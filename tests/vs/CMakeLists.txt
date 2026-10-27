@@ -37,6 +37,7 @@ endfunction()
 
 set(_core "${CMAKE_SOURCE_DIR}/src/core")
 visual_sidechain_add_test(test-audio-ring test-audio-ring.c "${_core}/audio-ring.c")
+visual_sidechain_add_test(test-fft test-fft.c "${_core}/fft.c")
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
