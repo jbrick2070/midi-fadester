@@ -1,0 +1,16 @@
+{
+    "display_name": "@PLUGIN_DISPLAY_NAME@",
+    "id": "@CMAKE_PROJECT_NAME@",
+    "name": "@CMAKE_PROJECT_NAME@",
+    "version": "@PLUGIN_VERSION@",
+    "os_arch": "windows-x64",
+    "description": "Continuous MIDI fader and video layer mixer control for OBS Studio.",
+    "long_description": "Midi Fadester provides channel-aware MIDI learn, 30 ms slew smoothing, soft takeover, Studio Mode T-bar crossfades, single-layer opacity fades, two-source dip-free crossfades, and cubic-dB audio fader control with plug-and-play support for the Akai APC40 mkII.",
+    "urls": {
+        "repository": "@PLUGIN_WEBSITE@",
+        "website": "@PLUGIN_WEBSITE@",
+        "support": "@PLUGIN_WEBSITE@/issues"
+    },
+    "has_banner": false,
+    "has_icon": false
+}

@@ -1,0 +1,31 @@
+#define MyAppName "@CMAKE_PROJECT_NAME@"
+#define MyAppDisplayName "@PLUGIN_DISPLAY_NAME@"
+#define MyAppVersion "@CMAKE_PROJECT_VERSION@"
+#define MyAppPublisher "@PLUGIN_AUTHOR@"
+#define MyAppURL "@PLUGIN_WEBSITE@"
+
+[Setup]
+AppId={{@UUID_APP@}
+AppName={#MyAppDisplayName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={commonappdata}\obs-studio\plugins\{#MyAppName}
+DefaultGroupName={#MyAppDisplayName}
+OutputBaseFilename={#MyAppName}-{#MyAppVersion}-Windows-Installer
+Compression=lzma
+SolidCompression=yes
+DirExistsWarning=no
+AlwaysShowDirOnReadyPage=yes
+DisableDirPage=yes
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+Source: "..\release\Package\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\{cm:ProgramOnTheWeb,{#MyAppDisplayName}}"; Filename: "{#MyAppURL}"
