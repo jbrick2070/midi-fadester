@@ -1,0 +1,37 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float opacity = 1.0;
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+float4 PSAlpha(VertData v_in) : TARGET
+{
+	float4 col = image.Sample(textureSampler, v_in.uv);
+	return col * clamp(opacity, 0.0, 1.0);
+}
+
+technique DrawAlpha
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSAlpha(v_in);
+	}
+}
