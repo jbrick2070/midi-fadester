@@ -32,6 +32,14 @@ function(midi_fadester_add_test name)
   set_tests_properties(${name} PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 endfunction()
 
+set(_core "${CMAKE_SOURCE_DIR}/src/core")
+midi_fadester_add_test(test-midi-queue test-midi-queue.c "${_core}/midi-queue.c")
+midi_fadester_add_test(test-midi-parser test-midi-parser.c "${_core}/midi-parser.c")
+midi_fadester_add_test(test-smoother test-smoother.c "${_core}/smoother.c")
+midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
+midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
+midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c")
+
 add_test(
   NAME check-locale-keys
   COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-keys.cmake"

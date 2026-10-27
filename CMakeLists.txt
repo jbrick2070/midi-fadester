@@ -35,7 +35,24 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c)
+target_sources(
+  ${CMAKE_PROJECT_NAME}
+  PRIVATE
+    src/plugin-main.c
+    src/core/midi-types.h
+    src/core/midi-queue.h
+    src/core/midi-queue.c
+    src/core/midi-parser.h
+    src/core/midi-parser.c
+    src/core/smoother.h
+    src/core/smoother.c
+    src/core/takeover.h
+    src/core/takeover.c
+    src/core/mixer-math.h
+    src/core/mixer-math.c
+    src/core/apc40-profile.h
+    src/core/apc40-profile.c
+)
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
 
