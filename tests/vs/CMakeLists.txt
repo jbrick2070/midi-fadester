@@ -30,16 +30,28 @@ message(STATUS "visual-sidechain tests: DLL search dirs: ${_test_dll_dirs}")
 function(visual_sidechain_add_test name)
   add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_compile_definitions(${name} PRIVATE "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\"")
   target_link_libraries(${name} PRIVATE OBS::libobs)
   add_test(NAME ${name} COMMAND ${name})
   set_tests_properties(${name} PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 endfunction()
 
 set(_core "${CMAKE_SOURCE_DIR}/src/core")
+set(
+  _analyzer_srcs
+  "${_core}/analyzer.c"
+  "${_core}/onset.c"
+  "${_core}/envelope.c"
+  "${_core}/spectrum.c"
+  "${_core}/fft.c"
+  "${_core}/audio-ring.c"
+)
 visual_sidechain_add_test(test-audio-ring test-audio-ring.c "${_core}/audio-ring.c")
 visual_sidechain_add_test(test-fft test-fft.c "${_core}/fft.c")
 visual_sidechain_add_test(test-spectrum test-spectrum.c "${_core}/spectrum.c" "${_core}/fft.c")
 visual_sidechain_add_test(test-envelope test-envelope.c "${_core}/envelope.c")
+visual_sidechain_add_test(test-onset test-onset.c "${_core}/onset.c")
+visual_sidechain_add_test(test-analyzer test-analyzer.c ${_analyzer_srcs})
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
