@@ -6,7 +6,9 @@
 
 #include "obs/mfd-tbar.h"
 #include "obs/mfd-engine.h"
+#include "obs/mfd-layer-filter.h"
 #include "core/tbar-logic.h"
+#include "core/mixer-math.h"
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -117,11 +119,71 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 	}
 }
 
+static void run_live_selftest_if_requested(void)
+{
+	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
+		return;
+	}
+
+	obs_log(LOG_INFO, "Running live OBS 33 integration self-test (MFD_SELF_TEST=1)...");
+
+	obs_source_t *src_a = obs_source_create_private("color_source", "__mfd_selftest_source_a__", nullptr);
+	obs_source_t *src_b = obs_source_create_private("color_source", "__mfd_selftest_source_b__", nullptr);
+	obs_source_t *flt_a = src_a ? mfd_ensure_layer_opacity_filter(src_a) : nullptr;
+	obs_source_t *flt_b = src_b ? mfd_ensure_layer_opacity_filter(src_b) : nullptr;
+
+	float alpha_a = 0.0f;
+	float alpha_b = 0.0f;
+	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 0.5f, &alpha_a, &alpha_b);
+	if (flt_a && flt_b) {
+		mfd_layer_filter_set_opacity(flt_a, alpha_a);
+		mfd_layer_filter_set_opacity(flt_b, alpha_b);
+	}
+	float read_a = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
+	float read_b = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
+
+	if (flt_a) {
+		obs_source_release(flt_a);
+	}
+	if (flt_b) {
+		obs_source_release(flt_b);
+	}
+	if (src_a) {
+		obs_source_release(src_a);
+	}
+	if (src_b) {
+		obs_source_release(src_b);
+	}
+
+	bool was_studio = obs_frontend_preview_program_mode_active();
+	if (!was_studio) {
+		obs_frontend_set_preview_program_mode(true);
+	}
+	refresh_studio_mode_state_on_ui_thread();
+
+	bool completed = false;
+	char err_buf[256] = {0};
+	bool mid_ok = mfd_tbar_driver_apply(0.5f, &completed, err_buf, sizeof(err_buf));
+	bool end_ok = mfd_tbar_driver_apply(1.0f, &completed, err_buf, sizeof(err_buf));
+
+	if (!was_studio) {
+		obs_frontend_set_preview_program_mode(false);
+		refresh_studio_mode_state_on_ui_thread();
+	}
+
+	obs_log(LOG_INFO,
+		"SELF-TEST RESULT: filter_a=%.2f filter_b=%.2f tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d", read_a,
+		read_b, (int)mid_ok, (int)end_ok, (int)completed);
+}
+
 static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 {
 	UNUSED_PARAMETER(unused);
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		refresh_studio_mode_state_on_ui_thread();
+		run_live_selftest_if_requested();
+		break;
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
 	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED:
