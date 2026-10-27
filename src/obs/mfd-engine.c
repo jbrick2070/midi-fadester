@@ -387,6 +387,45 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 	}
 }
 
+bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
+{
+	if (!eng || !filepath || filepath[0] == '\0') {
+		return false;
+	}
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "device_name", eng->configured_device_name);
+	obs_data_set_double(data, "smooth_tau_ms", (double)eng->smooth_tau_ms);
+	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
+	serialize_slots(eng, data);
+	bool ok = obs_data_save_json_safe(data, filepath, "tmp", "bak");
+	obs_data_release(data);
+	return ok;
+}
+
+bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
+{
+	if (!eng || !filepath || filepath[0] == '\0') {
+		return false;
+	}
+	obs_data_t *data = obs_data_create_from_json_file_safe(filepath, "bak");
+	if (!data) {
+		return false;
+	}
+	const char *dev = obs_data_get_string(data, "device_name");
+	if (dev) {
+		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", dev);
+	}
+	if (obs_data_has_user_value(data, "smooth_tau_ms")) {
+		eng->smooth_tau_ms = (float)obs_data_get_double(data, "smooth_tau_ms");
+	}
+	if (obs_data_has_user_value(data, "tbar_bidirectional_flip")) {
+		eng->tbar_bidirectional_flip = obs_data_get_bool(data, "tbar_bidirectional_flip");
+	}
+	deserialize_slots(eng, data);
+	obs_data_release(data);
+	return true;
+}
+
 void mfd_engine_save_global_config(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -401,13 +440,7 @@ void mfd_engine_save_global_config(struct mfd_engine *eng)
 	if (!cfg_path) {
 		return;
 	}
-	obs_data_t *data = obs_data_create();
-	obs_data_set_string(data, "device_name", eng->configured_device_name);
-	obs_data_set_double(data, "smooth_tau_ms", (double)eng->smooth_tau_ms);
-	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
-	serialize_slots(eng, data);
-	obs_data_save_json_safe(data, cfg_path, "tmp", "bak");
-	obs_data_release(data);
+	mfd_engine_export_config_file(eng, cfg_path);
 	bfree(cfg_path);
 }
 
@@ -420,23 +453,8 @@ void mfd_engine_load_global_config(struct mfd_engine *eng)
 	if (!cfg_path) {
 		return;
 	}
-	obs_data_t *data = obs_data_create_from_json_file_safe(cfg_path, "bak");
+	mfd_engine_import_config_file(eng, cfg_path);
 	bfree(cfg_path);
-	if (!data) {
-		return;
-	}
-	const char *dev = obs_data_get_string(data, "device_name");
-	if (dev) {
-		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", dev);
-	}
-	if (obs_data_has_user_value(data, "smooth_tau_ms")) {
-		eng->smooth_tau_ms = (float)obs_data_get_double(data, "smooth_tau_ms");
-	}
-	if (obs_data_has_user_value(data, "tbar_bidirectional_flip")) {
-		eng->tbar_bidirectional_flip = obs_data_get_bool(data, "tbar_bidirectional_flip");
-	}
-	deserialize_slots(eng, data);
-	obs_data_release(data);
 }
 
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)

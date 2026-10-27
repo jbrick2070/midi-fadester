@@ -85,6 +85,8 @@ void mfd_engine_cancel_learn(struct mfd_engine *eng);
 
 void mfd_engine_save_global_config(struct mfd_engine *eng);
 void mfd_engine_load_global_config(struct mfd_engine *eng);
+bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath);
+bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath);
 
 /*
  * Directly applies a slot's normalized value [0.0f, 1.0f] to its bound OBS target(s).

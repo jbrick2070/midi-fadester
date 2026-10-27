@@ -123,6 +123,29 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 
+	/* 6. JSON config Export and Import round-trip (Item 7: D-5 Import/Export without file watcher) */
+	const char *tmp_json = "test-mfd-config-roundtrip.json";
+	snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "APC40 mkII");
+	eng.smooth_tau_ms = 24.5f;
+	eng.tbar_bidirectional_flip = false;
+	REQUIRE(mfd_engine_export_config_file(&eng, tmp_json));
+
+	/* Reset engine to blank defaults, then import from exported JSON */
+	mfd_engine_load_apc40_defaults(&eng);
+	eng.configured_device_name[0] = '\0';
+	eng.smooth_tau_ms = 12.0f;
+	eng.tbar_bidirectional_flip = true;
+	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_UNASSIGNED);
+
+	REQUIRE(mfd_engine_import_config_file(&eng, tmp_json));
+	REQUIRE(strcmp(eng.configured_device_name, "APC40 mkII") == 0);
+	REQUIRE(fabsf(eng.smooth_tau_ms - 24.5f) < 1e-4f);
+	REQUIRE(!eng.tbar_bidirectional_flip);
+	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+	REQUIRE(strcmp(eng.fader_slots[1].source_a_name, "Cam_A") == 0);
+	REQUIRE(strcmp(eng.fader_slots[1].source_b_name, "Cam_B") == 0);
+	remove(tmp_json);
+
 	printf("test-vendor-api: PASS\n");
 	return 0;
 }

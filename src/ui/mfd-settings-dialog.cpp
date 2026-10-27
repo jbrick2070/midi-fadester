@@ -18,6 +18,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -199,12 +200,47 @@ public:
 		hint->setWordWrap(true);
 		footer->addWidget(hint, 1);
 
+		auto *btn_import = new QPushButton(QStringLiteral("Import..."), this);
+		footer->addWidget(btn_import);
+
+		auto *btn_export = new QPushButton(QStringLiteral("Export..."), this);
+		footer->addWidget(btn_export);
+
 		auto *btn_refresh_sources = new QPushButton(QStringLiteral("Refresh OBS Sources"), this);
 		footer->addWidget(btn_refresh_sources);
 
 		auto *btn_close = new QPushButton(QStringLiteral("Close"), this);
 		footer->addWidget(btn_close);
 		root->addLayout(footer);
+
+		connect(btn_import, &QPushButton::clicked, this, [this]() {
+			const QString path = QFileDialog::getOpenFileName(
+				this, QStringLiteral("Import Midi Fadester Configuration"), QString(),
+				QStringLiteral("JSON Files (*.json);;All Files (*)"));
+			if (path.isEmpty()) {
+				return;
+			}
+			struct mfd_engine *eng = mfd_engine_get();
+			if (mfd_engine_import_config_file(eng, path.toUtf8().constData())) {
+				mfd_engine_save_global_config(eng);
+				populate_device_combo();
+				sync_header_controls();
+				rebuild_table_rows();
+				update_live_status();
+			}
+		});
+
+		connect(btn_export, &QPushButton::clicked, this, [this]() {
+			const QString path =
+				QFileDialog::getSaveFileName(this, QStringLiteral("Export Midi Fadester Configuration"),
+							     QStringLiteral("midi-fadester-config.json"),
+							     QStringLiteral("JSON Files (*.json);;All Files (*)"));
+			if (path.isEmpty()) {
+				return;
+			}
+			struct mfd_engine *eng = mfd_engine_get();
+			mfd_engine_export_config_file(eng, path.toUtf8().constData());
+		});
 
 		connect(btn_reconnect, &QPushButton::clicked, this, [this]() {
 			struct mfd_engine *eng = mfd_engine_get();
