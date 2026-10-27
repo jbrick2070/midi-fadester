@@ -62,6 +62,7 @@ target_sources(
     src/obs/mfd-engine.c
     src/obs/mfd-tbar.h
     src/obs/mfd-tbar.cpp
+    src/obs/obs-websocket-api.h
     src/obs/mfd-vendor-api.h
     src/obs/mfd-vendor-api.c
     src/ui/mfd-settings-dialog.hpp
@@ -73,6 +74,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 if(MIDI_FADESTER_BUILD_TESTS)
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE "$<$<NOT:$<CONFIG:Release>>:MFD_ENABLE_SELF_TEST=1>")
   enable_testing()
   add_subdirectory(tests)
 endif()

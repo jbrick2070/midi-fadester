@@ -6,12 +6,12 @@
 
 #include "obs/mfd-engine.h"
 #include "obs/mfd-layer-filter.h"
+#include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
-#include "plugin-support.h"
-
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/platform.h>
+#include "plugin-support.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -51,6 +51,14 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	slot->last_applied_val = initial_val;
 	slot->last_alpha_a = 1.0f;
 	slot->last_alpha_b = 0.0f;
+	slot->auto_fade_active = false;
+	slot->auto_fade_from = initial_val;
+	slot->auto_fade_to = initial_val;
+	slot->auto_fade_duration_sec = 0.0f;
+	slot->auto_fade_elapsed_sec = 0.0f;
+	slot->sec_since_last_fader_event = 1.0f;
+	slot->fader_event_pending = false;
+	slot->pending_origin[0] = '\0';
 }
 
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
@@ -67,6 +75,8 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 		memset(s, 0, sizeof(*s));
 		if (i < count) {
 			s->enabled = true;
+			snprintf(s->id, sizeof(s->id), "%s", defs[i].id);
+			snprintf(s->kind, sizeof(s->kind), "%s", defs[i].kind);
 			snprintf(s->label, sizeof(s->label), "%s", defs[i].label);
 			s->addr = defs[i].addr;
 			s->target_type = defs[i].default_target;
@@ -75,6 +85,8 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 			s->invert = false;
 		} else {
 			s->enabled = false;
+			snprintf(s->id, sizeof(s->id), "fader_%u", (unsigned)(i + 1U));
+			snprintf(s->kind, sizeof(s->kind), "fader");
 			snprintf(s->label, sizeof(s->label), "Fader %u", (unsigned)(i + 1U));
 			s->addr.type = MFD_MIDI_NONE;
 			s->target_type = MFD_TARGET_UNASSIGNED;
@@ -86,6 +98,171 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 					 : 1.0f;
 		init_slot_runtime(eng, s, init_val);
 	}
+}
+
+bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_name)
+{
+	if (!source_name || source_name[0] == '\0') {
+		return false;
+	}
+	if (eng && eng->source_exists_fn) {
+		return eng->source_exists_fn(source_name, eng->source_exists_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_source_by_name(source_name);
+	if (!src) {
+		return false;
+	}
+	obs_source_release(src);
+	return true;
+}
+
+bool mfd_engine_is_studio_mode_active(const struct mfd_engine *eng)
+{
+	if (eng && eng->studio_mode_override_set) {
+		return eng->studio_mode_override;
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	return obs_frontend_preview_program_mode_active();
+}
+
+void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
+				size_t label_size, bool *out_available, char *out_reason, size_t reason_size)
+{
+	char lbl[128] = "Unassigned";
+	bool avail = false;
+	char rsn[160] = "Slot is unassigned";
+
+	if (slot) {
+		if (!slot->enabled) {
+			snprintf(lbl, sizeof(lbl), "Disabled");
+			avail = false;
+			snprintf(rsn, sizeof(rsn), "Slot is disabled");
+		} else {
+			switch (slot->target_type) {
+			case MFD_TARGET_UNASSIGNED:
+				snprintf(lbl, sizeof(lbl), "Unassigned");
+				avail = false;
+				snprintf(rsn, sizeof(rsn), "Slot is unassigned");
+				break;
+
+			case MFD_TARGET_TBAR:
+				snprintf(lbl, sizeof(lbl), "Studio Mode T-Bar");
+				if (!mfd_engine_is_studio_mode_active(eng)) {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Studio Mode is off");
+				} else if (eng && eng->tbar_error[0] != '\0') {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "%s", eng->tbar_error);
+				} else {
+					avail = true;
+					rsn[0] = '\0';
+				}
+				break;
+
+			case MFD_TARGET_TWO_SOURCE_MIX:
+				if (slot->source_a_name[0] != '\0' && slot->source_b_name[0] != '\0') {
+					snprintf(lbl, sizeof(lbl), "%s -> %s", slot->source_a_name,
+						 slot->source_b_name);
+				} else {
+					snprintf(lbl, sizeof(lbl), "Crossfade A/B");
+				}
+				if (slot->source_a_name[0] == '\0') {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source A is not set");
+				} else if (slot->source_b_name[0] == '\0') {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source B is not set");
+				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_a_name);
+				} else if (!mfd_engine_source_exists(eng, slot->source_b_name)) {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_b_name);
+				} else {
+					avail = true;
+					rsn[0] = '\0';
+				}
+				break;
+
+			case MFD_TARGET_SINGLE_LAYER:
+				if (slot->source_a_name[0] != '\0') {
+					snprintf(lbl, sizeof(lbl), "%s (Opacity)", slot->source_a_name);
+				} else {
+					snprintf(lbl, sizeof(lbl), "Layer Opacity");
+				}
+				if (slot->source_a_name[0] == '\0') {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source A is not set");
+				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_a_name);
+				} else {
+					avail = true;
+					rsn[0] = '\0';
+				}
+				break;
+
+			case MFD_TARGET_AUDIO_VOLUME:
+				if (slot->source_a_name[0] != '\0') {
+					snprintf(lbl, sizeof(lbl), "%s (Audio)", slot->source_a_name);
+				} else {
+					snprintf(lbl, sizeof(lbl), "Audio Volume");
+				}
+				if (slot->source_a_name[0] == '\0') {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source A is not set");
+				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
+					avail = false;
+					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_a_name);
+				} else {
+					avail = true;
+					rsn[0] = '\0';
+				}
+				break;
+			}
+		}
+	}
+
+	if (out_label && label_size > 0U) {
+		snprintf(out_label, label_size, "%s", lbl);
+	}
+	if (out_available) {
+		*out_available = avail;
+	}
+	if (out_reason && reason_size > 0U) {
+		snprintf(out_reason, reason_size, "%s", rsn);
+	}
+}
+
+void mfd_engine_notify_fader_changed(struct mfd_engine *eng, int slot_index, const char *origin)
+{
+	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
+		return;
+	}
+	struct mfd_fader_slot *slot = &eng->fader_slots[slot_index];
+	const char *orig = (origin && *origin) ? origin : "api";
+
+	if (slot->sec_since_last_fader_event >= MFD_FADER_EVENT_MIN_INTERVAL_SEC) {
+		slot->sec_since_last_fader_event = 0.0f;
+		slot->fader_event_pending = false;
+		mfd_vendor_emit_fader_changed(slot->id, slot->last_applied_val, orig);
+	} else {
+		slot->fader_event_pending = true;
+		snprintf(slot->pending_origin, sizeof(slot->pending_origin), "%s", orig);
+	}
+}
+
+void mfd_engine_notify_state_changed(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_vendor_emit_state_changed(eng);
 }
 
 static void apply_source_opacity_and_afv(const char *source_name, float alpha_01, bool afv)
@@ -115,7 +292,8 @@ static void apply_source_opacity_and_afv(const char *source_name, float alpha_01
 	obs_source_release(src);
 }
 
-void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val)
+void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val,
+				     bool force_release)
 {
 	if (!eng || !slot || !slot->enabled) {
 		return;
@@ -130,15 +308,16 @@ void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot 
 
 	case MFD_TARGET_TBAR:
 		if (eng->tbar_driver) {
+			float driver_val = force_release ? 1.0f : val;
 			bool completed = false;
 			char err_buf[256] = {0};
-			bool ok = eng->tbar_driver(val, &completed, err_buf, sizeof(err_buf));
+			bool ok = eng->tbar_driver(driver_val, &completed, err_buf, sizeof(err_buf));
 			if (!ok && err_buf[0] != '\0') {
 				snprintf(eng->tbar_error, sizeof(eng->tbar_error), "%s", err_buf);
 			} else if (ok) {
 				eng->tbar_error[0] = '\0';
 			}
-			if (completed) {
+			if (completed || force_release) {
 				mfd_takeover_notify_tbar_completed(&slot->takeover);
 				mfd_smoother_reset(&slot->smoother, 0.0f);
 				slot->last_applied_val = 0.0f;
@@ -178,11 +357,19 @@ void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot 
 	}
 }
 
-static void mfd_engine_video_tick(void *param, float seconds)
+void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val)
 {
-	struct mfd_engine *eng = param;
-	if (!eng || !eng->initialized) {
+	mfd_engine_apply_slot_output_ex(eng, slot, norm_val, false);
+}
+
+void mfd_engine_tick(struct mfd_engine *eng, float seconds)
+{
+	if (!eng) {
 		return;
+	}
+
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		eng->fader_slots[i].sec_since_last_fader_event += seconds;
 	}
 
 	eng->health_check_accum_sec += seconds;
@@ -210,6 +397,7 @@ static void mfd_engine_video_tick(void *param, float seconds)
 				ls->enabled = true;
 				obs_log(LOG_INFO, "MIDI Learn bound slot '%s' to Ch %u Type %d Num %u", ls->label,
 					(unsigned)(learned.channel + 1U), (int)learned.type, (unsigned)learned.number);
+				mfd_engine_notify_state_changed(eng);
 			}
 			eng->learning_slot_index = -1;
 		}
@@ -232,9 +420,11 @@ static void mfd_engine_video_tick(void *param, float seconds)
 
 			float effective = slot->last_applied_val;
 			if (mfd_takeover_step(&slot->takeover, norm, &effective)) {
+				slot->auto_fade_active = false;
 				mfd_smoother_set_target(&slot->smoother, effective);
 				if (!mfd_smoother_is_active(&slot->smoother)) {
 					mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
+					mfd_engine_notify_fader_changed(eng, i, "midi");
 				}
 			}
 		}
@@ -245,11 +435,43 @@ static void mfd_engine_video_tick(void *param, float seconds)
 		if (!slot->enabled) {
 			continue;
 		}
-		if (mfd_smoother_is_active(&slot->smoother)) {
+		if (slot->auto_fade_active) {
+			slot->auto_fade_elapsed_sec += seconds;
+			float progress = (slot->auto_fade_duration_sec > 0.0f)
+						 ? clamp01(slot->auto_fade_elapsed_sec / slot->auto_fade_duration_sec)
+						 : 1.0f;
+			float v = slot->auto_fade_from + (slot->auto_fade_to - slot->auto_fade_from) * progress;
+			slot->last_raw_norm = v;
+			slot->takeover.state = MFD_TAKEOVER_ENGAGED;
+			slot->takeover.hint = MFD_HINT_NONE;
+			slot->takeover.target_obs = v;
+			mfd_smoother_reset(&slot->smoother, v);
+			mfd_engine_apply_slot_output(eng, slot, v);
+			if (progress >= 1.0f) {
+				slot->auto_fade_active = false;
+			}
+			mfd_engine_notify_fader_changed(eng, i, "auto_fade");
+		} else if (mfd_smoother_is_active(&slot->smoother)) {
 			float smoothed = mfd_smoother_tick(&slot->smoother, seconds);
 			mfd_engine_apply_slot_output(eng, slot, smoothed);
+			mfd_engine_notify_fader_changed(eng, i, "midi");
+		}
+
+		if (slot->fader_event_pending && slot->sec_since_last_fader_event >= MFD_FADER_EVENT_MIN_INTERVAL_SEC) {
+			slot->sec_since_last_fader_event = 0.0f;
+			slot->fader_event_pending = false;
+			mfd_vendor_emit_fader_changed(slot->id, slot->last_applied_val, slot->pending_origin);
 		}
 	}
+}
+
+static void mfd_engine_video_tick(void *param, float seconds)
+{
+	struct mfd_engine *eng = param;
+	if (!eng || !eng->initialized) {
+		return;
+	}
+	mfd_engine_tick(eng, seconds);
 }
 
 static void sync_slots_on_scene_change(struct mfd_engine *eng)
@@ -264,7 +486,8 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng)
 		}
 		if (slot->target_type == MFD_TARGET_TBAR) {
 			mfd_takeover_sync_external(&slot->takeover, 0.0f);
-		} else if (slot->target_type == MFD_TARGET_AUDIO_VOLUME && slot->source_a_name[0] != '\0') {
+		} else if (slot->target_type == MFD_TARGET_AUDIO_VOLUME && slot->source_a_name[0] != '\0' &&
+			   obs_initialized()) {
 			obs_source_t *src = obs_get_source_by_name(slot->source_a_name);
 			if (src) {
 				float mul = obs_source_get_volume(src);
@@ -273,6 +496,7 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng)
 			}
 		}
 	}
+	mfd_engine_notify_state_changed(eng);
 }
 
 static void on_frontend_event(enum obs_frontend_event event, void *private_data)
@@ -300,6 +524,8 @@ static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		const struct mfd_fader_slot *s = &eng->fader_slots[i];
 		obs_data_t *item = obs_data_create();
+		obs_data_set_string(item, "id", s->id);
+		obs_data_set_string(item, "kind", s->kind);
 		obs_data_set_bool(item, "enabled", s->enabled);
 		obs_data_set_string(item, "label", s->label);
 		obs_data_set_int(item, "midi_type", (int)s->addr.type);
@@ -335,6 +561,8 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			continue;
 		}
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
+		snprintf(s->id, sizeof(s->id), "%s", mfd_slot_id_for_index((int)i));
+		snprintf(s->kind, sizeof(s->kind), "%s", mfd_slot_kind_for_index((int)i));
 		s->enabled = obs_data_get_bool(item, "enabled");
 		const char *lbl = obs_data_get_string(item, "label");
 		if (lbl && *lbl) {
@@ -383,6 +611,7 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 		if (obj) {
 			deserialize_slots(eng, obj);
 			obs_data_release(obj);
+			mfd_engine_notify_state_changed(eng);
 		}
 	}
 }
@@ -465,7 +694,9 @@ bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)
 	if (device_name) {
 		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", device_name);
 	}
-	return mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name);
+	bool ok = mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name);
+	mfd_engine_notify_state_changed(eng);
+	return ok;
 }
 
 void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms)

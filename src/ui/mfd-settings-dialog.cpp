@@ -437,6 +437,8 @@ private:
 						     static_cast<int>(MFD_CURVE_COSINE));
 				curve_combo->addItem(QStringLiteral("Linear Crossfade"),
 						     static_cast<int>(MFD_CURVE_LINEAR));
+				curve_combo->addItem(QStringLiteral("Cut (Instant at 50%)"),
+						     static_cast<int>(MFD_CURVE_CUT));
 				curve_combo->setCurrentIndex(curve_combo->findData(static_cast<int>(slot->curve)));
 				table_->setCellWidget(row, 6, curve_combo);
 			} else {
@@ -467,6 +469,7 @@ private:
 					e->fader_slots[row].target_type =
 						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
 					mfd_engine_save_global_config(e);
+					mfd_engine_notify_state_changed(e);
 					rebuild_table_rows();
 				});
 
@@ -479,6 +482,7 @@ private:
 							      sizeof(e->fader_slots[row].source_a_name), "%s",
 							      utf8.constData());
 						mfd_engine_save_global_config(e);
+						mfd_engine_notify_state_changed(e);
 					});
 			}
 
@@ -491,6 +495,7 @@ private:
 							      sizeof(e->fader_slots[row].source_b_name), "%s",
 							      utf8.constData());
 						mfd_engine_save_global_config(e);
+						mfd_engine_notify_state_changed(e);
 					});
 			}
 
@@ -501,6 +506,7 @@ private:
 						e->fader_slots[row].curve = static_cast<enum mfd_crossfade_curve>(
 							curve_combo->currentData().toInt());
 						mfd_engine_save_global_config(e);
+						mfd_engine_notify_state_changed(e);
 					});
 			}
 

@@ -13,6 +13,10 @@
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <util/bmem.h>
+#include <cassert>
+#include <cstring>
+#include "obs/obs-websocket-api.h"
 #include "plugin-support.h"
 
 #include <QApplication>
@@ -120,6 +124,34 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 	}
 }
 
+#ifdef MFD_ENABLE_SELF_TEST
+static obs_data_t *call_real_ws_vendor_request(const char *request_type, obs_data_t *vendor_req_data)
+{
+	obs_data_t *outer = obs_data_create();
+	obs_data_set_string(outer, "vendorName", MFD_VENDOR_NAME);
+	obs_data_set_string(outer, "requestType", request_type);
+	if (vendor_req_data) {
+		obs_data_set_obj(outer, "requestData", vendor_req_data);
+	}
+
+	struct obs_websocket_request_response *resp = obs_websocket_call_request("CallVendorRequest", outer);
+	obs_data_release(outer);
+
+	if (!resp) {
+		return nullptr;
+	}
+	obs_data_t *parsed = nullptr;
+	if (resp->status_code == 100 && resp->response_data) {
+		obs_data_t *full = obs_data_create_from_json(resp->response_data);
+		if (full) {
+			parsed = obs_data_get_obj(full, "responseData");
+			obs_data_release(full);
+		}
+	}
+	obs_websocket_request_response_free(resp);
+	return parsed;
+}
+
 static void run_live_selftest_if_requested(void)
 {
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
@@ -134,30 +166,34 @@ static void run_live_selftest_if_requested(void)
 	obs_source_t *src_b = obs_source_create("color_source", "__mfd_selftest_source_b__", nullptr, nullptr);
 
 	obs_data_t *req = obs_data_create();
-	obs_data_t *res = obs_data_create();
-	mfd_vendor_handle_load_apc40_defaults(req, res, eng);
+	obs_data_set_string(req, "name", "apc40mk2");
+	obs_data_t *res = call_real_ws_vendor_request("load_profile", req);
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	req = obs_data_create();
-	res = obs_data_create();
-	obs_data_set_int(req, "slot", 1);
-	obs_data_set_bool(req, "enabled", true);
-	obs_data_set_int(req, "target_type", (int)MFD_TARGET_TWO_SOURCE_MIX);
-	obs_data_set_int(req, "curve", (int)MFD_CURVE_DIP_FREE);
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "curve", "dip_free");
 	obs_data_set_string(req, "source_a", "__mfd_selftest_source_a__");
 	obs_data_set_string(req, "source_b", "__mfd_selftest_source_b__");
-	mfd_vendor_handle_set_slot(req, res, eng);
+	res = call_real_ws_vendor_request("set_slot", req);
+	bool slot_avail = res ? obs_data_get_bool(res, "available") : false;
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	req = obs_data_create();
-	res = obs_data_create();
-	obs_data_set_int(req, "slot", 1);
+	obs_data_set_string(req, "slot", "fader_1");
 	obs_data_set_double(req, "value", 0.5);
-	mfd_vendor_handle_set_fader_value(req, res, eng);
+	res = call_real_ws_vendor_request("set_fader_value", req);
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	obs_source_t *flt_a = src_a ? obs_source_get_filter_by_name(src_a, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
 	obs_source_t *flt_b = src_b ? obs_source_get_filter_by_name(src_b, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
@@ -165,12 +201,13 @@ static void run_live_selftest_if_requested(void)
 	float read_b_mid = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
 
 	req = obs_data_create();
-	res = obs_data_create();
-	obs_data_set_int(req, "slot", 1);
+	obs_data_set_string(req, "slot", "fader_1");
 	obs_data_set_double(req, "value", 1.0);
-	mfd_vendor_handle_set_fader_value(req, res, eng);
+	res = call_real_ws_vendor_request("set_fader_value", req);
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	float read_a_end = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
 	float read_b_end = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
@@ -195,30 +232,35 @@ static void run_live_selftest_if_requested(void)
 	refresh_studio_mode_state_on_ui_thread();
 
 	req = obs_data_create();
-	res = obs_data_create();
-	obs_data_set_int(req, "slot", 0);
+	obs_data_set_string(req, "slot", "crossfader");
 	obs_data_set_double(req, "value", 0.5);
-	mfd_vendor_handle_set_fader_value(req, res, eng);
-	bool mid_ok = obs_data_get_bool(res, "success");
+	res = call_real_ws_vendor_request("set_fader_value", req);
+	bool mid_ok = res && (obs_data_get_double(res, "value") > 0.49);
 	int slider_mid = g_tbar_slider ? g_tbar_slider->value() : -1;
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	req = obs_data_create();
-	res = obs_data_create();
-	obs_data_set_int(req, "slot", 0);
+	obs_data_set_string(req, "slot", "crossfader");
 	obs_data_set_double(req, "value", 1.0);
-	mfd_vendor_handle_set_fader_value(req, res, eng);
-	bool end_ok = obs_data_get_bool(res, "success");
+	obs_data_set_bool(req, "release", true);
+	res = call_real_ws_vendor_request("set_fader_value", req);
+	bool end_ok = res && (obs_data_get_double(res, "value") == 0.0);
 	bool completed = eng->fader_slots[0].takeover.polarity_reversed;
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	req = obs_data_create();
-	res = obs_data_create();
-	mfd_vendor_handle_load_apc40_defaults(req, res, eng);
+	obs_data_set_string(req, "name", "apc40mk2");
+	res = call_real_ws_vendor_request("load_profile", req);
+	if (res) {
+		obs_data_release(res);
+	}
 	obs_data_release(req);
-	obs_data_release(res);
 
 	if (!was_studio) {
 		obs_frontend_set_preview_program_mode(false);
@@ -226,9 +268,11 @@ static void run_live_selftest_if_requested(void)
 	}
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: filter_a=%.2f->%.2f filter_b=%.2f->%.2f slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d",
-		read_a_mid, read_a_end, read_b_mid, read_b_end, slider_mid, (int)mid_ok, (int)end_ok, (int)completed);
+		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d",
+		(int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end, slider_mid, (int)mid_ok, (int)end_ok,
+		(int)completed);
 }
+#endif
 
 static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 {
@@ -236,7 +280,9 @@ static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		refresh_studio_mode_state_on_ui_thread();
+#ifdef MFD_ENABLE_SELF_TEST
 		run_live_selftest_if_requested();
+#endif
 		break;
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:

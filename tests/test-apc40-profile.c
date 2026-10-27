@@ -28,6 +28,8 @@ int main(void)
 	REQUIRE(n == MFD_APC40_DEFAULT_SLOT_COUNT);
 
 	/* Slot 0: Crossfader (Ch 1 / 0, CC 15) -> Studio Mode T-Bar (D-1) */
+	REQUIRE(strcmp(slots[0].id, "crossfader") == 0);
+	REQUIRE(strcmp(slots[0].kind, "crossfader") == 0);
 	REQUIRE(slots[0].addr.type == MFD_MIDI_CC);
 	REQUIRE(slots[0].addr.channel == 0U);
 	REQUIRE(slots[0].addr.number == 15U);
@@ -35,6 +37,10 @@ int main(void)
 
 	/* Slots 1..8: Track Faders 1..8 (Ch 1..8 / 0..7, CC 7) -> start Unassigned (Item 4) */
 	for (uint8_t ch = 0; ch < 8U; ++ch) {
+		char expected_id[16];
+		snprintf(expected_id, sizeof(expected_id), "fader_%u", (unsigned)(ch + 1U));
+		REQUIRE(strcmp(slots[1U + ch].id, expected_id) == 0);
+		REQUIRE(strcmp(slots[1U + ch].kind, "fader") == 0);
 		REQUIRE(slots[1U + ch].addr.type == MFD_MIDI_CC);
 		REQUIRE(slots[1U + ch].addr.channel == ch);
 		REQUIRE(slots[1U + ch].addr.number == 7U);
@@ -42,10 +48,19 @@ int main(void)
 	}
 
 	/* Slot 9: Master Fader (Ch 1 / 0, CC 14) -> starts Unassigned (Item 4) */
+	REQUIRE(strcmp(slots[9].id, "master") == 0);
+	REQUIRE(strcmp(slots[9].kind, "master") == 0);
 	REQUIRE(slots[9].addr.type == MFD_MIDI_CC);
 	REQUIRE(slots[9].addr.channel == 0U);
 	REQUIRE(slots[9].addr.number == 14U);
 	REQUIRE(slots[9].default_target == MFD_TARGET_UNASSIGNED);
+
+	/* Slot ID lookup */
+	REQUIRE(mfd_slot_index_for_id("crossfader") == 0);
+	REQUIRE(mfd_slot_index_for_id("fader_1") == 1);
+	REQUIRE(mfd_slot_index_for_id("fader_8") == 8);
+	REQUIRE(mfd_slot_index_for_id("master") == 9);
+	REQUIRE(mfd_slot_index_for_id("fader_9") == -1);
 
 	/* Row control visibility per Target Mode (Item 5) */
 	bool show_a = true;

@@ -50,6 +50,11 @@ void mfd_crossfade_eval(enum mfd_crossfade_curve curve, float t, float *out_alph
 		*out_alpha_b = clamp01(sinf(x * MFD_HALF_PI));
 		break;
 
+	case MFD_CURVE_CUT:
+		*out_alpha_a = 1.0f;
+		*out_alpha_b = (x >= 0.5f) ? 1.0f : 0.0f;
+		break;
+
 	case MFD_CURVE_LINEAR:
 	default:
 		*out_alpha_a = 1.0f - x;

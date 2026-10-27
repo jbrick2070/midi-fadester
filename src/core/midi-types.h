@@ -53,6 +53,7 @@ enum mfd_crossfade_curve {
 	MFD_CURVE_FULL_CENTER = 1,
 	MFD_CURVE_COSINE = 2,
 	MFD_CURVE_LINEAR = 3,
+	MFD_CURVE_CUT = 4,
 };
 
 #ifdef __cplusplus
