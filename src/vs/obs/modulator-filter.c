@@ -630,6 +630,17 @@ static void add_signal_choices(obs_property_t *list)
 		snprintf(label, sizeof(label), "%s %u", obs_module_text("Signal.SpectrumBandPrefix"), b + 1u);
 		obs_property_list_add_int(list, label, (int)(VS_SIG_SPECTRUM_BAND_0 + b));
 	}
+
+	obs_property_list_add_int(list, obs_module_text("Signal.FaderCrossfader"), (int)VS_SIG_FADER_CROSSFADER);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader1"), (int)VS_SIG_FADER_1);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader2"), (int)VS_SIG_FADER_2);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader3"), (int)VS_SIG_FADER_3);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader4"), (int)VS_SIG_FADER_4);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader5"), (int)VS_SIG_FADER_5);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader6"), (int)VS_SIG_FADER_6);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader7"), (int)VS_SIG_FADER_7);
+	obs_property_list_add_int(list, obs_module_text("Signal.Fader8"), (int)VS_SIG_FADER_8);
+	obs_property_list_add_int(list, obs_module_text("Signal.FaderMaster"), (int)VS_SIG_FADER_MASTER);
 }
 
 static obs_properties_t *modulator_get_properties(void *data)

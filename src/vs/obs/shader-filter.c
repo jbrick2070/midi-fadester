@@ -16,6 +16,7 @@
 #include "shader-filter.h"
 
 #include "audio-tap.h"
+#include "core/fader-bridge.h"
 #include "core/shader-parse.h"
 
 #include <graphics/graphics.h>
@@ -109,6 +110,9 @@ struct vs_shader_filter {
 	gs_eparam_t *p_audio_magnitude;
 	gs_eparam_t *p_audio_spectrum;
 	gs_eparam_t *p_audio_fft;
+
+	/* Fader slot uniform handles (R-MOD-7) */
+	gs_eparam_t *p_fader[VS_FADER_SLOT_COUNT];
 
 	/* Ping-pong render targets for feedback shaders (R-UP-5, fft-feedback-trails.shader) */
 	gs_texrender_t *input_texrender[2];
@@ -339,6 +343,14 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		sf->p_audio_spectrum = gs_effect_get_param_by_name(sf->effect, "audio_spectrum");
 		sf->p_audio_fft = gs_effect_get_param_by_name(sf->effect, "audio_fft");
 
+		static const char *const k_fader_uniform_names[VS_FADER_SLOT_COUNT] = {
+			"fader_crossfader", "fader_1", "fader_2", "fader_3", "fader_4",
+			"fader_5",          "fader_6", "fader_7", "fader_8", "fader_master",
+		};
+		for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+			sf->p_fader[i] = gs_effect_get_param_by_name(sf->effect, k_fader_uniform_names[i]);
+		}
+
 		for (size_t i = 0; i < sf->parsed.param_count; i++) {
 			sf->user_bindings[i].eparam =
 				gs_effect_get_param_by_name(sf->effect, sf->parsed.params[i].name);
@@ -556,6 +568,12 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 		gs_effect_set_texture(sf->p_audio_spectrum, sf->tap.tex_spectrum);
 	if (sf->p_audio_fft && sf->tap.tex_fft)
 		gs_effect_set_texture(sf->p_audio_fft, sf->tap.tex_fft);
+
+	/* Fader slot float uniforms (R-MOD-7) */
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+		if (sf->p_fader[i])
+			gs_effect_set_float(sf->p_fader[i], vs_fader_bridge_get_slot(i));
+	}
 
 	/* User-annotated uniforms (R-UP-4) */
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {

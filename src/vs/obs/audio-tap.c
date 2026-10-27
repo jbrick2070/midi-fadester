@@ -10,6 +10,7 @@
 
 #include "audio-tap.h"
 #include "plugin-support.h"
+#include "vendor-api.h"
 
 #include <media-io/audio-io.h>
 #include <string.h>
@@ -250,6 +251,7 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 	tap->last_video_frame_ts = video_ts;
 
 	vs_analyzer_step(&tap->analyzer, seconds, &tap->current_frame);
+	vs_vendor_api_on_tick(seconds, &tap->current_frame);
 	upload_tap_textures(tap);
 }
 
