@@ -6,6 +6,7 @@
 
 #include "core/takeover.h"
 #include <math.h>
+#include <stdio.h>
 
 static float clamp01(float v)
 {
@@ -32,9 +33,9 @@ void mfd_takeover_init(struct mfd_takeover *t, float initial_obs_val, float pick
 		return;
 	}
 	t->state = MFD_TAKEOVER_WAITING;
-	t->hint = MFD_HINT_NONE;
 	t->last_fader = 0.0f;
 	t->target_obs = clamp01(initial_obs_val);
+	t->hint = (t->target_obs >= 0.5f) ? MFD_HINT_MOVE_UP : MFD_HINT_MOVE_DOWN;
 	t->pickup_threshold = (isfinite(pickup_threshold) && pickup_threshold > 0.0f) ? pickup_threshold
 										      : MFD_DEFAULT_PICKUP_THRESHOLD;
 	t->has_last_fader = false;
@@ -115,4 +116,36 @@ void mfd_takeover_notify_tbar_completed(struct mfd_takeover *t)
 		t->state = MFD_TAKEOVER_WAITING;
 		t->hint = MFD_HINT_MOVE_DOWN;
 	}
+}
+
+int mfd_takeover_format_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type, float applied_val,
+				   float alpha_a, float alpha_b, float db_val, char *out_text, size_t text_size)
+{
+	int pct = (int)lroundf(clamp01(applied_val) * 100.0f);
+	if (!out_text || text_size == 0U) {
+		return pct;
+	}
+
+	if (t && t->state == MFD_TAKEOVER_WAITING) {
+		int tgt_pct = (int)lroundf(clamp01(t->target_obs) * 100.0f);
+		const char *arrow = (t->hint == MFD_HINT_MOVE_UP) ? "\xE2\x86\x91" : "\xE2\x86\x93";
+		snprintf(out_text, text_size, "%s %d%%", arrow, tgt_pct);
+		return tgt_pct;
+	}
+
+	if (target_type == MFD_TARGET_TWO_SOURCE_MIX) {
+		int a_pct = (int)lroundf(clamp01(alpha_a) * 100.0f);
+		int b_pct = (int)lroundf(clamp01(alpha_b) * 100.0f);
+		snprintf(out_text, text_size, "%d%% (A:%d%% B:%d%%)", pct, a_pct, b_pct);
+	} else if (target_type == MFD_TARGET_AUDIO_VOLUME) {
+		if (isfinite(db_val)) {
+			snprintf(out_text, text_size, "%.1f dB (%d%%)", (double)db_val, pct);
+		} else {
+			snprintf(out_text, text_size, "-inf dB (0%%)");
+		}
+	} else {
+		snprintf(out_text, text_size, "%d%%", pct);
+	}
+
+	return pct;
 }

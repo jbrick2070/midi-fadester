@@ -7,6 +7,7 @@
 #include "core/takeover.h"
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #define REQUIRE(cond)                                                                   \
 	do {                                                                            \
@@ -67,6 +68,29 @@ int main(void)
 	/* Physical fader now moves back from 1.0 -> 0.25 -> effective T-bar moves 0.0 -> 0.75 */
 	REQUIRE(mfd_takeover_step(&tbar, 0.25f, &out));
 	REQUIRE(fabsf(out - 0.75f) < 1e-6f);
+
+	/* 4. Output bar formatter shows ↑/↓ arrow while waiting, then live value once engaged (Item 2) */
+	char bar_text[128] = {0};
+	struct mfd_takeover t_ui;
+	mfd_takeover_init(&t_ui, 0.80f, 0.015f, false);
+	REQUIRE(!mfd_takeover_step(&t_ui, 0.20f, &out));
+	int pct = mfd_takeover_format_output_bar(&t_ui, MFD_TARGET_SINGLE_LAYER, out, 0.80f, 0.0f, 0.0f, bar_text,
+						 sizeof(bar_text));
+	REQUIRE(pct == 80);
+	REQUIRE(strcmp(bar_text, "\xE2\x86\x91 80%") == 0);
+
+	REQUIRE(mfd_takeover_step(&t_ui, 0.85f, &out));
+	pct = mfd_takeover_format_output_bar(&t_ui, MFD_TARGET_SINGLE_LAYER, out, 0.85f, 0.0f, 0.0f, bar_text,
+					     sizeof(bar_text));
+	REQUIRE(pct == 85);
+	REQUIRE(strcmp(bar_text, "85%") == 0);
+
+	mfd_takeover_sync_external(&t_ui, 0.20f);
+	REQUIRE(!mfd_takeover_step(&t_ui, 0.60f, &out));
+	pct = mfd_takeover_format_output_bar(&t_ui, MFD_TARGET_SINGLE_LAYER, out, 0.20f, 0.0f, 0.0f, bar_text,
+					     sizeof(bar_text));
+	REQUIRE(pct == 20);
+	REQUIRE(strcmp(bar_text, "\xE2\x86\x93 20%") == 0);
 
 	printf("test-takeover: PASS\n");
 	return 0;

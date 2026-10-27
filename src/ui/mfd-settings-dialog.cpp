@@ -21,6 +21,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QStringList>
 #include <QTableWidget>
@@ -152,7 +153,7 @@ public:
 			QStringLiteral("Source B (Top Layer)"),
 			QStringLiteral("Crossfade Curve"),
 			QStringLiteral("AFV"),
-			QStringLiteral("Live Output & Soft Takeover"),
+			QStringLiteral("Output"),
 		});
 		table_->horizontalHeader()->setStretchLastSection(true);
 		table_->verticalHeader()->setVisible(false);
@@ -358,10 +359,14 @@ private:
 					    slot->target_type == MFD_TARGET_SINGLE_LAYER);
 			table_->setCellWidget(row, 7, chk_afv);
 
-			auto *lbl_status = new QLabel(QStringLiteral("--"), table_);
-			lbl_status->setMargin(4);
-			status_labels_[row] = lbl_status;
-			table_->setCellWidget(row, 8, lbl_status);
+			auto *out_bar = new QProgressBar(table_);
+			out_bar->setRange(0, 100);
+			out_bar->setValue(0);
+			out_bar->setTextVisible(true);
+			out_bar->setAlignment(Qt::AlignCenter);
+			out_bar->setMinimumWidth(140);
+			output_bars_[row] = out_bar;
+			table_->setCellWidget(row, 8, out_bar);
 
 			connect(target_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 				[this, row](int idx) {
@@ -469,41 +474,22 @@ private:
 							: QString());
 				}
 			}
-			if (!status_labels_[row]) {
+			if (!output_bars_[row]) {
 				continue;
 			}
 			if (!s.enabled) {
-				status_labels_[row]->setText(QStringLiteral("Disabled"));
+				output_bars_[row]->setValue(0);
+				output_bars_[row]->setFormat(QStringLiteral("Disabled"));
 				continue;
 			}
 
-			QString takeover_str;
-			if (s.takeover.state == MFD_TAKEOVER_ENGAGED) {
-				takeover_str = QStringLiteral("\xE2\x97\x8F Engaged");
-			} else if (s.takeover.hint == MFD_HINT_MOVE_UP) {
-				takeover_str = QStringLiteral("\xE2\x86\x91 Move Fader Up");
-			} else if (s.takeover.hint == MFD_HINT_MOVE_DOWN) {
-				takeover_str = QStringLiteral("\xE2\x86\x93 Move Fader Down");
-			} else {
-				takeover_str = QStringLiteral("Waiting");
-			}
-
-			if (s.target_type == MFD_TARGET_TWO_SOURCE_MIX) {
-				status_labels_[row]->setText(QStringLiteral("Mix %1% (A:%2% B:%3%) | %4")
-								     .arg(std::lround(s.last_applied_val * 100.0f))
-								     .arg(std::lround(s.last_alpha_a * 100.0f))
-								     .arg(std::lround(s.last_alpha_b * 100.0f))
-								     .arg(takeover_str));
-			} else if (s.target_type == MFD_TARGET_AUDIO_VOLUME) {
-				const float db = mfd_deflection_to_db(s.last_applied_val);
-				const QString db_str = std::isfinite(db) ? QStringLiteral("%1 dB").arg(db, 0, 'f', 1)
-									 : QStringLiteral("-inf dB");
-				status_labels_[row]->setText(QStringLiteral("%1 | %2").arg(db_str, takeover_str));
-			} else {
-				status_labels_[row]->setText(QStringLiteral("%1% | %2")
-								     .arg(std::lround(s.last_applied_val * 100.0f))
-								     .arg(takeover_str));
-			}
+			char bar_text[128] = {0};
+			const float db = mfd_deflection_to_db(s.last_applied_val);
+			const int pct = mfd_takeover_format_output_bar(&s.takeover, s.target_type, s.last_applied_val,
+								       s.last_alpha_a, s.last_alpha_b, db, bar_text,
+								       sizeof(bar_text));
+			output_bars_[row]->setValue(pct);
+			output_bars_[row]->setFormat(QString::fromUtf8(bar_text));
 		}
 	}
 
@@ -516,7 +502,7 @@ private:
 	QTimer *timer_ = nullptr;
 	QPointer<QLabel> addr_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> learn_buttons_[MFD_MAX_FADER_SLOTS];
-	QPointer<QLabel> status_labels_[MFD_MAX_FADER_SLOTS];
+	QPointer<QProgressBar> output_bars_[MFD_MAX_FADER_SLOTS];
 };
 
 static QPointer<MfdSettingsDialog> g_dialog;

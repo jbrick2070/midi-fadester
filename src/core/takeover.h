@@ -7,6 +7,8 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include "core/midi-types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +42,9 @@ void mfd_takeover_init(struct mfd_takeover *t, float initial_obs_val, float pick
 void mfd_takeover_sync_external(struct mfd_takeover *t, float new_obs_val);
 bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_effective_norm);
 void mfd_takeover_notify_tbar_completed(struct mfd_takeover *t);
+
+int mfd_takeover_format_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type, float applied_val,
+				   float alpha_a, float alpha_b, float db_val, char *out_text, size_t text_size);
 
 #ifdef __cplusplus
 }
