@@ -58,6 +58,8 @@ struct mfd_engine {
 
 	struct mfd_fader_slot fader_slots[MFD_MAX_FADER_SLOTS];
 	int learning_slot_index; /* -1 when not learning */
+	bool has_last_midi;
+	struct mfd_midi_decoded last_midi_decoded;
 
 	mfd_tbar_apply_fn tbar_driver;
 	char tbar_error[256];

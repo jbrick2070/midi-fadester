@@ -195,6 +195,8 @@ static void mfd_engine_video_tick(void *param, float seconds)
 		if (!mfd_midi_parser_feed(&eng->midi_parser, raw.raw_msg, &dec)) {
 			continue;
 		}
+		eng->last_midi_decoded = dec;
+		eng->has_last_midi = true;
 
 		struct mfd_midi_addr learned;
 		if (mfd_midi_parser_pop_learned(&eng->midi_parser, &learned)) {

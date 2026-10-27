@@ -131,6 +131,13 @@ public:
 							   "0)"),
 					    this);
 		top_bar->addWidget(flip_check_);
+
+		top_bar->addSpacing(16);
+		last_midi_label_ = new QLabel(QStringLiteral("No MIDI received yet"), this);
+		last_midi_label_->setStyleSheet(
+			QStringLiteral("QLabel { background-color: #1f2937; color: #93c5fd; padding: 4px 8px; "
+				       "border: 1px solid #374151; border-radius: 4px; font-weight: bold; }"));
+		top_bar->addWidget(last_midi_label_);
 		top_bar->addStretch(1);
 
 		root->addLayout(top_bar);
@@ -293,8 +300,8 @@ private:
 			auto *bind_layout = new QHBoxLayout(bind_widget);
 			bind_layout->setContentsMargins(4, 2, 4, 2);
 			auto *lbl_addr = new QLabel(format_midi_addr(slot->addr), bind_widget);
-			auto *btn_learn = new QPushButton(QStringLiteral("Learn"), bind_widget);
-			btn_learn->setFixedWidth(72);
+			auto *btn_learn = new QPushButton(QString::fromUtf8(mfd_learn_button_text(false)), bind_widget);
+			btn_learn->setMinimumWidth(118);
 			bind_layout->addWidget(lbl_addr, 1);
 			bind_layout->addWidget(btn_learn);
 			addr_labels_[row] = lbl_addr;
@@ -434,15 +441,33 @@ private:
 			banner_label_->show();
 		}
 
+		if (last_midi_label_) {
+			char midi_buf[128] = {0};
+			mfd_format_last_midi_readout(eng->has_last_midi, &eng->last_midi_decoded, midi_buf,
+						     sizeof(midi_buf));
+			last_midi_label_->setText(QString::fromUtf8(midi_buf));
+		}
+
 		for (int row = 0; row < MFD_MAX_FADER_SLOTS; ++row) {
 			const struct mfd_fader_slot &s = eng->fader_slots[row];
+			const bool is_learning = (eng->learning_slot_index == row);
 			if (addr_labels_[row]) {
 				addr_labels_[row]->setText(format_midi_addr(s.addr));
 			}
 			if (learn_buttons_[row]) {
-				const bool is_learning = (eng->learning_slot_index == row);
-				learn_buttons_[row]->setText(is_learning ? QStringLiteral("Cancel...")
-									 : QStringLiteral("Learn"));
+				learn_buttons_[row]->setText(QString::fromUtf8(mfd_learn_button_text(is_learning)));
+				learn_buttons_[row]->setStyleSheet(
+					is_learning ? QStringLiteral("QPushButton { background-color: #b45309; "
+								     "color: #ffffff; font-weight: bold; }")
+						    : QString());
+			}
+			for (int col = 0; col < table_->columnCount(); ++col) {
+				if (QWidget *cw = table_->cellWidget(row, col)) {
+					cw->setStyleSheet(
+						is_learning
+							? QStringLiteral("background-color: rgba(180, 83, 9, 0.28);")
+							: QString());
+				}
 			}
 			if (!status_labels_[row]) {
 				continue;
@@ -483,6 +508,7 @@ private:
 	}
 
 	QLabel *banner_label_ = nullptr;
+	QLabel *last_midi_label_ = nullptr;
 	QComboBox *device_combo_ = nullptr;
 	QDoubleSpinBox *tau_spin_ = nullptr;
 	QCheckBox *flip_check_ = nullptr;

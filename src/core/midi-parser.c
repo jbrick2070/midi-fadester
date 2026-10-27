@@ -5,6 +5,7 @@
  */
 
 #include "core/midi-parser.h"
+#include <stdio.h>
 #include <string.h>
 
 void mfd_midi_parser_init(struct mfd_midi_parser *p)
@@ -166,4 +167,42 @@ bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mf
 	}
 
 	return true;
+}
+
+void mfd_format_last_midi_readout(bool has_event, const struct mfd_midi_decoded *ev, char *out_buf, size_t out_size)
+{
+	if (!out_buf || out_size == 0U) {
+		return;
+	}
+	if (!has_event || !ev || ev->addr.type == MFD_MIDI_NONE) {
+		snprintf(out_buf, out_size, "No MIDI received yet");
+		return;
+	}
+
+	unsigned ch = (unsigned)ev->addr.channel + 1U;
+	unsigned num = (unsigned)ev->addr.number;
+	unsigned val = (unsigned)ev->raw_value;
+
+	switch (ev->addr.type) {
+	case MFD_MIDI_CC:
+		snprintf(out_buf, out_size, "Last MIDI: Ch %u CC %u = %u", ch, num, val);
+		break;
+	case MFD_MIDI_PITCH_BEND:
+		snprintf(out_buf, out_size, "Last MIDI: Ch %u Pitch Bend = %u", ch, val);
+		break;
+	case MFD_MIDI_NOTE_ON:
+		snprintf(out_buf, out_size, "Last MIDI: Ch %u Note %u = %u", ch, num, val);
+		break;
+	case MFD_MIDI_NOTE_OFF:
+		snprintf(out_buf, out_size, "Last MIDI: Ch %u Note Off %u = %u", ch, num, val);
+		break;
+	default:
+		snprintf(out_buf, out_size, "No MIDI received yet");
+		break;
+	}
+}
+
+const char *mfd_learn_button_text(bool is_learning_this_row)
+{
+	return is_learning_this_row ? "Move a control..." : "Learn";
 }

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include "core/midi-types.h"
 
 #ifdef __cplusplus
@@ -28,6 +29,9 @@ bool mfd_midi_parser_is_learning(const struct mfd_midi_parser *p);
 bool mfd_midi_parser_pop_learned(struct mfd_midi_parser *p, struct mfd_midi_addr *out_addr);
 bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mfd_midi_decoded *out_decoded);
 bool mfd_midi_addr_matches(const struct mfd_midi_addr *binding, const struct mfd_midi_addr *incoming);
+
+void mfd_format_last_midi_readout(bool has_event, const struct mfd_midi_decoded *ev, char *out_buf, size_t out_size);
+const char *mfd_learn_button_text(bool is_learning_this_row);
 
 #ifdef __cplusplus
 }

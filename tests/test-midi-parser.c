@@ -7,6 +7,7 @@
 #include "core/midi-parser.h"
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #define REQUIRE(cond)                                                                   \
 	do {                                                                            \
@@ -84,6 +85,18 @@ int main(void)
 	REQUIRE(learned.type == MFD_MIDI_NOTE_ON);
 	REQUIRE(learned.channel == 3U);
 	REQUIRE(learned.number == 50U);
+
+	/* 4. Live MIDI header readout & Learn button text (Item 1) */
+	char readout[128] = {0};
+	mfd_format_last_midi_readout(false, NULL, readout, sizeof(readout));
+	REQUIRE(strcmp(readout, "No MIDI received yet") == 0);
+
+	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 7U, 64U), &dec));
+	mfd_format_last_midi_readout(true, &dec, readout, sizeof(readout));
+	REQUIRE(strcmp(readout, "Last MIDI: Ch 1 CC 7 = 64") == 0);
+
+	REQUIRE(strcmp(mfd_learn_button_text(false), "Learn") == 0);
+	REQUIRE(strcmp(mfd_learn_button_text(true), "Move a control...") == 0);
 
 	printf("test-midi-parser: PASS\n");
 	return 0;
