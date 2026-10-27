@@ -60,6 +60,11 @@ target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api 
 add_test(NAME test-vendor-api COMMAND test-vendor-api)
 set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
+add_executable(midi-send midi-send.c)
+target_link_libraries(midi-send PRIVATE winmm)
+add_test(NAME test-midi-send COMMAND midi-send --self-test)
+set_tests_properties(test-midi-send PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
+
 add_executable(test-shader-syntax test-shader-syntax.c)
 add_test(NAME test-shader-syntax COMMAND test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect")
 set_tests_properties(test-shader-syntax PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
