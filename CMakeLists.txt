@@ -52,12 +52,18 @@ target_sources(
     src/core/mixer-math.c
     src/core/apc40-profile.h
     src/core/apc40-profile.c
+    src/core/tbar-logic.h
+    src/core/tbar-logic.c
     src/midi/winmm-device.h
     src/midi/winmm-device.c
     src/obs/mfd-layer-filter.h
     src/obs/mfd-layer-filter.c
     src/obs/mfd-engine.h
     src/obs/mfd-engine.c
+    src/obs/mfd-tbar.h
+    src/obs/mfd-tbar.cpp
+    src/ui/mfd-settings-dialog.hpp
+    src/ui/mfd-settings-dialog.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)

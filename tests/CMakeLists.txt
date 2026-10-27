@@ -39,6 +39,7 @@ midi_fadester_add_test(test-smoother test-smoother.c "${_core}/smoother.c")
 midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
 midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
 midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c")
+midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
 
 add_executable(test-shader-syntax test-shader-syntax.c)
 add_test(NAME test-shader-syntax COMMAND test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect")

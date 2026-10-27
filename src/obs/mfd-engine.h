@@ -56,7 +56,7 @@ struct mfd_engine {
 	float smooth_tau_ms;
 	bool tbar_bidirectional_flip;
 
-	struct mfd_fader_slot slots[MFD_MAX_FADER_SLOTS];
+	struct mfd_fader_slot fader_slots[MFD_MAX_FADER_SLOTS];
 	int learning_slot_index; /* -1 when not learning */
 
 	mfd_tbar_apply_fn tbar_driver;

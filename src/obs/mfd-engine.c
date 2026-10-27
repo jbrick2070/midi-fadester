@@ -63,7 +63,7 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 	size_t count = mfd_apc40_get_default_slots(defs, MFD_APC40_DEFAULT_SLOT_COUNT);
 
 	for (size_t i = 0U; i < MFD_MAX_FADER_SLOTS; ++i) {
-		struct mfd_fader_slot *s = &eng->slots[i];
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		memset(s, 0, sizeof(*s));
 		if (i < count) {
 			s->enabled = true;
@@ -199,7 +199,7 @@ static void mfd_engine_video_tick(void *param, float seconds)
 		struct mfd_midi_addr learned;
 		if (mfd_midi_parser_pop_learned(&eng->midi_parser, &learned)) {
 			if (eng->learning_slot_index >= 0 && eng->learning_slot_index < MFD_MAX_FADER_SLOTS) {
-				struct mfd_fader_slot *ls = &eng->slots[eng->learning_slot_index];
+				struct mfd_fader_slot *ls = &eng->fader_slots[eng->learning_slot_index];
 				ls->addr = learned;
 				ls->enabled = true;
 				obs_log(LOG_INFO, "MIDI Learn bound slot '%s' to Ch %u Type %d Num %u", ls->label,
@@ -213,7 +213,7 @@ static void mfd_engine_video_tick(void *param, float seconds)
 		}
 
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-			struct mfd_fader_slot *slot = &eng->slots[i];
+			struct mfd_fader_slot *slot = &eng->fader_slots[i];
 			if (!slot->enabled) {
 				continue;
 			}
@@ -235,7 +235,7 @@ static void mfd_engine_video_tick(void *param, float seconds)
 	}
 
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		struct mfd_fader_slot *slot = &eng->slots[i];
+		struct mfd_fader_slot *slot = &eng->fader_slots[i];
 		if (!slot->enabled) {
 			continue;
 		}
@@ -252,7 +252,7 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng)
 		return;
 	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		struct mfd_fader_slot *slot = &eng->slots[i];
+		struct mfd_fader_slot *slot = &eng->fader_slots[i];
 		if (!slot->enabled) {
 			continue;
 		}
@@ -292,7 +292,7 @@ static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 {
 	obs_data_array_t *arr = obs_data_array_create();
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		const struct mfd_fader_slot *s = &eng->slots[i];
+		const struct mfd_fader_slot *s = &eng->fader_slots[i];
 		obs_data_t *item = obs_data_create();
 		obs_data_set_bool(item, "enabled", s->enabled);
 		obs_data_set_string(item, "label", s->label);
@@ -328,7 +328,7 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		if (!item) {
 			continue;
 		}
-		struct mfd_fader_slot *s = &eng->slots[i];
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		s->enabled = obs_data_get_bool(item, "enabled");
 		const char *lbl = obs_data_get_string(item, "label");
 		if (lbl && *lbl) {
@@ -447,7 +447,7 @@ void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms)
 	}
 	eng->smooth_tau_ms = (isfinite(tau_ms) && tau_ms >= 0.0f) ? tau_ms : 0.0f;
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		mfd_smoother_set_tau_ms(&eng->slots[i].smoother, eng->smooth_tau_ms);
+		mfd_smoother_set_tau_ms(&eng->fader_slots[i].smoother, eng->smooth_tau_ms);
 	}
 }
 
@@ -458,8 +458,8 @@ void mfd_engine_set_tbar_bidirectional_flip(struct mfd_engine *eng, bool flip)
 	}
 	eng->tbar_bidirectional_flip = flip;
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		if (eng->slots[i].target_type == MFD_TARGET_TBAR) {
-			eng->slots[i].takeover.bidirectional_flip = flip;
+		if (eng->fader_slots[i].target_type == MFD_TARGET_TBAR) {
+			eng->fader_slots[i].takeover.bidirectional_flip = flip;
 		}
 	}
 }
