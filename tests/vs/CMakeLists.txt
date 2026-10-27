@@ -35,6 +35,9 @@ function(visual_sidechain_add_test name)
   set_tests_properties(${name} PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 endfunction()
 
+set(_core "${CMAKE_SOURCE_DIR}/src/core")
+visual_sidechain_add_test(test-audio-ring test-audio-ring.c "${_core}/audio-ring.c")
+
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
   NAME check-locale-keys
