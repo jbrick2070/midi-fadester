@@ -54,6 +54,7 @@ visual_sidechain_add_test(test-onset test-onset.c "${_core}/onset.c")
 visual_sidechain_add_test(test-analyzer test-analyzer.c ${_analyzer_srcs})
 visual_sidechain_add_test(test-modulation test-modulation.c "${_core}/modulation.c")
 visual_sidechain_add_test(test-modulator-baseline test-modulator-baseline.c "${_core}/baseline.c")
+visual_sidechain_add_test(test-shader-parser test-shader-parser.c "${_core}/shader-parse.c")
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
