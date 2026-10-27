@@ -44,9 +44,10 @@ void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn)
 
 static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slot, float initial_val)
 {
+	bool bidir = (slot->target_type == MFD_TARGET_TBAR) ? eng->tbar_bidirectional_flip
+							    : (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	mfd_smoother_init(&slot->smoother, eng->smooth_tau_ms, initial_val);
-	mfd_takeover_init(&slot->takeover, initial_val, MFD_DEFAULT_PICKUP_THRESHOLD,
-			  (slot->target_type == MFD_TARGET_TBAR) ? eng->tbar_bidirectional_flip : false);
+	mfd_takeover_init(&slot->takeover, initial_val, MFD_DEFAULT_PICKUP_THRESHOLD, bidir);
 	slot->last_raw_norm = initial_val;
 	slot->last_applied_val = initial_val;
 	slot->last_alpha_a = 1.0f;
@@ -421,9 +422,20 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			float effective = slot->last_applied_val;
 			if (mfd_takeover_step(&slot->takeover, norm, &effective)) {
 				slot->auto_fade_active = false;
-				mfd_smoother_set_target(&slot->smoother, effective);
+				float target_val = (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX)
+							   ? mfd_takeover_throw_to_mix_value(&slot->takeover, effective)
+							   : effective;
+				mfd_smoother_set_target(&slot->smoother, target_val);
 				if (!mfd_smoother_is_active(&slot->smoother)) {
-					mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
+					if (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX &&
+					    effective >= MFD_THROW_COMPLETE_THRESHOLD) {
+						float rail_val = slot->takeover.polarity_reversed ? 0.0f : 1.0f;
+						mfd_engine_apply_slot_output(eng, slot, rail_val);
+						mfd_takeover_notify_tbar_completed(&slot->takeover);
+						mfd_smoother_reset(&slot->smoother, rail_val);
+					} else {
+						mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
+					}
 					mfd_engine_notify_fader_changed(eng, i, "midi");
 				}
 			}
@@ -453,7 +465,16 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			mfd_engine_notify_fader_changed(eng, i, "auto_fade");
 		} else if (mfd_smoother_is_active(&slot->smoother)) {
 			float smoothed = mfd_smoother_tick(&slot->smoother, seconds);
-			mfd_engine_apply_slot_output(eng, slot, smoothed);
+			if (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX &&
+			    mfd_takeover_mix_to_throw_progress(&slot->takeover, smoothed) >=
+				    MFD_THROW_COMPLETE_THRESHOLD) {
+				float rail_val = slot->takeover.polarity_reversed ? 0.0f : 1.0f;
+				mfd_engine_apply_slot_output(eng, slot, rail_val);
+				mfd_takeover_notify_tbar_completed(&slot->takeover);
+				mfd_smoother_reset(&slot->smoother, rail_val);
+			} else {
+				mfd_engine_apply_slot_output(eng, slot, smoothed);
+			}
 			mfd_engine_notify_fader_changed(eng, i, "midi");
 		}
 

@@ -54,20 +54,105 @@ int main(void)
 	REQUIRE(fabsf(out - 0.08f) < 1e-6f);
 	REQUIRE(t.state == MFD_TAKEOVER_ENGAGED);
 
-	/* 3. Bidirectional T-Bar throw flip: 0 -> 1 completes, then 1 -> 0 drives 0 -> 1 */
+	/*
+	 * 3. Parked state machine, completion peak tracking, 8% hysteresis, and unpark rescaling:
+	 * Case 3a: Full throw 0 -> 1.0 (completing at 0.90), tracking peak to 1.0, 8% hysteresis, then 1.0 -> 0.
+	 */
 	struct mfd_takeover tbar;
 	mfd_takeover_init(&tbar, 0.0f, 0.015f, true);
 	REQUIRE(mfd_takeover_step(&tbar, 0.0f, &out));
-	REQUIRE(mfd_takeover_step(&tbar, 1.0f, &out));
-	REQUIRE(fabsf(out - 1.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&tbar, 0.90f, &out));
+	REQUIRE(fabsf(out - 0.90f) < 1e-6f);
 
+	/* Throw completes at 90% -> enters PARKED without flipping polarity yet */
 	mfd_takeover_notify_tbar_completed(&tbar);
-	REQUIRE(tbar.polarity_reversed);
-	REQUIRE(tbar.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(tbar.parked_at_upper_rail);
+	REQUIRE(!tbar.polarity_reversed);
+	REQUIRE(fabsf(tbar.parked_peak - 0.90f) < 1e-6f);
 
-	/* Physical fader now moves back from 1.0 -> 0.25 -> effective T-bar moves 0.0 -> 0.75 */
-	REQUIRE(mfd_takeover_step(&tbar, 0.25f, &out));
-	REQUIRE(fabsf(out - 0.75f) < 1e-6f);
+	/* Remaining travel 0.90 -> 0.96 -> 1.00 updates parked_peak with zero slider writes (returns false) */
+	REQUIRE(!mfd_takeover_step(&tbar, 0.96f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(fabsf(tbar.parked_peak - 0.96f) < 1e-6f);
+	REQUIRE(!mfd_takeover_step(&tbar, 1.00f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(fabsf(tbar.parked_peak - 1.00f) < 1e-6f);
+
+	/* Rail jitter and retreat <= 8% (1.00 -> 0.97 -> 0.99 -> 0.925, retreat = 0.075 <= 0.08) stay PARKED */
+	REQUIRE(!mfd_takeover_step(&tbar, 0.97f, &out));
+	REQUIRE(!mfd_takeover_step(&tbar, 0.99f, &out));
+	REQUIRE(!mfd_takeover_step(&tbar, 0.925f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(!tbar.polarity_reversed);
+
+	/* Retreat > 8% from peak (1.00 -> 0.90, retreat = 0.10 > 0.08) unparks, flips polarity, rescales to 0% */
+	REQUIRE(mfd_takeover_step(&tbar, 0.90f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(tbar.polarity_reversed);
+	REQUIRE(fabsf(tbar.rescale_origin - 0.90f) < 1e-6f);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+
+	/* Halfway from unpark point (0.90) to opposite physical rail (0.0) -> raw = 0.45 -> effective = 0.50 */
+	REQUIRE(mfd_takeover_step(&tbar, 0.45f, &out));
+	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
+
+	/* Opposite physical rail (0.0) -> effective = 1.00 */
+	REQUIRE(mfd_takeover_step(&tbar, 0.0f, &out));
+	REQUIRE(fabsf(out - 1.00f) < 1e-5f);
+
+	/*
+	 * Case 3b: Throw that completes at 90% and stops at 95% (0.95 peak), then comes back.
+	 */
+	mfd_takeover_init(&tbar, 0.0f, 0.015f, true);
+	REQUIRE(mfd_takeover_step(&tbar, 0.0f, &out));
+	REQUIRE(mfd_takeover_step(&tbar, 0.90f, &out));
+	mfd_takeover_notify_tbar_completed(&tbar);
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+
+	/* Fader continues to 0.95 and stops -> peak is 0.95, no writes */
+	REQUIRE(!mfd_takeover_step(&tbar, 0.95f, &out));
+	REQUIRE(fabsf(tbar.parked_peak - 0.95f) < 1e-6f);
+
+	/* Retreat <= 8% from 0.95 peak (0.88, retreat = 0.07 <= 0.08) stays PARKED */
+	REQUIRE(!mfd_takeover_step(&tbar, 0.88f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+
+	/* Retreat > 8% from 0.95 peak (0.86, retreat = 0.09 > 0.08) unparks at 0%, rescales [0.86 -> 0.0] to [0 -> 1] */
+	REQUIRE(mfd_takeover_step(&tbar, 0.86f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(tbar.polarity_reversed);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&tbar, 0.43f, &out));
+	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
+
+	/* Return throw reaches 90% at raw = 0.086, completes, tracks lower peak to 0.02, unparks at > 8% (0.11) */
+	REQUIRE(mfd_takeover_step(&tbar, 0.086f, &out));
+	REQUIRE(fabsf(out - 0.90f) < 1e-5f);
+	mfd_takeover_notify_tbar_completed(&tbar);
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(!tbar.parked_at_upper_rail);
+	REQUIRE(!mfd_takeover_step(&tbar, 0.02f, &out));
+	REQUIRE(fabsf(tbar.parked_peak - 0.02f) < 1e-6f);
+	REQUIRE(!mfd_takeover_step(&tbar, 0.095f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(mfd_takeover_step(&tbar, 0.11f, &out));
+	REQUIRE(tbar.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(!tbar.polarity_reversed);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&tbar, 1.0f, &out));
+	REQUIRE(fabsf(out - 1.0f) < 1e-5f);
+
+	/*
+	 * Case 3c: Two-source crossfade rail mapping (mfd_takeover_throw_to_mix_value):
+	 * At upper rail unpark (polarity_reversed=true, throw_progress=0.0), mix stays 1.0 (Source B, no jump)
+	 * and reaches 0.0 (Source A) at physical rail 0.0.
+	 */
+	tbar.polarity_reversed = true;
+	REQUIRE(fabsf(mfd_takeover_throw_to_mix_value(&tbar, 0.0f) - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(mfd_takeover_throw_to_mix_value(&tbar, 0.5f) - 0.5f) < 1e-6f);
+	REQUIRE(fabsf(mfd_takeover_throw_to_mix_value(&tbar, 1.0f) - 0.0f) < 1e-6f);
+	REQUIRE(fabsf(mfd_takeover_mix_to_throw_progress(&tbar, 0.10f) - 0.90f) < 1e-6f);
 
 	/* 4. Output bar formatter shows ↑/↓ arrow while waiting, then live value once engaged (Item 2) */
 	char bar_text[128] = {0};

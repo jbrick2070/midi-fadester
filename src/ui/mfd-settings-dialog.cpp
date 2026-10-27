@@ -468,6 +468,11 @@ private:
 					struct mfd_engine *e = mfd_engine_get();
 					e->fader_slots[row].target_type =
 						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
+					e->fader_slots[row].takeover.bidirectional_flip =
+						(e->fader_slots[row].target_type == MFD_TARGET_TBAR)
+							? e->tbar_bidirectional_flip
+							: (e->fader_slots[row].target_type ==
+							   MFD_TARGET_TWO_SOURCE_MIX);
 					mfd_engine_save_global_config(e);
 					mfd_engine_notify_state_changed(e);
 					rebuild_table_rows();

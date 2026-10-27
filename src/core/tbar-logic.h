@@ -13,7 +13,10 @@
 extern "C" {
 #endif
 
+#define MFD_TBAR_PRECISION 1024
 #define MFD_TBAR_RANGE_MAX 1023
+#define MFD_TBAR_CLAMP (MFD_TBAR_PRECISION / 10)
+#define MFD_TBAR_COMPLETE_POS (MFD_TBAR_RANGE_MAX - MFD_TBAR_CLAMP)
 
 struct mfd_tbar_action {
 	bool allow_frontend_calls;

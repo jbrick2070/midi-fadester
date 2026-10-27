@@ -51,17 +51,33 @@ int main(void)
 	ASSERT_TRUE(!act.call_release_tbar);
 
 	/*
-	 * 4. Reaching completion rail (t = 1.0 -> pos = 1023 from 512) triggers release_tbar
+	 * 4. Just below 90% completion threshold (t = 0.89 -> pos = 910 < 921) does not release T-bar
 	 */
-	mfd_tbar_compute_action(true, true, 1.0f, 512, &act);
+	ASSERT_TRUE(MFD_TBAR_COMPLETE_POS == 921);
+	mfd_tbar_compute_action(true, true, 0.89f, 512, &act);
 	ASSERT_TRUE(act.allow_frontend_calls);
-	ASSERT_TRUE(act.target_pos_1024 == 1023);
+	ASSERT_TRUE(act.target_pos_1024 == 910);
+	ASSERT_TRUE(act.call_set_tbar);
+	ASSERT_TRUE(!act.call_release_tbar);
+
+	/*
+	 * 5. Reaching 90% completion threshold (t = 0.90 -> pos = 921 from 910) triggers release_tbar once
+	 */
+	mfd_tbar_compute_action(true, true, 0.90f, 910, &act);
+	ASSERT_TRUE(act.allow_frontend_calls);
+	ASSERT_TRUE(act.target_pos_1024 == 921);
 	ASSERT_TRUE(act.call_set_tbar);
 	ASSERT_TRUE(act.call_release_tbar);
 
 	/*
-	 * 5. Holding at completion rail (last_pos_1024 == 1023) does not re-fire release_tbar
+	 * 6. Further travel in the completion zone (pos = 972 or 1023 when last_pos_1024 >= 921)
+	 * neither writes the slider nor re-fires release_tbar
 	 */
+	mfd_tbar_compute_action(true, true, 0.95f, 921, &act);
+	ASSERT_TRUE(act.allow_frontend_calls);
+	ASSERT_TRUE(!act.call_set_tbar);
+	ASSERT_TRUE(!act.call_release_tbar);
+
 	mfd_tbar_compute_action(true, true, 1.0f, 1023, &act);
 	ASSERT_TRUE(act.allow_frontend_calls);
 	ASSERT_TRUE(!act.call_set_tbar);

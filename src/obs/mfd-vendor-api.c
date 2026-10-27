@@ -235,6 +235,7 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 	slot->takeover.hint = MFD_HINT_NONE;
 	slot->takeover.target_obs = val;
 	slot->takeover.last_fader = val;
+	slot->takeover.last_raw_fader = val;
 	slot->takeover.has_last_fader = true;
 	mfd_smoother_reset(&slot->smoother, val);
 
@@ -332,6 +333,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	slot->takeover.hint = MFD_HINT_NONE;
 	slot->takeover.target_obs = val;
 	slot->takeover.last_fader = val;
+	slot->takeover.last_raw_fader = val;
 	slot->takeover.has_last_fader = true;
 	mfd_smoother_reset(&slot->smoother, val);
 
@@ -371,6 +373,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 	slot->takeover.hint = MFD_HINT_NONE;
 	slot->takeover.target_obs = val;
 	slot->takeover.last_fader = val;
+	slot->takeover.last_raw_fader = val;
 	slot->takeover.has_last_fader = true;
 	mfd_smoother_reset(&slot->smoother, val);
 
@@ -486,6 +489,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (has_target) {
 		s->target_type = new_target;
 		s->enabled = true;
+		s->takeover.bidirectional_flip = (s->target_type == MFD_TARGET_TBAR)
+							 ? eng->tbar_bidirectional_flip
+							 : (s->target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	}
 	if (has_curve) {
 		s->curve = new_curve;

@@ -46,6 +46,11 @@ static std::atomic<bool> g_studio_mode_active{false};
 static std::atomic<bool> g_slider_tbar_found{false};
 static std::atomic<bool> g_logged_missing_error{false};
 static std::atomic<int> g_last_pos_1024{0};
+static std::atomic<int> g_tbar_set_count{0};
+static std::atomic<int> g_tbar_release_count{0};
+static std::atomic<int> g_tbar_writes_since_release{0};
+static std::atomic<int> g_tbar_writes_before_unpark{0};
+static std::atomic<bool> g_tbar_awaiting_unpark{false};
 
 static QSlider *locate_slider_tbar_on_ui_thread(void)
 {
@@ -121,17 +126,21 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 	if (do_set) {
 		/*
 		 * Sync both OBSBasic::tBar QSlider value and OBS transition position so that
-		 * obs_frontend_release_tbar() sees tBar->value() == 1023 at completion and does not
+		 * obs_frontend_release_tbar() sees tBar->value() >= 921 at completion and does not
 		 * snap back to the old scene (OBSStudioAPI.cpp:115 vs OBSBasic_Transitions.cpp:752).
 		 */
 		g_tbar_slider->blockSignals(true);
 		g_tbar_slider->setValue(pos_1024);
 		g_tbar_slider->blockSignals(false);
 		obs_frontend_set_tbar_position(pos_1024);
+		g_tbar_set_count.fetch_add(1, std::memory_order_relaxed);
+		g_tbar_writes_since_release.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	if (do_release) {
 		obs_frontend_release_tbar();
+		g_tbar_release_count.fetch_add(1, std::memory_order_relaxed);
+		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
 	}
 }
 
@@ -269,10 +278,44 @@ static void on_selftest_fader_signal(void *data, calldata_t *cd)
 	cap->value = static_cast<float>(calldata_float(cd, "value"));
 }
 
+static log_handler_t g_orig_log_handler = nullptr;
+static void *g_orig_log_param = nullptr;
+static std::atomic<int> g_obs_manual_started{0};
+static std::atomic<int> g_obs_manual_finished{0};
+static std::atomic<int> g_obs_manual_cancelled{0};
+
+static void selftest_log_handler(int lvl, const char *msg, va_list args, void *p)
+{
+	if (msg) {
+		char formatted[512];
+		va_list copy;
+		va_copy(copy, args);
+		std::vsnprintf(formatted, sizeof(formatted), msg, copy);
+		va_end(copy);
+
+		if (std::strstr(formatted, "User started manual transition to scene ") != nullptr) {
+			g_obs_manual_started.fetch_add(1, std::memory_order_relaxed);
+		} else if (std::strstr(formatted, "Manual transition to scene ") != nullptr &&
+			   std::strstr(formatted, " finished") != nullptr) {
+			g_obs_manual_finished.fetch_add(1, std::memory_order_relaxed);
+		} else if (std::strstr(formatted, "Manual transition cancelled") != nullptr) {
+			g_obs_manual_cancelled.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+	if (g_orig_log_handler) {
+		g_orig_log_handler(lvl, msg, args, g_orig_log_param);
+	} else {
+		(void)p;
+	}
+}
+
 static void run_live_selftest_worker(void)
 {
 	std::this_thread::sleep_for(std::chrono::milliseconds(300));
 	obs_log(LOG_INFO, "Running live OBS 33 vendor API & integration self-test (MFD_SELF_TEST=1)...");
+
+	base_get_log_handler(&g_orig_log_handler, &g_orig_log_param);
+	base_set_log_handler(selftest_log_handler, nullptr);
 
 	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
 	struct mfd_engine *eng = mfd_engine_get();
@@ -280,6 +323,7 @@ static void run_live_selftest_worker(void)
 	bool was_studio = false;
 	obs_source_t *prev_scene = nullptr;
 	obs_scene_t *test_scene = nullptr;
+	obs_scene_t *test_scene_b = nullptr;
 	obs_source_t *src_a = nullptr;
 	obs_source_t *src_b = nullptr;
 
@@ -300,6 +344,7 @@ static void run_live_selftest_worker(void)
 				"__mfd_selftest_source_a__",   "__mfd_selftest_source_b__",
 				"__mfd_selftest_source_a__ 2", "__mfd_selftest_source_b__ 2",
 				"__mfd_selftest_scene__",      "__mfd_selftest_scene__ 2",
+				"__mfd_selftest_scene_b__",    "__mfd_selftest_scene_b__ 2",
 			};
 			for (const char *sn : stale_names) {
 				obs_source_t *old = obs_get_source_by_name(sn);
@@ -312,6 +357,7 @@ static void run_live_selftest_worker(void)
 			prev_scene = obs_frontend_get_current_scene();
 
 			test_scene = obs_scene_create("__mfd_selftest_scene__");
+			test_scene_b = obs_scene_create("__mfd_selftest_scene_b__");
 
 			obs_data_t *red_settings = obs_data_create();
 			obs_data_set_int(red_settings, "color", 0xFF0000FFLL);
@@ -463,6 +509,9 @@ static void run_live_selftest_worker(void)
 			if (!obs_frontend_preview_program_mode_active()) {
 				obs_frontend_set_preview_program_mode(true);
 			}
+			if (test_scene_b) {
+				obs_frontend_set_current_preview_scene(obs_scene_get_source(test_scene_b));
+			}
 			refresh_studio_mode_state_on_ui_thread();
 		},
 		Qt::BlockingQueuedConnection);
@@ -487,11 +536,14 @@ static void run_live_selftest_worker(void)
 	obs_data_set_bool(req, "release", true);
 	res = call_real_ws_vendor_request("set_fader_value", req);
 	bool end_ok = res && (obs_data_get_double(res, "value") == 0.0);
-	bool completed = eng->fader_slots[0].takeover.polarity_reversed;
+	bool completed = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
 	if (res) {
 		obs_data_release(res);
 	}
 	obs_data_release(req);
+
+	/* Allow the vendor API T-bar release transition to finish before loopMIDI sweeps */
+	std::this_thread::sleep_for(std::chrono::milliseconds(550));
 
 	/* Check (1): loopMIDI + tests/midi-send.c live CC sweep & soft takeover test */
 	char loopmidi_port[128] = {0};
@@ -546,7 +598,7 @@ static void run_live_selftest_worker(void)
 			Qt::BlockingQueuedConnection);
 		bool pre_slider_held = (slider_pre == 512);
 
-		/* Part 1b: Full sweep 0..127 over 450 ms -> soft takeover engages at ~64 (0.50), T-bar follows within smoothing window, completes at 127 */
+		/* Part 1b: Full sweep 0..127 over 450 ms -> soft takeover engages at ~64 (0.50), T-bar follows within smoothing window, completes at 90% and parks */
 		mfd_takeover_sync_external(&eng->fader_slots[0].takeover, 0.50f);
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.50f);
 		eng->fader_slots[0].last_applied_val = 0.50f;
@@ -578,7 +630,7 @@ static void run_live_selftest_worker(void)
 			if (cc_now > 5 && cc_now < 58 && st_now == MFD_TAKEOVER_WAITING && slider_now == 512) {
 				saw_waiting_before_pickup = true;
 			}
-			if (cc_now >= 66 && cc_now <= 118 && st_now == MFD_TAKEOVER_ENGAGED && slider_now > 512) {
+			if (cc_now >= 66 && cc_now <= 110 && st_now == MFD_TAKEOVER_ENGAGED && slider_now > 512) {
 				saw_engaged_after_pickup = true;
 				float tbar_norm = static_cast<float>(slider_now) / 1023.0f;
 				float lag = std::fabs(target_now - tbar_norm);
@@ -592,20 +644,144 @@ static void run_live_selftest_worker(void)
 			}
 		}
 		sweep_proc.waitForFinished(2000);
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		std::this_thread::sleep_for(std::chrono::milliseconds(550));
 
-		bool sweep_completed_throw = eng->fader_slots[0].takeover.polarity_reversed;
+		bool sweep_completed_throw = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
 		uint16_t final_cc = eng->last_midi_decoded.raw_value;
-		/* Within 450ms sweep + 8ms smoother tau + 16.7ms video tick, lag stays well within smoothing window (<= 0.12) */
 		bool smoothing_ok = (mid_sweep_samples >= 2) && (max_smoothing_lag <= 0.12f);
+
+		/*
+		 * Case (2): loopMIDI bidirectional sweep 0 -> 127, dwell, then 127 -> 0.
+		 * Assert:
+		 * - exactly 1 "started" and 1 "finished" per direction,
+		 * - T-bar released once per throw,
+		 * - 0 slider writes between completion and the fader leaving the rail (> 8% from peak).
+		 */
+		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
+		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
+		eng->fader_slots[0].last_applied_val = 0.0f;
+		g_last_pos_1024.store(0, std::memory_order_relaxed);
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_obs_manual_cancelled.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_writes_before_unpark.store(0, std::memory_order_relaxed);
+		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
+
+		int rc_c2_d1 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+									      << "15" << "400"
+									      << "0" << "127");
+		/* Dwell at rail (550 ms) */
+		std::this_thread::sleep_for(std::chrono::milliseconds(550));
+
+		int c2_d1_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c2_d1_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c2_d1_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+		int c2_d1_post_writes = g_tbar_writes_since_release.load(std::memory_order_relaxed);
+		bool c2_d1_parked = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
+		float c2_d1_peak = eng->fader_slots[0].takeover.parked_peak;
+
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+
+		int rc_c2_d2 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+									      << "15" << "400"
+									      << "127" << "0");
+		std::this_thread::sleep_for(std::chrono::milliseconds(550));
+
+		int c2_d2_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c2_d2_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c2_d2_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+		int c2_d2_post_writes = g_tbar_writes_since_release.load(std::memory_order_relaxed);
+		int c2_writes_before_unpark = g_tbar_writes_before_unpark.load(std::memory_order_relaxed);
+		bool c2_d2_parked = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
+		float c2_d2_peak = eng->fader_slots[0].takeover.parked_peak;
+
+		bool case2_ok = (rc_c2_d1 == 0) && (rc_c2_d2 == 0) && (c2_d1_started == 1) && (c2_d1_finished == 1) &&
+				(c2_d1_releases == 1) && (c2_d1_post_writes == 0) && c2_d1_parked &&
+				(c2_d2_started == 1) && (c2_d2_finished == 1) && (c2_d2_releases == 1) &&
+				(c2_d2_post_writes == 0) && (c2_writes_before_unpark == 0) && c2_d2_parked;
+
+		obs_log(case2_ok ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI CASE 2 (0->127->0) [%s]: dir1(started=%d finished=%d releases=%d parked=%d peak=%.4f post_completion_writes=%d) dir2(started=%d finished=%d releases=%d parked=%d peak=%.4f post_completion_writes=%d writes_before_leaving_rail=%d)",
+			case2_ok ? "PASS" : "FAIL", c2_d1_started, c2_d1_finished, c2_d1_releases, (int)c2_d1_parked,
+			c2_d1_peak, c2_d1_post_writes, c2_d2_started, c2_d2_finished, c2_d2_releases, (int)c2_d2_parked,
+			c2_d2_peak, c2_d2_post_writes, c2_writes_before_unpark);
+
+		/*
+		 * Case (3): loopMIDI sweep that stops at 95% (CC 121 = 95.28%), dwells, then comes back (121 -> 0).
+		 * Assert:
+		 * - exactly 1 "started" and 1 "finished" per direction,
+		 * - T-bar released once per throw,
+		 * - 0 slider writes between completion and the fader leaving the 95% peak (> 8% below 95%).
+		 */
+		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
+		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
+		eng->fader_slots[0].last_applied_val = 0.0f;
+		g_last_pos_1024.store(0, std::memory_order_relaxed);
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_writes_before_unpark.store(0, std::memory_order_relaxed);
+		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
+
+		int rc_c3_d1 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+									      << "15" << "400"
+									      << "0" << "121");
+		/* Dwell at 95% (550 ms) */
+		std::this_thread::sleep_for(std::chrono::milliseconds(550));
+
+		int c3_d1_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c3_d1_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c3_d1_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+		int c3_d1_post_writes = g_tbar_writes_since_release.load(std::memory_order_relaxed);
+		bool c3_d1_parked = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
+		float c3_d1_peak = eng->fader_slots[0].takeover.parked_peak;
+
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+
+		int rc_c3_d2 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+									      << "15" << "400"
+									      << "121" << "0");
+		std::this_thread::sleep_for(std::chrono::milliseconds(550));
+
+		int c3_d2_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c3_d2_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c3_d2_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+		int c3_d2_post_writes = g_tbar_writes_since_release.load(std::memory_order_relaxed);
+		int c3_writes_before_unpark = g_tbar_writes_before_unpark.load(std::memory_order_relaxed);
+		bool c3_d2_parked = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
+		float c3_d2_peak = eng->fader_slots[0].takeover.parked_peak;
+
+		bool case3_ok = (rc_c3_d1 == 0) && (rc_c3_d2 == 0) && (c3_d1_started == 1) && (c3_d1_finished == 1) &&
+				(c3_d1_releases == 1) && (c3_d1_post_writes == 0) && c3_d1_parked &&
+				(std::fabs(c3_d1_peak - (121.0f / 127.0f)) < 1e-4f) && (c3_d2_started == 1) &&
+				(c3_d2_finished == 1) && (c3_d2_releases == 1) && (c3_d2_post_writes == 0) &&
+				(c3_writes_before_unpark == 0) && c3_d2_parked;
+
+		obs_log(case3_ok ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI CASE 3 (0->95%%->0) [%s]: dir1(started=%d finished=%d releases=%d parked=%d peak=%.4f post_completion_writes=%d) dir2(started=%d finished=%d releases=%d parked=%d peak=%.4f post_completion_writes=%d writes_before_leaving_rail=%d)",
+			case3_ok ? "PASS" : "FAIL", c3_d1_started, c3_d1_finished, c3_d1_releases, (int)c3_d1_parked,
+			c3_d1_peak, c3_d1_post_writes, c3_d2_started, c3_d2_finished, c3_d2_releases, (int)c3_d2_parked,
+			c3_d2_peak, c3_d2_post_writes, c3_writes_before_unpark);
+
 		loopmidi_pass = connected && pre_waiting_ok && pre_slider_held && saw_waiting_before_pickup &&
-				saw_engaged_after_pickup && smoothing_ok && sweep_completed_throw && (final_cc == 127);
+				saw_engaged_after_pickup && smoothing_ok && sweep_completed_throw &&
+				(final_cc == 127) && case2_ok && case3_ok;
 
 		obs_log(loopmidi_pass ? LOG_INFO : LOG_ERROR,
-			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d",
+			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d case2_ok=%d case3_ok=%d",
 			loopmidi_pass ? "PASS" : "FAIL", loopmidi_port, (int)connected, (int)pre_waiting_ok, slider_pre,
 			(int)saw_waiting_before_pickup, (int)saw_engaged_after_pickup, mid_sweep_samples,
-			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw);
+			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw, (int)case2_ok,
+			(int)case3_ok);
 
 		mfd_engine_reconnect_midi(eng, prev_midi_dev);
 	} else {
@@ -722,6 +898,10 @@ static void run_live_selftest_worker(void)
 				obs_source_remove(src_b);
 				obs_source_release(src_b);
 			}
+			if (test_scene_b) {
+				obs_source_remove(obs_scene_get_source(test_scene_b));
+				obs_scene_release(test_scene_b);
+			}
 			if (test_scene) {
 				obs_source_remove(obs_scene_get_source(test_scene));
 				obs_scene_release(test_scene);
@@ -732,6 +912,8 @@ static void run_live_selftest_worker(void)
 			}
 		},
 		Qt::BlockingQueuedConnection);
+
+	base_set_log_handler(g_orig_log_handler, g_orig_log_param);
 
 	obs_log(LOG_INFO,
 		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
@@ -826,6 +1008,22 @@ bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_er
 
 	if (!act.call_set_tbar && !act.call_release_tbar) {
 		return true;
+	}
+
+	if (g_tbar_awaiting_unpark.load(std::memory_order_relaxed)) {
+		struct mfd_engine *eng_now = mfd_engine_get();
+		if (eng_now) {
+			const struct mfd_takeover &tk = eng_now->fader_slots[0].takeover;
+			const float retreat = std::fabs(tk.parked_peak - eng_now->fader_slots[0].last_raw_norm);
+			if (tk.state == MFD_TAKEOVER_PARKED || retreat <= MFD_PARKED_UNPARK_HYSTERESIS) {
+				g_tbar_writes_before_unpark.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
+			}
+		}
+	}
+	if (act.call_release_tbar) {
+		g_tbar_awaiting_unpark.store(true, std::memory_order_relaxed);
 	}
 
 	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());

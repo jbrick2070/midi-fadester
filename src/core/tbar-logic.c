@@ -51,8 +51,13 @@ void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, fl
 	out_action->allow_frontend_calls = true;
 	out_action->report_missing_slider_error = false;
 	out_action->target_pos_1024 = pos;
-	out_action->call_set_tbar = (pos != last_pos_1024);
-	out_action->call_release_tbar = (pos >= MFD_TBAR_RANGE_MAX && last_pos_1024 < MFD_TBAR_RANGE_MAX);
+	if (last_pos_1024 >= MFD_TBAR_COMPLETE_POS && pos >= MFD_TBAR_COMPLETE_POS) {
+		out_action->call_set_tbar = false;
+		out_action->call_release_tbar = false;
+	} else {
+		out_action->call_set_tbar = (pos != last_pos_1024);
+		out_action->call_release_tbar = (pos >= MFD_TBAR_COMPLETE_POS && last_pos_1024 < MFD_TBAR_COMPLETE_POS);
+	}
 }
 
 bool mfd_should_show_studio_mode_note(bool studio_mode_active, size_t active_tbar_slot_count)

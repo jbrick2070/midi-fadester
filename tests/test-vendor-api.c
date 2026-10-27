@@ -33,7 +33,7 @@ static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_
 	++g_mock_tbar_calls;
 	g_mock_tbar_last_val = t_norm;
 	if (out_completed_throw) {
-		*out_completed_throw = (t_norm >= 0.999f);
+		*out_completed_throw = (t_norm >= MFD_THROW_COMPLETE_THRESHOLD);
 	}
 	return true;
 }
@@ -303,7 +303,7 @@ int main(void)
 	mfd_vendor_handle_set_fader_value(req, res, &eng);
 	REQUIRE(g_mock_tbar_calls == 2);
 	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.0) < 1e-5);
-	REQUIRE(eng.fader_slots[0].takeover.polarity_reversed);
+	REQUIRE(eng.fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
 	obs_data_release(req);
 	obs_data_release(res);
 
