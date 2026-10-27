@@ -161,6 +161,27 @@ static void test_shader_uniform_annotations(void)
 	vs_shader_parse_result_free(&res);
 }
 
+static void test_builtin_shaders_parse_and_provenance(void)
+{
+	static const char *const k_builtin_shaders[9] = {
+		"fft-spectral-aura.shader",      "fft-wave-warp-glitch.shader", "fft-chromatic-prism-bloom.shader",
+		"fft-visualizer-overlay.shader", "fft-zoom-pulse.shader",       "fft-kaleidoscope.shader",
+		"fft-feedback-trails.shader",    "fft-strobe-flash.shader",     "fft-mirror-split.shader",
+	};
+
+	for (size_t i = 0; i < 9u; i++) {
+		char path[512];
+		snprintf(path, sizeof(path), "%s/%s", VS_SHADERS_DIR, k_builtin_shaders[i]);
+
+		char err_buf[256] = {0};
+		const bool valid = vs_shader_validate_builtin_file(path, err_buf, sizeof(err_buf));
+		if (!valid) {
+			fprintf(stderr, "Built-in shader validation failed for %s: %s\n", path, err_buf);
+		}
+		assert(valid);
+	}
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -170,6 +191,7 @@ int main(void)
 	test_shader_include_cycle_guard();
 	test_shader_malformed_include_quotes();
 	test_shader_uniform_annotations();
-	printf("test-shader-parser: all assertions passed\n");
+	test_builtin_shaders_parse_and_provenance();
+	printf("test-shader-parser: all 9 built-in shaders and parser assertions passed\n");
 	return 0;
 }

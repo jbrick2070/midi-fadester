@@ -30,7 +30,12 @@ message(STATUS "visual-sidechain tests: DLL search dirs: ${_test_dll_dirs}")
 function(visual_sidechain_add_test name)
   add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src")
-  target_compile_definitions(${name} PRIVATE "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\"")
+  target_compile_definitions(
+    ${name}
+    PRIVATE
+      "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\""
+      "VS_SHADERS_DIR=\"${CMAKE_SOURCE_DIR}/data/shaders\""
+  )
   target_link_libraries(${name} PRIVATE OBS::libobs)
   add_test(NAME ${name} COMMAND ${name})
   set_tests_properties(${name} PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
