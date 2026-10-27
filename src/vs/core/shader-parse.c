@@ -43,6 +43,16 @@ static const char *const k_effect_template_begin =
 	"uniform float audio_custom_band;\n"
 	"uniform float audio_peak;\n"
 	"uniform float audio_magnitude;\n"
+	"uniform float fader_crossfader;\n"
+	"uniform float fader_1;\n"
+	"uniform float fader_2;\n"
+	"uniform float fader_3;\n"
+	"uniform float fader_4;\n"
+	"uniform float fader_5;\n"
+	"uniform float fader_6;\n"
+	"uniform float fader_7;\n"
+	"uniform float fader_8;\n"
+	"uniform float fader_master;\n"
 	"uniform texture2d audio_spectrum;\n"
 	"uniform texture2d audio_fft;\n"
 	"\n"
@@ -269,6 +279,16 @@ static bool is_builtin_uniform_name(const char *name)
 		"audio_custom_band",
 		"audio_peak",
 		"audio_magnitude",
+		"fader_crossfader",
+		"fader_1",
+		"fader_2",
+		"fader_3",
+		"fader_4",
+		"fader_5",
+		"fader_6",
+		"fader_7",
+		"fader_8",
+		"fader_master",
 		"audio_spectrum",
 		"audio_fft",
 	};

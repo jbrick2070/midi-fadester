@@ -9,6 +9,7 @@
  */
 
 #include "analyzer.h"
+#include "fader-bridge.h"
 
 #include <math.h>
 #include <string.h>
@@ -251,6 +252,10 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 float vs_analyzer_get_signal(const struct vs_analyzer *ana, const struct vs_audio_frame *frame, enum vs_signal_id sig,
 			     float custom_low_hz, float custom_high_hz, enum vs_hz_band_mode custom_mode)
 {
+	if ((int)sig >= (int)VS_SIG_FADER_CROSSFADER && (int)sig < (int)VS_SIG_FADER_CROSSFADER + VS_FADER_SLOT_COUNT) {
+		return vs_fader_bridge_get_slot((int)sig - (int)VS_SIG_FADER_CROSSFADER);
+	}
+
 	if (!frame)
 		return 0.0f;
 
