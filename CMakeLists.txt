@@ -62,6 +62,8 @@ target_sources(
     src/obs/mfd-engine.c
     src/obs/mfd-tbar.h
     src/obs/mfd-tbar.cpp
+    src/obs/mfd-vendor-api.h
+    src/obs/mfd-vendor-api.c
     src/ui/mfd-settings-dialog.hpp
     src/ui/mfd-settings-dialog.cpp
 )

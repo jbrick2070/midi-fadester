@@ -41,6 +41,25 @@ midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c"
 midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c")
 midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
 
+add_executable(
+  test-vendor-api
+  test-vendor-api.c
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
+  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
+  "${_core}/midi-queue.c"
+  "${_core}/midi-parser.c"
+  "${_core}/smoother.c"
+  "${_core}/takeover.c"
+  "${_core}/mixer-math.c"
+  "${_core}/apc40-profile.c"
+)
+target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support winmm)
+add_test(NAME test-vendor-api COMMAND test-vendor-api)
+set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
+
 add_executable(test-shader-syntax test-shader-syntax.c)
 add_test(NAME test-shader-syntax COMMAND test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect")
 set_tests_properties(test-shader-syntax PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")

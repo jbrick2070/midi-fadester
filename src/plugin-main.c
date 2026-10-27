@@ -9,6 +9,7 @@
 #include "obs/mfd-layer-filter.h"
 #include "obs/mfd-engine.h"
 #include "obs/mfd-tbar.h"
+#include "obs/mfd-vendor-api.h"
 #include "ui/mfd-settings-dialog.hpp"
 
 OBS_DECLARE_MODULE()
@@ -32,6 +33,11 @@ bool obs_module_load(void)
 	mfd_ui_init();
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	return true;
+}
+
+void obs_module_post_load(void)
+{
+	mfd_vendor_api_register(mfd_engine_get());
 }
 
 void obs_module_unload(void)

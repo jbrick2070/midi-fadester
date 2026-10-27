@@ -90,7 +90,7 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 
 static void apply_source_opacity_and_afv(const char *source_name, float alpha_01, bool afv)
 {
-	if (!source_name || source_name[0] == '\0') {
+	if (!source_name || source_name[0] == '\0' || !obs_initialized()) {
 		return;
 	}
 
@@ -164,7 +164,7 @@ void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot 
 	}
 
 	case MFD_TARGET_AUDIO_VOLUME:
-		if (slot->source_a_name[0] != '\0') {
+		if (slot->source_a_name[0] != '\0' && obs_initialized()) {
 			obs_source_t *src = obs_get_source_by_name(slot->source_a_name);
 			if (src) {
 				uint32_t flags = obs_source_get_output_flags(src);

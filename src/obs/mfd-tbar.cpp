@@ -7,6 +7,7 @@
 #include "obs/mfd-tbar.h"
 #include "obs/mfd-engine.h"
 #include "obs/mfd-layer-filter.h"
+#include "obs/mfd-vendor-api.h"
 #include "core/tbar-logic.h"
 #include "core/mixer-math.h"
 
@@ -125,22 +126,54 @@ static void run_live_selftest_if_requested(void)
 		return;
 	}
 
-	obs_log(LOG_INFO, "Running live OBS 33 integration self-test (MFD_SELF_TEST=1)...");
+	obs_log(LOG_INFO, "Running live OBS 33 vendor API & integration self-test (MFD_SELF_TEST=1)...");
 
-	obs_source_t *src_a = obs_source_create_private("color_source", "__mfd_selftest_source_a__", nullptr);
-	obs_source_t *src_b = obs_source_create_private("color_source", "__mfd_selftest_source_b__", nullptr);
-	obs_source_t *flt_a = src_a ? mfd_ensure_layer_opacity_filter(src_a) : nullptr;
-	obs_source_t *flt_b = src_b ? mfd_ensure_layer_opacity_filter(src_b) : nullptr;
+	struct mfd_engine *eng = mfd_engine_get();
 
-	float alpha_a = 0.0f;
-	float alpha_b = 0.0f;
-	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 0.5f, &alpha_a, &alpha_b);
-	if (flt_a && flt_b) {
-		mfd_layer_filter_set_opacity(flt_a, alpha_a);
-		mfd_layer_filter_set_opacity(flt_b, alpha_b);
-	}
-	float read_a = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
-	float read_b = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
+	obs_source_t *src_a = obs_source_create("color_source", "__mfd_selftest_source_a__", nullptr, nullptr);
+	obs_source_t *src_b = obs_source_create("color_source", "__mfd_selftest_source_b__", nullptr, nullptr);
+
+	obs_data_t *req = obs_data_create();
+	obs_data_t *res = obs_data_create();
+	mfd_vendor_handle_load_apc40_defaults(req, res, eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_int(req, "slot", 1);
+	obs_data_set_bool(req, "enabled", true);
+	obs_data_set_int(req, "target_type", (int)MFD_TARGET_TWO_SOURCE_MIX);
+	obs_data_set_int(req, "curve", (int)MFD_CURVE_DIP_FREE);
+	obs_data_set_string(req, "source_a", "__mfd_selftest_source_a__");
+	obs_data_set_string(req, "source_b", "__mfd_selftest_source_b__");
+	mfd_vendor_handle_set_slot(req, res, eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_int(req, "slot", 1);
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	obs_source_t *flt_a = src_a ? obs_source_get_filter_by_name(src_a, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
+	obs_source_t *flt_b = src_b ? obs_source_get_filter_by_name(src_b, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
+	float read_a_mid = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
+	float read_b_mid = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_int(req, "slot", 1);
+	obs_data_set_double(req, "value", 1.0);
+	mfd_vendor_handle_set_fader_value(req, res, eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	float read_a_end = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
+	float read_b_end = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
 
 	if (flt_a) {
 		obs_source_release(flt_a);
@@ -161,10 +194,31 @@ static void run_live_selftest_if_requested(void)
 	}
 	refresh_studio_mode_state_on_ui_thread();
 
-	bool completed = false;
-	char err_buf[256] = {0};
-	bool mid_ok = mfd_tbar_driver_apply(0.5f, &completed, err_buf, sizeof(err_buf));
-	bool end_ok = mfd_tbar_driver_apply(1.0f, &completed, err_buf, sizeof(err_buf));
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_int(req, "slot", 0);
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, eng);
+	bool mid_ok = obs_data_get_bool(res, "success");
+	int slider_mid = g_tbar_slider ? g_tbar_slider->value() : -1;
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_int(req, "slot", 0);
+	obs_data_set_double(req, "value", 1.0);
+	mfd_vendor_handle_set_fader_value(req, res, eng);
+	bool end_ok = obs_data_get_bool(res, "success");
+	bool completed = eng->fader_slots[0].takeover.polarity_reversed;
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	mfd_vendor_handle_load_apc40_defaults(req, res, eng);
+	obs_data_release(req);
+	obs_data_release(res);
 
 	if (!was_studio) {
 		obs_frontend_set_preview_program_mode(false);
@@ -172,8 +226,8 @@ static void run_live_selftest_if_requested(void)
 	}
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: filter_a=%.2f filter_b=%.2f tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d", read_a,
-		read_b, (int)mid_ok, (int)end_ok, (int)completed);
+		"SELF-TEST RESULT: filter_a=%.2f->%.2f filter_b=%.2f->%.2f slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d",
+		read_a_mid, read_a_end, read_b_mid, read_b_end, slider_mid, (int)mid_ok, (int)end_ok, (int)completed);
 }
 
 static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
