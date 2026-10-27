@@ -77,10 +77,11 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 			s->enabled = false;
 			snprintf(s->label, sizeof(s->label), "Fader %u", (unsigned)(i + 1U));
 			s->addr.type = MFD_MIDI_NONE;
-			s->target_type = MFD_TARGET_SINGLE_LAYER;
+			s->target_type = MFD_TARGET_UNASSIGNED;
 			s->curve = MFD_CURVE_DIP_FREE;
 		}
-		float init_val = (s->target_type == MFD_TARGET_TBAR || s->target_type == MFD_TARGET_TWO_SOURCE_MIX)
+		float init_val = (s->target_type == MFD_TARGET_TBAR || s->target_type == MFD_TARGET_TWO_SOURCE_MIX ||
+				  s->target_type == MFD_TARGET_UNASSIGNED)
 					 ? 0.0f
 					 : 1.0f;
 		init_slot_runtime(eng, s, init_val);
@@ -124,6 +125,9 @@ void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot 
 	slot->last_applied_val = val;
 
 	switch (slot->target_type) {
+	case MFD_TARGET_UNASSIGNED:
+		break;
+
 	case MFD_TARGET_TBAR:
 		if (eng->tbar_driver) {
 			bool completed = false;
@@ -345,11 +349,15 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		const char *sb = obs_data_get_string(item, "source_b");
 		snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", sa ? sa : "");
 		snprintf(s->source_b_name, sizeof(s->source_b_name), "%s", sb ? sb : "");
+		if (s->target_type != MFD_TARGET_TBAR && s->source_a_name[0] == '\0' && s->source_b_name[0] == '\0') {
+			s->target_type = MFD_TARGET_UNASSIGNED;
+		}
 		s->curve = (enum mfd_crossfade_curve)obs_data_get_int(item, "curve");
 		s->audio_follows_video = obs_data_get_bool(item, "afv");
 		s->invert = obs_data_get_bool(item, "invert");
 
-		float init_val = (s->target_type == MFD_TARGET_TBAR || s->target_type == MFD_TARGET_TWO_SOURCE_MIX)
+		float init_val = (s->target_type == MFD_TARGET_TBAR || s->target_type == MFD_TARGET_TWO_SOURCE_MIX ||
+				  s->target_type == MFD_TARGET_UNASSIGNED)
 					 ? 0.0f
 					 : 1.0f;
 		init_slot_runtime(eng, s, init_val);

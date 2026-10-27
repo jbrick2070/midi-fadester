@@ -349,6 +349,7 @@ private:
 			table_->setCellWidget(row, 2, bind_widget);
 
 			auto *target_combo = new QComboBox(table_);
+			target_combo->addItem(QStringLiteral("Unassigned"), static_cast<int>(MFD_TARGET_UNASSIGNED));
 			target_combo->addItem(QStringLiteral("Studio Mode T-Bar"), static_cast<int>(MFD_TARGET_TBAR));
 			target_combo->addItem(QStringLiteral("Two-Source Crossfade (A \xE2\x86\x94 B)"),
 					      static_cast<int>(MFD_TARGET_TWO_SOURCE_MIX));
@@ -356,7 +357,7 @@ private:
 					      static_cast<int>(MFD_TARGET_SINGLE_LAYER));
 			target_combo->addItem(QStringLiteral("Audio Volume (Cubic dB)"),
 					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
-			target_combo->setCurrentIndex(static_cast<int>(slot->target_type));
+			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot->target_type)));
 			table_->setCellWidget(row, 3, target_combo);
 
 			auto *src_a_combo = new QComboBox(table_);
@@ -398,9 +399,10 @@ private:
 			table_->setCellWidget(row, 8, out_bar);
 
 			connect(target_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-				[this, row](int idx) {
+				[this, target_combo, row](int) {
 					struct mfd_engine *e = mfd_engine_get();
-					e->fader_slots[row].target_type = static_cast<enum mfd_target_type>(idx);
+					e->fader_slots[row].target_type =
+						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
 					mfd_engine_save_global_config(e);
 					rebuild_table_rows();
 				});
@@ -508,6 +510,11 @@ private:
 			if (!s.enabled) {
 				output_bars_[row]->setValue(0);
 				output_bars_[row]->setFormat(QStringLiteral("Disabled"));
+				continue;
+			}
+			if (s.target_type == MFD_TARGET_UNASSIGNED) {
+				output_bars_[row]->setValue(0);
+				output_bars_[row]->setFormat(QStringLiteral("Unassigned"));
 				continue;
 			}
 

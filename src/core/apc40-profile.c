@@ -10,15 +10,15 @@
 
 static const struct mfd_apc40_default_slot k_apc40_defaults[MFD_APC40_DEFAULT_SLOT_COUNT] = {
 	{"Crossfader (A/B)", {MFD_MIDI_CC, 0U, 15U, false}, MFD_TARGET_TBAR, MFD_CURVE_DIP_FREE},
-	{"Track Fader 1", {MFD_MIDI_CC, 0U, 7U, false}, MFD_TARGET_TWO_SOURCE_MIX, MFD_CURVE_DIP_FREE},
-	{"Track Fader 2", {MFD_MIDI_CC, 1U, 7U, false}, MFD_TARGET_SINGLE_LAYER, MFD_CURVE_DIP_FREE},
-	{"Track Fader 3", {MFD_MIDI_CC, 2U, 7U, false}, MFD_TARGET_SINGLE_LAYER, MFD_CURVE_DIP_FREE},
-	{"Track Fader 4", {MFD_MIDI_CC, 3U, 7U, false}, MFD_TARGET_SINGLE_LAYER, MFD_CURVE_DIP_FREE},
-	{"Track Fader 5", {MFD_MIDI_CC, 4U, 7U, false}, MFD_TARGET_AUDIO_VOLUME, MFD_CURVE_DIP_FREE},
-	{"Track Fader 6", {MFD_MIDI_CC, 5U, 7U, false}, MFD_TARGET_AUDIO_VOLUME, MFD_CURVE_DIP_FREE},
-	{"Track Fader 7", {MFD_MIDI_CC, 6U, 7U, false}, MFD_TARGET_AUDIO_VOLUME, MFD_CURVE_DIP_FREE},
-	{"Track Fader 8", {MFD_MIDI_CC, 7U, 7U, false}, MFD_TARGET_AUDIO_VOLUME, MFD_CURVE_DIP_FREE},
-	{"Master Fader", {MFD_MIDI_CC, 0U, 14U, false}, MFD_TARGET_AUDIO_VOLUME, MFD_CURVE_DIP_FREE},
+	{"Track Fader 1", {MFD_MIDI_CC, 0U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 2", {MFD_MIDI_CC, 1U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 3", {MFD_MIDI_CC, 2U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 4", {MFD_MIDI_CC, 3U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 5", {MFD_MIDI_CC, 4U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 6", {MFD_MIDI_CC, 5U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 7", {MFD_MIDI_CC, 6U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Track Fader 8", {MFD_MIDI_CC, 7U, 7U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
+	{"Master Fader", {MFD_MIDI_CC, 0U, 14U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_DIP_FREE},
 };
 
 static bool contains_case_insensitive(const char *haystack, const char *needle)

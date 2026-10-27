@@ -33,17 +33,19 @@ int main(void)
 	REQUIRE(slots[0].addr.number == 15U);
 	REQUIRE(slots[0].default_target == MFD_TARGET_TBAR);
 
-	/* Slots 1..8: Track Faders 1..8 (Ch 1..8 / 0..7, CC 7) */
+	/* Slots 1..8: Track Faders 1..8 (Ch 1..8 / 0..7, CC 7) -> start Unassigned (Item 4) */
 	for (uint8_t ch = 0; ch < 8U; ++ch) {
 		REQUIRE(slots[1U + ch].addr.type == MFD_MIDI_CC);
 		REQUIRE(slots[1U + ch].addr.channel == ch);
 		REQUIRE(slots[1U + ch].addr.number == 7U);
+		REQUIRE(slots[1U + ch].default_target == MFD_TARGET_UNASSIGNED);
 	}
 
-	/* Slot 9: Master Fader (Ch 1 / 0, CC 14) */
+	/* Slot 9: Master Fader (Ch 1 / 0, CC 14) -> starts Unassigned (Item 4) */
 	REQUIRE(slots[9].addr.type == MFD_MIDI_CC);
 	REQUIRE(slots[9].addr.channel == 0U);
 	REQUIRE(slots[9].addr.number == 14U);
+	REQUIRE(slots[9].default_target == MFD_TARGET_UNASSIGNED);
 
 	printf("test-apc40-profile: PASS\n");
 	return 0;

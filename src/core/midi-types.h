@@ -41,10 +41,11 @@ struct mfd_midi_decoded {
 };
 
 enum mfd_target_type {
-	MFD_TARGET_TBAR = 0,
-	MFD_TARGET_TWO_SOURCE_MIX = 1,
-	MFD_TARGET_SINGLE_LAYER = 2,
-	MFD_TARGET_AUDIO_VOLUME = 3,
+	MFD_TARGET_UNASSIGNED = 0,
+	MFD_TARGET_TBAR = 1,
+	MFD_TARGET_TWO_SOURCE_MIX = 2,
+	MFD_TARGET_SINGLE_LAYER = 3,
+	MFD_TARGET_AUDIO_VOLUME = 4,
 };
 
 enum mfd_crossfade_curve {
