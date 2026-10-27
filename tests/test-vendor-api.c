@@ -73,6 +73,27 @@ static void on_fake_ws_event(const char *event_name, obs_data_t *event_data, voi
 	}
 }
 
+struct fake_signal_log {
+	int count;
+	char slot[32];
+	float value;
+	char origin[32];
+};
+
+static void on_fake_signal(void *data, calldata_t *cd)
+{
+	struct fake_signal_log *sig = (struct fake_signal_log *)data;
+	if (!sig || !cd) {
+		return;
+	}
+	++sig->count;
+	const char *s = calldata_string(cd, "slot");
+	const char *o = calldata_string(cd, "origin");
+	snprintf(sig->slot, sizeof(sig->slot), "%s", s ? s : "");
+	snprintf(sig->origin, sizeof(sig->origin), "%s", o ? o : "");
+	sig->value = (float)calldata_float(cd, "value");
+}
+
 int main(void)
 {
 	struct mfd_engine eng;
@@ -307,6 +328,58 @@ int main(void)
 	REQUIRE(strcmp(eng.fader_slots[1].source_a_name, "Cam 1") == 0);
 	REQUIRE(strcmp(eng.fader_slots[1].source_b_name, "Loop 3") == 0);
 	remove(tmp_json);
+
+	/* 9. In-process bridge: midi_fadester_get_slot_value, midi_fadester_set_fader_value, midi_fadester_fader_changed */
+	proc_handler_t *fake_ph = proc_handler_create();
+	signal_handler_t *fake_sh = signal_handler_create();
+	REQUIRE(fake_ph != NULL && fake_sh != NULL);
+	REQUIRE(mfd_bridge_register_with_handlers(fake_ph, fake_sh, &eng));
+
+	struct fake_signal_log sig_log;
+	memset(&sig_log, 0, sizeof(sig_log));
+	signal_handler_connect(fake_sh, "midi_fadester_fader_changed", on_fake_signal, &sig_log);
+
+	/* Advance tick so slot 1 is ready to emit immediately */
+	mfd_engine_tick(&eng, 0.05f);
+
+	/* 9a. Invalid slot over proc_handler returns ok=false and reason sentence */
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_9");
+	calldata_set_float(&cd, "value", 0.5);
+	REQUIRE(proc_handler_call(fake_ph, "midi_fadester_set_fader_value", &cd));
+	REQUIRE(!calldata_bool(&cd, "ok"));
+	REQUIRE(strcmp(calldata_string(&cd, "reason"),
+		       "Slot 'fader_9' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.") == 0);
+	calldata_free(&cd);
+
+	/* 9b. Valid midi_fadester_set_fader_value emits midi_fadester_fader_changed signal */
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_1");
+	calldata_set_float(&cd, "value", 0.625);
+	REQUIRE(proc_handler_call(fake_ph, "midi_fadester_set_fader_value", &cd));
+	REQUIRE(calldata_bool(&cd, "ok"));
+	REQUIRE(strcmp(calldata_string(&cd, "reason"), "") == 0);
+	calldata_free(&cd);
+
+	REQUIRE(sig_log.count == 1);
+	REQUIRE(strcmp(sig_log.slot, "fader_1") == 0);
+	REQUIRE(fabsf(sig_log.value - 0.625f) < 1e-5f);
+	REQUIRE(strcmp(sig_log.origin, "api") == 0);
+
+	/* 9c. midi_fadester_get_slot_value reads back 0.625 with ok=true */
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_1");
+	REQUIRE(proc_handler_call(fake_ph, "midi_fadester_get_slot_value", &cd));
+	REQUIRE(calldata_bool(&cd, "ok"));
+	REQUIRE(fabs(calldata_float(&cd, "value") - 0.625) < 1e-5);
+	REQUIRE(strcmp(calldata_string(&cd, "reason"), "") == 0);
+	calldata_free(&cd);
+
+	signal_handler_disconnect(fake_sh, "midi_fadester_fader_changed", on_fake_signal, &sig_log);
+	mfd_bridge_register_with_handlers(NULL, NULL, NULL);
+	signal_handler_destroy(fake_sh);
+	proc_handler_destroy(fake_ph);
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");

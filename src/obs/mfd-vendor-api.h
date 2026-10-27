@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <obs.h>
 #include <obs-data.h>
 #include "obs/mfd-engine.h"
 
@@ -18,6 +19,14 @@ extern "C" {
 #define MFD_API_VERSION 1
 
 typedef void (*mfd_vendor_event_sink_fn)(const char *event_name, obs_data_t *event_data, void *user_data);
+
+/*
+ * Registers the in-process proc_handler / signal_handler bridge on the provided handlers:
+ *   - proc `midi_fadester_get_slot_value` (in: string slot -> out: float value, bool ok, string reason)
+ *   - proc `midi_fadester_set_fader_value` (in: string slot, float value -> out: bool ok, string reason)
+ *   - signal `midi_fadester_fader_changed` (string slot, float value, string origin)
+ */
+bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh, struct mfd_engine *eng);
 
 /*
  * Registers the "midi-fadester" vendor API with obs-websocket 5.x if loaded.

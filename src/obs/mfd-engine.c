@@ -743,7 +743,9 @@ void mfd_engine_cancel_learn(struct mfd_engine *eng)
 
 bool mfd_engine_init(void)
 {
+	mfd_tbar_apply_fn saved_tbar_driver = g_engine.tbar_driver;
 	memset(&g_engine, 0, sizeof(g_engine));
+	g_engine.tbar_driver = saved_tbar_driver;
 	mfd_midi_queue_init(&g_engine.midi_queue);
 	mfd_midi_parser_init(&g_engine.midi_parser);
 	mfd_winmm_init(&g_engine.midi_dev, &g_engine.midi_queue);

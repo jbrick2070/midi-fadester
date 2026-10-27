@@ -16,6 +16,8 @@
 #include "plugin-support.h"
 
 static obs_websocket_vendor g_vendor = NULL;
+static proc_handler_t *g_bridge_ph = NULL;
+static signal_handler_t *g_bridge_sh = NULL;
 static mfd_vendor_event_sink_fn g_event_sink = NULL;
 static void *g_event_sink_user_data = NULL;
 
@@ -118,10 +120,35 @@ void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char 
 	if (!slot_id || !*slot_id) {
 		return;
 	}
+	float clamped = clamp01(value);
+	const char *orig = (origin && *origin) ? origin : "api";
+
+	/* 1. Emit in-process signal `midi_fadester_fader_changed` */
+	if (g_bridge_sh) {
+		struct calldata cd;
+		calldata_init(&cd);
+		calldata_set_string(&cd, "slot", slot_id);
+		calldata_set_float(&cd, "value", (double)clamped);
+		calldata_set_string(&cd, "origin", orig);
+		signal_handler_signal(g_bridge_sh, "midi_fadester_fader_changed", &cd);
+		calldata_free(&cd);
+	}
+
+	/* Also notify Visual Sidechain's fader slot proc if registered on the proc_handler */
+	if (g_bridge_ph) {
+		struct calldata vs_cd;
+		calldata_init(&vs_cd);
+		calldata_set_string(&vs_cd, "slot", slot_id);
+		calldata_set_float(&vs_cd, "value", (double)clamped);
+		proc_handler_call(g_bridge_ph, "visual_sidechain_set_fader_slot", &vs_cd);
+		calldata_free(&vs_cd);
+	}
+
+	/* 2. Emit obs-websocket vendor event `fader_changed` */
 	obs_data_t *ev = obs_data_create();
 	obs_data_set_string(ev, "slot", slot_id);
-	obs_data_set_double(ev, "value", (double)clamp01(value));
-	obs_data_set_string(ev, "origin", (origin && *origin) ? origin : "api");
+	obs_data_set_double(ev, "value", (double)clamped);
+	obs_data_set_string(ev, "origin", orig);
 	emit_vendor_event("fader_changed", ev);
 	obs_data_release(ev);
 }
@@ -135,6 +162,111 @@ void mfd_vendor_emit_state_changed(struct mfd_engine *eng)
 	mfd_vendor_handle_get_state(NULL, ev, eng);
 	emit_vendor_event("state_changed", ev);
 	obs_data_release(ev);
+}
+
+static void proc_get_slot_value(void *data, calldata_t *cd)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	if (!eng) {
+		eng = mfd_engine_get();
+	}
+	if (!cd || !eng) {
+		return;
+	}
+
+	const char *slot_id = calldata_string(cd, "slot");
+	if (!slot_id || !*slot_id) {
+		slot_id = calldata_string(cd, "slot_id");
+	}
+	int idx = mfd_slot_index_for_id(slot_id);
+	if (idx < 0 || idx >= MFD_MAX_FADER_SLOTS) {
+		char msg[192];
+		snprintf(msg, sizeof(msg),
+			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.",
+			 (slot_id && *slot_id) ? slot_id : "");
+		calldata_set_float(cd, "value", 0.0);
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", msg);
+		return;
+	}
+
+	const struct mfd_fader_slot *s = &eng->fader_slots[idx];
+	bool available = false;
+	char reason[160] = {0};
+	mfd_engine_get_slot_status(eng, s, NULL, 0, &available, reason, sizeof(reason));
+	UNUSED_PARAMETER(available);
+
+	calldata_set_float(cd, "value", (double)s->last_applied_val);
+	calldata_set_bool(cd, "ok", true);
+	calldata_set_bool(cd, "success", true);
+	calldata_set_string(cd, "reason", reason);
+}
+
+static void proc_set_fader_value(void *data, calldata_t *cd)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	if (!eng) {
+		eng = mfd_engine_get();
+	}
+	if (!cd || !eng) {
+		return;
+	}
+
+	const char *slot_id = calldata_string(cd, "slot");
+	int idx = mfd_slot_index_for_id(slot_id);
+	if (idx < 0 || idx >= MFD_MAX_FADER_SLOTS) {
+		char msg[192];
+		snprintf(msg, sizeof(msg),
+			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.",
+			 (slot_id && *slot_id) ? slot_id : "");
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", msg);
+		return;
+	}
+
+	float val = clamp01((float)calldata_float(cd, "value"));
+	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+
+	slot->auto_fade_active = false;
+	slot->last_raw_norm = val;
+	slot->takeover.state = MFD_TAKEOVER_ENGAGED;
+	slot->takeover.hint = MFD_HINT_NONE;
+	slot->takeover.target_obs = val;
+	slot->takeover.last_fader = val;
+	slot->takeover.has_last_fader = true;
+	mfd_smoother_reset(&slot->smoother, val);
+
+	mfd_engine_apply_slot_output(eng, slot, val);
+	mfd_engine_notify_fader_changed(eng, idx, "api");
+
+	calldata_set_bool(cd, "ok", true);
+	calldata_set_bool(cd, "success", true);
+	calldata_set_string(cd, "reason", "");
+}
+
+bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh, struct mfd_engine *eng)
+{
+	g_bridge_ph = ph;
+	g_bridge_sh = sh;
+
+	if (ph) {
+		proc_handler_add(
+			ph,
+			"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+			proc_get_slot_value, eng);
+		proc_handler_add(
+			ph,
+			"void midi_fadester_set_fader_value(in string slot, in float value, out bool ok, out string reason)",
+			proc_set_fader_value, eng);
+	}
+
+	if (sh) {
+		signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+	}
+
+	return (ph != NULL) && (sh != NULL);
 }
 
 void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -397,7 +529,16 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 
 bool mfd_vendor_api_register(struct mfd_engine *eng)
 {
-	if (!obs_get_proc_handler()) {
+	proc_handler_t *global_ph = obs_get_proc_handler();
+	signal_handler_t *global_sh = obs_get_signal_handler();
+
+	if (global_ph && global_sh) {
+		mfd_bridge_register_with_handlers(global_ph, global_sh, eng);
+		obs_log(LOG_INFO,
+			"Registered in-process bridge procs (midi_fadester_get_slot_value, midi_fadester_set_fader_value) and signal (midi_fadester_fader_changed)");
+	}
+
+	if (!global_ph) {
 		obs_log(LOG_INFO, "obs-websocket not available (no global proc_handler); skipping vendor API");
 		return false;
 	}

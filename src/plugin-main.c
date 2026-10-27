@@ -24,8 +24,8 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	mfd_register_layer_filter();
-	mfd_tbar_init();
 	mfd_engine_init();
+	mfd_tbar_init();
 	mfd_ui_init();
 
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);

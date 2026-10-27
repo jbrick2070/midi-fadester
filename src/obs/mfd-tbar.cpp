@@ -125,10 +125,11 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 }
 
 #ifdef MFD_ENABLE_SELF_TEST
-static obs_data_t *call_real_ws_vendor_request(const char *request_type, obs_data_t *vendor_req_data)
+static obs_data_t *call_real_ws_vendor_request_for_vendor(const char *vendor_name, const char *request_type,
+							  obs_data_t *vendor_req_data)
 {
 	obs_data_t *outer = obs_data_create();
-	obs_data_set_string(outer, "vendorName", MFD_VENDOR_NAME);
+	obs_data_set_string(outer, "vendorName", vendor_name);
 	obs_data_set_string(outer, "requestType", request_type);
 	if (vendor_req_data) {
 		obs_data_set_obj(outer, "requestData", vendor_req_data);
@@ -150,6 +151,32 @@ static obs_data_t *call_real_ws_vendor_request(const char *request_type, obs_dat
 	}
 	obs_websocket_request_response_free(resp);
 	return parsed;
+}
+
+static obs_data_t *call_real_ws_vendor_request(const char *request_type, obs_data_t *vendor_req_data)
+{
+	return call_real_ws_vendor_request_for_vendor(MFD_VENDOR_NAME, request_type, vendor_req_data);
+}
+
+struct selftest_sig_capture {
+	int count;
+	char slot[32];
+	float value;
+	char origin[32];
+};
+
+static void on_selftest_fader_signal(void *data, calldata_t *cd)
+{
+	auto *cap = static_cast<selftest_sig_capture *>(data);
+	if (!cap || !cd) {
+		return;
+	}
+	++cap->count;
+	const char *s = calldata_string(cd, "slot");
+	const char *o = calldata_string(cd, "origin");
+	std::snprintf(cap->slot, sizeof(cap->slot), "%s", s ? s : "");
+	std::snprintf(cap->origin, sizeof(cap->origin), "%s", o ? o : "");
+	cap->value = static_cast<float>(calldata_float(cd, "value"));
 }
 
 static void run_live_selftest_if_requested(void)
@@ -254,6 +281,56 @@ static void run_live_selftest_if_requested(void)
 	}
 	obs_data_release(req);
 
+	/* 5. Test In-Process Bridge (proc + signal) and Visual Sidechain cross-plugin arrival */
+	selftest_sig_capture sig_cap{};
+	signal_handler_t *sh = obs_get_signal_handler();
+	proc_handler_t *ph = obs_get_proc_handler();
+	if (sh) {
+		signal_handler_connect(sh, "midi_fadester_fader_changed", on_selftest_fader_signal, &sig_cap);
+	}
+
+	bool bridge_set_ok = false;
+	bool bridge_get_ok = false;
+	float bridge_get_val = -1.0f;
+	float vs_fader2_val = -1.0f;
+
+	if (ph) {
+		struct calldata cd;
+		calldata_init(&cd);
+		calldata_set_string(&cd, "slot", "fader_2");
+		calldata_set_float(&cd, "value", 0.65);
+		if (proc_handler_call(ph, "midi_fadester_set_fader_value", &cd)) {
+			bridge_set_ok = calldata_bool(&cd, "ok");
+		}
+		calldata_free(&cd);
+
+		calldata_init(&cd);
+		calldata_set_string(&cd, "slot", "fader_2");
+		if (proc_handler_call(ph, "midi_fadester_get_slot_value", &cd)) {
+			bridge_get_ok = calldata_bool(&cd, "ok");
+			bridge_get_val = static_cast<float>(calldata_float(&cd, "value"));
+		}
+		calldata_free(&cd);
+	}
+
+	if (sh) {
+		signal_handler_disconnect(sh, "midi_fadester_fader_changed", on_selftest_fader_signal, &sig_cap);
+	}
+
+	obs_data_t *vs_res = call_real_ws_vendor_request_for_vendor("visual-sidechain", "get_faders", nullptr);
+	if (vs_res) {
+		obs_data_array_t *vs_slots = obs_data_get_array(vs_res, "slots");
+		if (vs_slots) {
+			obs_data_t *vs_s2 = obs_data_array_item(vs_slots, 2);
+			if (vs_s2) {
+				vs_fader2_val = static_cast<float>(obs_data_get_double(vs_s2, "value"));
+				obs_data_release(vs_s2);
+			}
+			obs_data_array_release(vs_slots);
+		}
+		obs_data_release(vs_res);
+	}
+
 	req = obs_data_create();
 	obs_data_set_string(req, "name", "apc40mk2");
 	res = call_real_ws_vendor_request("load_profile", req);
@@ -268,9 +345,10 @@ static void run_live_selftest_if_requested(void)
 	}
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d",
+		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
 		(int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end, slider_mid, (int)mid_ok, (int)end_ok,
-		(int)completed);
+		(int)completed, (int)(bridge_set_ok && bridge_get_ok), bridge_get_val, sig_cap.value, sig_cap.slot,
+		vs_fader2_val);
 }
 #endif
 
