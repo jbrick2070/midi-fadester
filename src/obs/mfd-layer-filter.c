@@ -152,10 +152,13 @@ static void mfd_layer_filter_render(void *data, gs_effect_t *unused_effect)
 
 	if (obs_source_process_filter_begin_with_color_space(f->context, GS_RGBA, source_space,
 							     OBS_ALLOW_DIRECT_RENDERING)) {
+		gs_blend_state_push();
+		gs_blend_function_separate(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 		if (f->param_opacity) {
 			gs_effect_set_float(f->param_opacity, alpha);
 		}
 		obs_source_process_filter_tech_end(f->context, f->effect, 0, 0, "DrawAlpha");
+		gs_blend_state_pop();
 	}
 }
 

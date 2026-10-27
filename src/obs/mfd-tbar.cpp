@@ -8,6 +8,7 @@
 #include "obs/mfd-engine.h"
 #include "obs/mfd-layer-filter.h"
 #include "obs/mfd-vendor-api.h"
+#include "midi/winmm-device.h"
 #include "core/tbar-logic.h"
 #include "core/mixer-math.h"
 
@@ -15,20 +16,30 @@
 #include <obs-frontend-api.h>
 #include <util/bmem.h>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include "obs/obs-websocket-api.h"
 #include "plugin-support.h"
 
 #include <QApplication>
+#include <QByteArray>
+#include <QColor>
+#include <QFileInfo>
+#include <QImage>
 #include <QMetaObject>
 #include <QPointer>
+#include <QProcess>
 #include <QSlider>
 #include <QThread>
 #include <QVariant>
 #include <QWidget>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <thread>
 
 static QPointer<QSlider> g_tbar_slider;
 static std::atomic<bool> g_studio_mode_active{false};
@@ -158,6 +169,85 @@ static obs_data_t *call_real_ws_vendor_request(const char *request_type, obs_dat
 	return call_real_ws_vendor_request_for_vendor(MFD_VENDOR_NAME, request_type, vendor_req_data);
 }
 
+static double srgb_nonlinear_to_linear_channel(double u)
+{
+	return (u <= 0.04045) ? (u / 12.92) : std::pow((u + 0.055) / 1.055, 2.4);
+}
+
+static bool capture_source_screenshot_avg_rgb(const char *source_name, float *out_r, float *out_g, float *out_b,
+					      float *out_srgb_brightness)
+{
+	obs_data_t *req = obs_data_create();
+	obs_data_set_string(req, "sourceName", source_name);
+	obs_data_set_string(req, "imageFormat", "bmp");
+	obs_data_set_int(req, "imageWidth", 64);
+	obs_data_set_int(req, "imageHeight", 64);
+
+	struct obs_websocket_request_response *resp = obs_websocket_call_request("GetSourceScreenshot", req);
+	obs_data_release(req);
+
+	if (!resp) {
+		obs_log(LOG_ERROR, "GetSourceScreenshot returned null response for '%s'", source_name);
+		return false;
+	}
+
+	bool ok = false;
+	if (resp->status_code == 100 && resp->response_data) {
+		obs_data_t *full = obs_data_create_from_json(resp->response_data);
+		if (full) {
+			const char *img_data = obs_data_get_string(full, "imageData");
+			obs_data_t *rdata = nullptr;
+			if (!img_data || img_data[0] == '\0') {
+				rdata = obs_data_get_obj(full, "responseData");
+				if (rdata) {
+					img_data = obs_data_get_string(rdata, "imageData");
+				}
+			}
+			const char *comma = img_data ? std::strchr(img_data, ',') : nullptr;
+			if (comma && comma[1] != '\0') {
+				QByteArray b64(comma + 1);
+				QByteArray raw = QByteArray::fromBase64(b64);
+				QImage img = QImage::fromData(raw, "BMP");
+				if (!img.isNull() && img.width() > 0 && img.height() > 0) {
+					double sum_r = 0.0;
+					double sum_g = 0.0;
+					double sum_b = 0.0;
+					double sum_srgb = 0.0;
+					const int w = img.width();
+					const int h = img.height();
+					for (int y = 0; y < h; ++y) {
+						for (int x = 0; x < w; ++x) {
+							const QColor c = img.pixelColor(x, y);
+							sum_r += srgb_nonlinear_to_linear_channel(c.redF());
+							sum_g += srgb_nonlinear_to_linear_channel(c.greenF());
+							sum_b += srgb_nonlinear_to_linear_channel(c.blueF());
+							sum_srgb += c.redF() + c.greenF() + c.blueF();
+						}
+					}
+					const double total = static_cast<double>(w) * static_cast<double>(h);
+					*out_r = static_cast<float>(sum_r / total);
+					*out_g = static_cast<float>(sum_g / total);
+					*out_b = static_cast<float>(sum_b / total);
+					if (out_srgb_brightness) {
+						*out_srgb_brightness = static_cast<float>(sum_srgb / total);
+					}
+					ok = true;
+				}
+			}
+			if (rdata) {
+				obs_data_release(rdata);
+			}
+			obs_data_release(full);
+		}
+	} else {
+		obs_log(LOG_ERROR, "GetSourceScreenshot failed for '%s': status=%u comment=%s", source_name,
+			resp->status_code, resp->comment ? resp->comment : "");
+	}
+
+	obs_websocket_request_response_free(resp);
+	return ok;
+}
+
 struct selftest_sig_capture {
 	int count;
 	char slot[32];
@@ -179,18 +269,82 @@ static void on_selftest_fader_signal(void *data, calldata_t *cd)
 	cap->value = static_cast<float>(calldata_float(cd, "value"));
 }
 
-static void run_live_selftest_if_requested(void)
+static void run_live_selftest_worker(void)
 {
-	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
-		return;
-	}
-
+	std::this_thread::sleep_for(std::chrono::milliseconds(300));
 	obs_log(LOG_INFO, "Running live OBS 33 vendor API & integration self-test (MFD_SELF_TEST=1)...");
 
+	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
 	struct mfd_engine *eng = mfd_engine_get();
 
-	obs_source_t *src_a = obs_source_create("color_source", "__mfd_selftest_source_a__", nullptr, nullptr);
-	obs_source_t *src_b = obs_source_create("color_source", "__mfd_selftest_source_b__", nullptr, nullptr);
+	bool was_studio = false;
+	obs_source_t *prev_scene = nullptr;
+	obs_scene_t *test_scene = nullptr;
+	obs_source_t *src_a = nullptr;
+	obs_source_t *src_b = nullptr;
+
+	char src_a_actual_name[128] = "__mfd_selftest_source_a__";
+	char src_b_actual_name[128] = "__mfd_selftest_source_b__";
+
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			was_studio = obs_frontend_preview_program_mode_active();
+			if (was_studio) {
+				obs_frontend_set_preview_program_mode(false);
+				refresh_studio_mode_state_on_ui_thread();
+			}
+
+			/* Remove any leftover self-test sources/scenes from prior interrupted runs */
+			const char *stale_names[] = {
+				"__mfd_selftest_source_a__",   "__mfd_selftest_source_b__",
+				"__mfd_selftest_source_a__ 2", "__mfd_selftest_source_b__ 2",
+				"__mfd_selftest_scene__",      "__mfd_selftest_scene__ 2",
+			};
+			for (const char *sn : stale_names) {
+				obs_source_t *old = obs_get_source_by_name(sn);
+				if (old) {
+					obs_source_remove(old);
+					obs_source_release(old);
+				}
+			}
+
+			prev_scene = obs_frontend_get_current_scene();
+
+			test_scene = obs_scene_create("__mfd_selftest_scene__");
+
+			obs_data_t *red_settings = obs_data_create();
+			obs_data_set_int(red_settings, "color", 0xFF0000FFLL);
+			obs_data_set_int(red_settings, "width", 1920);
+			obs_data_set_int(red_settings, "height", 1080);
+			src_a = obs_source_create("color_source", "__mfd_selftest_source_a__", red_settings, nullptr);
+			obs_data_release(red_settings);
+
+			obs_data_t *blue_settings = obs_data_create();
+			obs_data_set_int(blue_settings, "color", 0xFFFF0000LL);
+			obs_data_set_int(blue_settings, "width", 1920);
+			obs_data_set_int(blue_settings, "height", 1080);
+			src_b = obs_source_create("color_source", "__mfd_selftest_source_b__", blue_settings, nullptr);
+			obs_data_release(blue_settings);
+
+			if (src_a && obs_source_get_name(src_a)) {
+				std::snprintf(src_a_actual_name, sizeof(src_a_actual_name), "%s",
+					      obs_source_get_name(src_a));
+			}
+			if (src_b && obs_source_get_name(src_b)) {
+				std::snprintf(src_b_actual_name, sizeof(src_b_actual_name), "%s",
+					      obs_source_get_name(src_b));
+			}
+
+			obs_scene_add(test_scene, src_a);
+			obs_scene_add(test_scene, src_b);
+
+			obs_frontend_set_current_scene(obs_scene_get_source(test_scene));
+		},
+		Qt::BlockingQueuedConnection);
+
+	/* Wait for program scene transition to settle */
+	std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
 	obs_data_t *req = obs_data_create();
 	obs_data_set_string(req, "name", "apc40mk2");
@@ -204,8 +358,8 @@ static void run_live_selftest_if_requested(void)
 	obs_data_set_string(req, "slot", "fader_1");
 	obs_data_set_string(req, "target_mode", "crossfade_ab");
 	obs_data_set_string(req, "curve", "dip_free");
-	obs_data_set_string(req, "source_a", "__mfd_selftest_source_a__");
-	obs_data_set_string(req, "source_b", "__mfd_selftest_source_b__");
+	obs_data_set_string(req, "source_a", src_a_actual_name);
+	obs_data_set_string(req, "source_b", src_b_actual_name);
 	res = call_real_ws_vendor_request("set_slot", req);
 	bool slot_avail = res ? obs_data_get_bool(res, "available") : false;
 	if (res) {
@@ -213,31 +367,87 @@ static void run_live_selftest_if_requested(void)
 	}
 	obs_data_release(req);
 
-	req = obs_data_create();
-	obs_data_set_string(req, "slot", "fader_1");
-	obs_data_set_double(req, "value", 0.5);
-	res = call_real_ws_vendor_request("set_fader_value", req);
-	if (res) {
-		obs_data_release(res);
-	}
-	obs_data_release(req);
+	/* Measure isolated source brightness at t=0.0 (pure Red) and t=1.0 (pure Blue) on program output */
+	char program_scene_name[128] = "__mfd_selftest_scene__";
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			obs_source_t *cur = obs_frontend_get_current_scene();
+			if (cur) {
+				const char *nm = obs_source_get_name(cur);
+				if (nm) {
+					std::snprintf(program_scene_name, sizeof(program_scene_name), "%s", nm);
+				}
+				obs_source_release(cur);
+			}
+		},
+		Qt::BlockingQueuedConnection);
+
+	auto set_fader1_and_wait = [&](double t_val) {
+		obs_data_t *r = obs_data_create();
+		obs_data_set_string(r, "slot", "fader_1");
+		obs_data_set_double(r, "value", t_val);
+		obs_data_t *rs = call_real_ws_vendor_request("set_fader_value", r);
+		if (rs) {
+			obs_data_release(rs);
+		}
+		obs_data_release(r);
+		std::this_thread::sleep_for(std::chrono::milliseconds(80));
+	};
+
+	set_fader1_and_wait(0.0);
+	float r0 = 0.0f, g0 = 0.0f, b0 = 0.0f, srgb0 = 0.0f;
+	bool ss0_ok = capture_source_screenshot_avg_rgb(program_scene_name, &r0, &g0, &b0, &srgb0);
+	float bright_red = r0 + g0 + b0;
+
+	set_fader1_and_wait(1.0);
+	float r1 = 0.0f, g1 = 0.0f, b1 = 0.0f, srgb1 = 0.0f;
+	bool ss1_ok = capture_source_screenshot_avg_rgb(program_scene_name, &r1, &g1, &b1, &srgb1);
+	float bright_blue = r1 + g1 + b1;
+	float min_source_brightness = std::min(bright_red, bright_blue);
 
 	obs_source_t *flt_a = src_a ? obs_source_get_filter_by_name(src_a, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
 	obs_source_t *flt_b = src_b ? obs_source_get_filter_by_name(src_b, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
-	float read_a_mid = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
-	float read_b_mid = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
-
-	req = obs_data_create();
-	obs_data_set_string(req, "slot", "fader_1");
-	obs_data_set_double(req, "value", 1.0);
-	res = call_real_ws_vendor_request("set_fader_value", req);
-	if (res) {
-		obs_data_release(res);
-	}
-	obs_data_release(req);
-
 	float read_a_end = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
 	float read_b_end = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
+
+	/* Check (2): Program output GetSourceScreenshot at t = 0.25, 0.5, 0.75 */
+	const float test_ts[3] = {0.25f, 0.50f, 0.75f};
+	bool screenshot_all_pass = ss0_ok && ss1_ok;
+	float read_a_mid = -1.0f;
+	float read_b_mid = -1.0f;
+
+	for (int i = 0; i < 3; ++i) {
+		const float t = test_ts[i];
+		set_fader1_and_wait(t);
+		if (i == 1) {
+			read_a_mid = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
+			read_b_mid = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
+		}
+		float avg_r = 0.0f, avg_g = 0.0f, avg_b = 0.0f, srgb_bright = 0.0f;
+		bool cap_ok =
+			capture_source_screenshot_avg_rgb(program_scene_name, &avg_r, &avg_g, &avg_b, &srgb_bright);
+		const float exp_r = 1.0f - t;
+		const float exp_g = 0.0f;
+		const float exp_b = t;
+		const float err_r = std::fabs(avg_r - exp_r);
+		const float err_g = std::fabs(avg_g - exp_g);
+		const float err_b = std::fabs(avg_b - exp_b);
+		const float brightness = avg_r + avg_g + avg_b;
+		const bool mix_ok = cap_ok && (err_r <= 0.02f) && (err_g <= 0.02f) && (err_b <= 0.02f);
+		/* 8-bit sRGB integer quantization of 224/255 is 0.0044 (1 LSB = 0.0075); require no dip in both linear and sRGB */
+		const bool bright_ok = cap_ok && (brightness >= min_source_brightness - 0.008f) &&
+				       (srgb_bright >= srgb0 - 1e-4f) && (srgb_bright >= srgb1 - 1e-4f);
+		const bool step_ok = mix_ok && bright_ok;
+		if (!step_ok) {
+			screenshot_all_pass = false;
+		}
+		obs_log(step_ok ? LOG_INFO : LOG_ERROR,
+			"SCREENSHOT CHECK t=%.2f [%s]: program='%s' avg_rgb=(%.4f, %.4f, %.4f) expected=(%.4f, %.4f, %.4f) max_err=%.4f brightness=%.4f srgb_brightness=%.4f (src_red=%.4f src_blue=%.4f) mix_within_2pct=%d bright_no_dip=%d",
+			t, step_ok ? "PASS" : "FAIL", program_scene_name, avg_r, avg_g, avg_b, exp_r, exp_g, exp_b,
+			std::max({err_r, err_g, err_b}), brightness, srgb_bright, bright_red, bright_blue, (int)mix_ok,
+			(int)bright_ok);
+	}
 
 	if (flt_a) {
 		obs_source_release(flt_a);
@@ -245,25 +455,27 @@ static void run_live_selftest_if_requested(void)
 	if (flt_b) {
 		obs_source_release(flt_b);
 	}
-	if (src_a) {
-		obs_source_release(src_a);
-	}
-	if (src_b) {
-		obs_source_release(src_b);
-	}
 
-	bool was_studio = obs_frontend_preview_program_mode_active();
-	if (!was_studio) {
-		obs_frontend_set_preview_program_mode(true);
-	}
-	refresh_studio_mode_state_on_ui_thread();
+	/* Switch to Studio Mode for T-bar & loopMIDI checks */
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			if (!obs_frontend_preview_program_mode_active()) {
+				obs_frontend_set_preview_program_mode(true);
+			}
+			refresh_studio_mode_state_on_ui_thread();
+		},
+		Qt::BlockingQueuedConnection);
 
 	req = obs_data_create();
 	obs_data_set_string(req, "slot", "crossfader");
 	obs_data_set_double(req, "value", 0.5);
 	res = call_real_ws_vendor_request("set_fader_value", req);
 	bool mid_ok = res && (obs_data_get_double(res, "value") > 0.49);
-	int slider_mid = g_tbar_slider ? g_tbar_slider->value() : -1;
+	int slider_mid = -1;
+	QMetaObject::invokeMethod(
+		main_win, [&]() { slider_mid = g_tbar_slider ? g_tbar_slider->value() : -1; },
+		Qt::BlockingQueuedConnection);
 	if (res) {
 		obs_data_release(res);
 	}
@@ -281,7 +493,120 @@ static void run_live_selftest_if_requested(void)
 	}
 	obs_data_release(req);
 
-	/* 5. Test In-Process Bridge (proc + signal) and Visual Sidechain cross-plugin arrival */
+	/* Check (1): loopMIDI + tests/midi-send.c live CC sweep & soft takeover test */
+	char loopmidi_port[128] = {0};
+	struct mfd_midi_device_info devs[32];
+	size_t dev_count = mfd_winmm_enumerate(devs, 32);
+	for (size_t i = 0; i < dev_count; ++i) {
+		if (strstr(devs[i].name, "loopMIDI") != nullptr || strstr(devs[i].name, "loopmidi") != nullptr) {
+			std::snprintf(loopmidi_port, sizeof(loopmidi_port), "%s", devs[i].name);
+			break;
+		}
+	}
+
+	bool loopmidi_tested = false;
+	bool loopmidi_pass = false;
+	if (loopmidi_port[0] != '\0') {
+		loopmidi_tested = true;
+		QString midi_send_exe = qEnvironmentVariable(
+			"MFD_MIDI_SEND_EXE", "C:/midi-fadester/build_x64/tests/RelWithDebInfo/midi-send.exe");
+		bool connected = mfd_engine_reconnect_midi(eng, loopmidi_port);
+
+		/* Configure crossfader on Ch 1 CC 15 -> tbar, synced at 0.50 so a sweep from 0 starts away from current value */
+		req = obs_data_create();
+		obs_data_set_string(req, "name", "apc40mk2");
+		res = call_real_ws_vendor_request("load_profile", req);
+		if (res) {
+			obs_data_release(res);
+		}
+		obs_data_release(req);
+
+		/* Place crossfader at 0.50 (512) and arm soft takeover waiting for physical fader to cross 0.50 */
+		mfd_takeover_sync_external(&eng->fader_slots[0].takeover, 0.50f);
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.50f);
+		eng->fader_slots[0].last_applied_val = 0.50f;
+		g_last_pos_1024.store(512, std::memory_order_relaxed);
+		QMetaObject::invokeMethod(
+			main_win, [&]() { execute_tbar_on_ui_thread(512, true, false); }, Qt::BlockingQueuedConnection);
+
+		/* Part 1a: Sweep 0..30 (0.00..0.236, away from 0.50) -> soft takeover must stay WAITING and T-bar must stay at 512 */
+		int rc_pre = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+									    << "15" << "60"
+									    << "0" << "30");
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		bool pre_waiting_ok = (rc_pre == 0) && (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_WAITING) &&
+				      (eng->last_midi_decoded.raw_value == 30);
+		int slider_pre = -1;
+		QMetaObject::invokeMethod(
+			main_win, [&]() { slider_pre = g_tbar_slider ? g_tbar_slider->value() : -1; },
+			Qt::BlockingQueuedConnection);
+		bool pre_slider_held = (slider_pre == 512);
+
+		/* Part 1b: Full sweep 0..127 over 450 ms -> soft takeover engages at ~64 (0.50), T-bar follows within smoothing window, completes at 127 */
+		mfd_takeover_sync_external(&eng->fader_slots[0].takeover, 0.50f);
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.50f);
+		eng->fader_slots[0].last_applied_val = 0.50f;
+		g_last_pos_1024.store(512, std::memory_order_relaxed);
+		QMetaObject::invokeMethod(
+			main_win, [&]() { execute_tbar_on_ui_thread(512, true, false); }, Qt::BlockingQueuedConnection);
+
+		QProcess sweep_proc;
+		sweep_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1" << "15"
+							      << "450" << "0"
+							      << "127");
+		sweep_proc.waitForStarted(1000);
+
+		bool saw_waiting_before_pickup = false;
+		bool saw_engaged_after_pickup = false;
+		int mid_sweep_samples = 0;
+		float max_smoothing_lag = 0.0f;
+
+		for (int poll = 0; poll < 35; ++poll) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(16));
+			uint16_t cc_now = eng->last_midi_decoded.raw_value;
+			enum mfd_takeover_state st_now = eng->fader_slots[0].takeover.state;
+			float target_now = eng->fader_slots[0].smoother.target;
+			int slider_now = -1;
+			QMetaObject::invokeMethod(
+				main_win, [&]() { slider_now = g_tbar_slider ? g_tbar_slider->value() : -1; },
+				Qt::BlockingQueuedConnection);
+
+			if (cc_now > 5 && cc_now < 58 && st_now == MFD_TAKEOVER_WAITING && slider_now == 512) {
+				saw_waiting_before_pickup = true;
+			}
+			if (cc_now >= 66 && cc_now <= 118 && st_now == MFD_TAKEOVER_ENGAGED && slider_now > 512) {
+				saw_engaged_after_pickup = true;
+				float tbar_norm = static_cast<float>(slider_now) / 1023.0f;
+				float lag = std::fabs(target_now - tbar_norm);
+				if (lag > max_smoothing_lag) {
+					max_smoothing_lag = lag;
+				}
+				++mid_sweep_samples;
+			}
+			if (sweep_proc.state() == QProcess::NotRunning && poll > 28) {
+				break;
+			}
+		}
+		sweep_proc.waitForFinished(2000);
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+		bool sweep_completed_throw = eng->fader_slots[0].takeover.polarity_reversed;
+		uint16_t final_cc = eng->last_midi_decoded.raw_value;
+		/* Within 450ms sweep + 8ms smoother tau + 16.7ms video tick, lag stays well within smoothing window (<= 0.12) */
+		bool smoothing_ok = (mid_sweep_samples >= 2) && (max_smoothing_lag <= 0.12f);
+		loopmidi_pass = connected && pre_waiting_ok && pre_slider_held && saw_waiting_before_pickup &&
+				saw_engaged_after_pickup && smoothing_ok && sweep_completed_throw && (final_cc == 127);
+
+		obs_log(loopmidi_pass ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d",
+			loopmidi_pass ? "PASS" : "FAIL", loopmidi_port, (int)connected, (int)pre_waiting_ok, slider_pre,
+			(int)saw_waiting_before_pickup, (int)saw_engaged_after_pickup, mid_sweep_samples,
+			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw);
+	} else {
+		obs_log(LOG_INFO, "LOOPMIDI SWEEP CHECK [SKIPPED]: no WinMM input port matching 'loopMIDI' found.");
+	}
+
+	/* In-Process Bridge (proc + signal) and Visual Sidechain cross-plugin arrival */
 	selftest_sig_capture sig_cap{};
 	signal_handler_t *sh = obs_get_signal_handler();
 	proc_handler_t *ph = obs_get_proc_handler();
@@ -317,18 +642,54 @@ static void run_live_selftest_if_requested(void)
 		signal_handler_disconnect(sh, "midi_fadester_fader_changed", on_selftest_fader_signal, &sig_cap);
 	}
 
-	obs_data_t *vs_res = call_real_ws_vendor_request_for_vendor("visual-sidechain", "get_faders", nullptr);
-	if (vs_res) {
-		obs_data_array_t *vs_slots = obs_data_get_array(vs_res, "slots");
-		if (vs_slots) {
-			obs_data_t *vs_s2 = obs_data_array_item(vs_slots, 2);
-			if (vs_s2) {
-				vs_fader2_val = static_cast<float>(obs_data_get_double(vs_s2, "value"));
-				obs_data_release(vs_s2);
-			}
-			obs_data_array_release(vs_slots);
+	/* Verify Visual Sidechain (commit 26d9089) receives fader_2=0.65 via in-process bridge and modulates sibling filter */
+	obs_source_t *vs_test_src = obs_source_create("color_source", "__mfd_vs_bridge_src__", nullptr, nullptr);
+	obs_source_t *vs_col_flt = obs_source_create("color_filter", "__mfd_vs_col__", nullptr, nullptr);
+	obs_data_t *vs_mod_set = obs_data_create();
+	obs_data_set_bool(vs_mod_set, "slot_1_enabled", true);
+	obs_data_set_string(vs_mod_set, "slot_1_target_filter", "__mfd_vs_col__");
+	obs_data_set_string(vs_mod_set, "slot_1_target_setting", "opacity");
+	obs_data_set_int(vs_mod_set, "slot_1_signal", 202); /* VS_SIG_FADER_2 */
+	obs_data_set_double(vs_mod_set, "slot_1_amount_pct", 100.0);
+	obs_data_set_double(vs_mod_set, "slot_1_min_value", 0.0);
+	obs_data_set_double(vs_mod_set, "slot_1_max_value", 1.0);
+	obs_source_t *vs_mod_flt =
+		obs_source_create("visual_sidechain_modulator_filter", "__mfd_vs_mod__", vs_mod_set, nullptr);
+	obs_data_release(vs_mod_set);
+
+	if (vs_test_src && vs_col_flt && vs_mod_flt) {
+		obs_source_filter_add(vs_test_src, vs_col_flt);
+		obs_source_filter_add(vs_test_src, vs_mod_flt);
+		if (ph) {
+			struct calldata cd;
+			calldata_init(&cd);
+			calldata_set_string(&cd, "slot", "fader_2");
+			calldata_set_float(&cd, "value", 0.65);
+			proc_handler_call(ph, "midi_fadester_set_fader_value", &cd);
+			calldata_free(&cd);
 		}
-		obs_data_release(vs_res);
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+		obs_data_t *col_s = obs_source_get_settings(vs_col_flt);
+		if (col_s) {
+			vs_fader2_val = static_cast<float>(obs_data_get_double(col_s, "opacity"));
+			obs_data_release(col_s);
+		}
+	}
+	if (vs_mod_flt) {
+		if (vs_test_src) {
+			obs_source_filter_remove(vs_test_src, vs_mod_flt);
+		}
+		obs_source_release(vs_mod_flt);
+	}
+	if (vs_col_flt) {
+		if (vs_test_src) {
+			obs_source_filter_remove(vs_test_src, vs_col_flt);
+		}
+		obs_source_release(vs_col_flt);
+	}
+	if (vs_test_src) {
+		obs_source_remove(vs_test_src);
+		obs_source_release(vs_test_src);
 	}
 
 	req = obs_data_create();
@@ -339,16 +700,46 @@ static void run_live_selftest_if_requested(void)
 	}
 	obs_data_release(req);
 
-	if (!was_studio) {
-		obs_frontend_set_preview_program_mode(false);
-		refresh_studio_mode_state_on_ui_thread();
-	}
+	/* Clean up test scene and restore previous state on UI thread */
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			if (prev_scene) {
+				obs_frontend_set_current_scene(prev_scene);
+				obs_source_release(prev_scene);
+			}
+			if (src_a) {
+				obs_source_remove(src_a);
+				obs_source_release(src_a);
+			}
+			if (src_b) {
+				obs_source_remove(src_b);
+				obs_source_release(src_b);
+			}
+			if (test_scene) {
+				obs_source_remove(obs_scene_get_source(test_scene));
+				obs_scene_release(test_scene);
+			}
+			if (!was_studio) {
+				obs_frontend_set_preview_program_mode(false);
+				refresh_studio_mode_state_on_ui_thread();
+			}
+		},
+		Qt::BlockingQueuedConnection);
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
-		(int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end, slider_mid, (int)mid_ok, (int)end_ok,
-		(int)completed, (int)(bridge_set_ok && bridge_get_ok), bridge_get_val, sig_cap.value, sig_cap.slot,
-		vs_fader2_val);
+		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
+		(int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end, (int)screenshot_all_pass,
+		(int)loopmidi_tested, (int)loopmidi_pass, slider_mid, (int)mid_ok, (int)end_ok, (int)completed,
+		(int)(bridge_set_ok && bridge_get_ok), bridge_get_val, sig_cap.value, sig_cap.slot, vs_fader2_val);
+}
+
+static void run_live_selftest_if_requested(void)
+{
+	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
+		return;
+	}
+	std::thread(run_live_selftest_worker).detach();
 }
 #endif
 
