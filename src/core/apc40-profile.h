@@ -24,6 +24,9 @@ struct mfd_apc40_default_slot {
 bool mfd_is_apc40_mk2_name(const char *device_name);
 size_t mfd_apc40_get_default_slots(struct mfd_apc40_default_slot *out_slots, size_t max_slots);
 
+void mfd_row_controls_for_target(enum mfd_target_type target, bool *out_show_source_a, bool *out_show_source_b,
+				 bool *out_show_curve, bool *out_show_afv);
+
 #ifdef __cplusplus
 }
 #endif

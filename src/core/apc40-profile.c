@@ -57,3 +57,50 @@ size_t mfd_apc40_get_default_slots(struct mfd_apc40_default_slot *out_slots, siz
 	memcpy(out_slots, k_apc40_defaults, count * sizeof(struct mfd_apc40_default_slot));
 	return count;
 }
+
+void mfd_row_controls_for_target(enum mfd_target_type target, bool *out_show_source_a, bool *out_show_source_b,
+				 bool *out_show_curve, bool *out_show_afv)
+{
+	bool show_a = false;
+	bool show_b = false;
+	bool show_curve = false;
+	bool show_afv = false;
+
+	switch (target) {
+	case MFD_TARGET_TWO_SOURCE_MIX:
+		show_a = true;
+		show_b = true;
+		show_curve = true;
+		show_afv = true;
+		break;
+	case MFD_TARGET_SINGLE_LAYER:
+		show_a = true;
+		show_b = false;
+		show_curve = false;
+		show_afv = true;
+		break;
+	case MFD_TARGET_AUDIO_VOLUME:
+		show_a = true;
+		show_b = false;
+		show_curve = false;
+		show_afv = false;
+		break;
+	case MFD_TARGET_TBAR:
+	case MFD_TARGET_UNASSIGNED:
+	default:
+		break;
+	}
+
+	if (out_show_source_a) {
+		*out_show_source_a = show_a;
+	}
+	if (out_show_source_b) {
+		*out_show_source_b = show_b;
+	}
+	if (out_show_curve) {
+		*out_show_curve = show_curve;
+	}
+	if (out_show_afv) {
+		*out_show_afv = show_afv;
+	}
+}

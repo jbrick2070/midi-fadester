@@ -92,7 +92,7 @@ public:
 	explicit MfdSettingsDialog(QWidget *parent = nullptr) : QDialog(parent)
 	{
 		setWindowTitle(QStringLiteral("Midi Fadester — Video Mixer & Fader Control"));
-		resize(1120, 620);
+		resize(1280, 560);
 
 		auto *root = new QVBoxLayout(this);
 
@@ -187,6 +187,7 @@ public:
 		table_->horizontalHeader()->setStretchLastSection(true);
 		table_->verticalHeader()->setVisible(false);
 		table_->setSelectionMode(QAbstractItemView::NoSelection);
+		table_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 		root->addWidget(table_, 1);
 
 		auto *footer = new QHBoxLayout();
@@ -360,34 +361,60 @@ private:
 			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot->target_type)));
 			table_->setCellWidget(row, 3, target_combo);
 
-			auto *src_a_combo = new QComboBox(table_);
-			const bool is_audio_only = (slot->target_type == MFD_TARGET_AUDIO_VOLUME);
-			populate_source_combo(src_a_combo, is_audio_only ? audio_sources : video_sources,
-					      slot->source_a_name);
-			src_a_combo->setEnabled(slot->target_type != MFD_TARGET_TBAR);
-			table_->setCellWidget(row, 4, src_a_combo);
+			bool show_a = false;
+			bool show_b = false;
+			bool show_curve = false;
+			bool show_afv = false;
+			mfd_row_controls_for_target(slot->target_type, &show_a, &show_b, &show_curve, &show_afv);
 
-			auto *src_b_combo = new QComboBox(table_);
-			populate_source_combo(src_b_combo, video_sources, slot->source_b_name);
-			src_b_combo->setEnabled(slot->target_type == MFD_TARGET_TWO_SOURCE_MIX);
-			table_->setCellWidget(row, 5, src_b_combo);
+			QComboBox *src_a_combo = nullptr;
+			if (show_a) {
+				src_a_combo = new QComboBox(table_);
+				src_a_combo->setMaximumWidth(170);
+				const bool is_audio_only = (slot->target_type == MFD_TARGET_AUDIO_VOLUME);
+				populate_source_combo(src_a_combo, is_audio_only ? audio_sources : video_sources,
+						      slot->source_a_name);
+				table_->setCellWidget(row, 4, src_a_combo);
+			} else {
+				table_->setCellWidget(row, 4, new QWidget(table_));
+			}
 
-			auto *curve_combo = new QComboBox(table_);
-			curve_combo->addItem(QStringLiteral("Dip-Free Dissolve (Video Mixer)"),
-					     static_cast<int>(MFD_CURVE_DIP_FREE));
-			curve_combo->addItem(QStringLiteral("Full-Center Additive Hold"),
-					     static_cast<int>(MFD_CURVE_FULL_CENTER));
-			curve_combo->addItem(QStringLiteral("Equal-Power Cosine"), static_cast<int>(MFD_CURVE_COSINE));
-			curve_combo->addItem(QStringLiteral("Linear Crossfade"), static_cast<int>(MFD_CURVE_LINEAR));
-			curve_combo->setCurrentIndex(curve_combo->findData(static_cast<int>(slot->curve)));
-			curve_combo->setEnabled(slot->target_type == MFD_TARGET_TWO_SOURCE_MIX);
-			table_->setCellWidget(row, 6, curve_combo);
+			QComboBox *src_b_combo = nullptr;
+			if (show_b) {
+				src_b_combo = new QComboBox(table_);
+				src_b_combo->setMaximumWidth(170);
+				populate_source_combo(src_b_combo, video_sources, slot->source_b_name);
+				table_->setCellWidget(row, 5, src_b_combo);
+			} else {
+				table_->setCellWidget(row, 5, new QWidget(table_));
+			}
 
-			auto *chk_afv = new QCheckBox(table_);
-			chk_afv->setChecked(slot->audio_follows_video);
-			chk_afv->setEnabled(slot->target_type == MFD_TARGET_TWO_SOURCE_MIX ||
-					    slot->target_type == MFD_TARGET_SINGLE_LAYER);
-			table_->setCellWidget(row, 7, chk_afv);
+			QComboBox *curve_combo = nullptr;
+			if (show_curve) {
+				curve_combo = new QComboBox(table_);
+				curve_combo->setMaximumWidth(190);
+				curve_combo->addItem(QStringLiteral("Dip-Free Dissolve (Video Mixer)"),
+						     static_cast<int>(MFD_CURVE_DIP_FREE));
+				curve_combo->addItem(QStringLiteral("Full-Center Additive Hold"),
+						     static_cast<int>(MFD_CURVE_FULL_CENTER));
+				curve_combo->addItem(QStringLiteral("Equal-Power Cosine"),
+						     static_cast<int>(MFD_CURVE_COSINE));
+				curve_combo->addItem(QStringLiteral("Linear Crossfade"),
+						     static_cast<int>(MFD_CURVE_LINEAR));
+				curve_combo->setCurrentIndex(curve_combo->findData(static_cast<int>(slot->curve)));
+				table_->setCellWidget(row, 6, curve_combo);
+			} else {
+				table_->setCellWidget(row, 6, new QWidget(table_));
+			}
+
+			QCheckBox *chk_afv = nullptr;
+			if (show_afv) {
+				chk_afv = new QCheckBox(table_);
+				chk_afv->setChecked(slot->audio_follows_video);
+				table_->setCellWidget(row, 7, chk_afv);
+			} else {
+				table_->setCellWidget(row, 7, new QWidget(table_));
+			}
 
 			auto *out_bar = new QProgressBar(table_);
 			out_bar->setRange(0, 100);
@@ -407,42 +434,53 @@ private:
 					rebuild_table_rows();
 				});
 
-			connect(src_a_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-				[src_a_combo, row](int) {
+			if (src_a_combo) {
+				connect(src_a_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+					[src_a_combo, row](int) {
+						struct mfd_engine *e = mfd_engine_get();
+						const QByteArray utf8 = src_a_combo->currentData().toString().toUtf8();
+						std::snprintf(e->fader_slots[row].source_a_name,
+							      sizeof(e->fader_slots[row].source_a_name), "%s",
+							      utf8.constData());
+						mfd_engine_save_global_config(e);
+					});
+			}
+
+			if (src_b_combo) {
+				connect(src_b_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+					[src_b_combo, row](int) {
+						struct mfd_engine *e = mfd_engine_get();
+						const QByteArray utf8 = src_b_combo->currentData().toString().toUtf8();
+						std::snprintf(e->fader_slots[row].source_b_name,
+							      sizeof(e->fader_slots[row].source_b_name), "%s",
+							      utf8.constData());
+						mfd_engine_save_global_config(e);
+					});
+			}
+
+			if (curve_combo) {
+				connect(curve_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+					[curve_combo, row](int) {
+						struct mfd_engine *e = mfd_engine_get();
+						e->fader_slots[row].curve = static_cast<enum mfd_crossfade_curve>(
+							curve_combo->currentData().toInt());
+						mfd_engine_save_global_config(e);
+					});
+			}
+
+			if (chk_afv) {
+				connect(chk_afv, &QCheckBox::toggled, this, [row](bool checked) {
 					struct mfd_engine *e = mfd_engine_get();
-					const QByteArray utf8 = src_a_combo->currentData().toString().toUtf8();
-					std::snprintf(e->fader_slots[row].source_a_name,
-						      sizeof(e->fader_slots[row].source_a_name), "%s",
-						      utf8.constData());
+					e->fader_slots[row].audio_follows_video = checked;
 					mfd_engine_save_global_config(e);
 				});
-
-			connect(src_b_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-				[src_b_combo, row](int) {
-					struct mfd_engine *e = mfd_engine_get();
-					const QByteArray utf8 = src_b_combo->currentData().toString().toUtf8();
-					std::snprintf(e->fader_slots[row].source_b_name,
-						      sizeof(e->fader_slots[row].source_b_name), "%s",
-						      utf8.constData());
-					mfd_engine_save_global_config(e);
-				});
-
-			connect(curve_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-				[curve_combo, row](int) {
-					struct mfd_engine *e = mfd_engine_get();
-					e->fader_slots[row].curve = static_cast<enum mfd_crossfade_curve>(
-						curve_combo->currentData().toInt());
-					mfd_engine_save_global_config(e);
-				});
-
-			connect(chk_afv, &QCheckBox::toggled, this, [row](bool checked) {
-				struct mfd_engine *e = mfd_engine_get();
-				e->fader_slots[row].audio_follows_video = checked;
-				mfd_engine_save_global_config(e);
-			});
+			}
 		}
 
 		table_->resizeColumnsToContents();
+		const int table_w = table_->horizontalHeader()->length() + 48;
+		const int target_w = (table_w < 1180) ? 1180 : ((table_w > 1540) ? 1540 : table_w);
+		resize(target_w, height());
 	}
 
 	void update_live_status()
