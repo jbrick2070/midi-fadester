@@ -54,3 +54,8 @@ void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, fl
 	out_action->call_set_tbar = (pos != last_pos_1024);
 	out_action->call_release_tbar = (pos >= MFD_TBAR_RANGE_MAX && last_pos_1024 < MFD_TBAR_RANGE_MAX);
 }
+
+bool mfd_should_show_studio_mode_note(bool studio_mode_active, size_t active_tbar_slot_count)
+{
+	return (!studio_mode_active) && (active_tbar_slot_count > 0U);
+}

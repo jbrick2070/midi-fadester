@@ -67,6 +67,14 @@ int main(void)
 	ASSERT_TRUE(!act.call_set_tbar);
 	ASSERT_TRUE(!act.call_release_tbar);
 
+	/*
+	 * 6. Amber Studio Mode note banner visibility (Item 3):
+	 * Shown only when Studio Mode is OFF and at least one T-bar slot is enabled; hidden when Studio Mode is ON.
+	 */
+	ASSERT_TRUE(mfd_should_show_studio_mode_note(false, 1U));
+	ASSERT_TRUE(!mfd_should_show_studio_mode_note(true, 1U));
+	ASSERT_TRUE(!mfd_should_show_studio_mode_note(false, 0U));
+
 	printf("test-tbar-logic: PASS\n");
 	return 0;
 }

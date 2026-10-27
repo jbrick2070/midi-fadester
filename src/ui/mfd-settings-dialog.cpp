@@ -7,6 +7,7 @@
 #include "ui/mfd-settings-dialog.hpp"
 #include "obs/mfd-engine.h"
 #include "obs/mfd-tbar.h"
+#include "core/tbar-logic.h"
 #include "core/mixer-math.h"
 
 #include <obs-module.h>
@@ -102,6 +103,34 @@ public:
 				       "border: 1px solid #d9534f; border-radius: 4px; font-weight: bold; }"));
 		banner_label_->hide();
 		root->addWidget(banner_label_);
+
+		studio_note_widget_ = new QWidget(this);
+		studio_note_widget_->setStyleSheet(
+			QStringLiteral("QWidget#mfdStudioNote { background-color: #4d3800; border: 1px solid #d97706; "
+				       "border-radius: 4px; }"));
+		studio_note_widget_->setObjectName(QStringLiteral("mfdStudioNote"));
+		auto *note_layout = new QHBoxLayout(studio_note_widget_);
+		note_layout->setContentsMargins(10, 6, 10, 6);
+		auto *note_label = new QLabel(
+			QStringLiteral(
+				"Note: Studio Mode is currently OFF. Enable Studio Mode to use the Studio Mode T-Bar target."),
+			studio_note_widget_);
+		note_label->setStyleSheet(
+			QStringLiteral("color: #fde68a; font-weight: bold; background: transparent; border: none;"));
+		note_label->setWordWrap(true);
+		auto *btn_turn_on_studio = new QPushButton(QStringLiteral("Turn on Studio Mode"), studio_note_widget_);
+		btn_turn_on_studio->setStyleSheet(
+			QStringLiteral("QPushButton { background-color: #d97706; color: #111827; font-weight: bold; "
+				       "padding: 4px 12px; border-radius: 3px; }"));
+		note_layout->addWidget(note_label, 1);
+		note_layout->addWidget(btn_turn_on_studio);
+		studio_note_widget_->hide();
+		root->addWidget(studio_note_widget_);
+
+		connect(btn_turn_on_studio, &QPushButton::clicked, this, [this]() {
+			obs_frontend_set_preview_program_mode(true);
+			update_live_status();
+		});
 
 		auto *top_bar = new QHBoxLayout();
 		top_bar->addWidget(new QLabel(QStringLiteral("MIDI In Device:"), this));
@@ -425,25 +454,24 @@ private:
 		if (eng->tbar_error[0] != '\0') {
 			errors.append(QString::fromUtf8(eng->tbar_error));
 		}
-		if (!mfd_tbar_is_studio_mode_active()) {
-			bool any_tbar_slot = false;
-			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-				if (eng->fader_slots[i].enabled && eng->fader_slots[i].target_type == MFD_TARGET_TBAR) {
-					any_tbar_slot = true;
-					break;
-				}
-			}
-			if (any_tbar_slot) {
-				errors.append(QStringLiteral(
-					"Note: Studio Mode is currently OFF. Enable Studio Mode in OBS to use the Studio Mode T-Bar target, or switch Target Mode to 'Two-Source Crossfade (A \xE2\x86\x94 B)'."));
-			}
-		}
 
 		if (errors.isEmpty()) {
 			banner_label_->hide();
 		} else {
 			banner_label_->setText(errors.join(QStringLiteral("\n")));
 			banner_label_->show();
+		}
+
+		size_t active_tbar_slots = 0U;
+		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+			if (eng->fader_slots[i].enabled && eng->fader_slots[i].target_type == MFD_TARGET_TBAR) {
+				++active_tbar_slots;
+			}
+		}
+		if (studio_note_widget_) {
+			const bool show_note =
+				mfd_should_show_studio_mode_note(mfd_tbar_is_studio_mode_active(), active_tbar_slots);
+			studio_note_widget_->setVisible(show_note);
 		}
 
 		if (last_midi_label_) {
@@ -494,6 +522,7 @@ private:
 	}
 
 	QLabel *banner_label_ = nullptr;
+	QWidget *studio_note_widget_ = nullptr;
 	QLabel *last_midi_label_ = nullptr;
 	QComboBox *device_combo_ = nullptr;
 	QDoubleSpinBox *tau_spin_ = nullptr;

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,8 @@ struct mfd_tbar_action {
  */
 void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, float t_norm, int last_pos_1024,
 			     struct mfd_tbar_action *out_action);
+
+bool mfd_should_show_studio_mode_note(bool studio_mode_active, size_t active_tbar_slot_count);
 
 #ifdef __cplusplus
 }
