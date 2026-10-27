@@ -1,5 +1,5 @@
 /*
- * Visual Sidechain - obs-websocket 5 Vendor API & In-Process Signal/Fader Bus
+ * Visual Sidechain - obs-websocket 5 Vendor API & In-Process Signal Bridge
  * Copyright (C) 2026
  *
  * This program is free software; you can redistribute it and/or modify
@@ -25,8 +25,6 @@ bool vs_vendor_api_register(void);
 void vs_vendor_api_on_tick(float dt_sec, const struct vs_audio_frame *frame);
 
 void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
-void vs_vendor_handle_get_faders(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
-void vs_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 
 #ifdef __cplusplus
 }

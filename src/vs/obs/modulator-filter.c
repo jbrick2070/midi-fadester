@@ -11,6 +11,7 @@
 #include "modulator-filter.h"
 #include "audio-tap.h"
 #include "core/baseline.h"
+#include "core/fader-bridge.h"
 #include "core/modulation.h"
 #include "plugin-support.h"
 
@@ -625,22 +626,29 @@ static void add_signal_choices(obs_property_t *list)
 	obs_property_list_add_int(list, obs_module_text("Signal.Flux"), (int)VS_SIG_FLUX);
 	obs_property_list_add_int(list, obs_module_text("Signal.CustomHz"), (int)VS_SIG_CUSTOM_HZ);
 
-	char label[64];
+	char label[160];
 	for (uint32_t b = 0; b < VS_SPECTRUM_BANDS; b++) {
 		snprintf(label, sizeof(label), "%s %u", obs_module_text("Signal.SpectrumBandPrefix"), b + 1u);
 		obs_property_list_add_int(list, label, (int)(VS_SIG_SPECTRUM_BAND_0 + b));
 	}
 
-	obs_property_list_add_int(list, obs_module_text("Signal.FaderCrossfader"), (int)VS_SIG_FADER_CROSSFADER);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader1"), (int)VS_SIG_FADER_1);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader2"), (int)VS_SIG_FADER_2);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader3"), (int)VS_SIG_FADER_3);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader4"), (int)VS_SIG_FADER_4);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader5"), (int)VS_SIG_FADER_5);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader6"), (int)VS_SIG_FADER_6);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader7"), (int)VS_SIG_FADER_7);
-	obs_property_list_add_int(list, obs_module_text("Signal.Fader8"), (int)VS_SIG_FADER_8);
-	obs_property_list_add_int(list, obs_module_text("Signal.FaderMaster"), (int)VS_SIG_FADER_MASTER);
+	vs_fader_bridge_poll_once();
+	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+	const char *not_loaded_text = obs_module_text("Modulator.MidiFadesterNotLoaded");
+
+	static const char *const k_fader_locale_keys[VS_FADER_SLOT_COUNT] = {
+		"Signal.FaderCrossfader", "Signal.Fader1", "Signal.Fader2", "Signal.Fader3", "Signal.Fader4",
+		"Signal.Fader5",          "Signal.Fader6", "Signal.Fader7", "Signal.Fader8", "Signal.FaderMaster",
+	};
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+		const char *base = obs_module_text(k_fader_locale_keys[i]);
+		if (fadester_loaded) {
+			obs_property_list_add_int(list, base, (int)VS_SIG_FADER_CROSSFADER + i);
+		} else {
+			snprintf(label, sizeof(label), "%s — %s", base, not_loaded_text);
+			obs_property_list_add_int(list, label, (int)VS_SIG_FADER_CROSSFADER + i);
+		}
+	}
 }
 
 static obs_properties_t *modulator_get_properties(void *data)

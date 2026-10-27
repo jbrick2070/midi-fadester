@@ -1,5 +1,5 @@
 /*
- * Visual Sidechain - Fader Slot Modulation Source & 30 Hz Signal Coalescer Tests
+ * Visual Sidechain - Fader Slot Modulation Source & In-Process Bridge Tests
  * Copyright (C) 2026
  *
  * This program is free software; you can redistribute it and/or modify
@@ -104,6 +104,178 @@ static void test_signals_event_coalescing_30hz(void)
 	assert(!vs_fader_bridge_should_emit_signals(0.05000f, &frame));
 }
 
+static void test_in_process_bridge_missing_midi_fadester(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph != NULL && sh != NULL);
+
+	/* Attach a proc_handler without midi_fadester_get_slot_value */
+	vs_fader_bridge_attach(ph, sh);
+	assert(!vs_fader_bridge_is_midi_fadester_loaded());
+
+	/* Seed a non-zero slot, then tick: because midi_fadester_get_slot_value is missing on ph,
+	 * vs_fader_bridge_on_tick must mark Midi Fadester as not loaded and zero all fader slots. */
+	vs_fader_bridge_set_slot(VS_FADER_CROSSFADER, 0.88f);
+	struct vs_audio_frame frame;
+	memset(&frame, 0, sizeof(frame));
+	vs_fader_bridge_on_tick(0.01667f, &frame);
+
+	assert(!vs_fader_bridge_is_midi_fadester_loaded());
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+		assert(float_near(vs_fader_bridge_get_slot(i), 0.0f, 1e-6f));
+		const float sig = vs_analyzer_get_signal(NULL, NULL,
+							 (enum vs_signal_id)((int)VS_SIG_FADER_CROSSFADER + i), 60.0f,
+							 150.0f, VS_HZ_MODE_AVERAGE);
+		assert(float_near(sig, 0.0f, 1e-6f));
+	}
+
+	vs_fader_bridge_detach();
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
+struct fake_fadester_ctx {
+	float slots[VS_FADER_SLOT_COUNT];
+	int poll_calls;
+};
+
+static void fake_midi_fadester_get_slot_value(void *data, calldata_t *cd)
+{
+	struct fake_fadester_ctx *ctx = (struct fake_fadester_ctx *)data;
+	ctx->poll_calls++;
+
+	const char *slot_name = calldata_string(cd, "slot");
+	const int idx = vs_fader_slot_from_name(slot_name);
+	if (idx < 0) {
+		calldata_set_float(cd, "value", 0.0);
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_string(cd, "reason", "Unknown slot");
+		return;
+	}
+
+	calldata_set_float(cd, "value", (double)ctx->slots[idx]);
+	calldata_set_bool(cd, "ok", true);
+	calldata_set_string(cd, "reason", "");
+}
+
+struct signal_capture_ctx {
+	int emit_count;
+	float level;
+	float bass;
+	float mid;
+	float high;
+	float kick;
+	float snare;
+	float beat_phase;
+	float bpm;
+	bool ok;
+};
+
+static void on_visual_sidechain_signals_captured(void *data, calldata_t *cd)
+{
+	struct signal_capture_ctx *cap = (struct signal_capture_ctx *)data;
+	cap->emit_count++;
+	cap->level = (float)calldata_float(cd, "level");
+	cap->bass = (float)calldata_float(cd, "bass");
+	cap->mid = (float)calldata_float(cd, "mid");
+	cap->high = (float)calldata_float(cd, "high");
+	cap->kick = (float)calldata_float(cd, "kick");
+	cap->snare = (float)calldata_float(cd, "snare");
+	cap->beat_phase = (float)calldata_float(cd, "beat_phase");
+	cap->bpm = (float)calldata_float(cd, "bpm");
+	cap->ok = calldata_bool(cd, "ok");
+}
+
+static void test_in_process_bridge_fake_proc_and_signal(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph != NULL && sh != NULL);
+
+	struct fake_fadester_ctx fake_fadester;
+	memset(&fake_fadester, 0, sizeof(fake_fadester));
+	fake_fadester.slots[VS_FADER_CROSSFADER] = 0.35f;
+	fake_fadester.slots[VS_FADER_1] = 0.62f;
+
+	/* Register fake Midi Fadester proc and signal per API-CONTRACT.md */
+	proc_handler_add(
+		ph,
+		"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+		fake_midi_fadester_get_slot_value, &fake_fadester);
+	signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+
+	/* Attach Visual Sidechain bridge */
+	vs_fader_bridge_attach(ph, sh);
+	assert(vs_fader_bridge_is_midi_fadester_loaded());
+	/* Attach performed exactly 1 initial probe */
+	assert(fake_fadester.poll_calls == 1);
+	assert(float_near(vs_fader_bridge_get_slot(VS_FADER_CROSSFADER), 0.35f, 1e-6f));
+
+	/* Subscribe to visual_sidechain_signals on sh */
+	struct signal_capture_ctx sig_cap;
+	memset(&sig_cap, 0, sizeof(sig_cap));
+	signal_handler_connect(sh, "visual_sidechain_signals", on_visual_sidechain_signals_captured, &sig_cap);
+
+	/* Step 1 tick: verify at most 1 poll per tick and exact signal emission */
+	struct vs_audio_frame frame;
+	memset(&frame, 0, sizeof(frame));
+	frame.level = 0.55f;
+	frame.bass = 0.82f;
+	frame.mid = 0.44f;
+	frame.high = 0.21f;
+	frame.kick = 0.93f;
+	frame.snare = 0.12f;
+	frame.beat = 0.75f;
+	frame.estimated_bpm = 128.0f;
+
+	assert(vs_fader_bridge_on_tick(0.01667f, &frame));
+	assert(fake_fadester.poll_calls == 2); /* 1 at attach + 1 on this tick */
+	assert(float_near(vs_fader_bridge_get_slot(VS_FADER_1), 0.62f, 1e-6f));
+
+	assert(sig_cap.emit_count == 1);
+	assert(sig_cap.ok);
+	assert(float_near(sig_cap.level, 0.55f, 1e-6f));
+	assert(float_near(sig_cap.bass, 0.82f, 1e-6f));
+	assert(float_near(sig_cap.mid, 0.44f, 1e-6f));
+	assert(float_near(sig_cap.high, 0.21f, 1e-6f));
+	assert(float_near(sig_cap.kick, 0.93f, 1e-6f));
+	assert(float_near(sig_cap.snare, 0.12f, 1e-6f));
+	assert(float_near(sig_cap.beat_phase, 0.75f, 1e-6f));
+	assert(float_near(sig_cap.bpm, 128.0f, 1e-5f));
+
+	/* Verify visual_sidechain_get_signals proc returns the exact contract fields */
+	struct calldata cd;
+	calldata_init(&cd);
+	assert(proc_handler_call(ph, "visual_sidechain_get_signals", &cd));
+	assert(calldata_bool(&cd, "ok"));
+	assert(float_near((float)calldata_float(&cd, "level"), 0.55f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "bass"), 0.82f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "mid"), 0.44f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "high"), 0.21f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "kick"), 0.93f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "snare"), 0.12f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "beat_phase"), 0.75f, 1e-6f));
+	assert(float_near((float)calldata_float(&cd, "bpm"), 128.0f, 1e-5f));
+	calldata_free(&cd);
+
+	/* Emit midi_fadester_fader_changed signal and verify immediate fader slot update without polling */
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_5");
+	calldata_set_float(&cd, "value", 0.91);
+	calldata_set_string(&cd, "origin", "midi");
+	signal_handler_signal(sh, "midi_fadester_fader_changed", &cd);
+	calldata_free(&cd);
+
+	assert(float_near(vs_fader_bridge_get_slot(VS_FADER_5), 0.91f, 1e-6f));
+	assert(float_near(vs_analyzer_get_signal(NULL, NULL, VS_SIG_FADER_5, 60.0f, 150.0f, VS_HZ_MODE_AVERAGE), 0.91f,
+			  1e-6f));
+
+	vs_fader_bridge_detach();
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -112,6 +284,8 @@ int main(void)
 #endif
 	test_fader_slot_lookup_and_clamping();
 	test_signals_event_coalescing_30hz();
+	test_in_process_bridge_missing_midi_fadester();
+	test_in_process_bridge_fake_proc_and_signal();
 	printf("test-fader-bridge: all assertions passed\n");
 	return 0;
 }
