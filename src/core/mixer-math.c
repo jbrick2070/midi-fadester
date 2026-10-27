@@ -32,11 +32,11 @@ void mfd_crossfade_eval(enum mfd_crossfade_curve curve, float t, float *out_alph
 	case MFD_CURVE_DIP_FREE:
 		/*
 		 * Dip-Free Video Mixer Dissolve (D-2):
-		 * Source A (bottom) stays at 1.0 across [0.0, 0.5] and ramps 1.0 -> 0.0 across [0.5, 1.0],
-		 * while Source B (top) ramps 0.0 -> 1.0 across [0.0, 1.0]. At midpoint (t = 0.5),
-		 * Porter-Duff Source Over yields 0.5*B + (1 - 0.5)*1.0*A = 0.5*B + 0.5*A with 0.0% black dip.
+		 * Source A (bottom) stays at 1.0 across all t in [0.0, 1.0],
+		 * while Source B (top) ramps 0.0 -> 1.0 across [0.0, 1.0].
+		 * Porter-Duff Source Over coverage = B + (1 - B) * 1.0 = 1.0 everywhere (0.0% black dip).
 		 */
-		*out_alpha_a = clamp01(2.0f * (1.0f - x));
+		*out_alpha_a = 1.0f;
 		*out_alpha_b = x;
 		break;
 

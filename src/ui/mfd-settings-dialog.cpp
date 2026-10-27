@@ -195,7 +195,7 @@ public:
 		auto *hint = new QLabel(
 			QStringLiteral(
 				"Tip: For Two-Source Layer Crossfade (A \xE2\x86\x94 B), place Source A below Source B in your OBS Scene. "
-				"Dip-Free Dissolve holds Source A at 100% until midpoint so 0% black background bleeds through."),
+				"Dip-Free Dissolve holds Source A at 100% while Source B fades in so 0% black background bleeds through."),
 			this);
 		hint->setWordWrap(true);
 		footer->addWidget(hint, 1);

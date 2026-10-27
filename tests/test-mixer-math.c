@@ -27,22 +27,14 @@ int main(void)
 	REQUIRE(fabsf(b - 0.5f) < 1e-6f);
 	REQUIRE(fabsf(mfd_porter_duff_over_coverage(a, b) - 0.75f) < 1e-6f);
 
-	/* 2. Dip-Free Video Mixer Dissolve has 100% Porter-Duff coverage at t = 0.0, 0.25, 0.50, 1.00 (0% black dip at midpoint!) */
-	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 0.0f, &a, &b);
-	REQUIRE(fabsf(a - 1.0f) < 1e-6f && fabsf(b - 0.0f) < 1e-6f);
-	REQUIRE(fabsf(mfd_porter_duff_over_coverage(a, b) - 1.0f) < 1e-6f);
-
-	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 0.25f, &a, &b);
-	REQUIRE(fabsf(a - 1.0f) < 1e-6f && fabsf(b - 0.25f) < 1e-6f);
-	REQUIRE(fabsf(mfd_porter_duff_over_coverage(a, b) - 1.0f) < 1e-6f);
-
-	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 0.50f, &a, &b);
-	REQUIRE(fabsf(a - 1.0f) < 1e-6f && fabsf(b - 0.50f) < 1e-6f);
-	REQUIRE(fabsf(mfd_porter_duff_over_coverage(a, b) - 1.0f) < 1e-6f);
-
-	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 1.0f, &a, &b);
-	REQUIRE(fabsf(a - 0.0f) < 1e-6f && fabsf(b - 1.0f) < 1e-6f);
-	REQUIRE(fabsf(mfd_porter_duff_over_coverage(a, b) - 1.0f) < 1e-6f);
+	/* 2. Dip-Free Video Mixer Dissolve has 100% Porter-Duff coverage at every t in steps of 0.05 */
+	for (int i = 0; i <= 20; ++i) {
+		float t = (float)i * 0.05f;
+		mfd_crossfade_eval(MFD_CURVE_DIP_FREE, t, &a, &b);
+		REQUIRE(fabsf(mfd_porter_duff_over_coverage(a, b) - 1.0f) < 1e-6f);
+		REQUIRE(fabsf(a - 1.0f) < 1e-6f);
+		REQUIRE(fabsf(b - t) < 1e-6f);
+	}
 
 	/* 3. Full-Center Mix puts both A and B at 1.0 at t = 0.5 */
 	mfd_crossfade_eval(MFD_CURVE_FULL_CENTER, 0.5f, &a, &b);
