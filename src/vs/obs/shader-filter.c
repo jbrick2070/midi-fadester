@@ -656,17 +656,20 @@ static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *
 	gs_enable_framebuffer_srgb(prev_srgb);
 	gs_texrender_end(sf->output_texrender[cur]);
 
-	/* Present output_texrender[cur] to the filter chain */
+	/* Present output_texrender[cur] to the filter chain (premultiplied alpha, R-SHD-5) */
 	gs_texture_t *out_tex = gs_texrender_get_texture(sf->output_texrender[cur]);
 	if (out_tex) {
 		const bool srgb = gs_framebuffer_srgb_enabled();
 		gs_enable_framebuffer_srgb(true);
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 		gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		gs_eparam_t *img = gs_effect_get_param_by_name(default_effect, "image");
 		gs_effect_set_texture_srgb(img, out_tex);
 		while (gs_effect_loop(default_effect, "Draw")) {
 			gs_draw_sprite(out_tex, 0, cx, cy);
 		}
+		gs_blend_state_pop();
 		gs_enable_framebuffer_srgb(srgb);
 	}
 
@@ -717,7 +720,14 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 
 	bind_all_shader_uniforms(sf, cx, cy);
 
-	obs_source_process_filter_end(sf->context, sf->effect, cx, cy);
+	/* Premultiplied alpha blend around obs_source_process_filter_tech_end (R-SHD-5):
+	 * obs_source_process_filter_begin_with_color_space renders the upstream source into its internal
+	 * texrender with premultiplied alpha. Under OBS's default GS_BLEND_SRCALPHA blend state, a shader
+	 * outputting premultiplied RGBA (e.g. 50% opacity) would be multiplied by alpha a second time (25%). */
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	obs_source_process_filter_tech_end(sf->context, sf->effect, cx, cy, "Draw");
+	gs_blend_state_pop();
 }
 
 static enum gs_color_space shader_filter_get_color_space(void *data, size_t count,
