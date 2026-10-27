@@ -25,7 +25,8 @@ uniform float onset_threshold <
 > = 0.30;
 
 uniform float max_flash_rate_hz <
-	string label = "Max Strobe Rate Cap (Hz)";
+	string label = "Maximum Flash Rate (Hz)";
+	string tooltip = "Photosensitivity guideline: keep at or below 3.0 Hz (W3C WCAG 2.3.1 / ITU-R BT.1702 three-flashes-per-second limit).";
 	string widget_type = "slider";
 	float minimum = 0.5;
 	float maximum = 8.0;

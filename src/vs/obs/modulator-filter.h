@@ -19,6 +19,8 @@ extern "C" {
 extern struct obs_source_info vs_modulator_filter_info;
 
 void vs_register_modulator_filter(void);
+void vs_modulator_filter_apply_panic(obs_source_t *source);
+void vs_modulator_filter_apply_restore(obs_source_t *source);
 
 #ifdef __cplusplus
 }

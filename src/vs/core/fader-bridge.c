@@ -21,6 +21,7 @@ static proc_handler_t *g_ph = NULL;
 static signal_handler_t *g_sh = NULL;
 static bool g_midi_fadester_loaded = false;
 static int g_poll_slot_idx = 0;
+static bool g_panic_active = false;
 
 static float g_fader_values[VS_FADER_SLOT_COUNT];
 static struct vs_audio_frame g_latest_signals;
@@ -101,6 +102,7 @@ void vs_fader_bridge_reset(void)
 {
 	vs_fader_bridge_detach();
 	g_poll_slot_idx = 0;
+	g_panic_active = false;
 	memset(&g_latest_signals, 0, sizeof(g_latest_signals));
 	memset(&g_last_emitted_signals, 0, sizeof(g_last_emitted_signals));
 	g_since_last_emit_sec = VS_SIGNALS_MIN_INTERVAL_SEC;
@@ -277,4 +279,87 @@ bool vs_fader_bridge_on_tick(float dt_sec, const struct vs_audio_frame *frame)
 	}
 
 	return true;
+}
+
+static bool contains_word_ci(const char *haystack, const char *needle)
+{
+	if (!haystack || !needle || needle[0] == '\0')
+		return false;
+	const size_t nlen = strlen(needle);
+	for (const char *p = haystack; *p != '\0'; p++) {
+		size_t i = 0;
+		while (i < nlen && p[i] != '\0') {
+			char c1 = p[i];
+			char c2 = needle[i];
+			if (c1 >= 'A' && c1 <= 'Z')
+				c1 = (char)(c1 - 'A' + 'a');
+			if (c2 >= 'A' && c2 <= 'Z')
+				c2 = (char)(c2 - 'A' + 'a');
+			if (c1 != c2)
+				break;
+			i++;
+		}
+		if (i == nlen)
+			return true;
+	}
+	return false;
+}
+
+bool vs_fader_bridge_is_strobe_or_flash_param(const char *param_name)
+{
+	if (!param_name || param_name[0] == '\0')
+		return false;
+
+	/* Rate caps, thresholds, and frequency bounds are safety/filter limits, not strobe/flash amounts */
+	if (contains_word_ci(param_name, "rate") || contains_word_ci(param_name, "threshold") ||
+	    contains_word_ci(param_name, "_hz")) {
+		return false;
+	}
+
+	return contains_word_ci(param_name, "flash") || contains_word_ci(param_name, "strobe") ||
+	       contains_word_ci(param_name, "intensity") || contains_word_ci(param_name, "amount") ||
+	       contains_word_ci(param_name, "strength") || contains_word_ci(param_name, "boost") ||
+	       contains_word_ci(param_name, "reactivity");
+}
+
+void vs_fader_bridge_trigger_panic(void)
+{
+	g_panic_active = true;
+}
+
+void vs_fader_bridge_trigger_restore(void)
+{
+	g_panic_active = false;
+}
+
+bool vs_fader_bridge_is_panic_active(void)
+{
+	return g_panic_active;
+}
+
+void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, size_t count)
+{
+	if (!slots)
+		return;
+	for (size_t i = 0; i < count; i++) {
+		if (!vs_fader_bridge_is_strobe_or_flash_param(slots[i].name))
+			continue;
+		if (!slots[i].saved_valid) {
+			slots[i].saved_value = slots[i].current_value;
+			slots[i].saved_valid = true;
+		}
+		slots[i].current_value = 0.0;
+	}
+}
+
+void vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count)
+{
+	if (!slots)
+		return;
+	for (size_t i = 0; i < count; i++) {
+		if (!slots[i].saved_valid)
+			continue;
+		slots[i].current_value = slots[i].saved_value;
+		slots[i].saved_valid = false;
+	}
 }

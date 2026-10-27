@@ -49,6 +49,8 @@ struct vs_user_uniform_binding {
 	gs_eparam_t *eparam;
 	enum vs_shader_param_type type;
 	float f_val;
+	double saved_pre_panic_val;
+	bool has_saved_pre_panic;
 	int i_val;
 	bool b_val;
 	struct vec4 c_val;
@@ -576,12 +578,17 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 	}
 
 	/* User-annotated uniforms (R-UP-4) */
+	const bool panic_active = vs_fader_bridge_is_panic_active();
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_user_uniform_binding *b = &sf->user_bindings[i];
 		if (!b->eparam)
 			continue;
 		if (b->type == VS_SHADER_PARAM_FLOAT) {
-			gs_effect_set_float(b->eparam, b->f_val);
+			const float val =
+				(panic_active && vs_fader_bridge_is_strobe_or_flash_param(sf->parsed.params[i].name))
+					? 0.0f
+					: b->f_val;
+			gs_effect_set_float(b->eparam, val);
 		} else if (b->type == VS_SHADER_PARAM_INT) {
 			gs_effect_set_int(b->eparam, b->i_val);
 		} else if (b->type == VS_SHADER_PARAM_BOOL) {
@@ -878,4 +885,55 @@ void vs_register_shader_filter(void)
 	info.get_properties = shader_filter_get_properties;
 
 	obs_register_source(&info);
+}
+
+void vs_shader_filter_apply_panic(obs_source_t *source)
+{
+	if (!source)
+		return;
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)obs_obj_get_data(source);
+	if (!sf)
+		return;
+
+	obs_data_t *settings = obs_source_get_settings(source);
+	for (size_t i = 0; i < sf->parsed.param_count; i++) {
+		const struct vs_shader_param_info *info = &sf->parsed.params[i];
+		struct vs_user_uniform_binding *b = &sf->user_bindings[i];
+		if (info->type == VS_SHADER_PARAM_FLOAT && vs_fader_bridge_is_strobe_or_flash_param(info->name)) {
+			if (!b->has_saved_pre_panic) {
+				b->saved_pre_panic_val = (double)b->f_val;
+				b->has_saved_pre_panic = true;
+			}
+			b->f_val = 0.0f;
+			if (settings)
+				obs_data_set_double(settings, info->name, 0.0);
+		}
+	}
+	if (settings)
+		obs_data_release(settings);
+	obs_source_update_properties(source);
+}
+
+void vs_shader_filter_apply_restore(obs_source_t *source)
+{
+	if (!source)
+		return;
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)obs_obj_get_data(source);
+	if (!sf)
+		return;
+
+	obs_data_t *settings = obs_source_get_settings(source);
+	for (size_t i = 0; i < sf->parsed.param_count; i++) {
+		const struct vs_shader_param_info *info = &sf->parsed.params[i];
+		struct vs_user_uniform_binding *b = &sf->user_bindings[i];
+		if (b->has_saved_pre_panic) {
+			b->f_val = (float)b->saved_pre_panic_val;
+			b->has_saved_pre_panic = false;
+			if (settings)
+				obs_data_set_double(settings, info->name, (double)b->f_val);
+		}
+	}
+	if (settings)
+		obs_data_release(settings);
+	obs_source_update_properties(source);
 }

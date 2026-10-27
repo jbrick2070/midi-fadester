@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <obs-module.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -17,6 +18,8 @@ extern "C" {
 #endif
 
 void vs_register_shader_filter(void);
+void vs_shader_filter_apply_panic(obs_source_t *source);
+void vs_shader_filter_apply_restore(obs_source_t *source);
 
 #ifdef __cplusplus
 }

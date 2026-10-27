@@ -276,6 +276,48 @@ static void test_in_process_bridge_fake_proc_and_signal(void)
 	proc_handler_destroy(ph);
 }
 
+static void test_panic_and_restore_hotkeys_logic(void)
+{
+	vs_fader_bridge_reset();
+	assert(!vs_fader_bridge_is_panic_active());
+
+	struct vs_panic_param_slot slots[4];
+	memset(slots, 0, sizeof(slots));
+	snprintf(slots[0].name, sizeof(slots[0].name), "flash_intensity");
+	slots[0].current_value = 0.55;
+	snprintf(slots[1].name, sizeof(slots[1].name), "slot_1_amount_pct");
+	slots[1].current_value = 100.0;
+	snprintf(slots[2].name, sizeof(slots[2].name), "max_flash_rate_hz");
+	slots[2].current_value = 3.0;
+	snprintf(slots[3].name, sizeof(slots[3].name), "onset_threshold");
+	slots[3].current_value = 0.30;
+
+	/* 1. Trigger "Visual Sidechain: Panic" */
+	vs_fader_bridge_trigger_panic();
+	assert(vs_fader_bridge_is_panic_active());
+	vs_fader_bridge_apply_panic_to_slots(slots, 4u);
+
+	/* Strobe/flash/modulation amounts immediately become 0.0; safety rate cap and threshold stay unchanged */
+	assert(fabs(slots[0].current_value - 0.0) < 1e-6);
+	assert(fabs(slots[1].current_value - 0.0) < 1e-6);
+	assert(fabs(slots[2].current_value - 3.0) < 1e-6);
+	assert(fabs(slots[3].current_value - 0.30) < 1e-6);
+
+	/* Pressing Panic a second time while already panicked must not overwrite saved pre-panic values with 0.0 */
+	vs_fader_bridge_trigger_panic();
+	vs_fader_bridge_apply_panic_to_slots(slots, 4u);
+
+	/* 2. Trigger "Visual Sidechain: Restore" */
+	vs_fader_bridge_trigger_restore();
+	assert(!vs_fader_bridge_is_panic_active());
+	vs_fader_bridge_apply_restore_to_slots(slots, 4u);
+
+	assert(fabs(slots[0].current_value - 0.55) < 1e-6);
+	assert(fabs(slots[1].current_value - 100.0) < 1e-6);
+	assert(fabs(slots[2].current_value - 3.0) < 1e-6);
+	assert(fabs(slots[3].current_value - 0.30) < 1e-6);
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -286,6 +328,7 @@ int main(void)
 	test_signals_event_coalescing_30hz();
 	test_in_process_bridge_missing_midi_fadester();
 	test_in_process_bridge_fake_proc_and_signal();
+	test_panic_and_restore_hotkeys_logic();
 	printf("test-fader-bridge: all assertions passed\n");
 	return 0;
 }

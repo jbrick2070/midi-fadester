@@ -180,6 +180,37 @@ static void test_builtin_shaders_parse_and_provenance(void)
 		}
 		assert(valid);
 	}
+
+	/* Verify fft-strobe-flash.shader has Maximum Flash Rate <= 3.0 Hz and photosensitivity guideline tooltip */
+	char strobe_path[512];
+	snprintf(strobe_path, sizeof(strobe_path), "%s/fft-strobe-flash.shader", VS_SHADERS_DIR);
+	FILE *fp = fopen(strobe_path, "rb");
+	assert(fp != NULL);
+	fseek(fp, 0, SEEK_END);
+	const long sz = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	char *buf = (char *)malloc((size_t)sz + 1u);
+	assert(buf != NULL);
+	fread(buf, 1u, (size_t)sz, fp);
+	buf[sz] = '\0';
+	fclose(fp);
+
+	struct vs_shader_parse_result res;
+	const enum vs_shader_error perr = vs_shader_ExpandAndParse(buf, VS_SHADERS_DIR, false, NULL, NULL, &res);
+	free(buf);
+	assert(perr == VS_SHADER_OK);
+
+	bool found_rate = false;
+	for (size_t i = 0; i < res.param_count; i++) {
+		if (strcmp(res.params[i].name, "max_flash_rate_hz") == 0) {
+			found_rate = true;
+			assert(res.params[i].has_default);
+			assert(res.params[i].default_val[0] <= 3.0);
+			assert(strstr(res.params[i].tooltip, "Photosensitivity guideline") != NULL);
+		}
+	}
+	assert(found_rate);
+	vs_shader_parse_result_free(&res);
 }
 
 int main(void)

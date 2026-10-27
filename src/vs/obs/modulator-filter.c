@@ -23,6 +23,8 @@ struct vs_modulator_filter {
 	struct vs_audio_tap tap;
 	struct vs_mod_slot_config slot_cfg[VS_MOD_MAX_SLOTS];
 	struct vs_mod_slot_state slot_state[VS_MOD_MAX_SLOTS];
+	double saved_pre_panic_amount_pct[VS_MOD_MAX_SLOTS];
+	bool has_saved_pre_panic[VS_MOD_MAX_SLOTS];
 	struct vs_baseline_table baselines;
 	bool pending_load_restore;
 };
@@ -760,4 +762,57 @@ struct obs_source_info vs_modulator_filter_info = {
 void vs_register_modulator_filter(void)
 {
 	obs_register_source(&vs_modulator_filter_info);
+}
+
+void vs_modulator_filter_apply_panic(obs_source_t *source)
+{
+	if (!source)
+		return;
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)obs_obj_get_data(source);
+	if (!f)
+		return;
+
+	obs_data_t *settings = obs_source_get_settings(source);
+	char key[64];
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		slot_key(key, sizeof(key), i, "amount_pct");
+		if (!f->has_saved_pre_panic[i]) {
+			f->saved_pre_panic_amount_pct[i] = f->slot_cfg[i].amount * 100.0;
+			f->has_saved_pre_panic[i] = true;
+		}
+		f->slot_cfg[i].amount = 0.0;
+		if (settings)
+			obs_data_set_double(settings, key, 0.0);
+	}
+	if (settings)
+		obs_data_release(settings);
+
+	vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
+	obs_source_update_properties(source);
+}
+
+void vs_modulator_filter_apply_restore(obs_source_t *source)
+{
+	if (!source)
+		return;
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)obs_obj_get_data(source);
+	if (!f)
+		return;
+
+	obs_data_t *settings = obs_source_get_settings(source);
+	char key[64];
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		if (!f->has_saved_pre_panic[i])
+			continue;
+		slot_key(key, sizeof(key), i, "amount_pct");
+		f->slot_cfg[i].amount = f->saved_pre_panic_amount_pct[i] * 0.01;
+		f->has_saved_pre_panic[i] = false;
+		f->slot_state[i].has_last_written = false;
+		if (settings)
+			obs_data_set_double(settings, key, f->saved_pre_panic_amount_pct[i]);
+	}
+	if (settings)
+		obs_data_release(settings);
+
+	obs_source_update_properties(source);
 }

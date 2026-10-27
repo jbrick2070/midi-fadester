@@ -70,6 +70,26 @@ bool vs_fader_bridge_should_emit_signals(float dt_sec, const struct vs_audio_fra
  */
 bool vs_fader_bridge_on_tick(float dt_sec, const struct vs_audio_frame *frame);
 
+/*
+ * Panic & Restore hotkey state and parameter-slot helpers:
+ * "Visual Sidechain: Panic" immediately sets every strobe/flash/modulation
+ * amount to 0.0 (saving pre-panic values once); "Visual Sidechain: Restore"
+ * restores them.
+ */
+struct vs_panic_param_slot {
+	char name[64];
+	double current_value;
+	double saved_value;
+	bool saved_valid;
+};
+
+bool vs_fader_bridge_is_strobe_or_flash_param(const char *param_name);
+void vs_fader_bridge_trigger_panic(void);
+void vs_fader_bridge_trigger_restore(void);
+bool vs_fader_bridge_is_panic_active(void);
+void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, size_t count);
+void vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count);
+
 #ifdef __cplusplus
 }
 #endif
