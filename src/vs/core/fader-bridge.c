@@ -337,6 +337,15 @@ bool vs_fader_bridge_is_panic_active(void)
 	return g_panic_active;
 }
 
+bool vs_fader_bridge_should_shader_passthrough(bool filter_panic_passthrough, bool has_compiled_effect)
+{
+	if (!has_compiled_effect)
+		return true;
+	if (filter_panic_passthrough || g_panic_active)
+		return true;
+	return false;
+}
+
 void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, size_t count)
 {
 	if (!slots)
@@ -362,4 +371,20 @@ void vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, s
 		slots[i].current_value = slots[i].saved_value;
 		slots[i].saved_valid = false;
 	}
+}
+
+void vs_fader_bridge_apply_panic_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
+					   size_t count)
+{
+	if (filter_panic_passthrough)
+		*filter_panic_passthrough = true;
+	vs_fader_bridge_apply_panic_to_slots(slots, count);
+}
+
+void vs_fader_bridge_apply_restore_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
+					     size_t count)
+{
+	if (filter_panic_passthrough)
+		*filter_panic_passthrough = false;
+	vs_fader_bridge_apply_restore_to_slots(slots, count);
 }

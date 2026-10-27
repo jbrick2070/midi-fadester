@@ -281,6 +281,7 @@ static void test_panic_and_restore_hotkeys_logic(void)
 	vs_fader_bridge_reset();
 	assert(!vs_fader_bridge_is_panic_active());
 
+	bool builtin_passthrough = false;
 	struct vs_panic_param_slot slots[4];
 	memset(slots, 0, sizeof(slots));
 	snprintf(slots[0].name, sizeof(slots[0].name), "flash_intensity");
@@ -292,25 +293,66 @@ static void test_panic_and_restore_hotkeys_logic(void)
 	snprintf(slots[3].name, sizeof(slots[3].name), "onset_threshold");
 	slots[3].current_value = 0.30;
 
+	/* User shader with non-matching parameter names and parameterless user shader */
+	bool user_shader_passthrough = false;
+	struct vs_panic_param_slot user_slots[2];
+	memset(user_slots, 0, sizeof(user_slots));
+	snprintf(user_slots[0].name, sizeof(user_slots[0].name), "custom_color_drive");
+	user_slots[0].current_value = 0.85;
+	snprintf(user_slots[1].name, sizeof(user_slots[1].name), "warp_phase_offset");
+	user_slots[1].current_value = 1.25;
+
+	bool zero_param_shader_passthrough = false;
+
+	/* Before Panic: compiled shaders render normally (not pass-through); uncompiled shader is pass-through */
+	assert(!vs_fader_bridge_should_shader_passthrough(builtin_passthrough, true));
+	assert(!vs_fader_bridge_should_shader_passthrough(user_shader_passthrough, true));
+	assert(!vs_fader_bridge_should_shader_passthrough(zero_param_shader_passthrough, true));
+	assert(vs_fader_bridge_should_shader_passthrough(false, false));
+
 	/* 1. Trigger "Visual Sidechain: Panic" */
 	vs_fader_bridge_trigger_panic();
 	assert(vs_fader_bridge_is_panic_active());
-	vs_fader_bridge_apply_panic_to_slots(slots, 4u);
+	vs_fader_bridge_apply_panic_to_shader(&builtin_passthrough, slots, 4u);
+	vs_fader_bridge_apply_panic_to_shader(&user_shader_passthrough, user_slots, 2u);
+	vs_fader_bridge_apply_panic_to_shader(&zero_param_shader_passthrough, NULL, 0u);
 
-	/* Strobe/flash/modulation amounts immediately become 0.0; safety rate cap and threshold stay unchanged */
+	/* Every Visual Sidechain: Shader Filter must enter pass-through regardless of parameter names */
+	assert(builtin_passthrough);
+	assert(user_shader_passthrough);
+	assert(zero_param_shader_passthrough);
+	assert(vs_fader_bridge_should_shader_passthrough(builtin_passthrough, true));
+	assert(vs_fader_bridge_should_shader_passthrough(user_shader_passthrough, true));
+	assert(vs_fader_bridge_should_shader_passthrough(zero_param_shader_passthrough, true));
+
+	/* Strobe/flash/modulation amounts immediately become 0.0; safety rate cap, threshold, and custom params stay intact */
 	assert(fabs(slots[0].current_value - 0.0) < 1e-6);
 	assert(fabs(slots[1].current_value - 0.0) < 1e-6);
 	assert(fabs(slots[2].current_value - 3.0) < 1e-6);
 	assert(fabs(slots[3].current_value - 0.30) < 1e-6);
+	assert(fabs(user_slots[0].current_value - 0.85) < 1e-6);
+	assert(fabs(user_slots[1].current_value - 1.25) < 1e-6);
 
-	/* Pressing Panic a second time while already panicked must not overwrite saved pre-panic values with 0.0 */
+	/* Pressing Panic a second time while already panicked must keep pass-through active and preserve saved values */
 	vs_fader_bridge_trigger_panic();
-	vs_fader_bridge_apply_panic_to_slots(slots, 4u);
+	vs_fader_bridge_apply_panic_to_shader(&builtin_passthrough, slots, 4u);
+	vs_fader_bridge_apply_panic_to_shader(&user_shader_passthrough, user_slots, 2u);
+	assert(vs_fader_bridge_should_shader_passthrough(user_shader_passthrough, true));
 
 	/* 2. Trigger "Visual Sidechain: Restore" */
 	vs_fader_bridge_trigger_restore();
 	assert(!vs_fader_bridge_is_panic_active());
-	vs_fader_bridge_apply_restore_to_slots(slots, 4u);
+	vs_fader_bridge_apply_restore_to_shader(&builtin_passthrough, slots, 4u);
+	vs_fader_bridge_apply_restore_to_shader(&user_shader_passthrough, user_slots, 2u);
+	vs_fader_bridge_apply_restore_to_shader(&zero_param_shader_passthrough, NULL, 0u);
+
+	/* Pass-through is cleared on Restore and pre-panic values are restored */
+	assert(!builtin_passthrough);
+	assert(!user_shader_passthrough);
+	assert(!zero_param_shader_passthrough);
+	assert(!vs_fader_bridge_should_shader_passthrough(builtin_passthrough, true));
+	assert(!vs_fader_bridge_should_shader_passthrough(user_shader_passthrough, true));
+	assert(!vs_fader_bridge_should_shader_passthrough(zero_param_shader_passthrough, true));
 
 	assert(fabs(slots[0].current_value - 0.55) < 1e-6);
 	assert(fabs(slots[1].current_value - 100.0) < 1e-6);

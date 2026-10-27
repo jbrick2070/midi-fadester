@@ -49,8 +49,6 @@ struct vs_user_uniform_binding {
 	gs_eparam_t *eparam;
 	enum vs_shader_param_type type;
 	float f_val;
-	double saved_pre_panic_val;
-	bool has_saved_pre_panic;
 	int i_val;
 	bool b_val;
 	struct vec4 c_val;
@@ -80,6 +78,8 @@ struct vs_shader_filter {
 
 	struct vs_shader_parse_result parsed;
 	struct vs_user_uniform_binding user_bindings[VS_SHADER_MAX_UNIFORMS];
+	bool panic_passthrough;
+	struct vs_panic_param_slot panic_slots[VS_SHADER_MAX_UNIFORMS];
 
 	/* Built-in effect parameter handles */
 	gs_eparam_t *p_image;
@@ -166,6 +166,7 @@ static void destroy_shader_effect(struct vs_shader_filter *sf)
 	obs_leave_graphics();
 	vs_shader_parse_result_free(&sf->parsed);
 	memset(sf->user_bindings, 0, sizeof(sf->user_bindings));
+	memset(sf->panic_slots, 0, sizeof(sf->panic_slots));
 }
 
 static char *read_text_file_utf8(const char *path)
@@ -357,6 +358,8 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 			sf->user_bindings[i].eparam =
 				gs_effect_get_param_by_name(sf->effect, sf->parsed.params[i].name);
 			sf->user_bindings[i].type = sf->parsed.params[i].type;
+			snprintf(sf->panic_slots[i].name, sizeof(sf->panic_slots[i].name), "%s",
+				 sf->parsed.params[i].name);
 		}
 	}
 	obs_leave_graphics();
@@ -676,7 +679,7 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 	(void)effect;
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
 
-	if (!sf->effect) {
+	if (vs_fader_bridge_should_shader_passthrough(sf->panic_passthrough, sf->effect != NULL)) {
 		obs_source_skip_video_filter(sf->context);
 		return;
 	}
@@ -895,18 +898,19 @@ void vs_shader_filter_apply_panic(obs_source_t *source)
 	if (!sf)
 		return;
 
+	for (size_t i = 0; i < sf->parsed.param_count; i++) {
+		sf->panic_slots[i].current_value = (double)sf->user_bindings[i].f_val;
+	}
+	vs_fader_bridge_apply_panic_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count);
+	sf->feedback_seeded = false;
+
 	obs_data_t *settings = obs_source_get_settings(source);
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
-		struct vs_user_uniform_binding *b = &sf->user_bindings[i];
-		if (info->type == VS_SHADER_PARAM_FLOAT && vs_fader_bridge_is_strobe_or_flash_param(info->name)) {
-			if (!b->has_saved_pre_panic) {
-				b->saved_pre_panic_val = (double)b->f_val;
-				b->has_saved_pre_panic = true;
-			}
-			b->f_val = 0.0f;
+		if (info->type == VS_SHADER_PARAM_FLOAT) {
+			sf->user_bindings[i].f_val = (float)sf->panic_slots[i].current_value;
 			if (settings)
-				obs_data_set_double(settings, info->name, 0.0);
+				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
 		}
 	}
 	if (settings)
@@ -922,15 +926,15 @@ void vs_shader_filter_apply_restore(obs_source_t *source)
 	if (!sf)
 		return;
 
+	vs_fader_bridge_apply_restore_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count);
+
 	obs_data_t *settings = obs_source_get_settings(source);
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
-		struct vs_user_uniform_binding *b = &sf->user_bindings[i];
-		if (b->has_saved_pre_panic) {
-			b->f_val = (float)b->saved_pre_panic_val;
-			b->has_saved_pre_panic = false;
+		if (info->type == VS_SHADER_PARAM_FLOAT) {
+			sf->user_bindings[i].f_val = (float)sf->panic_slots[i].current_value;
 			if (settings)
-				obs_data_set_double(settings, info->name, (double)b->f_val);
+				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
 		}
 	}
 	if (settings)
