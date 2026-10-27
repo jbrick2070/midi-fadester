@@ -508,6 +508,10 @@ static void run_live_selftest_worker(void)
 	bool loopmidi_pass = false;
 	if (loopmidi_port[0] != '\0') {
 		loopmidi_tested = true;
+		char prev_midi_dev[MFD_MIDI_DEV_NAME_MAX] = {0};
+		std::snprintf(prev_midi_dev, sizeof(prev_midi_dev), "%s",
+			      eng->midi_dev.opened_name[0] != '\0' ? eng->midi_dev.opened_name
+								   : eng->configured_device_name);
 		QString midi_send_exe = qEnvironmentVariable(
 			"MFD_MIDI_SEND_EXE", "C:/midi-fadester/build_x64/tests/RelWithDebInfo/midi-send.exe");
 		bool connected = mfd_engine_reconnect_midi(eng, loopmidi_port);
@@ -602,6 +606,8 @@ static void run_live_selftest_worker(void)
 			loopmidi_pass ? "PASS" : "FAIL", loopmidi_port, (int)connected, (int)pre_waiting_ok, slider_pre,
 			(int)saw_waiting_before_pickup, (int)saw_engaged_after_pickup, mid_sweep_samples,
 			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw);
+
+		mfd_engine_reconnect_midi(eng, prev_midi_dev);
 	} else {
 		obs_log(LOG_INFO, "LOOPMIDI SWEEP CHECK [SKIPPED]: no WinMM input port matching 'loopMIDI' found.");
 	}
