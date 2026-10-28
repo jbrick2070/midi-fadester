@@ -40,6 +40,7 @@ midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
 midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
 midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c")
 midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
+midi_fadester_add_test(test-ui-sentences test-ui-sentences.c "${_core}/ui-sentences.c" "${_core}/takeover.c")
 
 add_executable(
   test-vendor-api

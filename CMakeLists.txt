@@ -54,6 +54,8 @@ target_sources(
     src/core/apc40-profile.c
     src/core/tbar-logic.h
     src/core/tbar-logic.c
+    src/core/ui-sentences.h
+    src/core/ui-sentences.c
     src/midi/winmm-device.h
     src/midi/winmm-device.c
     src/obs/mfd-layer-filter.h
