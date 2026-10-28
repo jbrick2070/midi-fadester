@@ -11,17 +11,43 @@ foreach(_config IN ITEMS RELEASE RELWITHDEBINFO DEBUG NOCONFIG)
     break()
   endif()
 endforeach()
+
+set(_qt_plugins_dir "")
+foreach(_config IN ITEMS RELEASE RELWITHDEBINFO DEBUG NOCONFIG)
+  get_target_property(_qtcore_location Qt6::Core IMPORTED_LOCATION_${_config})
+  if(_qtcore_location)
+    cmake_path(GET _qtcore_location PARENT_PATH _qt_bin_dir)
+    list(APPEND _test_dll_dirs "${_qt_bin_dir}")
+    cmake_path(GET _qt_bin_dir PARENT_PATH _qt_root_dir)
+    if(EXISTS "${_qt_root_dir}/plugins/platforms/qwindows.dll")
+      set(_qt_plugins_dir "${_qt_root_dir}/plugins")
+    endif()
+    break()
+  endif()
+endforeach()
+
 foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
   if(EXISTS "${_prefix}/share/obs-deps/VERSION" AND EXISTS "${_prefix}/bin")
     list(APPEND _test_dll_dirs "${_prefix}/bin")
   endif()
+  if(NOT _qt_plugins_dir AND EXISTS "${_prefix}/plugins/platforms/qwindows.dll")
+    set(_qt_plugins_dir "${_prefix}/plugins")
+  endif()
 endforeach()
+list(REMOVE_DUPLICATES _test_dll_dirs)
 
 set(_test_environment "")
 foreach(_dir IN LISTS _test_dll_dirs)
   cmake_path(NATIVE_PATH _dir _native_dir)
   list(APPEND _test_environment "PATH=path_list_prepend:${_native_dir}")
 endforeach()
+
+set(_ui_test_environment ${_test_environment})
+if(_qt_plugins_dir)
+  cmake_path(NATIVE_PATH _qt_plugins_dir _native_qt_plugins)
+  list(APPEND _ui_test_environment "QT_PLUGIN_PATH=set:${_native_qt_plugins}")
+  message(STATUS "midi-fadester tests: Qt6 plugins dir: ${_qt_plugins_dir}")
+endif()
 message(STATUS "midi-fadester tests: DLL search dirs: ${_test_dll_dirs}")
 
 function(midi_fadester_add_test name)
@@ -61,6 +87,39 @@ target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support winmm)
 add_test(NAME test-vendor-api COMMAND test-vendor-api)
 set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
+
+add_executable(
+  test-ui-dialog
+  test-ui-dialog.cpp
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-svg-canvas.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
+  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
+  "${_core}/midi-queue.c"
+  "${_core}/midi-parser.c"
+  "${_core}/smoother.c"
+  "${_core}/takeover.c"
+  "${_core}/mixer-math.c"
+  "${_core}/apc40-profile.c"
+  "${_core}/tbar-logic.c"
+  "${_core}/ui-sentences.c"
+)
+set_target_properties(test-ui-dialog PROPERTIES AUTOMOC ON)
+target_compile_definitions(test-ui-dialog PRIVATE QT_NO_KEYWORDS)
+target_include_directories(test-ui-dialog PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(
+  test-ui-dialog
+  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg plugin-support winmm
+)
+add_test(NAME test-ui-dialog COMMAND test-ui-dialog)
+set_tests_properties(test-ui-dialog PROPERTIES ENVIRONMENT_MODIFICATION "${_ui_test_environment}")
 
 add_executable(midi-send midi-send.c)
 target_link_libraries(midi-send PRIVATE winmm)

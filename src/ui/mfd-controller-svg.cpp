@@ -125,8 +125,8 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 	const QString dot_hex = ctrl.dot_green ? QStringLiteral("#22c55e") : QStringLiteral("#ef4444");
 	svg.append(QStringLiteral("<text x='38' y='48' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
 				  "font-size='18' font-weight='bold'>Akai APC40 mkII \xE2\x80\x94 Hardware Map</text>"
-				  "<circle cx='355' cy='42' r='6' fill='%1'/>"
-				  "<text x='370' y='47' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
+				  "<circle cx='388' cy='42' r='6' fill='%1'/>"
+				  "<text x='403' y='47' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
 				  "font-size='13'>%2</text>")
 			   .arg(dot_hex, xml_escape(QString::fromUtf8(ctrl.status_sentence))));
 
@@ -205,14 +205,14 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 		const QString title = xml_escape(elide_plain(QString::fromUtf8(sp.title), 10));
 		const QString short_lbl = xml_escape(elide_plain(QString::fromUtf8(sp.svg_short_label), 13));
 
-		const int track_top = 172;
-		const int track_h = 160;
+		const int track_top = 182;
+		const int track_h = 150;
 		const int fill_h = (sp.bar_percent * track_h) / 100;
 		const int cap_y = track_top + track_h - fill_h - 8;
 
 		svg.append(QStringLiteral("<rect x='%1' y='146' width='74' height='248' rx='7' fill='#0f172a' "
 					  "stroke='%2' stroke-width='1.5'/>"
-					  "<text x='%3' y='164' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
+					  "<text x='%3' y='163' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
 					  "font-size='12' font-weight='bold' text-anchor='middle'>%4</text>"
 					  "<rect x='%5' y='%6' width='8' height='%7' rx='4' fill='#1e293b'/>"
 					  "<rect x='%5' y='%8' width='8' height='%9' rx='4' fill='%2'/>"

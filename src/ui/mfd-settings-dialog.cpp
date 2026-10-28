@@ -205,6 +205,10 @@ public:
 		show_pickup_ = show_pickup;
 		pickup_pct_ = clamped_pickup;
 		arrow_glyph_ = arrow_glyph;
+		setProperty("barPercent", bar_pct_);
+		setProperty("showingPickup", show_pickup_);
+		setProperty("pickupPercent", pickup_pct_);
+		setProperty("arrowGlyph", arrow_glyph_);
 		update();
 	}
 
@@ -448,6 +452,12 @@ public:
 				setup_sheet_->reject();
 			}
 			refresh_from_engine();
+			if (idx == 1 && table_) {
+				for (int c = 0; c < 9; ++c) {
+					table_->resizeColumnToContents(c);
+				}
+				table_->doItemsLayout();
+			}
 		});
 
 		/* For standalone headless test engines, connect ui_notify_fn through Qt's queued event loop */
@@ -823,25 +833,6 @@ private:
 		auto *btn_defaults = new QPushButton(QStringLiteral("Load APC40 mkII Defaults"), adv_tab);
 		btn_defaults->setObjectName(QStringLiteral("mfdAdvDefaultsBtn"));
 		top_bar->addWidget(btn_defaults);
-
-		top_bar->addSpacing(12);
-		auto *lbl_tau = new QLabel(QStringLiteral("Smoothing (ms):"), adv_tab);
-		lbl_tau->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
-		top_bar->addWidget(lbl_tau);
-
-		tau_spin_ = new QDoubleSpinBox(adv_tab);
-		tau_spin_->setObjectName(QStringLiteral("mfdAdvTauSpin"));
-		tau_spin_->setRange(0.0, 250.0);
-		tau_spin_->setSingleStep(5.0);
-		tau_spin_->setDecimals(1);
-		tau_spin_->setSuffix(QStringLiteral(" ms"));
-		top_bar->addWidget(tau_spin_);
-
-		top_bar->addSpacing(10);
-		flip_check_ = new QCheckBox(QStringLiteral("T-bar works in both directions"), adv_tab);
-		flip_check_->setObjectName(QStringLiteral("mfdAdvFlipCheck"));
-		flip_check_->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
-		top_bar->addWidget(flip_check_);
 		top_bar->addStretch(1);
 		root->addLayout(top_bar);
 
@@ -854,6 +845,25 @@ private:
 		btn_finish_tbar_->setObjectName(QStringLiteral("mfdAdvFinishBtn"));
 		btn_finish_tbar_->setEnabled(false);
 		telemetry_bar->addWidget(btn_finish_tbar_);
+
+		telemetry_bar->addSpacing(16);
+		auto *lbl_tau = new QLabel(QStringLiteral("Smoothing (ms):"), adv_tab);
+		lbl_tau->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
+		telemetry_bar->addWidget(lbl_tau);
+
+		tau_spin_ = new QDoubleSpinBox(adv_tab);
+		tau_spin_->setObjectName(QStringLiteral("mfdAdvTauSpin"));
+		tau_spin_->setRange(0.0, 250.0);
+		tau_spin_->setSingleStep(5.0);
+		tau_spin_->setDecimals(1);
+		tau_spin_->setSuffix(QStringLiteral(" ms"));
+		telemetry_bar->addWidget(tau_spin_);
+
+		telemetry_bar->addSpacing(12);
+		flip_check_ = new QCheckBox(QStringLiteral("T-bar works in both directions"), adv_tab);
+		flip_check_->setObjectName(QStringLiteral("mfdAdvFlipCheck"));
+		flip_check_->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
+		telemetry_bar->addWidget(flip_check_);
 		telemetry_bar->addStretch(1);
 
 		last_midi_label_ = new QLabel(QStringLiteral("No MIDI received yet"), adv_tab);
@@ -890,6 +900,7 @@ private:
 			QStringLiteral("Output"),
 		});
 		table_->horizontalHeader()->setStretchLastSection(true);
+		table_->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
 		table_->verticalHeader()->setVisible(false);
 		table_->verticalHeader()->setDefaultSectionSize(36);
 		table_->setAlternatingRowColors(true);
@@ -1087,6 +1098,9 @@ private:
 		if (!setup_sheet_) {
 			setup_sheet_ = new MfdSetupSheetDialog(eng_, this);
 		}
+		if (testAttribute(Qt::WA_DontShowOnScreen)) {
+			setup_sheet_->setAttribute(Qt::WA_DontShowOnScreen, true);
+		}
 		setup_sheet_->open_for_slot(slot_index);
 		refresh_from_engine();
 	}
@@ -1095,6 +1109,9 @@ private:
 	{
 		if (!controller_view_dlg_) {
 			controller_view_dlg_ = new MfdControllerViewDialog(this);
+		}
+		if (testAttribute(Qt::WA_DontShowOnScreen)) {
+			controller_view_dlg_->setAttribute(Qt::WA_DontShowOnScreen, true);
 		}
 		controller_view_dlg_->refresh_from_snapshot(snap_);
 		controller_view_dlg_->show();
@@ -1342,6 +1359,20 @@ private:
 	void rebuild_table_rows()
 	{
 		rebuilding_adv_table_ = true;
+
+		for (int r = 0; r < MFD_MAX_FADER_SLOTS; ++r) {
+			for (int c = 0; c < table_->columnCount(); ++c) {
+				if (QWidget *old_w = table_->cellWidget(r, c)) {
+					old_w->hide();
+					old_w->setObjectName(QString());
+					const auto old_children = old_w->findChildren<QObject *>();
+					for (QObject *ch : old_children) {
+						ch->setObjectName(QString());
+					}
+					table_->removeCellWidget(r, c);
+				}
+			}
+		}
 
 		tau_spin_->blockSignals(true);
 		tau_spin_->setValue(static_cast<double>(snap_.smooth_tau_ms));
@@ -1613,7 +1644,9 @@ private:
 			}
 		}
 
-		table_->resizeColumnsToContents();
+		for (int c = 0; c < 9; ++c) {
+			table_->resizeColumnToContents(c);
+		}
 		last_adv_topology_rev_ = snap_.config_topology_rev;
 		rebuilding_adv_table_ = false;
 	}
