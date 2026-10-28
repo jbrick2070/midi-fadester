@@ -19,7 +19,8 @@
 #include <string.h>
 
 static const char *const k_fader_slot_ids[VS_FADER_SLOT_COUNT] = {
-	"crossfader", "fader_1", "fader_2", "fader_3", "fader_4", "fader_5", "fader_6", "fader_7", "fader_8", "master",
+	"crossfader", "fader_1", "fader_2", "fader_3", "fader_4", "fader_5", "fader_6", "fader_7", "fader_8",
+	"master",     "fx_1",    "fx_2",    "fx_3",    "fx_4",    "fx_5",    "fx_6",    "fx_7",    "fx_8",
 };
 
 /*
@@ -37,6 +38,8 @@ static int g_poll_slot_idx = 0;
 static volatile bool g_panic_active = false;
 
 static float g_fader_values[VS_FADER_SLOT_COUNT];
+static uint64_t g_fader_generations[VS_FADER_SLOT_COUNT];
+static uint64_t g_bridge_revision;
 static struct vs_audio_frame g_latest_signals;
 static struct vs_audio_frame g_last_emitted_signals;
 static float g_since_last_emit_sec = VS_SIGNALS_MIN_INTERVAL_SEC;
@@ -53,6 +56,15 @@ static float clamp01(float x)
 	if (x >= 1.0f)
 		return 1.0f;
 	return x;
+}
+
+/* Invalidates in-flight reads, including detach/reattach to the same proc handler. */
+static void clear_fader_values_locked(void)
+{
+	memset(g_fader_values, 0, sizeof(g_fader_values));
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
+		++g_fader_generations[i];
+	++g_bridge_revision;
 }
 
 const char *vs_fader_slot_id(int slot_idx)
@@ -109,6 +121,8 @@ static void on_global_signal(void *data, const char *signal, calldata_t *params)
 	pthread_mutex_lock(&g_bridge_mutex);
 	g_midi_fadester_loaded = true;
 	g_fader_values[idx] = clamped;
+	++g_fader_generations[idx];
+	++g_bridge_revision;
 	pthread_mutex_unlock(&g_bridge_mutex);
 }
 
@@ -120,7 +134,7 @@ void vs_fader_bridge_detach(void)
 	g_sh = NULL;
 	g_ph = NULL;
 	g_midi_fadester_loaded = false;
-	memset(g_fader_values, 0, sizeof(g_fader_values));
+	clear_fader_values_locked();
 	pthread_mutex_unlock(&g_bridge_mutex);
 
 	if (old_sh)
@@ -184,11 +198,13 @@ bool vs_fader_bridge_poll_once(void)
 	proc_handler_t *ph = g_ph;
 	if (!ph) {
 		g_midi_fadester_loaded = false;
-		memset(g_fader_values, 0, sizeof(g_fader_values));
+		clear_fader_values_locked();
 		pthread_mutex_unlock(&g_bridge_mutex);
 		return false;
 	}
 	const int idx = g_poll_slot_idx % VS_FADER_SLOT_COUNT;
+	const uint64_t slot_generation = g_fader_generations[idx];
+	const uint64_t bridge_revision = g_bridge_revision;
 	g_poll_slot_idx = (g_poll_slot_idx + 1) % VS_FADER_SLOT_COUNT;
 	pthread_mutex_unlock(&g_bridge_mutex);
 
@@ -199,9 +215,9 @@ bool vs_fader_bridge_poll_once(void)
 	if (!proc_exists) {
 		calldata_free(&cd);
 		pthread_mutex_lock(&g_bridge_mutex);
-		if (g_ph == ph) {
+		if (g_ph == ph && g_bridge_revision == bridge_revision) {
 			g_midi_fadester_loaded = false;
-			memset(g_fader_values, 0, sizeof(g_fader_values));
+			clear_fader_values_locked();
 		}
 		pthread_mutex_unlock(&g_bridge_mutex);
 		return false;
@@ -212,10 +228,12 @@ bool vs_fader_bridge_poll_once(void)
 	calldata_free(&cd);
 
 	pthread_mutex_lock(&g_bridge_mutex);
-	if (g_ph == ph) {
+	if (g_ph == ph && g_fader_generations[idx] == slot_generation) {
 		g_midi_fadester_loaded = true;
-		if (ok)
-			g_fader_values[idx] = val;
+		/* Older providers do not expose FX slots; do not retain a stale value when a slot disappears. */
+		g_fader_values[idx] = val;
+		++g_fader_generations[idx];
+		++g_bridge_revision;
 	}
 	pthread_mutex_unlock(&g_bridge_mutex);
 	return true;
@@ -229,6 +247,8 @@ bool vs_fader_bridge_set_slot(int slot_idx, float value)
 	pthread_mutex_lock(&g_bridge_mutex);
 	g_midi_fadester_loaded = true;
 	g_fader_values[slot_idx] = clamped;
+	++g_fader_generations[slot_idx];
+	++g_bridge_revision;
 	pthread_mutex_unlock(&g_bridge_mutex);
 	return true;
 }

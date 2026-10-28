@@ -38,7 +38,7 @@ enum vs_signal_id {
 	VS_SIG_FLUX = 9,
 	VS_SIG_CUSTOM_HZ = 10,
 	VS_SIG_SPECTRUM_BAND_0 = 100,  /* 100..131 address spectrum[0..31] */
-	VS_SIG_FADER_CROSSFADER = 200, /* 200..209 address Fadester slots crossfader, fader_1..8, master */
+	VS_SIG_FADER_CROSSFADER = 200, /* 200..217 address the 18 Fadester slots; legacy IDs stay unchanged. */
 	VS_SIG_FADER_1 = 201,
 	VS_SIG_FADER_2 = 202,
 	VS_SIG_FADER_3 = 203,
@@ -47,7 +47,15 @@ enum vs_signal_id {
 	VS_SIG_FADER_6 = 206,
 	VS_SIG_FADER_7 = 207,
 	VS_SIG_FADER_8 = 208,
-	VS_SIG_FADER_MASTER = 209
+	VS_SIG_FADER_MASTER = 209,
+	VS_SIG_FADER_FX_1 = 210,
+	VS_SIG_FADER_FX_2 = 211,
+	VS_SIG_FADER_FX_3 = 212,
+	VS_SIG_FADER_FX_4 = 213,
+	VS_SIG_FADER_FX_5 = 214,
+	VS_SIG_FADER_FX_6 = 215,
+	VS_SIG_FADER_FX_7 = 216,
+	VS_SIG_FADER_FX_8 = 217
 };
 
 struct vs_audio_frame {

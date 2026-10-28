@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define VS_FADER_SLOT_NONE (-1)
-#define VS_FADER_SLOT_COUNT 10
+#define VS_FADER_SLOT_COUNT 18
 #define VS_SHADER_PARAM_FADER_SLOTS 2
 #define VS_SIGNALS_MAX_EVENTS_PER_SEC 30.0f
 #define VS_SIGNALS_MIN_INTERVAL_SEC (1.0f / VS_SIGNALS_MAX_EVENTS_PER_SEC)
@@ -40,6 +40,14 @@ enum vs_fader_slot_index {
 	VS_FADER_7 = 7,
 	VS_FADER_8 = 8,
 	VS_FADER_MASTER = 9,
+	VS_FADER_FX_1 = 10,
+	VS_FADER_FX_2 = 11,
+	VS_FADER_FX_3 = 12,
+	VS_FADER_FX_4 = 13,
+	VS_FADER_FX_5 = 14,
+	VS_FADER_FX_6 = 15,
+	VS_FADER_FX_7 = 16,
+	VS_FADER_FX_8 = 17,
 };
 
 const char *vs_fader_slot_id(int slot_idx);

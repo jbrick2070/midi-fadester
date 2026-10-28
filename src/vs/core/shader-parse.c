@@ -57,6 +57,14 @@ static const char *const k_effect_template_begin =
 	"uniform float fader_7;\n"
 	"uniform float fader_8;\n"
 	"uniform float fader_master;\n"
+	"uniform float fader_fx_1;\n"
+	"uniform float fader_fx_2;\n"
+	"uniform float fader_fx_3;\n"
+	"uniform float fader_fx_4;\n"
+	"uniform float fader_fx_5;\n"
+	"uniform float fader_fx_6;\n"
+	"uniform float fader_fx_7;\n"
+	"uniform float fader_fx_8;\n"
 	"uniform float vs_effect_mix;\n"
 	"uniform float vs_reactivity_scale;\n"
 	"uniform texture2d audio_spectrum;\n"
@@ -305,6 +313,14 @@ static bool is_builtin_uniform_name(const char *name)
 		"fader_7",
 		"fader_8",
 		"fader_master",
+		"fader_fx_1",
+		"fader_fx_2",
+		"fader_fx_3",
+		"fader_fx_4",
+		"fader_fx_5",
+		"fader_fx_6",
+		"fader_fx_7",
+		"fader_fx_8",
 		"audio_spectrum",
 		"audio_fft",
 	};

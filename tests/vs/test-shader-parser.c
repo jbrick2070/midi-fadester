@@ -211,6 +211,31 @@ static void test_fader_control_uniform_ownership(void)
 	vs_shader_parse_result_free(&res);
 }
 
+static void test_fx_uniforms_are_live_host_values(void)
+{
+	const char *source =
+		"uniform float amount = 0.5;\n"
+		"float4 mainImage(VertData v_in) : TARGET { return float4(fader_fx_1, fader_fx_8, amount, 1.0); }\n";
+	struct vs_shader_parse_result res;
+	assert(vs_shader_ExpandAndParse(source, "", false, NULL, NULL, &res) == VS_SHADER_OK);
+	assert(res.param_count == 1u);
+	for (int i = 1; i <= 8; i++) {
+		char declaration[48];
+		snprintf(declaration, sizeof(declaration), "uniform float fader_fx_%d;", i);
+		assert(strstr(res.full_effect_source, declaration) != NULL);
+	}
+	vs_shader_parse_result_free(&res);
+
+	/* Full-effect declarations remain host-owned and must not get editable defaults. */
+	source = "uniform float fader_fx_1 = 0.9;\n"
+		 "uniform float fader_fx_8 = 0.8;\n"
+		 "uniform float amount = 0.5;\n";
+	assert(vs_shader_ExpandAndParse(source, "", true, NULL, NULL, &res) == VS_SHADER_OK);
+	assert(res.param_count == 1u);
+	assert(strcmp(res.params[0].name, "amount") == 0);
+	vs_shader_parse_result_free(&res);
+}
+
 static void test_host_control_setting_names_are_reserved(void)
 {
 	/* This public naming contract covers source selection, audio settings, group/button/status
@@ -543,6 +568,7 @@ int main(void)
 	test_shader_malformed_include_quotes();
 	test_shader_uniform_annotations();
 	test_fader_control_uniform_ownership();
+	test_fx_uniforms_are_live_host_values();
 	test_host_control_setting_names_are_reserved();
 	test_reserved_names_after_parameter_limit();
 	test_invalid_numeric_annotations_are_rejected();

@@ -1053,8 +1053,10 @@ static void add_fader_slot_choices(obs_property_t *list, bool fadester_loaded, c
 
 	const char *not_loaded_text = obs_module_text("Modulator.MidiFadesterNotLoaded");
 	static const char *const k_fader_locale_keys[VS_FADER_SLOT_COUNT] = {
-		"Signal.FaderCrossfader", "Signal.Fader1", "Signal.Fader2", "Signal.Fader3", "Signal.Fader4",
-		"Signal.Fader5",          "Signal.Fader6", "Signal.Fader7", "Signal.Fader8", "Signal.FaderMaster",
+		"Signal.FaderCrossfader", "Signal.Fader1",   "Signal.Fader2",   "Signal.Fader3",   "Signal.Fader4",
+		"Signal.Fader5",          "Signal.Fader6",   "Signal.Fader7",   "Signal.Fader8",   "Signal.FaderMaster",
+		"Signal.FaderFx1",        "Signal.FaderFx2", "Signal.FaderFx3", "Signal.FaderFx4", "Signal.FaderFx5",
+		"Signal.FaderFx6",        "Signal.FaderFx7", "Signal.FaderFx8",
 	};
 	char label[160];
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
@@ -1109,6 +1111,7 @@ static obs_properties_t *modulator_get_properties(void *data)
 	char key[64];
 	char grp_key[64];
 	char grp_title[128];
+	char property_title[192];
 
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
 		obs_properties_t *grp = obs_properties_create();
@@ -1149,13 +1152,17 @@ static obs_properties_t *modulator_get_properties(void *data)
 		obs_property_set_modified_callback2(p_sig, slot_modified_cb, f);
 
 		slot_key(key, sizeof(key), i, "custom_low_hz");
-		obs_property_t *p_lo = obs_properties_add_float_slider(
-			grp, key, obs_module_text("Modulator.CustomLowHz"), 20.0, 20000.0, 1.0);
+		snprintf(property_title, sizeof(property_title), "%s %u: %s",
+			 obs_module_text("Modulator.SlotGroupPrefix"), i + 1u,
+			 obs_module_text("Modulator.CustomLowHz"));
+		obs_property_t *p_lo = obs_properties_add_float_slider(grp, key, property_title, 20.0, 20000.0, 1.0);
 		obs_property_float_set_suffix(p_lo, " Hz");
 
 		slot_key(key, sizeof(key), i, "custom_high_hz");
-		obs_property_t *p_hi = obs_properties_add_float_slider(
-			grp, key, obs_module_text("Modulator.CustomHighHz"), 20.0, 20000.0, 1.0);
+		snprintf(property_title, sizeof(property_title), "%s %u: %s",
+			 obs_module_text("Modulator.SlotGroupPrefix"), i + 1u,
+			 obs_module_text("Modulator.CustomHighHz"));
+		obs_property_t *p_hi = obs_properties_add_float_slider(grp, key, property_title, 20.0, 20000.0, 1.0);
 		obs_property_float_set_suffix(p_hi, " Hz");
 
 		slot_key(key, sizeof(key), i, "custom_mode");
@@ -1167,8 +1174,9 @@ static obs_properties_t *modulator_get_properties(void *data)
 		obs_property_list_add_int(p_cm, obs_module_text("Modulator.CustomMode.Flux"), (int)VS_HZ_MODE_FLUX);
 
 		slot_key(key, sizeof(key), i, "amount_pct");
-		obs_property_t *p_amt = obs_properties_add_float_slider(grp, key, obs_module_text("Modulator.Amount"),
-									-100.0, 100.0, 1.0);
+		snprintf(property_title, sizeof(property_title), "%s %u: %s",
+			 obs_module_text("Modulator.SlotGroupPrefix"), i + 1u, obs_module_text("Modulator.Amount"));
+		obs_property_t *p_amt = obs_properties_add_float_slider(grp, key, property_title, -100.0, 100.0, 1.0);
 		obs_property_float_set_suffix(p_amt, "%");
 		obs_property_set_long_description(p_amt, obs_module_text("Modulator.Amount.Tooltip"));
 		obs_property_set_modified_callback2(p_amt, slot_modified_cb, f);
@@ -1184,13 +1192,15 @@ static obs_properties_t *modulator_get_properties(void *data)
 					   depth_fader_reset_clicked, f);
 
 		slot_key(key, sizeof(key), i, "min_value");
-		obs_property_t *p_min = obs_properties_add_float(grp, key, obs_module_text("Modulator.MinValue"),
-								 -100000.0, 100000.0, 0.01);
+		snprintf(property_title, sizeof(property_title), "%s %u: %s",
+			 obs_module_text("Modulator.SlotGroupPrefix"), i + 1u, obs_module_text("Modulator.MinValue"));
+		obs_property_t *p_min = obs_properties_add_float(grp, key, property_title, -100000.0, 100000.0, 0.01);
 		obs_property_set_modified_callback2(p_min, slot_modified_cb, f);
 
 		slot_key(key, sizeof(key), i, "max_value");
-		obs_property_t *p_max = obs_properties_add_float(grp, key, obs_module_text("Modulator.MaxValue"),
-								 -100000.0, 100000.0, 0.01);
+		snprintf(property_title, sizeof(property_title), "%s %u: %s",
+			 obs_module_text("Modulator.SlotGroupPrefix"), i + 1u, obs_module_text("Modulator.MaxValue"));
+		obs_property_t *p_max = obs_properties_add_float(grp, key, property_title, -100000.0, 100000.0, 0.01);
 		obs_property_set_modified_callback2(p_max, slot_modified_cb, f);
 
 		slot_key(key, sizeof(key), i, "invert");

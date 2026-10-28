@@ -33,7 +33,8 @@ static void test_fader_slot_lookup_and_clamping(void)
 {
 	vs_fader_bridge_reset();
 
-	/* 1. Resolve all 10 canonical Fadester slot IDs */
+	/* 1. Preserve the ten legacy indices and append all eight FX slots. */
+	assert(VS_FADER_SLOT_COUNT == 18);
 	assert(vs_fader_slot_from_name("crossfader") == VS_FADER_CROSSFADER);
 	assert(vs_fader_slot_from_name("fader_1") == VS_FADER_1);
 	assert(vs_fader_slot_from_name("fader_2") == VS_FADER_2);
@@ -44,10 +45,22 @@ static void test_fader_slot_lookup_and_clamping(void)
 	assert(vs_fader_slot_from_name("fader_7") == VS_FADER_7);
 	assert(vs_fader_slot_from_name("fader_8") == VS_FADER_8);
 	assert(vs_fader_slot_from_name("master") == VS_FADER_MASTER);
+	for (int i = 0; i < 8; i++) {
+		char id[16];
+		snprintf(id, sizeof(id), "fx_%d", i + 1);
+		assert(vs_fader_slot_from_name(id) == 10 + i);
+		assert(strcmp(vs_fader_slot_id(10 + i), id) == 0);
+		assert(vs_fader_bridge_set_slot_by_name(id, 0.125f * (float)(i + 1)));
+		const enum vs_signal_id signal = (enum vs_signal_id)(210 + i);
+		assert(float_near(vs_analyzer_get_signal(NULL, NULL, signal, 0.0f, 0.0f, VS_HZ_MODE_AVERAGE),
+				  0.125f * (float)(i + 1), 1e-6f));
+	}
 
 	/* Reject invalid slot names */
 	assert(vs_fader_slot_from_name("fader_9") == -1);
 	assert(vs_fader_slot_from_name("fader_0") == -1);
+	assert(vs_fader_slot_from_name("fx_0") == -1);
+	assert(vs_fader_slot_from_name("fx_9") == -1);
 	assert(vs_fader_slot_from_name("") == -1);
 	assert(vs_fader_slot_from_name(NULL) == -1);
 
@@ -147,10 +160,10 @@ static void test_complete_fader_snapshot(void)
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
 		assert(values[i] == 0.0f);
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
-		vs_fader_bridge_set_slot(i, (float)i / 10.0f);
+		vs_fader_bridge_set_slot(i, (float)i / 18.0f);
 	vs_fader_bridge_get_slots(values);
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
-		assert(float_near(values[i], (float)i / 10.0f, 1e-6f));
+		assert(float_near(values[i], (float)i / 18.0f, 1e-6f));
 	vs_fader_bridge_detach();
 	vs_fader_bridge_get_slots(values);
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
@@ -191,6 +204,10 @@ static void test_parameter_faders_saturate_before_numeric_conversion(void)
 struct fake_fadester_ctx {
 	float slots[VS_FADER_SLOT_COUNT];
 	int poll_calls;
+	bool reject_fx;
+	signal_handler_t *interleave_signal;
+	bool emit_clean_during_poll;
+	bool set_value_during_poll;
 };
 
 static void fake_midi_fadester_get_slot_value(void *data, calldata_t *cd)
@@ -200,14 +217,29 @@ static void fake_midi_fadester_get_slot_value(void *data, calldata_t *cd)
 
 	const char *slot_name = calldata_string(cd, "slot");
 	const int idx = vs_fader_slot_from_name(slot_name);
-	if (idx < 0) {
+	if (idx < 0 || (ctx->reject_fx && idx >= VS_FADER_FX_1)) {
 		calldata_set_float(cd, "value", 0.0);
 		calldata_set_bool(cd, "ok", false);
-		calldata_set_string(cd, "reason", "Unknown slot");
+		calldata_set_string(cd, "reason", "The requested slot is not available.");
 		return;
 	}
 
-	calldata_set_float(cd, "value", (double)ctx->slots[idx]);
+	const float snapshot = ctx->slots[idx];
+	if (ctx->emit_clean_during_poll) {
+		ctx->emit_clean_during_poll = false;
+		struct calldata event;
+		calldata_init(&event);
+		calldata_set_string(&event, "slot", slot_name);
+		calldata_set_float(&event, "value", 0.0);
+		calldata_set_string(&event, "origin", "api");
+		signal_handler_signal(ctx->interleave_signal, "midi_fadester_fader_changed", &event);
+		calldata_free(&event);
+	}
+	if (ctx->set_value_during_poll) {
+		ctx->set_value_during_poll = false;
+		vs_fader_bridge_set_slot(idx, 0.25f);
+	}
+	calldata_set_float(cd, "value", (double)snapshot);
 	calldata_set_bool(cd, "ok", true);
 	calldata_set_string(cd, "reason", "");
 }
@@ -324,6 +356,85 @@ static void test_in_process_bridge_fake_proc_and_signal(void)
 	assert(float_near(vs_analyzer_get_signal(NULL, NULL, VS_SIG_FADER_5, 60.0f, 150.0f, VS_HZ_MODE_AVERAGE), 0.91f,
 			  1e-6f));
 
+	vs_fader_bridge_detach();
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
+static void test_fx_bridge_poll_signal_and_legacy_provider(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph && sh);
+	struct fake_fadester_ctx ctx = {0};
+	for (int i = 0; i < 18; i++)
+		ctx.slots[i] = (float)(i + 1) / 18.0f;
+	proc_handler_add(
+		ph,
+		"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+		fake_midi_fadester_get_slot_value, &ctx);
+	signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+	vs_fader_bridge_attach(ph, sh);
+	for (int i = 1; i < 18; i++)
+		assert(vs_fader_bridge_poll_once());
+	assert(ctx.poll_calls == 18);
+	for (int i = 0; i < 18; i++)
+		assert(float_near(vs_fader_bridge_get_slot(i), ctx.slots[i], 1e-6f));
+
+	/* An API clean reaches the FX bridge immediately through the same event as MIDI input. */
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fx_8");
+	calldata_set_float(&cd, "value", 0.0);
+	calldata_set_string(&cd, "origin", "api");
+	signal_handler_signal(sh, "midi_fadester_fader_changed", &cd);
+	calldata_free(&cd);
+	assert(vs_fader_bridge_get_slot(VS_FADER_FX_8) == 0.0f);
+	assert(vs_fader_bridge_resolve_scale(VS_FADER_FX_8) == 0.0f);
+	assert(vs_fader_bridge_eval_float_param(VS_FADER_FX_8, 1.0f, 0.0, 100.0, true, 0.0, true, 100.0) == 0.0f);
+
+	/* A 0.3 provider still drives its ten legacy slots, and missing FX slots cannot retain stale values. */
+	ctx.reject_fx = true;
+	for (int i = 0; i < 18; i++)
+		vs_fader_bridge_poll_once();
+	assert(vs_fader_bridge_is_midi_fadester_loaded());
+	for (int i = 0; i < 10; i++)
+		assert(float_near(vs_fader_bridge_get_slot(i), ctx.slots[i], 1e-6f));
+	for (int i = 10; i < 18; i++)
+		assert(vs_fader_bridge_get_slot(i) == 0.0f);
+	vs_fader_bridge_detach();
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
+static void test_newer_events_win_over_in_flight_poll(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph && sh);
+	struct fake_fadester_ctx ctx = {0};
+	ctx.slots[VS_FADER_FX_1] = 0.8f;
+	ctx.slots[VS_FADER_FX_2] = 0.9f;
+	ctx.interleave_signal = sh;
+	proc_handler_add(
+		ph,
+		"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+		fake_midi_fadester_get_slot_value, &ctx);
+	signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+	vs_fader_bridge_attach(ph, sh);
+	for (int i = 1; i < 10; i++)
+		vs_fader_bridge_poll_once();
+
+	/* The fake proc reads 0.8, then an API clean arrives before that read completes. */
+	ctx.emit_clean_during_poll = true;
+	assert(vs_fader_bridge_poll_once());
+	assert(vs_fader_bridge_get_slot(VS_FADER_FX_1) == 0.0f);
+
+	/* Direct setters also invalidate a preceding read of the same slot. */
+	ctx.set_value_during_poll = true;
+	assert(vs_fader_bridge_poll_once());
+	assert(vs_fader_bridge_get_slot(VS_FADER_FX_2) == 0.25f);
+	assert(vs_fader_bridge_is_midi_fadester_loaded());
 	vs_fader_bridge_detach();
 	signal_handler_destroy(sh);
 	proc_handler_destroy(ph);
@@ -596,6 +707,8 @@ int main(void)
 	test_parameter_faders_saturate_before_numeric_conversion();
 	test_vendor_payload_fields_trigger_events();
 	test_in_process_bridge_fake_proc_and_signal();
+	test_fx_bridge_poll_signal_and_legacy_provider();
+	test_newer_events_win_over_in_flight_poll();
 	test_panic_and_restore_hotkeys_logic();
 	test_multi_instance_frame_deduplication_and_track1_priority();
 	test_shader_and_modulator_fader_parameter_controls();

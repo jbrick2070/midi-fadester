@@ -67,6 +67,16 @@ visual_sidechain_add_test(
   "${_core}/modulation.c"
   ${_analyzer_srcs}
 )
+visual_sidechain_add_test(
+  test-modulator-properties
+  test-modulator-properties.c
+  "${CMAKE_SOURCE_DIR}/src/obs/modulator-filter.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/audio-tap.c"
+  "${_core}/modulation.c"
+  "${_core}/baseline.c"
+  ${_analyzer_srcs}
+)
+target_link_libraries(test-modulator-properties PRIVATE plugin-support)
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(

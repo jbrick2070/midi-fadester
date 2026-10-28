@@ -468,8 +468,9 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		sf->p_audio_fft = gs_effect_get_param_by_name(sf->effect, "audio_fft");
 
 		static const char *const k_fader_uniform_names[VS_FADER_SLOT_COUNT] = {
-			"fader_crossfader", "fader_1", "fader_2", "fader_3", "fader_4",
-			"fader_5",          "fader_6", "fader_7", "fader_8", "fader_master",
+			"fader_crossfader", "fader_1",    "fader_2",    "fader_3",      "fader_4",    "fader_5",
+			"fader_6",          "fader_7",    "fader_8",    "fader_master", "fader_fx_1", "fader_fx_2",
+			"fader_fx_3",       "fader_fx_4", "fader_fx_5", "fader_fx_6",   "fader_fx_7", "fader_fx_8",
 		};
 		for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
 			sf->p_fader[i] = gs_effect_get_param_by_name(sf->effect, k_fader_uniform_names[i]);
@@ -1173,8 +1174,10 @@ static void populate_shader_fader_slot_list(obs_property_t *list, bool fadester_
 
 	const char *not_loaded_text = obs_module_text("Modulator.MidiFadesterNotLoaded");
 	static const char *const k_fader_locale_keys[VS_FADER_SLOT_COUNT] = {
-		"Signal.FaderCrossfader", "Signal.Fader1", "Signal.Fader2", "Signal.Fader3", "Signal.Fader4",
-		"Signal.Fader5",          "Signal.Fader6", "Signal.Fader7", "Signal.Fader8", "Signal.FaderMaster",
+		"Signal.FaderCrossfader", "Signal.Fader1",   "Signal.Fader2",   "Signal.Fader3",   "Signal.Fader4",
+		"Signal.Fader5",          "Signal.Fader6",   "Signal.Fader7",   "Signal.Fader8",   "Signal.FaderMaster",
+		"Signal.FaderFx1",        "Signal.FaderFx2", "Signal.FaderFx3", "Signal.FaderFx4", "Signal.FaderFx5",
+		"Signal.FaderFx6",        "Signal.FaderFx7", "Signal.FaderFx8",
 	};
 	char label[160];
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {

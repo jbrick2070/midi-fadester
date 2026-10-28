@@ -40,7 +40,7 @@ struct vs_mod_slot_config {
 	float custom_high_hz;
 	enum vs_hz_band_mode custom_mode;
 	double amount;        /* [-1.0, +1.0], negative = ducking */
-	int depth_fader_slot; /* -1 = unbound (fixed 1.0 depth_scale), 0..9 = Fadester slot */
+	int depth_fader_slot; /* -1 = unbound (fixed 1.0 depth_scale), 0..17 = Fadester slot */
 	double depth_scale;   /* [0.0, 1.0], live fader depth multiplier (1.0 when unbound) */
 	double min_value;     /* lower bound of target range */
 	double max_value;     /* upper bound of target range */
