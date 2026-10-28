@@ -31,12 +31,14 @@
 #include <QProcess>
 #include <QSlider>
 #include <QThread>
+#include <QTimer>
 #include <QVariant>
 #include <QWidget>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
@@ -46,11 +48,57 @@ static std::atomic<bool> g_studio_mode_active{false};
 static std::atomic<bool> g_slider_tbar_found{false};
 static std::atomic<bool> g_logged_missing_error{false};
 static std::atomic<int> g_last_pos_1024{0};
+static std::atomic<bool> g_tbar_release_latched{false};
+static std::atomic<uint64_t> g_tbar_throw_epoch{1ULL};
 static std::atomic<int> g_tbar_set_count{0};
 static std::atomic<int> g_tbar_release_count{0};
 static std::atomic<int> g_tbar_writes_since_release{0};
+static std::atomic<int> g_tbar_post_first_release_writes{0};
 static std::atomic<int> g_tbar_writes_before_unpark{0};
 static std::atomic<bool> g_tbar_awaiting_unpark{false};
+static std::atomic<bool> g_tbar_debug_log{false};
+
+/* UI-thread-only per-transition latch & active-transition guard state */
+static uint64_t g_tbar_ui_last_released_epoch = 0ULL;
+static bool g_tbar_ui_throw_active = false;
+static bool g_tbar_awaiting_transition_stop = false;
+static bool g_tbar_deferred_poll_scheduled = false;
+
+struct mfd_deferred_tbar_cmd {
+	bool active;
+	int pos_1024;
+	bool do_set;
+	bool do_release;
+	uint64_t epoch;
+};
+
+static mfd_deferred_tbar_cmd g_pending_deferred_tbar = {false, 0, false, false, 0ULL};
+
+void mfd_tbar_reset_release_latch(void)
+{
+	g_tbar_throw_epoch.fetch_add(1ULL, std::memory_order_acq_rel);
+	g_tbar_release_latched.store(false, std::memory_order_release);
+	g_last_pos_1024.store(0, std::memory_order_relaxed);
+}
+
+bool mfd_tbar_is_release_latched(void)
+{
+	return g_tbar_release_latched.load(std::memory_order_acquire);
+}
+
+static const char *takeover_state_str(enum mfd_takeover_state st)
+{
+	switch (st) {
+	case MFD_TAKEOVER_ENGAGED:
+		return "ENGAGED";
+	case MFD_TAKEOVER_WAITING:
+		return "WAITING";
+	case MFD_TAKEOVER_PARKED:
+		return "PARKED";
+	default:
+		return "UNKNOWN";
+	}
+}
 
 static QSlider *locate_slider_tbar_on_ui_thread(void)
 {
@@ -101,12 +149,65 @@ static void refresh_studio_mode_state_on_ui_thread(void)
 	}
 }
 
-static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release)
+static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release, uint64_t epoch);
+
+static void flush_deferred_tbar_on_ui_thread(void)
+{
+	if (!g_pending_deferred_tbar.active) {
+		return;
+	}
+	obs_source_t *tr = obs_get_output_source(0);
+	const bool active_tr = tr ? obs_transition_is_active(tr) : false;
+	if (tr) {
+		obs_source_release(tr);
+	}
+	if (g_tbar_awaiting_transition_stop && active_tr) {
+		return;
+	}
+	g_tbar_awaiting_transition_stop = false;
+	const mfd_deferred_tbar_cmd cmd = g_pending_deferred_tbar;
+	g_pending_deferred_tbar.active = false;
+	execute_tbar_on_ui_thread(cmd.pos_1024, cmd.do_set, cmd.do_release, cmd.epoch);
+}
+
+static void schedule_deferred_tbar_poll_on_ui_thread(void)
+{
+	if (g_tbar_deferred_poll_scheduled) {
+		return;
+	}
+	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+	if (!main_win) {
+		return;
+	}
+	g_tbar_deferred_poll_scheduled = true;
+	QTimer::singleShot(25, main_win, []() {
+		g_tbar_deferred_poll_scheduled = false;
+		if (!g_pending_deferred_tbar.active) {
+			return;
+		}
+		obs_source_t *tr = obs_get_output_source(0);
+		const bool active_tr = tr ? obs_transition_is_active(tr) : false;
+		if (tr) {
+			obs_source_release(tr);
+		}
+		if (!active_tr) {
+			g_tbar_awaiting_transition_stop = false;
+			flush_deferred_tbar_on_ui_thread();
+		} else {
+			schedule_deferred_tbar_poll_on_ui_thread();
+		}
+	});
+}
+
+static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release, uint64_t epoch)
 {
 	if (!obs_frontend_preview_program_mode_active()) {
 		g_studio_mode_active.store(false, std::memory_order_relaxed);
 		g_tbar_slider.clear();
 		g_slider_tbar_found.store(false, std::memory_order_relaxed);
+		g_tbar_ui_throw_active = false;
+		g_tbar_awaiting_transition_stop = false;
+		g_pending_deferred_tbar.active = false;
 		return;
 	}
 
@@ -123,22 +224,102 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 		return;
 	}
 
+	/*
+	 * Per-transition UI-thread release latch:
+	 * Between one manual transition start and the next unpark (next epoch),
+	 * at most ONE release may execute and zero slider writes may occur after release.
+	 */
+	if (epoch <= g_tbar_ui_last_released_epoch) {
+		return;
+	}
+	if (!do_release && !g_tbar_ui_throw_active && epoch < g_tbar_throw_epoch.load(std::memory_order_acquire)) {
+		return;
+	}
+
+	/*
+	 * Guard against OBSBasic::TransitionToScene stillTransitioning race:
+	 * If a previous completed throw is still finishing its TransitionStopped swap,
+	 * coalesce this new throw's start until TransitionStopped finishes.
+	 */
+	if (!g_tbar_ui_throw_active && (do_set || do_release)) {
+		obs_source_t *tr_chk = obs_get_output_source(0);
+		const bool tr_busy = g_tbar_awaiting_transition_stop || (tr_chk && obs_transition_is_active(tr_chk));
+		if (tr_chk) {
+			obs_source_release(tr_chk);
+		}
+		if (tr_busy) {
+			if (!g_pending_deferred_tbar.active || epoch > g_pending_deferred_tbar.epoch) {
+				g_pending_deferred_tbar = {true, pos_1024, do_set, do_release, epoch};
+			} else if (epoch == g_pending_deferred_tbar.epoch && !g_pending_deferred_tbar.do_release) {
+				g_pending_deferred_tbar.pos_1024 = pos_1024;
+				g_pending_deferred_tbar.do_set = g_pending_deferred_tbar.do_set || do_set;
+				g_pending_deferred_tbar.do_release = g_pending_deferred_tbar.do_release || do_release;
+			}
+			schedule_deferred_tbar_poll_on_ui_thread();
+			return;
+		}
+	}
+
+	const bool dbg = g_tbar_debug_log.load(std::memory_order_relaxed) ||
+			 qEnvironmentVariableIsSet("MFD_TBAR_DEBUG");
+	if (dbg && (do_set || do_release)) {
+		struct mfd_engine *eng_dbg = mfd_engine_get();
+		int raw_cc = (eng_dbg && eng_dbg->has_last_midi) ? (int)eng_dbg->last_midi_decoded.raw_value : -1;
+		float raw_norm = eng_dbg ? eng_dbg->fader_slots[0].last_raw_norm : -1.0f;
+		const char *st_str = eng_dbg ? takeover_state_str(eng_dbg->fader_slots[0].takeover.state) : "NO_ENGINE";
+		float peak = eng_dbg ? eng_dbg->fader_slots[0].takeover.parked_peak : -1.0f;
+		int pol_rev = eng_dbg ? (int)eng_dbg->fader_slots[0].takeover.polarity_reversed : 0;
+		obs_source_t *tr_dbg = obs_get_output_source(0);
+		float tr_t = tr_dbg ? obs_transition_get_time(tr_dbg) : -1.0f;
+		if (tr_dbg) {
+			obs_source_release(tr_dbg);
+		}
+		obs_source_t *prev_s = obs_frontend_get_current_preview_scene();
+		obs_source_t *prog_s = obs_frontend_get_current_scene();
+		obs_log(LOG_INFO,
+			"TBAR DEBUG: write=%d(pos=%d slider_before=%d) release=%d raw_cc=%d raw_norm=%.4f state=%s peak=%.4f pol_rev=%d tr_time=%.4f epoch=%llu preview='%s' program='%s'",
+			(int)do_set, pos_1024, g_tbar_slider->value(), (int)do_release, raw_cc, raw_norm, st_str, peak,
+			pol_rev, tr_t, static_cast<unsigned long long>(epoch),
+			(prev_s && obs_source_get_name(prev_s)) ? obs_source_get_name(prev_s) : "",
+			(prog_s && obs_source_get_name(prog_s)) ? obs_source_get_name(prog_s) : "");
+		if (prev_s) {
+			obs_source_release(prev_s);
+		}
+		if (prog_s) {
+			obs_source_release(prog_s);
+		}
+	}
+
 	if (do_set) {
 		/*
 		 * Sync both OBSBasic::tBar QSlider value and OBS transition position so that
 		 * obs_frontend_release_tbar() sees tBar->value() >= 921 at completion and does not
 		 * snap back to the old scene (OBSStudioAPI.cpp:115 vs OBSBasic_Transitions.cpp:752).
 		 */
+		g_tbar_ui_throw_active = true;
 		g_tbar_slider->blockSignals(true);
 		g_tbar_slider->setValue(pos_1024);
 		g_tbar_slider->blockSignals(false);
 		obs_frontend_set_tbar_position(pos_1024);
 		g_tbar_set_count.fetch_add(1, std::memory_order_relaxed);
 		g_tbar_writes_since_release.fetch_add(1, std::memory_order_relaxed);
+		if (g_tbar_release_count.load(std::memory_order_relaxed) >= 1) {
+			g_tbar_post_first_release_writes.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 
 	if (do_release) {
+		g_tbar_ui_last_released_epoch = epoch;
+		g_tbar_ui_throw_active = false;
 		obs_frontend_release_tbar();
+		obs_source_t *tr_rel = obs_get_output_source(0);
+		if (tr_rel) {
+			obs_transition_set_manual_torque(tr_rel, 0.0f, 0.0f);
+			if (obs_transition_is_active(tr_rel)) {
+				g_tbar_awaiting_transition_stop = true;
+			}
+			obs_source_release(tr_rel);
+		}
 		g_tbar_release_count.fetch_add(1, std::memory_order_relaxed);
 		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
 	}
@@ -699,12 +880,15 @@ static void run_live_selftest_worker(void)
 		obs_data_release(req);
 
 		/* Place crossfader at 0.50 (512) and arm soft takeover waiting for physical fader to cross 0.50 */
+		mfd_tbar_reset_release_latch();
 		mfd_takeover_sync_external(&eng->fader_slots[0].takeover, 0.50f);
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.50f);
 		eng->fader_slots[0].last_applied_val = 0.50f;
 		g_last_pos_1024.store(512, std::memory_order_relaxed);
+		const uint64_t ep_p1a = g_tbar_throw_epoch.load(std::memory_order_acquire);
 		QMetaObject::invokeMethod(
-			main_win, [&]() { execute_tbar_on_ui_thread(512, true, false); }, Qt::BlockingQueuedConnection);
+			main_win, [&]() { execute_tbar_on_ui_thread(512, true, false, ep_p1a); },
+			Qt::BlockingQueuedConnection);
 
 		/* Part 1a: Sweep 0..30 (0.00..0.236, away from 0.50) -> soft takeover must stay WAITING and T-bar must stay at 512 */
 		int rc_pre = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
@@ -725,7 +909,8 @@ static void run_live_selftest_worker(void)
 		eng->fader_slots[0].last_applied_val = 0.50f;
 		g_last_pos_1024.store(512, std::memory_order_relaxed);
 		QMetaObject::invokeMethod(
-			main_win, [&]() { execute_tbar_on_ui_thread(512, true, false); }, Qt::BlockingQueuedConnection);
+			main_win, [&]() { execute_tbar_on_ui_thread(512, true, false, ep_p1a); },
+			Qt::BlockingQueuedConnection);
 
 		QProcess sweep_proc;
 		sweep_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1" << "15"
@@ -778,6 +963,7 @@ static void run_live_selftest_worker(void)
 		 * - T-bar released once per throw,
 		 * - 0 slider writes between completion and the fader leaving the rail (> 8% from peak).
 		 */
+		mfd_tbar_reset_release_latch();
 		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
 		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
@@ -788,6 +974,7 @@ static void run_live_selftest_worker(void)
 		g_obs_manual_cancelled.store(0, std::memory_order_relaxed);
 		g_tbar_release_count.store(0, std::memory_order_relaxed);
 		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_post_first_release_writes.store(0, std::memory_order_relaxed);
 		g_tbar_writes_before_unpark.store(0, std::memory_order_relaxed);
 		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
 
@@ -839,6 +1026,7 @@ static void run_live_selftest_worker(void)
 		 * - T-bar released once per throw,
 		 * - 0 slider writes between completion and the fader leaving the 95% peak (> 8% below 95%).
 		 */
+		mfd_tbar_reset_release_latch();
 		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
 		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
@@ -848,6 +1036,7 @@ static void run_live_selftest_worker(void)
 		g_obs_manual_finished.store(0, std::memory_order_relaxed);
 		g_tbar_release_count.store(0, std::memory_order_relaxed);
 		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_post_first_release_writes.store(0, std::memory_order_relaxed);
 		g_tbar_writes_before_unpark.store(0, std::memory_order_relaxed);
 		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
 
@@ -893,16 +1082,182 @@ static void run_live_selftest_worker(void)
 			c3_d1_peak, c3_d1_post_writes, c3_d2_started, c3_d2_finished, c3_d2_releases, (int)c3_d2_parked,
 			c3_d2_peak, c3_d2_post_writes, c3_writes_before_unpark);
 
+		/*
+		 * Case (4): Rail jitter 127/126/127 every 100 ms for 3.0 s (30 steps) after a 0 -> 127 throw,
+		 * with full TBAR DEBUG logging of every slider write and every release.
+		 * Asserts: 1 started, 1 finished, 0 releases after the first, 0 slider writes after the first release,
+		 * and Preview/Program ending swapped on the exact expected scenes.
+		 */
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				if (test_scene && test_scene_b) {
+					obs_frontend_set_current_scene(obs_scene_get_source(test_scene));
+					obs_frontend_set_current_preview_scene(obs_scene_get_source(test_scene_b));
+				}
+			},
+			Qt::BlockingQueuedConnection);
+		std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+		mfd_tbar_reset_release_latch();
+		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
+		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
+		eng->fader_slots[0].last_applied_val = 0.0f;
+		g_last_pos_1024.store(0, std::memory_order_relaxed);
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_obs_manual_cancelled.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_post_first_release_writes.store(0, std::memory_order_relaxed);
+		g_tbar_writes_before_unpark.store(0, std::memory_order_relaxed);
+		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
+		g_tbar_debug_log.store(true, std::memory_order_relaxed);
+
+		obs_log(LOG_INFO, "LOOPMIDI CASE 4 (0->127 + 127/126/127 x 100ms for 3s): starting...");
+		int rc_c4_throw = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port)
+										 << "1" << "15" << "200"
+										 << "0" << "127");
+		int rc_c4_jitter = QProcess::execute(midi_send_exe, QStringList() << "--jitter"
+										  << QString::fromUtf8(loopmidi_port)
+										  << "1" << "15" << "100"
+										  << "30" << "126" << "127");
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+		int c4_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c4_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c4_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+		int c4_post_releases = (c4_releases > 1) ? (c4_releases - 1) : 0;
+		int c4_post_writes = std::max(g_tbar_writes_since_release.load(std::memory_order_relaxed),
+					      g_tbar_post_first_release_writes.load(std::memory_order_relaxed));
+		bool c4_parked = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
+
+		char c4_prev_name[128] = {0};
+		char c4_prog_name[128] = {0};
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				obs_source_t *ps = obs_frontend_get_current_preview_scene();
+				obs_source_t *cs = obs_frontend_get_current_scene();
+				if (ps && obs_source_get_name(ps)) {
+					std::snprintf(c4_prev_name, sizeof(c4_prev_name), "%s",
+						      obs_source_get_name(ps));
+				}
+				if (cs && obs_source_get_name(cs)) {
+					std::snprintf(c4_prog_name, sizeof(c4_prog_name), "%s",
+						      obs_source_get_name(cs));
+				}
+				if (ps) {
+					obs_source_release(ps);
+				}
+				if (cs) {
+					obs_source_release(cs);
+				}
+			},
+			Qt::BlockingQueuedConnection);
+
+		const char *exp_scene_a = (test_scene && obs_source_get_name(obs_scene_get_source(test_scene)))
+						  ? obs_source_get_name(obs_scene_get_source(test_scene))
+						  : "__mfd_selftest_scene__";
+		const char *exp_scene_b = (test_scene_b && obs_source_get_name(obs_scene_get_source(test_scene_b)))
+						  ? obs_source_get_name(obs_scene_get_source(test_scene_b))
+						  : "__mfd_selftest_scene_b__";
+
+		bool c4_scenes_ok = (std::strcmp(c4_prev_name, exp_scene_a) == 0) &&
+				    (std::strcmp(c4_prog_name, exp_scene_b) == 0);
+		bool case4_ok = (rc_c4_throw == 0) && (rc_c4_jitter == 0) && (c4_started == 1) && (c4_finished == 1) &&
+				(c4_releases == 1) && (c4_post_releases == 0) && (c4_post_writes == 0) && c4_parked &&
+				c4_scenes_ok;
+
+		obs_log(case4_ok ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI CASE 4 (127/126/127 x 100ms 3s) [%s]: started=%d finished=%d releases=%d post_first_releases=%d post_first_writes=%d parked=%d preview='%s'(exp='%s') program='%s'(exp='%s')",
+			case4_ok ? "PASS" : "FAIL", c4_started, c4_finished, c4_releases, c4_post_releases,
+			c4_post_writes, (int)c4_parked, c4_prev_name, exp_scene_a, c4_prog_name, exp_scene_b);
+
+		/*
+		 * Case (5): Rapid back-and-forth throws within OBS's ~530 ms manual-torque tail
+		 * (0 -> 127, 250 ms pause, 127 -> 0, 250 ms pause, 0 -> 127 — matching video 17:41:58.815..17:42:01.948).
+		 * Asserts: started == finished (never multiple finishes per start!) and Preview != Program on expected scenes.
+		 */
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				if (test_scene && test_scene_b) {
+					obs_frontend_set_current_scene(obs_scene_get_source(test_scene));
+					obs_frontend_set_current_preview_scene(obs_scene_get_source(test_scene_b));
+				}
+			},
+			Qt::BlockingQueuedConnection);
+		std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+		mfd_tbar_reset_release_latch();
+		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
+		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
+		eng->fader_slots[0].last_applied_val = 0.0f;
+		g_last_pos_1024.store(0, std::memory_order_relaxed);
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_post_first_release_writes.store(0, std::memory_order_relaxed);
+
+		obs_log(LOG_INFO, "LOOPMIDI CASE 5 (rapid throws 0->127->0->127 every 200ms): starting...");
+		int rc_c5 = QProcess::execute(midi_send_exe, QStringList() << "--rapid-throws"
+									   << QString::fromUtf8(loopmidi_port) << "1"
+									   << "15" << "150" << "200");
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		g_tbar_debug_log.store(false, std::memory_order_relaxed);
+
+		int c5_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c5_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c5_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+
+		char c5_prev_name[128] = {0};
+		char c5_prog_name[128] = {0};
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				obs_source_t *ps = obs_frontend_get_current_preview_scene();
+				obs_source_t *cs = obs_frontend_get_current_scene();
+				if (ps && obs_source_get_name(ps)) {
+					std::snprintf(c5_prev_name, sizeof(c5_prev_name), "%s",
+						      obs_source_get_name(ps));
+				}
+				if (cs && obs_source_get_name(cs)) {
+					std::snprintf(c5_prog_name, sizeof(c5_prog_name), "%s",
+						      obs_source_get_name(cs));
+				}
+				if (ps) {
+					obs_source_release(ps);
+				}
+				if (cs) {
+					obs_source_release(cs);
+				}
+			},
+			Qt::BlockingQueuedConnection);
+
+		bool c5_scenes_ok = (std::strcmp(c5_prev_name, exp_scene_a) == 0) &&
+				    (std::strcmp(c5_prog_name, exp_scene_b) == 0);
+		bool case5_ok = (rc_c5 == 0) && (c5_started == 3) && (c5_finished == 3) && (c5_releases == 3) &&
+				c5_scenes_ok;
+
+		obs_log(case5_ok ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI CASE 5 (rapid throws <530ms) [%s]: started=%d finished=%d releases=%d preview='%s'(exp='%s') program='%s'(exp='%s')",
+			case5_ok ? "PASS" : "FAIL", c5_started, c5_finished, c5_releases, c5_prev_name, exp_scene_a,
+			c5_prog_name, exp_scene_b);
+
 		loopmidi_pass = connected && pre_waiting_ok && pre_slider_held && saw_waiting_before_pickup &&
 				saw_engaged_after_pickup && smoothing_ok && sweep_completed_throw &&
-				(final_cc == 127) && case2_ok && case3_ok;
+				(final_cc == 127) && case2_ok && case3_ok && case4_ok && case5_ok;
 
 		obs_log(loopmidi_pass ? LOG_INFO : LOG_ERROR,
-			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d case2_ok=%d case3_ok=%d",
+			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d case2_ok=%d case3_ok=%d case4_ok=%d case5_ok=%d",
 			loopmidi_pass ? "PASS" : "FAIL", loopmidi_port, (int)connected, (int)pre_waiting_ok, slider_pre,
 			(int)saw_waiting_before_pickup, (int)saw_engaged_after_pickup, mid_sweep_samples,
-			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw, (int)case2_ok,
-			(int)case3_ok);
+			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw, (int)case2_ok, (int)case3_ok,
+			(int)case4_ok, (int)case5_ok);
 
 		mfd_engine_reconnect_midi(eng, prev_midi_dev);
 	} else {
@@ -1064,8 +1419,24 @@ static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 		break;
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
-	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED:
+		g_tbar_ui_throw_active = false;
+		g_tbar_awaiting_transition_stop = false;
+		g_pending_deferred_tbar.active = false;
 		refresh_studio_mode_state_on_ui_thread();
+		break;
+	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED:
+		g_tbar_awaiting_transition_stop = false;
+		refresh_studio_mode_state_on_ui_thread();
+		if (g_pending_deferred_tbar.active) {
+			QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+			if (main_win) {
+				/*
+				 * Defer by 0 ms so OBSBasic::TransitionStopped() finishes clearing
+				 * swapScene = nullptr (OBSBasic_Transitions.cpp:271) before the next throw starts.
+				 */
+				QTimer::singleShot(0, main_win, []() { flush_deferred_tbar_on_ui_thread(); });
+			}
+		}
 		break;
 	default:
 		break;
@@ -1096,10 +1467,12 @@ bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_er
 
 	bool studio_active = mfd_tbar_is_studio_mode_active();
 	bool slider_found = g_slider_tbar_found.load(std::memory_order_relaxed);
+	bool latched = g_tbar_release_latched.load(std::memory_order_acquire);
+	uint64_t epoch = g_tbar_throw_epoch.load(std::memory_order_acquire);
 	int last_pos = g_last_pos_1024.load(std::memory_order_relaxed);
 
 	struct mfd_tbar_action act;
-	mfd_tbar_compute_action(studio_active, slider_found, t_norm, last_pos, &act);
+	mfd_tbar_compute_action_ex(studio_active, slider_found, latched, t_norm, last_pos, &act);
 
 	if (act.report_missing_slider_error) {
 		if (!g_logged_missing_error.exchange(true, std::memory_order_relaxed)) {
@@ -1119,11 +1492,18 @@ bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_er
 	}
 
 	if (act.call_release_tbar) {
+		if (g_tbar_release_latched.exchange(true, std::memory_order_acq_rel)) {
+			/* Per-transition release latch already tripped; block both slider write and release. */
+			return true;
+		}
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		if (out_completed_throw) {
 			*out_completed_throw = true;
 		}
 	} else {
+		if (g_tbar_release_latched.load(std::memory_order_acquire)) {
+			return true;
+		}
 		g_last_pos_1024.store(act.target_pos_1024, std::memory_order_relaxed);
 	}
 
@@ -1157,10 +1537,11 @@ bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_er
 	const bool do_rel = act.call_release_tbar;
 
 	if (QThread::currentThread() == main_win->thread()) {
-		execute_tbar_on_ui_thread(pos, do_set, do_rel);
+		execute_tbar_on_ui_thread(pos, do_set, do_rel, epoch);
 	} else {
 		QMetaObject::invokeMethod(
-			main_win, [pos, do_set, do_rel]() { execute_tbar_on_ui_thread(pos, do_set, do_rel); },
+			main_win,
+			[pos, do_set, do_rel, epoch]() { execute_tbar_on_ui_thread(pos, do_set, do_rel, epoch); },
 			Qt::QueuedConnection);
 	}
 
@@ -1173,14 +1554,24 @@ void mfd_tbar_init(void)
 	g_slider_tbar_found.store(false, std::memory_order_relaxed);
 	g_logged_missing_error.store(false, std::memory_order_relaxed);
 	g_last_pos_1024.store(0, std::memory_order_relaxed);
+	g_tbar_release_latched.store(false, std::memory_order_relaxed);
+	g_tbar_throw_epoch.store(1ULL, std::memory_order_relaxed);
+	g_tbar_ui_last_released_epoch = 0ULL;
+	g_tbar_ui_throw_active = false;
+	g_tbar_awaiting_transition_stop = false;
+	g_tbar_deferred_poll_scheduled = false;
+	g_pending_deferred_tbar.active = false;
 
 	mfd_engine_set_tbar_driver(mfd_tbar_driver_apply);
+	mfd_engine_set_tbar_unlatch_fn(mfd_tbar_reset_release_latch);
 	obs_frontend_add_event_callback(on_tbar_frontend_event, nullptr);
 }
 
 void mfd_tbar_shutdown(void)
 {
 	obs_frontend_remove_event_callback(on_tbar_frontend_event, nullptr);
+	mfd_engine_set_tbar_unlatch_fn(nullptr);
 	mfd_engine_set_tbar_driver(nullptr);
+	g_pending_deferred_tbar.active = false;
 	g_tbar_slider.clear();
 }

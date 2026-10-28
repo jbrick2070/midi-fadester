@@ -19,8 +19,8 @@ static float clamp01(float v)
 	return v;
 }
 
-void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, float t_norm, int last_pos_1024,
-			     struct mfd_tbar_action *out_action)
+void mfd_tbar_compute_action_ex(bool studio_mode_active, bool slider_tbar_found, bool release_latched, float t_norm,
+				int last_pos_1024, struct mfd_tbar_action *out_action)
 {
 	if (!out_action) {
 		return;
@@ -39,6 +39,16 @@ void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, fl
 		return;
 	}
 
+	out_action->allow_frontend_calls = true;
+	out_action->report_missing_slider_error = false;
+
+	if (release_latched) {
+		out_action->target_pos_1024 = 0;
+		out_action->call_set_tbar = false;
+		out_action->call_release_tbar = false;
+		return;
+	}
+
 	float clamped = clamp01(t_norm);
 	int pos = (int)lroundf(clamped * (float)MFD_TBAR_RANGE_MAX);
 	if (pos < 0) {
@@ -48,16 +58,23 @@ void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, fl
 		pos = MFD_TBAR_RANGE_MAX;
 	}
 
-	out_action->allow_frontend_calls = true;
-	out_action->report_missing_slider_error = false;
 	out_action->target_pos_1024 = pos;
 	if (last_pos_1024 >= MFD_TBAR_COMPLETE_POS && pos >= MFD_TBAR_COMPLETE_POS) {
 		out_action->call_set_tbar = false;
 		out_action->call_release_tbar = false;
+	} else if (pos >= MFD_TBAR_COMPLETE_POS) {
+		out_action->call_set_tbar = true;
+		out_action->call_release_tbar = true;
 	} else {
 		out_action->call_set_tbar = (pos != last_pos_1024);
-		out_action->call_release_tbar = (pos >= MFD_TBAR_COMPLETE_POS && last_pos_1024 < MFD_TBAR_COMPLETE_POS);
+		out_action->call_release_tbar = false;
 	}
+}
+
+void mfd_tbar_compute_action(bool studio_mode_active, bool slider_tbar_found, float t_norm, int last_pos_1024,
+			     struct mfd_tbar_action *out_action)
+{
+	mfd_tbar_compute_action_ex(studio_mode_active, slider_tbar_found, false, t_norm, last_pos_1024, out_action);
 }
 
 bool mfd_should_show_studio_mode_note(bool studio_mode_active, size_t active_tbar_slot_count)

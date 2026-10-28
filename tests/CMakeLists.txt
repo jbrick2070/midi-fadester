@@ -54,6 +54,7 @@ add_executable(
   "${_core}/takeover.c"
   "${_core}/mixer-math.c"
   "${_core}/apc40-profile.c"
+  "${_core}/tbar-logic.c"
 )
 target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support winmm)

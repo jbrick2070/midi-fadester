@@ -66,6 +66,7 @@ struct mfd_fader_slot {
 };
 
 typedef bool (*mfd_tbar_apply_fn)(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size);
+typedef void (*mfd_tbar_unlatch_fn)(void);
 typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
 
 struct mfd_engine {
@@ -83,6 +84,7 @@ struct mfd_engine {
 	struct mfd_midi_decoded last_midi_decoded;
 
 	mfd_tbar_apply_fn tbar_driver;
+	mfd_tbar_unlatch_fn tbar_unlatch;
 	char tbar_error[256];
 
 	/* Optional test overrides when running outside live OBS */
@@ -101,6 +103,9 @@ bool mfd_engine_init(void);
 void mfd_engine_shutdown(void);
 
 void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn);
+void mfd_engine_set_tbar_unlatch_fn(mfd_tbar_unlatch_fn unlatch_fn);
+void mfd_engine_unlatch_tbar(struct mfd_engine *eng);
+void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng);
 
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng);
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name);

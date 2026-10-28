@@ -260,6 +260,27 @@ int main(void)
 	REQUIRE(pct == 20);
 	REQUIRE(strcmp(bar_text, "\xE2\x86\x93 20%") == 0);
 
+	/*
+	 * 5. Fast throw bumper-bounce peak preservation & 30-step 127/126/127 rail jitter (R-FADE-1 / R-FEEL-4):
+	 * If a fast physical throw hits CC 127 (1.00) and bounces slightly to CC 126 (126/127) before the
+	 * 30 ms smoother crosses 90% and calls mfd_takeover_notify_tbar_completed(), parked_peak MUST preserve
+	 * the true raw extreme 1.00, and 30 steps of 127/126/127 rail jitter MUST produce zero writes.
+	 */
+	struct mfd_takeover t_jitter;
+	mfd_takeover_init(&t_jitter, 0.0f, 0.015f, true);
+	REQUIRE(mfd_takeover_step(&t_jitter, 0.0f, &out));
+	REQUIRE(mfd_takeover_step(&t_jitter, 1.0f, &out));
+	REQUIRE(mfd_takeover_step(&t_jitter, 126.0f / 127.0f, &out));
+	mfd_takeover_notify_tbar_completed(&t_jitter);
+	REQUIRE(t_jitter.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(fabsf(t_jitter.parked_peak - 1.0f) < 1e-6f);
+
+	for (int step = 0; step < 30; ++step) {
+		float raw_cc = ((step % 2) == 0) ? (126.0f / 127.0f) : 1.0f;
+		REQUIRE(!mfd_takeover_step(&t_jitter, raw_cc, &out));
+		REQUIRE(t_jitter.state == MFD_TAKEOVER_PARKED);
+	}
+
 	printf("test-takeover: PASS\n");
 	return 0;
 }

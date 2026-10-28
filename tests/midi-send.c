@@ -108,10 +108,148 @@ static int find_midi_out_port(const char *port_substring, char *out_name, size_t
 	return -1;
 }
 
+static void send_cc_sweep_on_handle(HMIDIOUT hout, int channel, int cc, int duration_ms, int start_val, int end_val)
+{
+	int total_intervals = abs(end_val - start_val);
+	LARGE_INTEGER freq;
+	LARGE_INTEGER t0;
+	QueryPerformanceFrequency(&freq);
+	QueryPerformanceCounter(&t0);
+
+	for (int step = 0; step <= total_intervals; ++step) {
+		int val = mfd_compute_sweep_step_value(start_val, end_val, step, total_intervals);
+		uint32_t msg = mfd_pack_cc_short_msg(channel, cc, val);
+		midiOutShortMsg(hout, (DWORD)msg);
+
+		if (step < total_intervals && duration_ms > 0 && total_intervals > 0) {
+			double target_ms = ((double)duration_ms * (double)(step + 1)) / (double)total_intervals;
+			for (;;) {
+				LARGE_INTEGER now;
+				QueryPerformanceCounter(&now);
+				double elapsed_ms =
+					((double)(now.QuadPart - t0.QuadPart) * 1000.0) / (double)freq.QuadPart;
+				double remain_ms = target_ms - elapsed_ms;
+				if (remain_ms <= 0.2) {
+					break;
+				}
+				if (remain_ms >= 2.0) {
+					Sleep(1);
+				} else {
+					SwitchToThread();
+				}
+			}
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 	if (argc >= 2 && strcmp(argv[1], "--self-test") == 0) {
 		return run_self_test();
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "--rapid-throws") == 0) {
+		if (argc < 7) {
+			fprintf(stderr,
+				"Usage: %s --rapid-throws <port_name> <channel_1_16> <cc_0_127> <sweep_ms> <pause_ms>\n",
+				argv[0]);
+			return 2;
+		}
+		const char *port_arg = argv[2];
+		int channel = atoi(argv[3]);
+		int cc = atoi(argv[4]);
+		int sweep_ms = atoi(argv[5]);
+		int pause_ms = atoi(argv[6]);
+
+		if (channel < 1 || channel > 16 || cc < 0 || cc > 127 || sweep_ms < 0 || pause_ms < 0) {
+			fprintf(stderr, "midi-send --rapid-throws: invalid parameters\n");
+			return 2;
+		}
+
+		char resolved_name[128] = {0};
+		int dev_id = find_midi_out_port(port_arg, resolved_name, sizeof(resolved_name));
+		if (dev_id < 0) {
+			fprintf(stderr, "midi-send: no WinMM MIDI Out port matching '%s'\n", port_arg);
+			return 1;
+		}
+
+		HMIDIOUT hout = NULL;
+		MMRESULT mm = midiOutOpen(&hout, (UINT)dev_id, 0, 0, CALLBACK_NULL);
+		if (mm != MMSYSERR_NOERROR || !hout) {
+			fprintf(stderr, "midi-send: midiOutOpen failed for '%s' (mm=%u)\n", resolved_name,
+				(unsigned)mm);
+			return 1;
+		}
+
+		timeBeginPeriod(1);
+		send_cc_sweep_on_handle(hout, channel, cc, sweep_ms, 0, 127);
+		if (pause_ms > 0) {
+			Sleep((DWORD)pause_ms);
+		}
+		send_cc_sweep_on_handle(hout, channel, cc, sweep_ms, 127, 0);
+		if (pause_ms > 0) {
+			Sleep((DWORD)pause_ms);
+		}
+		send_cc_sweep_on_handle(hout, channel, cc, sweep_ms, 0, 127);
+		timeEndPeriod(1);
+		midiOutClose(hout);
+
+		printf("midi-send: sent 3 rapid throws (sweep=%d ms, pause=%d ms) ch=%d cc=%d to '%s'\n", sweep_ms,
+		       pause_ms, channel, cc, resolved_name);
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "--jitter") == 0) {
+		if (argc < 9) {
+			fprintf(stderr,
+				"Usage: %s --jitter <port_name> <channel_1_16> <cc_0_127> <interval_ms> <steps> <val_a> <val_b>\n",
+				argv[0]);
+			return 2;
+		}
+		const char *port_arg = argv[2];
+		int channel = atoi(argv[3]);
+		int cc = atoi(argv[4]);
+		int interval_ms = atoi(argv[5]);
+		int steps = atoi(argv[6]);
+		int val_a = atoi(argv[7]);
+		int val_b = atoi(argv[8]);
+
+		if (channel < 1 || channel > 16 || cc < 0 || cc > 127 || interval_ms < 0 || steps <= 0 || val_a < 0 ||
+		    val_a > 127 || val_b < 0 || val_b > 127) {
+			fprintf(stderr, "midi-send --jitter: invalid parameters\n");
+			return 2;
+		}
+
+		char resolved_name[128] = {0};
+		int dev_id = find_midi_out_port(port_arg, resolved_name, sizeof(resolved_name));
+		if (dev_id < 0) {
+			fprintf(stderr, "midi-send: no WinMM MIDI Out port matching '%s'\n", port_arg);
+			return 1;
+		}
+
+		HMIDIOUT hout = NULL;
+		MMRESULT mm = midiOutOpen(&hout, (UINT)dev_id, 0, 0, CALLBACK_NULL);
+		if (mm != MMSYSERR_NOERROR || !hout) {
+			fprintf(stderr, "midi-send: midiOutOpen failed for '%s' (mm=%u)\n", resolved_name,
+				(unsigned)mm);
+			return 1;
+		}
+
+		timeBeginPeriod(1);
+		for (int i = 0; i < steps; ++i) {
+			int val = ((i % 2) == 0) ? val_a : val_b;
+			uint32_t msg = mfd_pack_cc_short_msg(channel, cc, val);
+			midiOutShortMsg(hout, (DWORD)msg);
+			if (interval_ms > 0) {
+				Sleep((DWORD)interval_ms);
+			}
+		}
+		timeEndPeriod(1);
+		midiOutClose(hout);
+
+		printf("midi-send: sent CC jitter ch=%d cc=%d (%d/%d x %d every %d ms) to '%s'\n", channel, cc, val_a,
+		       val_b, steps, interval_ms, resolved_name);
+		return 0;
 	}
 
 	if (argc < 5) {
@@ -154,36 +292,7 @@ int main(int argc, char **argv)
 
 	int total_intervals = abs(end_val - start_val);
 	int total_msgs = total_intervals + 1;
-
-	LARGE_INTEGER freq;
-	LARGE_INTEGER t0;
-	QueryPerformanceFrequency(&freq);
-	QueryPerformanceCounter(&t0);
-
-	for (int step = 0; step <= total_intervals; ++step) {
-		int val = mfd_compute_sweep_step_value(start_val, end_val, step, total_intervals);
-		uint32_t msg = mfd_pack_cc_short_msg(channel, cc, val);
-		midiOutShortMsg(hout, (DWORD)msg);
-
-		if (step < total_intervals && duration_ms > 0 && total_intervals > 0) {
-			double target_ms = ((double)duration_ms * (double)(step + 1)) / (double)total_intervals;
-			for (;;) {
-				LARGE_INTEGER now;
-				QueryPerformanceCounter(&now);
-				double elapsed_ms =
-					((double)(now.QuadPart - t0.QuadPart) * 1000.0) / (double)freq.QuadPart;
-				double remain_ms = target_ms - elapsed_ms;
-				if (remain_ms <= 0.2) {
-					break;
-				}
-				if (remain_ms >= 2.0) {
-					Sleep(1);
-				} else {
-					SwitchToThread();
-				}
-			}
-		}
-	}
+	send_cc_sweep_on_handle(hout, channel, cc, duration_ms, start_val, end_val);
 
 	timeEndPeriod(1);
 	midiOutClose(hout);

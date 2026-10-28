@@ -23,6 +23,12 @@ void mfd_tbar_shutdown(void);
 bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size);
 
 /*
+ * Resets the per-transition T-bar release latch when a T-bar slot unparks or reinitializes.
+ */
+void mfd_tbar_reset_release_latch(void);
+bool mfd_tbar_is_release_latched(void);
+
+/*
  * Returns true if Studio Mode is currently active in OBS.
  */
 bool mfd_tbar_is_studio_mode_active(void);

@@ -233,16 +233,39 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 	slot->auto_fade_active = false;
 	slot->takeover.dial_reversed = false;
-	mfd_takeover_unpark_from_api(&slot->takeover, val);
-	mfd_smoother_reset(&slot->smoother, val);
 
-	mfd_engine_apply_slot_output(eng, slot, val);
-	if (slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
-		mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f, val);
-	}
-	mfd_engine_notify_fader_changed(eng, idx, "api");
-	if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-		mfd_engine_notify_state_changed(eng);
+	if (slot->target_type == MFD_TARGET_TBAR) {
+		if (val >= MFD_THROW_COMPLETE_THRESHOLD) {
+			if (!(was_parked && slot->last_applied_val <= 0.0f)) {
+				mfd_engine_apply_slot_output_ex(eng, slot, val, true);
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+					mfd_engine_notify_state_changed(eng);
+				}
+			}
+		} else {
+			if (was_parked) {
+				mfd_engine_unlatch_tbar(eng);
+			}
+			mfd_takeover_unpark_from_api(&slot->takeover, val);
+			mfd_smoother_reset(&slot->smoother, val);
+			mfd_engine_apply_slot_output(eng, slot, val);
+			mfd_engine_notify_fader_changed(eng, idx, "api");
+			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+				mfd_engine_notify_state_changed(eng);
+			}
+		}
+	} else {
+		mfd_takeover_unpark_from_api(&slot->takeover, val);
+		mfd_smoother_reset(&slot->smoother, val);
+		mfd_engine_apply_slot_output(eng, slot, val);
+		if (slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
+			mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f, val);
+		}
+		mfd_engine_notify_fader_changed(eng, idx, "api");
+		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+			mfd_engine_notify_state_changed(eng);
+		}
 	}
 
 	calldata_set_bool(cd, "ok", true);
@@ -345,6 +368,9 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 				}
 			}
 		} else {
+			if (was_parked) {
+				mfd_engine_unlatch_tbar(eng);
+			}
 			mfd_takeover_unpark_from_api(&slot->takeover, val);
 			mfd_smoother_reset(&slot->smoother, val);
 			mfd_engine_apply_slot_output_ex(eng, slot, val, false);
@@ -407,20 +433,23 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 	slot->auto_fade_active = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
-		float eff_delta = delta;
-		if (was_parked) {
-			slot->takeover.dial_reversed = (delta < 0.0f);
-			eff_delta = fabsf(delta);
-		} else if (slot->takeover.dial_reversed) {
-			eff_delta = -delta;
-		}
-		float val = clamp01(slot->last_applied_val + eff_delta);
-		mfd_takeover_unpark_from_api(&slot->takeover, val);
-		mfd_smoother_reset(&slot->smoother, val);
-		mfd_engine_apply_slot_output(eng, slot, val);
-		mfd_engine_notify_fader_changed(eng, idx, "api");
-		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-			mfd_engine_notify_state_changed(eng);
+		if (!(was_parked && fabsf(delta) <= 1e-6f)) {
+			float eff_delta = delta;
+			if (was_parked) {
+				slot->takeover.dial_reversed = (delta < 0.0f);
+				eff_delta = fabsf(delta);
+				mfd_engine_unlatch_tbar(eng);
+			} else if (slot->takeover.dial_reversed) {
+				eff_delta = -delta;
+			}
+			float val = clamp01(slot->last_applied_val + eff_delta);
+			mfd_takeover_unpark_from_api(&slot->takeover, val);
+			mfd_smoother_reset(&slot->smoother, val);
+			mfd_engine_apply_slot_output(eng, slot, val);
+			mfd_engine_notify_fader_changed(eng, idx, "api");
+			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+				mfd_engine_notify_state_changed(eng);
+			}
 		}
 	} else {
 		slot->takeover.dial_reversed = false;
@@ -493,6 +522,9 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
 	if (was_parked) {
+		if (slot->target_type == MFD_TARGET_TBAR) {
+			mfd_engine_unlatch_tbar(eng);
+		}
 		mfd_takeover_unpark_from_api(&slot->takeover, slot->auto_fade_from);
 		mfd_engine_notify_state_changed(eng);
 	}
@@ -586,6 +618,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		}
 		s->takeover.bidirectional_flip = is_tbar ? eng->tbar_bidirectional_flip : false;
 		mfd_takeover_set_two_rail_mode(&s->takeover, is_two_rail);
+		if (is_tbar && s->takeover.state != MFD_TAKEOVER_PARKED) {
+			mfd_engine_unlatch_tbar(eng);
+		}
 	}
 	if (has_curve) {
 		s->curve = new_curve;

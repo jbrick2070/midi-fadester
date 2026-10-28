@@ -42,6 +42,18 @@ void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn)
 	g_engine.tbar_driver = driver_fn;
 }
 
+void mfd_engine_set_tbar_unlatch_fn(mfd_tbar_unlatch_fn unlatch_fn)
+{
+	g_engine.tbar_unlatch = unlatch_fn;
+}
+
+void mfd_engine_unlatch_tbar(struct mfd_engine *eng)
+{
+	if (eng && eng->tbar_unlatch) {
+		eng->tbar_unlatch();
+	}
+}
+
 static void configure_slot_takeover_mode(const struct mfd_engine *eng, struct mfd_fader_slot *slot)
 {
 	if (!slot) {
@@ -76,6 +88,9 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	slot->sec_since_last_fader_event = 1.0f;
 	slot->fader_event_pending = false;
 	slot->pending_origin[0] = '\0';
+	if (slot->target_type == MFD_TARGET_TBAR) {
+		mfd_engine_unlatch_tbar(eng);
+	}
 }
 
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
@@ -324,7 +339,7 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		break;
 
 	case MFD_TARGET_TBAR:
-		if (force_release && slot->takeover.state == MFD_TAKEOVER_PARKED && slot->last_applied_val <= 0.0f) {
+		if (slot->takeover.state == MFD_TAKEOVER_PARKED) {
 			return;
 		}
 		slot->last_applied_val = val;
@@ -402,14 +417,6 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		eng->fader_slots[i].sec_since_last_fader_event += seconds;
 	}
 
-	eng->health_check_accum_sec += seconds;
-	if (eng->health_check_accum_sec >= MFD_HEALTH_CHECK_INTERVAL_SEC) {
-		eng->health_check_accum_sec = 0.0f;
-		if (eng->midi_dev.is_open) {
-			mfd_winmm_check_health(&eng->midi_dev);
-		}
-	}
-
 	struct mfd_midi_raw_event raw;
 	while (mfd_midi_queue_pop(&eng->midi_queue, &raw)) {
 		struct mfd_midi_decoded dec;
@@ -451,6 +458,10 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			float effective = slot->last_applied_val;
 			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 			if (mfd_takeover_step(&slot->takeover, norm, &effective)) {
+				if (was_parked && slot->takeover.state != MFD_TAKEOVER_PARKED &&
+				    slot->target_type == MFD_TARGET_TBAR) {
+					mfd_engine_unlatch_tbar(eng);
+				}
 				slot->auto_fade_active = false;
 				mfd_smoother_set_target(&slot->smoother, effective);
 				if (!mfd_smoother_is_active(&slot->smoother)) {
@@ -542,10 +553,13 @@ static void mfd_engine_video_tick(void *param, float seconds)
 	mfd_engine_tick(eng, seconds);
 }
 
-static void sync_slots_on_scene_change(struct mfd_engine *eng)
+static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 {
 	if (!eng) {
 		return;
+	}
+	if (reset_tbar) {
+		mfd_engine_unlatch_tbar(eng);
 	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
@@ -553,7 +567,12 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng)
 			continue;
 		}
 		if (slot->target_type == MFD_TARGET_TBAR) {
-			mfd_takeover_sync_external(&slot->takeover, 0.0f);
+			if (reset_tbar) {
+				slot->auto_fade_active = false;
+				slot->last_applied_val = 0.0f;
+				mfd_smoother_reset(&slot->smoother, 0.0f);
+				mfd_takeover_sync_external(&slot->takeover, 0.0f);
+			}
 		} else if (slot->target_type == MFD_TARGET_AUDIO_VOLUME && slot->source_a_name[0] != '\0' &&
 			   obs_initialized()) {
 			obs_source_t *src = obs_get_source_by_name(slot->source_a_name);
@@ -577,9 +596,11 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	switch (event) {
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
 	case OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED:
+		sync_slots_on_scene_change(eng, false);
+		break;
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
-		sync_slots_on_scene_change(eng);
+		sync_slots_on_scene_change(eng, true);
 		break;
 	default:
 		break;
@@ -809,11 +830,61 @@ void mfd_engine_cancel_learn(struct mfd_engine *eng)
 	mfd_midi_parser_cancel_learn(&eng->midi_parser);
 }
 
+void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
+{
+	if (!eng || !eng->initialized) {
+		return;
+	}
+
+	if (eng->midi_dev.is_open) {
+		if (!mfd_winmm_check_health(&eng->midi_dev)) {
+			mfd_engine_notify_state_changed(eng);
+		}
+		return;
+	}
+
+	/* Automatic 2-second hot-plug rescan while disconnected (R-MIDI-2) */
+	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
+	size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
+	if (count == 0U) {
+		return;
+	}
+
+	bool candidate_present = false;
+	if (eng->configured_device_name[0] != '\0') {
+		for (size_t i = 0U; i < count; ++i) {
+			if (strcmp(list[i].name, eng->configured_device_name) == 0) {
+				candidate_present = true;
+				break;
+			}
+		}
+	} else {
+		for (size_t i = 0U; i < count; ++i) {
+			if (list[i].is_apc40_mk2) {
+				candidate_present = true;
+				break;
+			}
+		}
+		if (!candidate_present && eng->midi_dev.last_error[0] != '\0' &&
+		    strstr(eng->midi_dev.last_error, "MMSYSERR_ALLOCATED") == NULL) {
+			candidate_present = true;
+		}
+	}
+
+	if (candidate_present) {
+		if (mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name)) {
+			mfd_engine_notify_state_changed(eng);
+		}
+	}
+}
+
 bool mfd_engine_init(void)
 {
 	mfd_tbar_apply_fn saved_tbar_driver = g_engine.tbar_driver;
+	mfd_tbar_unlatch_fn saved_tbar_unlatch = g_engine.tbar_unlatch;
 	memset(&g_engine, 0, sizeof(g_engine));
 	g_engine.tbar_driver = saved_tbar_driver;
+	g_engine.tbar_unlatch = saved_tbar_unlatch;
 	mfd_midi_queue_init(&g_engine.midi_queue);
 	mfd_midi_parser_init(&g_engine.midi_parser);
 	mfd_winmm_init(&g_engine.midi_dev, &g_engine.midi_queue);

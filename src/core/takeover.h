@@ -40,6 +40,7 @@ struct mfd_takeover {
 	float target_obs;
 	float pickup_threshold;
 	float parked_peak;
+	float throw_raw_extreme;
 	float rescale_origin;
 	float lower_rescale_origin;
 	float upper_rescale_origin;
@@ -54,6 +55,7 @@ struct mfd_takeover {
 	bool armed_upper_rail;
 	bool dial_reversed;
 	bool midi_at_rail_deadzone;
+	bool has_throw_extreme;
 };
 
 void mfd_takeover_init(struct mfd_takeover *t, float initial_obs_val, float pickup_threshold, bool bidirectional_flip);

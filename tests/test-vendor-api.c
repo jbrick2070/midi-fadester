@@ -6,6 +6,7 @@
 
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
+#include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <math.h>
 #include <stdio.h>
@@ -23,8 +24,19 @@ OBS_MODULE_USE_DEFAULT_LOCALE("midi-fadester", "en-US")
 	} while (0)
 
 static int g_mock_tbar_calls = 0;
+static int g_mock_tbar_set_writes = 0;
 static int g_mock_tbar_completions = 0;
+static int g_mock_tbar_unlatches = 0;
+static int g_mock_tbar_last_pos = 0;
+static bool g_mock_tbar_latched = false;
 static float g_mock_tbar_last_val = -1.0f;
+
+static void mock_tbar_unlatch(void)
+{
+	++g_mock_tbar_unlatches;
+	g_mock_tbar_latched = false;
+	g_mock_tbar_last_pos = 0;
+}
 
 static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size)
 {
@@ -33,12 +45,26 @@ static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_
 	}
 	++g_mock_tbar_calls;
 	g_mock_tbar_last_val = t_norm;
-	bool completed = (t_norm >= MFD_THROW_COMPLETE_THRESHOLD);
-	if (completed) {
-		++g_mock_tbar_completions;
+
+	struct mfd_tbar_action act;
+	mfd_tbar_compute_action_ex(true, true, g_mock_tbar_latched, t_norm, g_mock_tbar_last_pos, &act);
+	if (act.call_set_tbar) {
+		++g_mock_tbar_set_writes;
 	}
-	if (out_completed_throw) {
-		*out_completed_throw = completed;
+	if (act.call_release_tbar) {
+		g_mock_tbar_latched = true;
+		g_mock_tbar_last_pos = 0;
+		++g_mock_tbar_completions;
+		if (out_completed_throw) {
+			*out_completed_throw = true;
+		}
+	} else {
+		if (!g_mock_tbar_latched) {
+			g_mock_tbar_last_pos = act.target_pos_1024;
+		}
+		if (out_completed_throw) {
+			*out_completed_throw = false;
+		}
 	}
 	return true;
 }
@@ -128,6 +154,7 @@ int main(void)
 	eng.smooth_tau_ms = 12.0f;
 	eng.tbar_bidirectional_flip = true;
 	eng.tbar_driver = mock_tbar_driver;
+	eng.tbar_unlatch = mock_tbar_unlatch;
 	eng.source_exists_fn = mock_source_exists;
 	eng.studio_mode_override_set = true;
 	eng.studio_mode_override = false;
@@ -687,6 +714,7 @@ int main(void)
 
 	/* 10d: nudge_fader right after a completed throw (Stream Deck dial) */
 	/* 10d-1: Physical MIDI throw 0 -> 127 on crossfader (T-bar), then negative Stream Deck dial nudge */
+	mfd_engine_unlatch_tbar(&eng);
 	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 	eng.fader_slots[0].takeover.polarity_reversed = false;
 	eng.fader_slots[0].takeover.rescale_origin = 0.0f;
@@ -792,6 +820,77 @@ int main(void)
 	REQUIRE(g_mock_tbar_calls == calls_before_finish + 1);
 	REQUIRE(g_mock_tbar_completions == completions_before_finish + 1);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/*
+	 * 11. Per-transition T-bar release latch & zero-write parked invariant under 30 ms smoothing + 127/126/127 jitter:
+	 *     - Sweep 0 -> 127 over 200 ms with 30 ms smoother enabled, then jitter 126/127 every 100 ms for 3.0 s.
+	 *     - Assert: exactly 1 completion (release), g_mock_tbar_latched == true, 0 writes and 0 releases during
+	 *       the entire 3-second rail jitter, and 0 writes/releases even if mfd_engine_apply_slot_output_ex is
+	 *       called directly while parked!
+	 *     - Retreat > 8% unparks, calls tbar_unlatch once, and allows the return throw 127 -> 0 to release once.
+	 */
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	g_mock_tbar_calls = 0;
+	g_mock_tbar_set_writes = 0;
+	g_mock_tbar_completions = 0;
+
+	for (int step = 0; step <= 12; ++step) {
+		uint8_t cc_v = (uint8_t)((step * 127) / 12);
+		push_midi_cc(&eng, 0, 15, cc_v);
+		mfd_engine_tick(&eng, 0.016f);
+	}
+	/* Allow 30 ms smoother to cross 90% and park */
+	for (int tick = 0; tick < 6; ++tick) {
+		mfd_engine_tick(&eng, 0.016f);
+	}
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(g_mock_tbar_latched);
+
+	int writes_at_park = g_mock_tbar_set_writes;
+	uint32_t slot_writes_at_park = eng.fader_slots[0].output_write_count;
+	int unlatches_at_park = g_mock_tbar_unlatches;
+
+	/* 30 steps of 126/127 jitter every 100 ms (3.0 s total) while parked -> 0 writes, 0 extra releases */
+	for (int j = 0; j < 30; ++j) {
+		push_midi_cc(&eng, 0, 15, ((j % 2) == 0) ? 126U : 127U);
+		for (int sub = 0; sub < 6; ++sub) {
+			mfd_engine_tick(&eng, 0.0167f);
+		}
+	}
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(g_mock_tbar_set_writes == writes_at_park);
+	REQUIRE(eng.fader_slots[0].output_write_count == slot_writes_at_park);
+	REQUIRE(g_mock_tbar_unlatches == unlatches_at_park);
+
+	/* Direct mfd_engine_apply_slot_output_ex calls while parked -> strict no-op (0 writes, 0 releases) */
+	mfd_engine_apply_slot_output(&eng, &eng.fader_slots[0], 1.0f);
+	mfd_engine_apply_slot_output_ex(&eng, &eng.fader_slots[0], 1.0f, true);
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(g_mock_tbar_set_writes == writes_at_park);
+	REQUIRE(eng.fader_slots[0].output_write_count == slot_writes_at_park);
+
+	/* Retreat > 8% (CC 114 < 127 * 0.92) unparks and unlatches once; return throw to 0 releases once */
+	push_midi_cc(&eng, 0, 15, 114);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+	REQUIRE(!g_mock_tbar_latched);
+	REQUIRE(g_mock_tbar_unlatches == unlatches_at_park + 1);
+
+	for (int step = 10; step >= 0; --step) {
+		uint8_t cc_v = (uint8_t)((step * 114) / 10);
+		push_midi_cc(&eng, 0, 15, cc_v);
+		mfd_engine_tick(&eng, 0.016f);
+	}
+	for (int tick = 0; tick < 6; ++tick) {
+		mfd_engine_tick(&eng, 0.016f);
+	}
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+	REQUIRE(g_mock_tbar_completions == 2);
+	REQUIRE(g_mock_tbar_latched);
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");
