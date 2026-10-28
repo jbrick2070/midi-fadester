@@ -50,7 +50,8 @@ if(_built_at STREQUAL "")
 endif()
 
 string(
-  CONCAT _header_content
+  CONCAT
+  _header_content
   "/* Auto-generated at build time by generate_build_info.cmake */\n"
   "#pragma once\n"
   "#define MFD_BUILD_GIT_COMMIT \"${_git_commit}\"\n"

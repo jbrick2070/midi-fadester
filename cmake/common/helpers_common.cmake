@@ -43,7 +43,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin-support.c.in")
   set(_mfd_gen "${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/generate_build_info.cmake")
   set(_mfd_src "${CMAKE_CURRENT_SOURCE_DIR}")
 
-  execute_process(COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${_mfd_src}" "-DOUTPUT_HEADER=${_mfd_hdr}" -P "${_mfd_gen}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${_mfd_src}" "-DOUTPUT_HEADER=${_mfd_hdr}" -P "${_mfd_gen}"
+  )
 
   add_custom_target(
     mfd-build-info

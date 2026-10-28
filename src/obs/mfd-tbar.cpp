@@ -1091,8 +1091,10 @@ static void run_live_selftest_worker(void)
 
 		/* Part 1a: Sweep 0..30 (0.00..0.236, away from 0.50) -> soft takeover must stay WAITING and T-bar must stay at 512 */
 		int rc_pre = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
-									    << "15" << "60"
-									    << "0" << "30");
+									    << "15"
+									    << "60"
+									    << "0"
+									    << "30");
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		bool pre_waiting_ok = (rc_pre == 0) && (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_WAITING) &&
 				      (eng->last_midi_decoded.raw_value == 30);
@@ -1112,8 +1114,10 @@ static void run_live_selftest_worker(void)
 			Qt::BlockingQueuedConnection);
 
 		QProcess sweep_proc;
-		sweep_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1" << "15"
-							      << "450" << "0"
+		sweep_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+							      << "15"
+							      << "450"
+							      << "0"
 							      << "127");
 		sweep_proc.waitForStarted(1000);
 
@@ -1181,8 +1185,10 @@ static void run_live_selftest_worker(void)
 		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
 
 		int rc_c2_d1 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
-									      << "15" << "400"
-									      << "0" << "127");
+									      << "15"
+									      << "400"
+									      << "0"
+									      << "127");
 		/* Dwell at rail (550 ms) */
 		std::this_thread::sleep_for(std::chrono::milliseconds(550));
 
@@ -1198,8 +1204,10 @@ static void run_live_selftest_worker(void)
 		g_tbar_release_count.store(0, std::memory_order_relaxed);
 
 		int rc_c2_d2 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
-									      << "15" << "400"
-									      << "127" << "0");
+									      << "15"
+									      << "400"
+									      << "127"
+									      << "0");
 		std::this_thread::sleep_for(std::chrono::milliseconds(550));
 
 		int c2_d2_started = g_obs_manual_started.load(std::memory_order_relaxed);
@@ -1246,8 +1254,10 @@ static void run_live_selftest_worker(void)
 		g_tbar_awaiting_unpark.store(false, std::memory_order_relaxed);
 
 		int rc_c3_d1 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
-									      << "15" << "400"
-									      << "0" << "121");
+									      << "15"
+									      << "400"
+									      << "0"
+									      << "121");
 		/* Dwell at 95% (550 ms) */
 		std::this_thread::sleep_for(std::chrono::milliseconds(550));
 
@@ -1263,8 +1273,10 @@ static void run_live_selftest_worker(void)
 		g_tbar_release_count.store(0, std::memory_order_relaxed);
 
 		int rc_c3_d2 = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
-									      << "15" << "400"
-									      << "121" << "0");
+									      << "15"
+									      << "400"
+									      << "121"
+									      << "0");
 		std::this_thread::sleep_for(std::chrono::milliseconds(550));
 
 		int c3_d2_started = g_obs_manual_started.load(std::memory_order_relaxed);
@@ -1324,13 +1336,20 @@ static void run_live_selftest_worker(void)
 		g_tbar_debug_log.store(true, std::memory_order_relaxed);
 
 		obs_log(LOG_INFO, "LOOPMIDI CASE 4 (0->127 + 127/126/127 x 100ms for 3s): starting...");
-		int rc_c4_throw = QProcess::execute(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port)
-										 << "1" << "15" << "200"
-										 << "0" << "127");
-		int rc_c4_jitter = QProcess::execute(midi_send_exe, QStringList() << "--jitter"
-										  << QString::fromUtf8(loopmidi_port)
-										  << "1" << "15" << "100"
-										  << "30" << "126" << "127");
+		int rc_c4_throw = QProcess::execute(midi_send_exe, QStringList()
+									   << QString::fromUtf8(loopmidi_port) << "1"
+									   << "15"
+									   << "200"
+									   << "0"
+									   << "127");
+		int rc_c4_jitter = QProcess::execute(midi_send_exe, QStringList()
+									    << "--jitter"
+									    << QString::fromUtf8(loopmidi_port) << "1"
+									    << "15"
+									    << "100"
+									    << "30"
+									    << "126"
+									    << "127");
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 		int c4_started = g_obs_manual_started.load(std::memory_order_relaxed);
@@ -1417,7 +1436,9 @@ static void run_live_selftest_worker(void)
 		obs_log(LOG_INFO, "LOOPMIDI CASE 5 (rapid throws 0->127->0->127 every 200ms): starting...");
 		int rc_c5 = QProcess::execute(midi_send_exe, QStringList() << "--rapid-throws"
 									   << QString::fromUtf8(loopmidi_port) << "1"
-									   << "15" << "150" << "200");
+									   << "15"
+									   << "150"
+									   << "200");
 		std::this_thread::sleep_for(std::chrono::milliseconds(300));
 		g_tbar_debug_log.store(false, std::memory_order_relaxed);
 
@@ -1548,8 +1569,10 @@ static void run_live_selftest_worker(void)
 			program_tr_id, program_tap_uuid);
 
 		QProcess slow_proc;
-		slow_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1" << "15"
-							     << "6350" << "0"
+		slow_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1"
+							     << "15"
+							     << "6350"
+							     << "0"
 							     << "127");
 		slow_proc.waitForStarted(1500);
 
