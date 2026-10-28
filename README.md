@@ -32,5 +32,7 @@ This project is developed with the assistance of AI coding tools under human dir
 ## Documentation
 
 - [REQUIREMENTS.md](REQUIREMENTS.md) — Functional, fader target (`R-FADE-*`), two-source & bus mixer (`R-MIX-*`), smoothing/takeover/LED feedback (`R-FEEL-*`), WinMM MIDI (`R-MIDI-*`), threading, and testing requirements, plus approved operator decisions (`D-1..D-7`).
-- [PLAN.md](PLAN.md) — Pre-planning OBS 33 & APC40 mkII audit findings, architecture, file layout, phased implementation plan (Phase 1 MVP through Phase 5), test matrix, and risk register.
+- [PLAN.md](PLAN.md) — Pre-planning OBS 33 & APC40 mkII audit findings, architecture, file layout, phased implementation plan (Phase 1 MVP through Phase 5), test matrix, risk register, and autonomous decisions (`D-8..D-20`).
+- [PLAN-UI.md](PLAN-UI.md) — `0.2.0` three-zone `Strips` UI, 3-step `Set up` sheet, live APC40 mkII SVG desk view, concurrency/locking architecture, and 4-round `kibitz` review disposition.
+- [TESTING.md](TESTING.md) — Automated `ctest` suite (`14` targets), rendered `0.2.0` dialog state screenshot gallery, and live OBS 33 + `loopMIDI` verification guide.
 - [LICENSE](LICENSE) — GNU General Public License v2.0.

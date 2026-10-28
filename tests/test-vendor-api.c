@@ -658,7 +658,7 @@ int main(void)
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.1.3") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.2.0") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");
 	REQUIRE(build_obj != NULL);
 	const char *b_commit = obs_data_get_string(build_obj, "commit");
@@ -2199,8 +2199,8 @@ int main(void)
 	REQUIRE(eng.setup_session.candidate_addr.number == 77);
 
 	int owners[MFD_MAX_FADER_SLOTS] = {0};
-	size_t owner_cnt = mfd_engine_find_addr_owners(&eng, &eng.setup_session.candidate_addr, 1, owners,
-						       MFD_MAX_FADER_SLOTS);
+	size_t owner_cnt =
+		mfd_engine_find_addr_owners(&eng, &eng.setup_session.candidate_addr, 1, owners, MFD_MAX_FADER_SLOTS);
 	REQUIRE(owner_cnt == 2U);
 	REQUIRE(owners[0] == 4 && owners[1] == 5);
 
@@ -2482,10 +2482,13 @@ int main(void)
 						c.target_type = MFD_TARGET_TWO_SOURCE_MIX;
 						c.curve = MFD_CURVE_DIP_FREE;
 						snprintf(c.scene_name, sizeof(c.scene_name), "%s", se->name);
-						snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", se->layers[la]);
-						snprintf(c.source_b_name, sizeof(c.source_b_name), "%s", se->layers[lb]);
+						snprintf(c.source_a_name, sizeof(c.source_a_name), "%s",
+							 se->layers[la]);
+						snprintf(c.source_b_name, sizeof(c.source_b_name), "%s",
+							 se->layers[lb]);
 						char rsn[160] = {0};
-						REQUIRE(mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn)));
+						REQUIRE(mfd_engine_validate_setup_candidate(&eng, &c, rsn,
+											    sizeof(rsn)));
 						mfd_engine_begin_setup_session(&eng, 1);
 						REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
 						REQUIRE(eng.fader_slots[1].cached_available);

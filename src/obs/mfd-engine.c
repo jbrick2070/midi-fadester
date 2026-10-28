@@ -1372,8 +1372,8 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 	out->studio_mode_active = mfd_engine_is_studio_mode_active(eng);
 	snprintf(out->preview_scene_name, sizeof(out->preview_scene_name), "%s", eng->cached_preview_scene);
 	snprintf(out->program_scene_name, sizeof(out->program_scene_name), "%s", eng->cached_program_scene);
-	out->first_run_offer_pending =
-		eng->frontend_finished_loading && !eng->first_run_offer_dismissed && eng->apc40_controller_detected;
+	out->first_run_offer_pending = eng->frontend_finished_loading && !eng->first_run_offer_dismissed &&
+				       eng->apc40_controller_detected;
 	out->learning_slot_index = eng->learning_slot_index;
 	out->has_last_midi = eng->has_last_midi;
 	out->last_midi_decoded = eng->last_midi_decoded;
@@ -1679,8 +1679,9 @@ bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_se
 	if (eng->slot_config_rev[cand->slot_index] != eng->setup_session.base_slot_rev) {
 		eng->setup_session.base_slot_rev = eng->slot_config_rev[cand->slot_index];
 		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size,
-				 "This strip was changed externally while Set up was open. Review and press Done again.");
+			snprintf(
+				out_err, err_size,
+				"This strip was changed externally while Set up was open. Review and press Done again.");
 		}
 		mfd_engine_mark_ui_dirty(eng, true);
 		mfd_engine_unlock(eng);
@@ -2360,7 +2361,8 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		/* Track last-moved strip for Zone 3 status line */
 		int matched_slot = -1;
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-			if (eng->fader_slots[i].enabled && mfd_midi_addr_matches(&eng->fader_slots[i].addr, &dec.addr)) {
+			if (eng->fader_slots[i].enabled &&
+			    mfd_midi_addr_matches(&eng->fader_slots[i].addr, &dec.addr)) {
 				matched_slot = i;
 				break;
 			}
@@ -2368,8 +2370,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		eng->last_moved_slot_index = matched_slot;
 
 		/* Update Step 3 candidate meter if setup session is active */
-		if (eng->setup_session.active &&
-		    mfd_midi_addr_matches(&eng->setup_session.candidate_addr, &dec.addr)) {
+		if (eng->setup_session.active && mfd_midi_addr_matches(&eng->setup_session.candidate_addr, &dec.addr)) {
 			eng->setup_session.candidate_raw_norm = normalize_decoded_sample(
 				eng, &eng->setup_session.candidate_addr, &eng->setup_session.candidate_cal,
 				eng->setup_session.candidate_invert, &dec);
