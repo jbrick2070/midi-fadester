@@ -152,14 +152,23 @@ try {
     $finalLog = [System.IO.File]::ReadAllText($latestLog)
     Write-Output "=== OBS LOG: $latestLog ==="
     $finalLog -split "`r?`n" | Where-Object {
-        $_ -match 'midi-fadester|SCREENSHOT CHECK|SCENE SIGNALS|LOOPMIDI CASE|SELF-TEST RESULT|Number of memory leaks'
+        $_ -match 'midi-fadester|SCREENSHOT CHECK|SCENE SIGNALS|LOOPMIDI CASE|FX FILTER LIVE CHECK|SELF-TEST RESULT|Number of memory leaks'
     } | ForEach-Object { Write-Output $_ }
 
     if (-not $resultFound) {
         throw "SELF-TEST RESULT not found before timeout"
     }
+    if ($finalLog -notmatch 'screenshot_all_pass=1') {
+        throw "Self-test did not confirm screenshot_all_pass=1"
+    }
+    if ($finalLog -notmatch 'loopmidi_pass=1') {
+        throw "Self-test did not confirm loopmidi_pass=1"
+    }
     if ($finalLog -notmatch 'studio_off=1') {
         throw "Self-test did not confirm studio_off=1 before teardown"
+    }
+    if ($finalLog -notmatch 'fx_filter_pass=1') {
+        throw "Self-test did not confirm fx_filter_pass=1"
     }
     if ($finalLog -notmatch 'Number of memory leaks: 0') {
         throw "OBS reported non-zero memory leaks"

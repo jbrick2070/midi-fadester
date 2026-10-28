@@ -1,13 +1,13 @@
-# Midi Fadester — Verification & UI State Gallery (`0.3.0`)
+# Midi Fadester — Verification & UI State Gallery (`0.4.0`)
 
-Midi Fadester verifies every engine invariant, T-bar state transition, Soft Takeover rail/pickup rule, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
+Midi Fadester verifies every engine invariant, T-bar state transition, Soft Takeover rail/pickup rule, filter parameter modulation & shared-filter `bypass_at_zero` lease contract, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 
-1. **Automated `ctest` Suite (14 headless targets, ~1.6 s total)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
-2. **Live Portable OBS 33 + `loopMIDI` Hardware-Loopback Suite (`MFD_SELF_TEST=1`)** — boots real `obs64.exe` in Studio Mode, renders HLSL `mfd_layer_mixer.effect` composites on the GPU, checks `GetSourceScreenshot` pixel samples, verifies live scene-item reorder stack-order inversion, drives 8 physical-timing `loopMIDI` cases through WinMM `midiInOpen`, and asserts `Number of memory leaks: 0` on clean exit.
+1. **Automated `ctest` Suite (15 headless targets, ~2.6 s total)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
+2. **Live Portable OBS 33 + `loopMIDI` Hardware-Loopback Suite (`MFD_SELF_TEST=1`)** — boots real `obs64.exe` in Studio Mode, renders HLSL `mfd_layer_mixer.effect` composites and live `color_filter_v2` `filter_param` sweeps on the GPU, checks `GetSourceScreenshot` pixel samples, verifies live scene-item reorder stack-order inversion, live filter/host rename + remove/re-add + external OBS `"update"` Soft Takeover + `reset_fx`, drives 8 physical-timing `loopMIDI` cases through WinMM `midiInOpen`, and asserts `Number of memory leaks: 0` on clean exit.
 
 ---
 
-## 1. Automated `ctest` Suite (`14/14` Targets)
+## 1. Automated `ctest` Suite (`15/15` Targets)
 
 Run locally from a configured preset:
 
@@ -24,21 +24,22 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 | 3 | `test-smoother` | First-order exponential smoother (`tau_ms`), instant snap at `tau_ms = 0`, frame-rate independence, and rail convergence. |
 | 4 | `test-takeover` | Soft Takeover state machine (`UNINITIALIZED`, `PICKUP_WAITING`, `CAPTURED`), calibrated `[raw_min, raw_max]` auto-widening, directional pickup hints (`ABOVE` / `BELOW`), polarity reversal, and mode-switch reset to `Idle`. |
 | 5 | `test-mixer-math` | Crossfade laws (`Dip-free`, `Full-center`, `Equal power`, `Linear`, `Cut`), `[-60 dB, 0 dB]` audio deflection taper, and top/bottom layer alpha inversion when OBS scene stack order flips. |
-| 6 | `test-apc40-profile` | Declarative 6-controller profile registry (`apc40mk2` Verified; `apcminimk2`, `midimix`, `nanokontrol2`, `launchcontrolxl` Beta untested manufacturer specs; `generic` Custom), factory MIDI CC maps, physical strip presence flags (`10` / `9` / `8` strips), and WinMM USB port name auto-detection. |
+| 6 | `test-apc40-profile` | Declarative 6-controller profile registry (`apc40mk2` Verified; `apcminimk2`, `midimix`, `nanokontrol2`, `launchcontrolxl` Beta untested manufacturer specs; `generic` Custom), 18-slot factory MIDI CC maps (`0..9` faders + `10..17` `fx_1..fx_8` knobs), physical strip presence flags, and WinMM USB port name auto-detection. |
 | 7 | `test-tbar-logic` | Pure-C T-bar state machine (`R-TBAR-SM`): `6%` start deadband (`x > 0.06` starts throw with `t` rescaled `[0.06, 1.0] -> [0.0, 1.0]`), linear tracking to `100%`, `3%` target rail completion (`x >= 0.97` normal / `x <= 0.03` reversed), `3%` origin rail abort (`Throwing -> Idle` with `pos = 0`, single `release`, zero polarity flip), and bidirectional park/unpark. |
-| 8 | `test-ui-sentences` | Pure-C table-driven test of every plain-English UI sentence in `src/core/ui-sentences.c`: controller status bar (`Connected`, unplugged, WinMM busy/error, generic/none), strip assignment/state/action precedence (`Not used`, `Studio Mode is off`, missing scene/layer/audio recovery sentences, `Throwing N%` + `Finish now`, `At end.`, Soft Takeover pickup arrows/sentences, live `%` / `dB` readouts), 3-step `Set up` sheet copy & multi-scene warning, Zone 3 live status line, and `Advanced` tab Output cell text. |
-| 9 | `test-vendor-api` | Full engine & `obs-websocket` vendor API (`get_state` including `profile` / `profile_display_name` / `profile_tier`, `set_slot_value`, `configure_slot`, `load_profile` across all 6 controller slugs, `bind_midi`), target-preserving layout switching (`mfd_engine_select_profile`), recursive `state_mutex` + outermost-unlock deferred disk/UI drain, `0.2.0` First-Run Offer (`Yes` vs `I'll set it up`), 3-step `mfd_setup_session` transaction/cancel rollback, `[Not used]` MIDI binding preservation, and 4-thread concurrent stress (`tick` + `snapshot` + `setup_session` + `shutdown`). |
-| 10 | `test-ui-dialog` | Real Qt6 `qwindows` (`Qt::WA_DontShowOnScreen`) end-to-end dialog test instantiating `mfd_ui_create_settings_dialog`: drives First-Run banner, Studio Mode amber banner & one-click recovery, live MIDI CC throws/fades, Soft Takeover pickup arrows, red precondition recovery flows, 3-step `Set up` modal sheet (`Step 1` -> `Step 2` -> `Step 3 Try it` + `Cancel` rollback), `[Show controller]` live SVG desk view (`QSvgRenderer::isValid()` across all 6 controller profiles), Beta profile badges & physical strip card filtering (`10` / `9` / `8` strips), `Advanced` tab round-trip synchronization, and non-blank `QDialog::grab()` PNG verification of all 10 states below. |
-| 11 | `test-midi-send` | CLI argument validation and WinMM loopback message framing for `midi-send.exe`. |
-| 12 | `test-shader-syntax` | HLSL `data/effects/mfd_layer_mixer.effect` uniform/pass validation, repository-wide UTF-8 no-BOM guard across 33 source/config files, and zero-timer / zero-sleep static source audit (`QTimer`, `startTimer`, `SetTimer`, `QThread::msleep`, `os_sleep_ms`). |
-| 13 | `check-locale-keys` | Verifies every `obs_module_text(...)` key in `src/` exists in `data/locale/en-US.ini` with non-empty text and no `"OBS"` prefix violation. |
-| 14 | `check-locale-keys-fails-on-missing-key` | Negative mutation check proving `check-locale-keys` fails immediately when a locale key is missing. |
+| 8 | `test-filter-mod` | Pure-C filter parameter math (`src/core/filter-math.c`, `R-FADE-4`): `[from_val, to_val]` forward/inverted sub-range mapping, `OBS_PROPERTY_INT` nearest-int rounding, step quantization (`1e-12` midpoint tie handling), endpoint snap, quantized write gating (`mfd_filter_should_write_mapped`), `bypass_at_zero` deadzone (`u <= 0.005` off / `u >= 0.010` on), inverse normalized position for external OBS `"update"` sync, and `display_value` unit formatting (`px`, `%`, `dB`, `°`, raw float/int). |
+| 9 | `test-ui-sentences` | Pure-C table-driven test of every plain-English UI sentence in `src/core/ui-sentences.c`: controller status bar (`Connected`, unplugged, WinMM busy/error, generic/none), strip & FX bank assignment/state/action precedence (`Not used`, `Studio Mode is off`, missing scene/layer/audio/filter/property recovery sentences, `Throwing N%` + `Finish now`, `At end.`, Soft Takeover pickup arrows/sentences, live `%` / `dB` / `display_value` readouts), 3-step `Set up` sheet copy & multi-scene warning, Zone 3 live status line, and `Advanced` tab Output cell text. |
+| 10 | `test-vendor-api` | Full 18-slot engine & `obs-websocket` vendor API (`get_state`, `get_catalog`, `set_slot`, `set_fader_value`, `nudge_fader`, `auto_fade`, `reset_fx`, `load_profile`, `bind_midi`), nested `OBS_PROPERTY_GROUP` recursion, universal single-writer `(source, filter, prop)` uniqueness across enabled & disabled slots, shared-filter `bypass_at_zero` lease aggregation + crash-recovery `pre_mfd_enabled` restoration, external OBS `"update"` Soft Takeover sync (`origin: "obs"`), weak-ref signal lifecycle, and 4-thread concurrent stress (`tick` + `snapshot` + `setup_session` + `shutdown`). |
+| 11 | `test-ui-dialog` | Real Qt6 `qwindows` (`Qt::WA_DontShowOnScreen`) end-to-end dialog test instantiating `mfd_ui_create_settings_dialog`: drives First-Run banner, Studio Mode amber banner & one-click recovery, live MIDI CC throws/fades, Soft Takeover pickup arrows, red precondition recovery flows, `[Faders]` / `[FX & Knobs (8)]` bank pills + `[Clean / All FX Off]`, 3-step `Set up` modal sheet including `Filter or effect setting` & single-writer conflict guard, `[Show controller]` live SVG desk view across all 6 controller profiles, 18-row `Advanced` tab (`<= 1380 px`), and non-blank `QDialog::grab()` PNG verification of all 12 states below. |
+| 12 | `test-midi-send` | CLI argument validation and WinMM loopback message framing for `midi-send.exe`. |
+| 13 | `test-shader-syntax` | HLSL `data/effects/mfd_layer_mixer.effect` uniform/pass validation, repository-wide UTF-8 no-BOM guard across 35 source/config files, and zero-timer / zero-sleep static source audit (`QTimer`, `startTimer`, `SetTimer`, `QThread::msleep`, `os_sleep_ms`). |
+| 14 | `check-locale-keys` | Verifies every `obs_module_text(...)` key in `src/` exists in `data/locale/en-US.ini` with non-empty text and no `"OBS"` prefix violation. |
+| 15 | `check-locale-keys-fails-on-missing-key` | Negative mutation check proving `check-locale-keys` fails immediately when a locale key is missing. |
 
 ---
 
-## 2. Dialog State Screenshot Gallery (`0.3.0` UI)
+## 2. Dialog State Screenshot Gallery (`0.4.0` UI)
 
-All 10 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
+All 12 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
 
 ```powershell
 ctest --preset windows-x64 -C RelWithDebInfo -R test-ui-dialog --output-on-failure
@@ -111,6 +112,18 @@ Selecting one of the four **Beta** profiles (`Akai APC mini mk2`, `Akai MIDImix`
 
 ![State 10: Beta Akai MIDImix SVG Desk View](docs/screenshots/10-beta-midimix-svg.png)
 
+### State 11 — `FX & Knobs (8)` Bank (`fx_1..fx_8` Dedicated Filter Strips & `[Clean / All FX Off]`)
+
+Switching the segmented bank bar on `Strips` to **`FX & Knobs (8)`** displays the 8 dedicated FX/knob cards (`FX 1..FX 8`, pre-mapped to `Ch 1 CC 16–23` on APC40 mkII and nanoKONTROL2, Row-3 knobs on MIDImix and Launch Control XL, and always active for Stream Deck + / `obs-websocket` even on knobless controllers), cyan-to-amber filter intensity bars, formatted `display_value` readouts (`14.0 px`, `62.0 %`), and the one-click **`[Clean / All FX Off]`** panic button.
+
+![State 11: FX & Knobs Bank](docs/screenshots/11-fx-bank-strips.png)
+
+### State 12 — 3-Step `Set up` Sheet: `Filter or effect setting` (`Step 2 of 3` Range & Bypass Pickers)
+
+Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's source/scene, filter, and numeric setting pickers (including nested `OBS_PROPERTY_GROUP` settings such as Visual Sidechain reactivity), editable `At 0% (From)` / `At 100% (To)` sub-ranges with `[Use current]` capture buttons, `[x] Turn filter off at 0% (saves GPU)` shared-lease bypass, and immediate single-writer conflict refusal if another slot already drives the same `(source, filter, setting)`.
+
+![State 12: Set up Filter or Effect Setting](docs/screenshots/12-setup-filter-step2.png)
+
 ---
 
 ## 3. Live Portable OBS 33 + `loopMIDI` Self-Test (`MFD_SELF_TEST=1`)
@@ -140,3 +153,5 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
   - **Case 6:** Bottom-rail jitter `CC 3, 4, 3, 4, 3, 4` x5 inside the `6%` start deadband — **zero** transitions started.
   - **Case 7:** Micro-throw & cancel `CC 0 -> 8 -> 3` — crosses `6%` start band (`1` start) and retreats into `3%` origin rail (`1` cancel, Program unchanged).
   - **Case 8:** Mode-switch Soft Takeover reset to `Idle` and clean teardown (`Number of memory leaks: 0`).
+- **Live Filter Parameter & Shared Lease Suite (`FX FILTER LIVE CHECK`):**
+  - Calls `get_catalog` against a live OBS `color_filter_v2`, binds `fx_1` (`filter_param`, `brightness` `[0.0 .. -1.0]`, `bypass_at_zero = true`), verifies GPU pixel darkening via `GetSourceScreenshot`, verifies external `obs_source_update` emits `fader_changed` with `origin == "obs"` + `display_value` and engages Soft Takeover, exercises live `"enable"` / `"update_properties"` / filter & host rename / filter remove + re-add signals, runs `reset_fx({ ms: 0 })` verifying pixel restoration and `obs_source_enabled == false`, and unbinds `fx_1` verifying `pre_mfd_enabled` lease restoration (`obs_source_enabled == true`).

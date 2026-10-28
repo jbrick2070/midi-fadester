@@ -13,6 +13,7 @@
 class QCheckBox;
 class QCloseEvent;
 class QComboBox;
+class QDoubleSpinBox;
 class QLabel;
 class QProgressBar;
 class QPushButton;
@@ -35,10 +36,15 @@ protected:
 private:
 	struct mfd_setup_candidate build_candidate() const;
 	const struct mfd_ui_scene_entry *find_catalog_scene(const QString &name) const;
+	const struct mfd_filter_entry_info *find_selected_filter_entry() const;
+	const struct mfd_filter_prop_info *find_selected_filter_prop() const;
 	bool chosen_layers_have_audio() const;
 	void select_mode_and_go_step2(enum mfd_target_type mode);
 	void repopulate_step2_pickers();
 	void repopulate_layer_combos_for_scene();
+	void repopulate_filter_combos_for_host(bool preserve_range);
+	void repopulate_prop_combo_for_filter(bool preserve_range);
+	void configure_spinboxes_for_prop(bool preserve_range);
 	void update_step2_notes_and_validation();
 	void update_step3_controls();
 	void update_footer_buttons();
@@ -46,7 +52,8 @@ private:
 
 	struct mfd_engine *eng_ = nullptr;
 	struct mfd_ui_catalog *catalog_ = nullptr;
-	struct mfd_ui_snapshot snap_ {};
+	struct mfd_source_filter_catalog *filter_cat_ = nullptr;
+	struct mfd_ui_snapshot snap_{};
 	uint64_t last_topology_rev_ = 0ULL;
 	int slot_index_ = 0;
 	bool committed_or_unassigned_ = false;
@@ -57,6 +64,13 @@ private:
 	QString chosen_left_;
 	QString chosen_right_;
 	QString chosen_audio_;
+	QString chosen_filter_host_;
+	QString chosen_filter_name_;
+	QString chosen_filter_prop_;
+	double chosen_filter_from_ = 0.0;
+	double chosen_filter_to_ = 1.0;
+	bool chosen_filter_has_custom_range_ = false;
+	bool chosen_filter_bypass_ = false;
 	enum mfd_crossfade_curve chosen_curve_ = MFD_CURVE_DIP_FREE;
 	bool chosen_afv_ = false;
 	bool chosen_tbar_bidir_ = true;
@@ -70,6 +84,7 @@ private:
 	QPushButton *card_mix_ = nullptr;
 	QPushButton *card_single_ = nullptr;
 	QPushButton *card_volume_ = nullptr;
+	QPushButton *card_filter_ = nullptr;
 	QPushButton *btn_not_used_ = nullptr;
 
 	/* Step 2 widgets */
@@ -91,6 +106,19 @@ private:
 	QWidget *step2_audio_box_ = nullptr;
 	QLabel *step2_empty_audio_note_ = nullptr;
 	QComboBox *combo_audio_ = nullptr;
+
+	QWidget *step2_filter_box_ = nullptr;
+	QLabel *step2_empty_filter_note_ = nullptr;
+	QComboBox *combo_filter_host_ = nullptr;
+	QComboBox *combo_filter_name_ = nullptr;
+	QComboBox *combo_filter_prop_ = nullptr;
+	QDoubleSpinBox *spin_filter_from_ = nullptr;
+	QPushButton *btn_use_current_from_ = nullptr;
+	QDoubleSpinBox *spin_filter_to_ = nullptr;
+	QPushButton *btn_use_current_to_ = nullptr;
+	QLabel *lbl_filter_limits_note_ = nullptr;
+	QCheckBox *chk_filter_bypass_ = nullptr;
+	QLabel *filter_validation_refusal_ = nullptr;
 
 	QLabel *catalog_truncated_note_ = nullptr;
 

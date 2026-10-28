@@ -1011,7 +1011,7 @@ int main(void)
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.3.0") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.4.0") == 0);
 	REQUIRE(strcmp(obs_data_get_string(res, "profile"), "apc40mk2") == 0);
 	REQUIRE(strcmp(obs_data_get_string(res, "profile_tier"), "verified") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");

@@ -16,6 +16,8 @@
 #include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-setup-sheet.hpp"
 #include "obs/mfd-engine.h"
+#include "core/apc40-profile.h"
+#include "core/filter-math.h"
 #include "core/ui-sentences.h"
 #include "core/tbar-logic.h"
 #include "core/mixer-math.h"
@@ -197,12 +199,13 @@ public:
 	}
 
 	void set_state(int bar_pct, bool dimmed, enum mfd_ui_severity severity, bool at_end, bool show_pickup,
-		       int pickup_target_pct, const QString &arrow_glyph)
+		       int pickup_target_pct, const QString &arrow_glyph, bool is_fx_style = false)
 	{
 		const int clamped_pct = std::clamp(bar_pct, 0, 100);
 		const int clamped_pickup = std::clamp(pickup_target_pct, 0, 100);
 		if (bar_pct_ == clamped_pct && dimmed_ == dimmed && severity_ == severity && at_end_ == at_end &&
-		    show_pickup_ == show_pickup && pickup_pct_ == clamped_pickup && arrow_glyph_ == arrow_glyph) {
+		    show_pickup_ == show_pickup && pickup_pct_ == clamped_pickup && arrow_glyph_ == arrow_glyph &&
+		    is_fx_style_ == is_fx_style) {
 			return;
 		}
 		bar_pct_ = clamped_pct;
@@ -212,10 +215,12 @@ public:
 		show_pickup_ = show_pickup;
 		pickup_pct_ = clamped_pickup;
 		arrow_glyph_ = arrow_glyph;
+		is_fx_style_ = is_fx_style;
 		setProperty("barPercent", bar_pct_);
 		setProperty("showingPickup", show_pickup_);
 		setProperty("pickupPercent", pickup_pct_);
 		setProperty("arrowGlyph", arrow_glyph_);
+		setProperty("fxStyle", is_fx_style_);
 		update();
 	}
 
@@ -230,7 +235,7 @@ protected:
 		QPainter p(this);
 		p.setRenderHint(QPainter::Antialiasing, true);
 
-		QColor accent(0x38, 0xbd, 0xf8);
+		QColor accent = is_fx_style_ ? QColor(0x06, 0xb6, 0xd4) : QColor(0x38, 0xbd, 0xf8);
 		if (dimmed_) {
 			accent = QColor(0x64, 0x74, 0x8b);
 		} else if (severity_ == MFD_UI_SEVERITY_RED) {
@@ -239,6 +244,8 @@ protected:
 			accent = QColor(0xf5, 0x9e, 0x0b);
 		} else if (at_end_) {
 			accent = QColor(0x10, 0xb9, 0x81);
+		} else if (is_fx_style_ && bar_pct_ >= 75) {
+			accent = QColor(0xf5, 0x9e, 0x0b);
 		}
 
 		const QColor track_bg(0x1e, 0x29, 0x3b);
@@ -342,6 +349,7 @@ private:
 	bool show_pickup_ = false;
 	int pickup_pct_ = 0;
 	QString arrow_glyph_;
+	bool is_fx_style_ = false;
 };
 
 class MfdSettingsDialog final : public QDialog {
@@ -689,6 +697,64 @@ private:
 		});
 		connect(z1_btn_show_ctrl_, &QPushButton::clicked, this, [this]() { open_controller_svg_view(); });
 
+		/* --- Bank Switcher & Clean FX Bar --- */
+		auto *bank_bar = new QFrame(strips_tab);
+		bank_bar->setObjectName(QStringLiteral("mfdBankBar"));
+		bank_bar->setStyleSheet(QStringLiteral(
+			"QFrame#mfdBankBar { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 7px; }"));
+		auto *bb_lay = new QHBoxLayout(bank_bar);
+		bb_lay->setContentsMargins(10, 6, 10, 6);
+		bb_lay->setSpacing(8);
+
+		const QString pill_style = QStringLiteral(
+			"QPushButton { background-color: #1e293b; color: #cbd5e1; border: 1px solid #475569; "
+			"border-radius: 5px; padding: 5px 14px; font-weight: bold; } "
+			"QPushButton:hover { border-color: #93c5fd; color: #ffffff; } "
+			"QPushButton:checked { background-color: #0284c7; color: #ffffff; border: 1px solid #38bdf8; }");
+
+		btn_bank_faders_ = new QPushButton(QStringLiteral("Faders"), bank_bar);
+		btn_bank_faders_->setObjectName(QStringLiteral("mfdBtnBankFaders"));
+		btn_bank_faders_->setCheckable(true);
+		btn_bank_faders_->setChecked(true);
+		btn_bank_faders_->setCursor(Qt::PointingHandCursor);
+		btn_bank_faders_->setStyleSheet(pill_style);
+		bb_lay->addWidget(btn_bank_faders_);
+
+		btn_bank_fx_ = new QPushButton(QStringLiteral("FX && Knobs (8)"), bank_bar);
+		btn_bank_fx_->setObjectName(QStringLiteral("mfdBtnBankFx"));
+		btn_bank_fx_->setCheckable(true);
+		btn_bank_fx_->setChecked(false);
+		btn_bank_fx_->setCursor(Qt::PointingHandCursor);
+		btn_bank_fx_->setStyleSheet(pill_style);
+		bb_lay->addWidget(btn_bank_fx_);
+
+		bank_hint_label_ = new QLabel(bank_bar);
+		bank_hint_label_->setObjectName(QStringLiteral("mfdBankHintLabel"));
+		bank_hint_label_->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px; padding-left: 6px;"));
+		bb_lay->addWidget(bank_hint_label_, 1);
+
+		btn_clean_all_fx_ = new QPushButton(QStringLiteral("Clean / All FX Off"), bank_bar);
+		btn_clean_all_fx_->setObjectName(QStringLiteral("mfdBtnCleanAllFx"));
+		btn_clean_all_fx_->setCursor(Qt::PointingHandCursor);
+		btn_clean_all_fx_->setToolTip(QStringLiteral(
+			"Instantly return all FX & Knobs slots and filter controls to 0% (Clean) without touching A/B mixes or audio faders."));
+		bb_lay->addWidget(btn_clean_all_fx_);
+
+		lay->addWidget(bank_bar);
+
+		connect(btn_bank_faders_, &QPushButton::clicked, this, [this]() {
+			showing_fx_bank_ = false;
+			refresh_from_engine();
+		});
+		connect(btn_bank_fx_, &QPushButton::clicked, this, [this]() {
+			showing_fx_bank_ = true;
+			refresh_from_engine();
+		});
+		connect(btn_clean_all_fx_, &QPushButton::clicked, this, [this]() {
+			mfd_engine_reset_fx(eng_, 0, nullptr, nullptr, nullptr, nullptr, 0U);
+			refresh_from_engine();
+		});
+
 		/* --- Zone 2: Hardware Strips --- */
 		auto *scroll = new QScrollArea(strips_tab);
 		scroll->setObjectName(QStringLiteral("mfdStripsScrollArea"));
@@ -956,7 +1022,10 @@ private:
 				"Program from 0&ndash;100%. Reach the far end to finish, or return to the start "
 				"to cancel.<br>"
 				"<b style='color:#f8fafc;'>Mix two layers:</b> Crossfades Left and Right in one scene "
-				"(layer order is detected automatically)."),
+				"(layer order is detected automatically).<br>"
+				"<b style='color:#f8fafc;'>Filter or effect setting:</b> Sweeps any numeric filter or "
+				"shader slider across a custom Clean &rarr; Max range (click <b>Edit...</b> to pick "
+				"filter, setting, and range)."),
 			adv_tab);
 		hint->setObjectName(QStringLiteral("mfdAdvHelpLabel"));
 		hint->setTextFormat(Qt::RichText);
@@ -1204,13 +1273,62 @@ private:
 			}
 		}
 
+		if (btn_bank_faders_ && btn_bank_fx_) {
+			btn_bank_faders_->setChecked(!showing_fx_bank_);
+			btn_bank_fx_->setChecked(showing_fx_bank_);
+		}
+		if (bank_hint_label_) {
+			const QString hint_txt =
+				showing_fx_bank_
+					? QStringLiteral(
+						  "Dedicated FX slots for filter sweeps, shader controls, MIDI knobs, and Stream Deck + dials.")
+					: QStringLiteral("Channel faders, master, and A/B crossfader.");
+			if (bank_hint_label_->text() != hint_txt) {
+				bank_hint_label_->setText(hint_txt);
+			}
+		}
+		if (btn_clean_all_fx_) {
+			int eligible_fx = 0;
+			int active_fx = 0;
+			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+				const struct mfd_fader_slot &fs = snap_.slots[i];
+				if (fs.enabled && fs.target_type != MFD_TARGET_UNASSIGNED &&
+				    fs.target_type != MFD_TARGET_TBAR &&
+				    (mfd_slot_is_fx_bank(i) || fs.target_type == MFD_TARGET_FILTER_PARAM)) {
+					++eligible_fx;
+					if (fs.last_applied_val > MFD_FILTER_BYPASS_ZERO_THRESHOLD ||
+					    fs.auto_fade_active) {
+						++active_fx;
+					}
+				}
+			}
+			const QString clean_style =
+				(active_fx > 0)
+					? QStringLiteral(
+						  "QPushButton { background-color: #b45309; color: #ffffff; border: 1px solid #f59e0b; "
+						  "border-radius: 5px; padding: 5px 14px; font-weight: bold; } "
+						  "QPushButton:hover { background-color: #d97706; }")
+					: QStringLiteral(
+						  "QPushButton { background-color: #164e63; color: #cffafe; border: 1px solid #0891b2; "
+						  "border-radius: 5px; padding: 5px 14px; font-weight: bold; } "
+						  "QPushButton:hover { border-color: #22d3ee; color: #ffffff; }");
+			if (btn_clean_all_fx_->styleSheet() != clean_style) {
+				btn_clean_all_fx_->setStyleSheet(clean_style);
+			}
+			btn_clean_all_fx_->setEnabled(eligible_fx >= 0);
+		}
+
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 			const struct mfd_fader_slot &s = snap_.slots[i];
-			const bool show_strip = mfd_slot_is_fx_bank(i)
-							? false
-							: (mfd_profile_has_physical_slot(snap_.active_profile, i) ||
-							   (s.enabled && (s.addr.type != MFD_MIDI_NONE ||
-									  s.target_type != MFD_TARGET_UNASSIGNED)));
+			bool show_strip = false;
+			if (showing_fx_bank_) {
+				show_strip = mfd_slot_is_fx_bank(i);
+			} else {
+				show_strip = !mfd_slot_is_fx_bank(i) &&
+					     (mfd_profile_has_physical_slot(snap_.active_profile, i) ||
+					      (s.enabled && (s.addr.type != MFD_MIDI_NONE ||
+							     s.target_type != MFD_TARGET_UNASSIGNED)));
+			}
 			strip_cards_[i]->setVisible(show_strip);
 
 			struct mfd_ui_strip_presentation sp;
@@ -1249,8 +1367,10 @@ private:
 			}
 
 			const bool at_end = (std::strcmp(sp.state_readout, "At end.") == 0);
+			const bool is_fx_style = mfd_slot_is_fx_bank(i) || (s.target_type == MFD_TARGET_FILTER_PARAM);
 			strip_bars_[i]->set_state(sp.bar_percent, sp.dimmed, sp.severity, at_end, sp.show_pickup_marker,
-						  sp.pickup_target_percent, QString::fromUtf8(sp.arrow_glyph));
+						  sp.pickup_target_percent, QString::fromUtf8(sp.arrow_glyph),
+						  is_fx_style);
 
 			const QString state_q = QString::fromUtf8(sp.state_readout);
 			if (strip_states_[i]->text() != state_q) {
@@ -1390,19 +1510,33 @@ private:
 		combo->blockSignals(false);
 	}
 
-	void collect_advanced_source_lists(QStringList *out_video, QStringList *out_audio)
+	void collect_advanced_source_lists(QStringList *out_video, QStringList *out_audio,
+					   QStringList *out_filter_hosts)
 	{
 		QStringList vids = collect_live_obs_sources(true, false);
 		QStringList auds = collect_live_obs_sources(false, true);
+		QStringList hosts = vids;
+		for (const QString &a : auds) {
+			if (!hosts.contains(a)) {
+				hosts.append(a);
+			}
+		}
 
 		if (adv_catalog_) {
 			mfd_engine_get_ui_catalog(eng_, adv_catalog_);
 			for (size_t si = 0U; si < adv_catalog_->scene_count; ++si) {
 				const struct mfd_ui_scene_entry &se = adv_catalog_->scenes[si];
+				const QString sc_nm = QString::fromUtf8(se.name);
+				if (!sc_nm.isEmpty() && !hosts.contains(sc_nm)) {
+					hosts.append(sc_nm);
+				}
 				for (size_t li = 0U; li < se.layer_count; ++li) {
 					const QString lnm = QString::fromUtf8(se.layers[li]);
 					if (!vids.contains(lnm)) {
 						vids.append(lnm);
+					}
+					if (!hosts.contains(lnm)) {
+						hosts.append(lnm);
 					}
 				}
 			}
@@ -1411,12 +1545,41 @@ private:
 				if (!auds.contains(anm)) {
 					auds.append(anm);
 				}
+				if (!hosts.contains(anm)) {
+					hosts.append(anm);
+				}
+			}
+			for (size_t hi = 0U; hi < adv_catalog_->filter_host_count; ++hi) {
+				const QString hnm = QString::fromUtf8(adv_catalog_->filter_hosts[hi].name);
+				if (!hnm.isEmpty() && !hosts.contains(hnm)) {
+					hosts.append(hnm);
+				}
 			}
 		}
 		vids.sort(Qt::CaseInsensitive);
 		auds.sort(Qt::CaseInsensitive);
+		hosts.sort(Qt::CaseInsensitive);
 		*out_video = vids;
 		*out_audio = auds;
+		if (out_filter_hosts) {
+			*out_filter_hosts = hosts;
+		}
+	}
+
+	void apply_advanced_row_edit(int row, const struct mfd_slot_config_edit &edit, bool force_rebuild = false)
+	{
+		char err_buf[192] = {0};
+		if (!mfd_engine_update_slot_config_ex(eng_, row, &edit, err_buf, sizeof(err_buf))) {
+			adv_edit_error_ = QString::fromUtf8(
+				(err_buf[0] != '\0') ? err_buf : "Could not update strip configuration.");
+			last_adv_topology_rev_ = ~0ULL;
+		} else {
+			adv_edit_error_.clear();
+			if (force_rebuild) {
+				last_adv_topology_rev_ = ~0ULL;
+			}
+		}
+		refresh_from_engine();
 	}
 
 	struct mfd_slot_config_edit make_edit_from_snapshot_row(int row, bool preserve_scene) const
@@ -1479,7 +1642,8 @@ private:
 
 		QStringList video_sources;
 		QStringList audio_sources;
-		collect_advanced_source_lists(&video_sources, &audio_sources);
+		QStringList filter_host_sources;
+		collect_advanced_source_lists(&video_sources, &audio_sources, &filter_host_sources);
 
 		for (int row = 0; row < MFD_MAX_FADER_SLOTS; ++row) {
 			const struct mfd_fader_slot &slot = snap_.slots[row];
@@ -1496,8 +1660,7 @@ private:
 				}
 				struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
 				edit.enabled = on;
-				mfd_engine_update_slot_config(eng_, row, &edit);
-				refresh_from_engine();
+				apply_advanced_row_edit(row, edit);
 			});
 			table_->setCellWidget(row, 0, on_cell);
 
@@ -1557,8 +1720,7 @@ private:
 				}
 				struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
 				edit.invert = inverted;
-				mfd_engine_update_slot_config(eng_, row, &edit);
-				refresh_from_engine();
+				apply_advanced_row_edit(row, edit);
 			});
 			table_->setCellWidget(row, 3, inv_cell);
 
@@ -1573,6 +1735,8 @@ private:
 			target_combo->addItem(QStringLiteral("Show or hide a layer"),
 					      static_cast<int>(MFD_TARGET_SINGLE_LAYER));
 			target_combo->addItem(QStringLiteral("Volume"), static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
+			target_combo->addItem(QStringLiteral("Filter or effect setting"),
+					      static_cast<int>(MFD_TARGET_FILTER_PARAM));
 			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot.target_type)));
 			adv_mode_combos_[row] = target_combo;
 			table_->setCellWidget(row, 4, target_combo);
@@ -1582,6 +1746,7 @@ private:
 			bool show_curve = false;
 			bool show_afv = false;
 			mfd_row_controls_for_target(slot.target_type, &show_a, &show_b, &show_curve, &show_afv);
+			const bool is_filter_param = (slot.target_type == MFD_TARGET_FILTER_PARAM);
 
 			/* Column 5: Left */
 			QComboBox *src_a_combo = nullptr;
@@ -1589,9 +1754,11 @@ private:
 				src_a_combo = new QComboBox(table_);
 				src_a_combo->setObjectName(QStringLiteral("mfdAdvLeft_%1").arg(row));
 				src_a_combo->setMaximumWidth(175);
-				const bool is_audio_only = (slot.target_type == MFD_TARGET_AUDIO_VOLUME);
-				populate_source_combo(src_a_combo, is_audio_only ? audio_sources : video_sources,
-						      slot.source_a_name);
+				const QStringList &src_list =
+					(slot.target_type == MFD_TARGET_AUDIO_VOLUME)
+						? audio_sources
+						: (is_filter_param ? filter_host_sources : video_sources);
+				populate_source_combo(src_a_combo, src_list, slot.source_a_name);
 				table_->setCellWidget(row, 5, src_a_combo);
 			} else {
 				table_->setCellWidget(row, 5, new QWidget(table_));
@@ -1606,6 +1773,54 @@ private:
 				src_b_combo->setMaximumWidth(175);
 				populate_source_combo(src_b_combo, video_sources, slot.source_b_name);
 				table_->setCellWidget(row, 6, src_b_combo);
+			} else if (is_filter_param) {
+				auto *fcell = new QWidget(table_);
+				auto *flay = new QHBoxLayout(fcell);
+				flay->setContentsMargins(4, 2, 4, 2);
+				flay->setSpacing(4);
+
+				QString full_summary;
+				if (slot.filter_name[0] != '\0' && slot.filter_prop[0] != '\0') {
+					const QString fnm = QString::fromUtf8(slot.filter_name);
+					const QString plbl = (slot.filter_prop_label[0] != '\0')
+								     ? QString::fromUtf8(slot.filter_prop_label)
+								     : QString::fromUtf8(slot.filter_prop);
+					const int dec = slot.filter_prop_valid
+								? mfd_filter_decimals_for_step(slot.filter_prop_is_int,
+											       slot.filter_prop_step)
+								: 2;
+					full_summary = QStringLiteral("%1: %2 [%3..%4]")
+							       .arg(fnm, plbl,
+								    QString::number(slot.filter_from_val, 'f', dec),
+								    QString::number(slot.filter_to_val, 'f', dec));
+				} else {
+					full_summary = QStringLiteral("Choose filter...");
+				}
+
+				auto *lbl_fsum = new QLabel(full_summary, fcell);
+				lbl_fsum->setObjectName(QStringLiteral("mfdAdvFilterSummary_%1").arg(row));
+				lbl_fsum->setMaximumWidth(118);
+				lbl_fsum->setToolTip(full_summary);
+				lbl_fsum->setStyleSheet(
+					(slot.filter_name[0] != '\0' && slot.filter_prop[0] != '\0')
+						? QStringLiteral("color: #7dd3fc; font-size: 11px; font-weight: bold;")
+						: QStringLiteral("color: #94a3b8; font-size: 11px;"));
+
+				auto *btn_fedit = new QPushButton(QStringLiteral("Edit..."), fcell);
+				btn_fedit->setObjectName(QStringLiteral("mfdAdvFilterEdit_%1").arg(row));
+				btn_fedit->setCursor(Qt::PointingHandCursor);
+				btn_fedit->setStyleSheet(QStringLiteral(
+					"QPushButton { background-color: #1e293b; color: #e2e8f0; border: 1px solid #475569; "
+					"border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: bold; } "
+					"QPushButton:hover { border-color: #38bdf8; color: #ffffff; }"));
+				connect(btn_fedit, &QPushButton::clicked, this, [this, row]() {
+					adv_edit_error_.clear();
+					open_setup_for_slot(row);
+				});
+
+				flay->addWidget(lbl_fsum, 1);
+				flay->addWidget(btn_fedit);
+				table_->setCellWidget(row, 6, fcell);
 			} else {
 				table_->setCellWidget(row, 6, new QWidget(table_));
 			}
@@ -1625,18 +1840,33 @@ private:
 				curve_combo->addItem(QStringLiteral("Cut"), static_cast<int>(MFD_CURVE_CUT));
 				curve_combo->setCurrentIndex(curve_combo->findData(static_cast<int>(slot.curve)));
 				table_->setCellWidget(row, 7, curve_combo);
+			} else if (is_filter_param) {
+				auto *lbl_lin = new QLabel(QStringLiteral("Linear"), table_);
+				lbl_lin->setObjectName(QStringLiteral("mfdAdvFeelLabel_%1").arg(row));
+				lbl_lin->setAlignment(Qt::AlignCenter);
+				lbl_lin->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
+				table_->setCellWidget(row, 7, lbl_lin);
 			} else {
 				table_->setCellWidget(row, 7, new QWidget(table_));
 			}
 			adv_feel_combos_[row] = curve_combo;
 
-			/* Column 8: Also fade audio */
+			/* Column 8: Also fade audio / Off at 0% */
 			QCheckBox *chk_afv = nullptr;
+			QCheckBox *chk_flt_bypass = nullptr;
 			if (show_afv) {
 				QWidget *afv_cell = make_centered_checkbox_cell(
 					table_, QStringLiteral("mfdAdvAfv_%1").arg(row), slot.audio_follows_video,
 					QStringLiteral("Also fade audio volume alongside layer opacity."), &chk_afv);
 				table_->setCellWidget(row, 8, afv_cell);
+			} else if (is_filter_param) {
+				QWidget *byp_cell = make_centered_checkbox_cell(
+					table_, QStringLiteral("mfdAdvFilterBypass_%1").arg(row),
+					slot.filter_bypass_at_zero,
+					QStringLiteral("Turn filter off at 0% (saves GPU)."), &chk_flt_bypass);
+				chk_flt_bypass->setText(QStringLiteral("Off at 0%"));
+				chk_flt_bypass->setStyleSheet(QStringLiteral("font-size: 11px; color: #cbd5e1;"));
+				table_->setCellWidget(row, 8, byp_cell);
 			} else {
 				table_->setCellWidget(row, 8, new QWidget(table_));
 			}
@@ -1658,11 +1888,18 @@ private:
 						return;
 					}
 					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
-					edit.target_type =
+					const auto new_target =
 						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
-					mfd_engine_update_slot_config(eng_, row, &edit);
-					last_adv_topology_rev_ = ~0ULL;
-					refresh_from_engine();
+					edit.target_type = new_target;
+					if (new_target == MFD_TARGET_FILTER_PARAM &&
+					    snap_.slots[row].target_type != MFD_TARGET_FILTER_PARAM) {
+						edit.filter_name[0] = '\0';
+						edit.filter_prop[0] = '\0';
+						edit.has_filter_range = false;
+						edit.filter_from_val = 0.0;
+						edit.filter_to_val = 0.0;
+					}
+					apply_advanced_row_edit(row, edit, true);
 				});
 
 			if (src_a_combo) {
@@ -1674,10 +1911,20 @@ private:
 						struct mfd_slot_config_edit edit =
 							make_edit_from_snapshot_row(row, true);
 						const QByteArray utf8 = src_a_combo->currentData().toString().toUtf8();
+						const bool host_changed =
+							(std::strcmp(edit.source_a_name, utf8.constData()) != 0);
 						std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s",
 							      utf8.constData());
-						mfd_engine_update_slot_config(eng_, row, &edit);
-						refresh_from_engine();
+						if (edit.target_type == MFD_TARGET_FILTER_PARAM && host_changed) {
+							edit.filter_name[0] = '\0';
+							edit.filter_prop[0] = '\0';
+							edit.has_filter_range = false;
+							edit.filter_from_val = 0.0;
+							edit.filter_to_val = 0.0;
+						}
+						apply_advanced_row_edit(row, edit,
+									edit.target_type == MFD_TARGET_FILTER_PARAM &&
+										host_changed);
 					});
 			}
 
@@ -1692,8 +1939,7 @@ private:
 						const QByteArray utf8 = src_b_combo->currentData().toString().toUtf8();
 						std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s",
 							      utf8.constData());
-						mfd_engine_update_slot_config(eng_, row, &edit);
-						refresh_from_engine();
+						apply_advanced_row_edit(row, edit);
 					});
 			}
 
@@ -1707,8 +1953,7 @@ private:
 							make_edit_from_snapshot_row(row, true);
 						edit.curve = static_cast<enum mfd_crossfade_curve>(
 							curve_combo->currentData().toInt());
-						mfd_engine_update_slot_config(eng_, row, &edit);
-						refresh_from_engine();
+						apply_advanced_row_edit(row, edit);
 					});
 			}
 
@@ -1719,8 +1964,18 @@ private:
 					}
 					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
 					edit.audio_follows_video = checked;
-					mfd_engine_update_slot_config(eng_, row, &edit);
-					refresh_from_engine();
+					apply_advanced_row_edit(row, edit);
+				});
+			}
+
+			if (chk_flt_bypass) {
+				connect(chk_flt_bypass, &QCheckBox::toggled, this, [this, row](bool checked) {
+					if (rebuilding_adv_table_) {
+						return;
+					}
+					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
+					edit.filter_bypass_at_zero = checked;
+					apply_advanced_row_edit(row, edit);
 				});
 			}
 		}
@@ -1783,13 +2038,21 @@ private:
 				QStringLiteral("\xE2\x97\x8F Connected: %1").arg(QString::fromUtf8(ctrl.display_name)),
 				QStringLiteral("QLabel { background-color: #064e3b; color: #6ee7b7; padding: 4px 10px; "
 					       "border: 1px solid #10b981; border-radius: 4px; font-weight: bold; }"));
-			banner_label_->hide();
+			if (!adv_edit_error_.isEmpty()) {
+				banner_label_->setText(adv_edit_error_);
+				banner_label_->show();
+			} else {
+				banner_label_->hide();
+			}
 		} else {
 			set_label_text_and_style(
 				conn_status_label_, QString::fromUtf8(ctrl.status_sentence),
 				QStringLiteral("QLabel { background-color: #451a03; color: #fcd34d; padding: 4px 10px; "
 					       "border: 1px solid #d97706; border-radius: 4px; font-weight: bold; }"));
-			if (snap_.midi_last_error[0] != '\0') {
+			if (!adv_edit_error_.isEmpty()) {
+				banner_label_->setText(adv_edit_error_);
+				banner_label_->show();
+			} else if (snap_.midi_last_error[0] != '\0') {
 				banner_label_->setText(QString::fromUtf8(snap_.midi_last_error));
 				banner_label_->show();
 			} else {
@@ -1931,6 +2194,8 @@ private:
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
 	bool last_midi_connected_ = false;
+	bool showing_fx_bank_ = false;
+	QString adv_edit_error_;
 
 	QWidget *first_run_banner_ = nullptr;
 	QWidget *studio_note_widget_ = nullptr;
@@ -1947,6 +2212,10 @@ private:
 	QComboBox *zone1_profile_combo_ = nullptr;
 	QPushButton *z1_btn_change_ctrl_ = nullptr;
 	QPushButton *z1_btn_show_ctrl_ = nullptr;
+	QPushButton *btn_bank_faders_ = nullptr;
+	QPushButton *btn_bank_fx_ = nullptr;
+	QLabel *bank_hint_label_ = nullptr;
+	QPushButton *btn_clean_all_fx_ = nullptr;
 
 	QFrame *strip_cards_[MFD_MAX_FADER_SLOTS]{};
 	QLabel *strip_titles_[MFD_MAX_FADER_SLOTS]{};

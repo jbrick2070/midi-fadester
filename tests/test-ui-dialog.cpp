@@ -22,6 +22,7 @@ OBS_MODULE_USE_DEFAULT_LOCALE("midi-fadester", "en-US")
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QImage>
@@ -140,6 +141,20 @@ static void pump_ui()
 constexpr int FAKE_MAX_SOURCES = 20;
 constexpr int FAKE_MAX_SCENES = 10;
 constexpr int FAKE_MAX_SCENE_ITEMS = 10;
+constexpr int FAKE_MAX_FILTERS = 8;
+
+struct fake_sg_filter {
+	bool in_use;
+	char host_name[64];
+	char filter_name[64];
+	char type_id[64];
+	bool enabled;
+	double radius;
+	int passes;
+	double reactivity_pct;
+	int update_writes;
+	int enable_writes;
+};
 
 struct fake_sg_source {
 	bool in_use;
@@ -161,8 +176,10 @@ struct fake_sg_scene {
 struct fake_scene_graph {
 	struct fake_sg_source sources[FAKE_MAX_SOURCES];
 	struct fake_sg_scene scenes[FAKE_MAX_SCENES];
+	struct fake_sg_filter filters[FAKE_MAX_FILTERS];
 	int total_opacity_writes;
 	int total_volume_writes;
+	int total_filter_writes;
 	struct mfd_engine *owner_eng;
 };
 
@@ -443,6 +460,191 @@ static void fake_op_fill_catalog(struct mfd_ui_catalog *out, void *user_data)
 		std::snprintf(ae->name, sizeof(ae->name), "%s", sg->sources[i].name);
 		ae->db = mfd_mul_to_db(sg->sources[i].last_volume_mul);
 	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (!sg->filters[i].in_use) {
+			continue;
+		}
+		const char *hnm = sg->filters[i].host_name;
+		struct mfd_ui_filter_host_summary *existing = nullptr;
+		for (size_t k = 0U; k < out->filter_host_count; ++k) {
+			if (std::strcmp(out->filter_hosts[k].name, hnm) == 0) {
+				existing = &out->filter_hosts[k];
+				break;
+			}
+		}
+		if (existing) {
+			++existing->filter_count;
+		} else if (out->filter_host_count < MFD_CATALOG_MAX_FILTER_HOSTS) {
+			struct mfd_ui_filter_host_summary *fh = &out->filter_hosts[out->filter_host_count++];
+			std::memset(fh, 0, sizeof(*fh));
+			std::snprintf(fh->name, sizeof(fh->name), "%s", hnm);
+			fh->is_scene = (fake_sg_find_scene(sg, hnm) != nullptr);
+			fh->filter_count = 1U;
+		}
+	}
+}
+
+static struct fake_sg_filter *fake_sg_find_filter(struct fake_scene_graph *sg, const char *host_name,
+						  const char *filter_name)
+{
+	if (!sg || !host_name || !filter_name) {
+		return nullptr;
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (sg->filters[i].in_use && std::strcmp(sg->filters[i].host_name, host_name) == 0 &&
+		    std::strcmp(sg->filters[i].filter_name, filter_name) == 0) {
+			return &sg->filters[i];
+		}
+	}
+	return nullptr;
+}
+
+static void fake_sg_add_filter(struct fake_scene_graph *sg, const char *host_name, const char *filter_name,
+			       const char *type_id, bool enabled = true)
+{
+	if (fake_sg_find_filter(sg, host_name, filter_name)) {
+		return;
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (!sg->filters[i].in_use) {
+			std::memset(&sg->filters[i], 0, sizeof(sg->filters[i]));
+			sg->filters[i].in_use = true;
+			std::snprintf(sg->filters[i].host_name, sizeof(sg->filters[i].host_name), "%s", host_name);
+			std::snprintf(sg->filters[i].filter_name, sizeof(sg->filters[i].filter_name), "%s",
+				      filter_name);
+			std::snprintf(sg->filters[i].type_id, sizeof(sg->filters[i].type_id), "%s", type_id);
+			sg->filters[i].enabled = enabled;
+			sg->filters[i].radius = 12.5;
+			sg->filters[i].passes = 2;
+			sg->filters[i].reactivity_pct = 50.0;
+			return;
+		}
+	}
+}
+
+static void fake_op_enum_filter_hosts(mfd_filter_host_cb cb, void *cb_param, void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	if (!sg || !cb) {
+		return;
+	}
+	for (int i = 0; i < FAKE_MAX_SOURCES; ++i) {
+		if (sg->sources[i].in_use) {
+			cb(sg->sources[i].name, false, cb_param);
+		}
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (sg->scenes[i].in_use) {
+			cb(sg->scenes[i].name, true, cb_param);
+		}
+	}
+}
+
+static bool fake_op_enum_source_filters(const char *source_name, bool *out_is_scene, mfd_source_filter_cb cb,
+					void *cb_param, void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	if (!sg || !source_name || !fake_op_source_exists(source_name, sg)) {
+		return false;
+	}
+	if (out_is_scene) {
+		*out_is_scene = (fake_sg_find_scene(sg, source_name) != nullptr);
+	}
+	if (cb) {
+		for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+			if (sg->filters[i].in_use && std::strcmp(sg->filters[i].host_name, source_name) == 0) {
+				cb(sg->filters[i].filter_name, sg->filters[i].type_id, sg->filters[i].enabled,
+				   cb_param);
+			}
+		}
+	}
+	return true;
+}
+
+static obs_properties_t *fake_op_create_filter_properties(const char *source_name, const char *filter_name,
+							  void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	struct fake_sg_filter *flt = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!flt) {
+		return nullptr;
+	}
+	obs_properties_t *props = obs_properties_create();
+	if (std::strcmp(flt->type_id, "blur_filter") == 0) {
+		obs_property_t *pr = obs_properties_add_float_slider(props, "radius", "Blur Radius", 0.0, 50.0, 0.5);
+		obs_property_float_set_suffix(pr, " px");
+		obs_properties_add_int_slider(props, "passes", "Passes", 1, 8, 1);
+	} else if (std::strcmp(flt->type_id, "VisualSidechain.AudioModulator") == 0) {
+		obs_properties_t *grp = obs_properties_create();
+		obs_property_t *pa =
+			obs_properties_add_float_slider(grp, "slot_1_amount_pct", "Slot 1 Amount", 0.0, 100.0, 1.0);
+		obs_property_float_set_suffix(pa, "%");
+		obs_properties_add_group(props, "slot_1_group", "Modulation Slot 1", OBS_GROUP_NORMAL, grp);
+	}
+	return props;
+}
+
+static obs_data_t *fake_op_get_filter_settings(const char *source_name, const char *filter_name, void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	struct fake_sg_filter *flt = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!flt) {
+		return nullptr;
+	}
+	obs_data_t *d = obs_data_create();
+	if (std::strcmp(flt->type_id, "blur_filter") == 0) {
+		obs_data_set_double(d, "radius", flt->radius);
+		obs_data_set_int(d, "passes", flt->passes);
+	} else if (std::strcmp(flt->type_id, "VisualSidechain.AudioModulator") == 0) {
+		obs_data_set_double(d, "slot_1_amount_pct", flt->reactivity_pct);
+	}
+	return d;
+}
+
+static void fake_op_update_filter_settings(const char *source_name, const char *filter_name, obs_data_t *settings,
+					   void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	struct fake_sg_filter *flt = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!flt || !settings) {
+		return;
+	}
+	if (obs_data_has_user_value(settings, "radius")) {
+		flt->radius = obs_data_get_double(settings, "radius");
+	}
+	if (obs_data_has_user_value(settings, "passes")) {
+		flt->passes = static_cast<int>(obs_data_get_int(settings, "passes"));
+	}
+	if (obs_data_has_user_value(settings, "slot_1_amount_pct")) {
+		flt->reactivity_pct = obs_data_get_double(settings, "slot_1_amount_pct");
+	}
+	++flt->update_writes;
+	++sg->total_filter_writes;
+}
+
+static bool fake_op_get_filter_enabled(const char *source_name, const char *filter_name, bool *out_enabled,
+				       void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	struct fake_sg_filter *flt = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!flt) {
+		return false;
+	}
+	if (out_enabled) {
+		*out_enabled = flt->enabled;
+	}
+	return true;
+}
+
+static void fake_op_set_filter_enabled(const char *source_name, const char *filter_name, bool enabled, void *user_data)
+{
+	auto *sg = static_cast<struct fake_scene_graph *>(user_data);
+	struct fake_sg_filter *flt = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!flt) {
+		return;
+	}
+	flt->enabled = enabled;
+	++flt->enable_writes;
 }
 
 static void fake_op_set_studio_mode(bool enabled, void *user_data)
@@ -465,13 +667,13 @@ static const struct mfd_scene_graph_ops k_fake_sg_ops = {
 	fake_op_apply_volume,
 	fake_op_fill_catalog,
 	fake_op_set_studio_mode,
-	nullptr,
-	nullptr,
-	nullptr,
-	nullptr,
-	nullptr,
-	nullptr,
-	nullptr,
+	fake_op_enum_filter_hosts,
+	fake_op_enum_source_filters,
+	fake_op_create_filter_properties,
+	fake_op_get_filter_settings,
+	fake_op_update_filter_settings,
+	fake_op_get_filter_enabled,
+	fake_op_set_filter_enabled,
 };
 
 template<typename T> static T *must_find(QObject *root, const QString &name)
@@ -573,6 +775,9 @@ int main(int argc, char **argv)
 
 	fake_sg_add_scene(&sg, "OldScene");
 	fake_sg_scene_add_item(&sg, "OldScene", "Cam");
+
+	fake_sg_add_filter(&sg, "Cam", "Blur", "blur_filter", true);
+	fake_sg_add_filter(&sg, "Blue", "AudioMod", "VisualSidechain.AudioModulator", true);
 
 	mfd_engine_load_apc40_defaults(&eng);
 	eng.first_run_offer_dismissed = false;
@@ -1124,16 +1329,251 @@ int main(int argc, char **argv)
 	pump_ui();
 	REQUIRE(beta_badge->isHidden());
 	REQUIRE(adv_beta_note->isHidden());
+	REQUIRE(dlg->width() <= 1380);
 	for (int i = 0; i < (int)MFD_FADER_STRIP_COUNT; ++i) {
 		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
 	}
+	for (int i = (int)MFD_FADER_STRIP_COUNT; i < MFD_MAX_FADER_SLOTS; ++i) {
+		REQUIRE(must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+	}
+
+	/* --- 9. 0.4.0 FX & Knobs Bank, Filter or Effect Setting Set up, Clean / All FX Off & Advanced 18-Row --- */
+	auto *btn_bank_faders = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnBankFaders"));
+	auto *btn_bank_fx = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnBankFx"));
+	auto *btn_clean_fx = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnCleanAllFx"));
+	REQUIRE(btn_bank_faders->isChecked());
+	REQUIRE(!btn_bank_fx->isChecked());
+
+	/* Switch to [FX & Knobs (8)] bank -> slots 0..9 hide, slots 10..17 (FX 1 .. FX 8) show */
+	btn_bank_fx->click();
+	pump_ui();
+	REQUIRE(!btn_bank_faders->isChecked());
+	REQUIRE(btn_bank_fx->isChecked());
+	for (int i = 0; i < (int)MFD_FADER_STRIP_COUNT; ++i) {
+		REQUIRE(must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+	}
+	for (int i = (int)MFD_FADER_STRIP_COUNT; i < MFD_MAX_FADER_SLOTS; ++i) {
+		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripTitle_%1").arg(i))->text() ==
+			QStringLiteral("FX %1").arg(i - 9));
+	}
+
+	/* Switch to knobless APC mini mk2 -> FX 1..8 remain visible & enabled with zero red "No MIDI control bound." */
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC_MINI_MK2, false));
+	pump_ui();
+	for (int i = (int)MFD_FADER_STRIP_COUNT; i < MFD_MAX_FADER_SLOTS; ++i) {
+		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_%1").arg(i))->isHidden());
+	}
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC40_MK2, false));
+	pump_ui();
+
+	/* Open Set up on FX 1 (slot 10) -> defaults to Filter or effect setting card checked */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdStripActionBtn_10"))->click();
+	pump_ui();
+	sheet = must_find<QDialog>(dlg.get(), QStringLiteral("mfdSetupSheet"));
+	stack = must_find<QStackedWidget>(sheet, QStringLiteral("mfdSetupStack"));
+	auto *card_filter = must_find<QPushButton>(sheet, QStringLiteral("mfdCardFilterSetting"));
+	REQUIRE(!sheet->isHidden());
+	REQUIRE(stack->currentIndex() == 0);
+	REQUIRE(card_filter->isChecked());
+
+	/* Click Filter or effect setting card -> Step 2 */
+	card_filter->click();
+	pump_ui();
+	REQUIRE(stack->currentIndex() == 1);
+
+	auto *combo_fhost = must_find<QComboBox>(sheet, QStringLiteral("mfdComboFilterHost"));
+	auto *combo_fname = must_find<QComboBox>(sheet, QStringLiteral("mfdComboFilterName"));
+	auto *combo_fprop = must_find<QComboBox>(sheet, QStringLiteral("mfdComboFilterProp"));
+	auto *spin_ffrom = must_find<QDoubleSpinBox>(sheet, QStringLiteral("mfdSpinFilterFrom"));
+	auto *spin_fto = must_find<QDoubleSpinBox>(sheet, QStringLiteral("mfdSpinFilterTo"));
+	auto *btn_use_cur_from = must_find<QPushButton>(sheet, QStringLiteral("mfdBtnUseCurrentFrom"));
+	auto *chk_fbypass = must_find<QCheckBox>(sheet, QStringLiteral("mfdChkFilterBypass"));
+	auto *flt_refusal = must_find<QLabel>(sheet, QStringLiteral("mfdFilterValidationRefusal"));
+	btn_next = must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"));
+
+	REQUIRE(combo_fhost->findData(QStringLiteral("Cam")) >= 0);
+	REQUIRE(combo_fhost->findData(QStringLiteral("Blue")) >= 0);
+	combo_fhost->setCurrentIndex(combo_fhost->findData(QStringLiteral("Cam")));
+	pump_ui();
+	REQUIRE(combo_fname->currentData().toString() == QStringLiteral("Blur"));
+	combo_fprop->setCurrentIndex(combo_fprop->findData(QStringLiteral("radius")));
+	pump_ui();
+
+	/* Click [Use current] on At 0% -> reads live 12.5 px, then test equal endpoints refusal */
+	btn_use_cur_from->click();
+	pump_ui();
+	REQUIRE(std::fabs(spin_ffrom->value() - 12.5) < 1e-6);
+
+	spin_ffrom->setValue(40.0);
+	spin_fto->setValue(40.0);
+	pump_ui();
+	REQUIRE(!flt_refusal->isHidden());
+	REQUIRE(flt_refusal->text().contains(QStringLiteral("must differ")));
+	REQUIRE(!btn_next->isEnabled());
+
+	/* Configure Clean = 0.0 px, Max = 40.0 px, Turn filter off at 0% = true */
+	spin_ffrom->setValue(0.0);
+	spin_fto->setValue(40.0);
+	chk_fbypass->setChecked(true);
+	pump_ui();
+	REQUIRE(flt_refusal->isHidden());
+	REQUIRE(btn_next->isEnabled());
+
+	capture_and_verify_png(sheet, screenshot_dir, QStringLiteral("12-setup-filter-step2.png"));
+
+	/* Advance to Step 3 -> simulated display_value preview while live filter writes stay paused */
+	btn_next->click();
+	pump_ui();
+	REQUIRE(stack->currentIndex() == 2);
+	fin_lbl = must_find<QLabel>(sheet, QStringLiteral("mfdFinishedSentence"));
+	cand_meter = must_find<QProgressBar>(sheet, QStringLiteral("mfdCandidateMeter"));
+	btn_done = must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"));
+	REQUIRE(fin_lbl->text() == QStringLiteral("FX 1 controls Blur (Blur Radius) on Cam"));
+
+	const int flt_writes_before_try = sg.total_filter_writes;
+	push_midi_cc(&eng, 0, 16, 64); /* APC40 Device Knob 1 (Ch 1 CC 16) = ~50% -> 20.0 px */
+	mfd_engine_tick(&eng, 0.016f);
+	pump_ui();
+	REQUIRE(cand_meter->value() == 50);
+	REQUIRE(cand_meter->format().contains(QStringLiteral("px")));
+	REQUIRE(sg.total_filter_writes == flt_writes_before_try);
+
+	btn_done->click();
+	pump_ui();
+	REQUIRE(sheet->isHidden());
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_10"))->text() ==
+		QStringLiteral("Cam: Blur (Blur Radius)"));
+
+	/* Drive FX 1 via APC40 Device Knob 1 (cross initial takeover target first, then 50% -> 20.0 px) */
+	push_midi_cc(&eng, 0, 16, 30);
+	push_midi_cc(&eng, 0, 16, 50);
+	push_midi_cc(&eng, 0, 16, 64);
+	mfd_engine_tick(&eng, 0.016f);
+	pump_ui();
+	struct fake_sg_filter *blur_flt = fake_sg_find_filter(&sg, "Cam", "Blur");
+	REQUIRE(blur_flt != nullptr);
+	REQUIRE(blur_flt->enabled);
+	REQUIRE(std::fabs(blur_flt->radius - 20.157) < 0.5);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_10"))->text().contains(QStringLiteral("px")));
+
+	/* Open Set up on FX 2 (slot 11): verify single-writer conflict on Cam/Blur/radius, then bind scene AudioMod */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdStripActionBtn_11"))->click();
+	pump_ui();
+	must_find<QPushButton>(sheet, QStringLiteral("mfdCardFilterSetting"))->click();
+	pump_ui();
+	combo_fhost->setCurrentIndex(combo_fhost->findData(QStringLiteral("Cam")));
+	pump_ui();
+	combo_fprop->setCurrentIndex(combo_fprop->findData(QStringLiteral("radius")));
+	pump_ui();
+	REQUIRE(!flt_refusal->isHidden());
+	REQUIRE(flt_refusal->text() == QStringLiteral("Setting 'radius' on 'Blur' is already controlled by FX 1."));
+	REQUIRE(!btn_next->isEnabled());
+
+	/* Switch FX 2 to whole-scene Visual Sidechain AudioMod nested group setting (inverted 100% -> 0%) */
+	combo_fhost->setCurrentIndex(combo_fhost->findData(QStringLiteral("Blue")));
+	pump_ui();
+	REQUIRE(combo_fname->currentData().toString() == QStringLiteral("AudioMod"));
+	REQUIRE(combo_fprop->currentData().toString() == QStringLiteral("slot_1_amount_pct"));
+	spin_ffrom->setValue(100.0);
+	spin_fto->setValue(0.0);
+	chk_fbypass->setChecked(false);
+	pump_ui();
+	REQUIRE(flt_refusal->isHidden());
+	REQUIRE(btn_next->isEnabled());
+	btn_next->click();
+	pump_ui();
+	btn_done->click();
+	pump_ui();
+	REQUIRE(sheet->isHidden());
+
+	/* Drive FX 2 to 75% deflection -> inverted 25% reactivity */
+	push_midi_cc(&eng, 0, 17, 50);
+	push_midi_cc(&eng, 0, 17, 95);
+	mfd_engine_tick(&eng, 0.016f);
+	pump_ui();
+	struct fake_sg_filter *amod_flt = fake_sg_find_filter(&sg, "Blue", "AudioMod");
+	REQUIRE(amod_flt != nullptr);
+	REQUIRE(std::fabs(amod_flt->reactivity_pct - 25.2) < 1.5);
+
+	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("11-fx-bank-strips.png"));
+
+	/* Click [Clean / All FX Off] -> resets FX 1 (0.0 px (Off), Blur disabled) & FX 2 (100% clean) without touching Strip 1 */
+	{
+		char err_s1[128] = {0};
+		REQUIRE(mfd_engine_set_slot_value(&eng, 1, 0.62f, false, "api", err_s1, sizeof(err_s1)));
+		mfd_engine_tick(&eng, 0.016f);
+	}
+	const float strip1_val_before_clean = eng.fader_slots[1].last_applied_val;
+	REQUIRE(std::fabs(strip1_val_before_clean - 0.62f) < 1e-5f);
+	btn_clean_fx->click();
+	pump_ui();
+	REQUIRE(std::fabs(eng.fader_slots[10].last_applied_val) < 1e-5f);
+	REQUIRE(std::fabs(eng.fader_slots[11].last_applied_val) < 1e-5f);
+	REQUIRE(std::fabs(blur_flt->radius - 0.0) < 1e-5);
+	REQUIRE(!blur_flt->enabled);
+	REQUIRE(std::fabs(amod_flt->reactivity_pct - 100.0) < 1e-5);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_10"))->text() ==
+		QStringLiteral("0.0 px (Off)"));
+	REQUIRE(std::fabs(eng.fader_slots[1].last_applied_val - strip1_val_before_clean) < 1e-5f);
+
+	/* Switch to Advanced tab -> verify 18 rows, <= 1380 px width, filter summary, Off at 0% toggle & conflict banner */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnOpenAdvanced"))->click();
+	pump_ui();
+	REQUIRE(tabs->currentIndex() == 1);
+	REQUIRE(table->rowCount() == 18);
+	REQUIRE(dlg->width() <= 1380);
+	REQUIRE(must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_10"))->currentData().toInt() ==
+		static_cast<int>(MFD_TARGET_FILTER_PARAM));
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvFilterSummary_10"))->text() ==
+		QStringLiteral("Blur: Blur Radius [0.0..40.0]"));
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvFeelLabel_10"))->text() == QStringLiteral("Linear"));
+
+	/* Uncheck Off at 0% on row 10 -> lease detaches and restores Blur enabled == true immediately */
+	auto *adv_byp_10 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvFilterBypass_10"));
+	REQUIRE(adv_byp_10->isChecked());
+	adv_byp_10->setChecked(false);
+	pump_ui();
+	REQUIRE(blur_flt->enabled);
+
+	/* Click [Edit...] on row 10 -> opens Set up sheet for FX 1, then cancel */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvFilterEdit_10"))->click();
+	pump_ui();
+	REQUIRE(!sheet->isHidden());
+	must_find<QPushButton>(sheet, QStringLiteral("mfdSetupCancelBtn"))->click();
+	pump_ui();
+	REQUIRE(sheet->isHidden());
+
+	/* Configure disabled duplicate on FX 3 (row 12), then toggle On in Advanced -> banner surfaces single-writer error */
+	{
+		struct mfd_slot_config_edit dup_edit{};
+		dup_edit.enabled = false;
+		dup_edit.target_type = MFD_TARGET_FILTER_PARAM;
+		std::snprintf(dup_edit.source_a_name, sizeof(dup_edit.source_a_name), "Cam");
+		std::snprintf(dup_edit.filter_name, sizeof(dup_edit.filter_name), "Blur");
+		std::snprintf(dup_edit.filter_prop, sizeof(dup_edit.filter_prop), "radius");
+		dup_edit.has_filter_range = true;
+		dup_edit.filter_from_val = 0.0;
+		dup_edit.filter_to_val = 25.0;
+		REQUIRE(mfd_engine_update_slot_config(&eng, 12, &dup_edit));
+		pump_ui();
+	}
+	auto *adv_on_12 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvOn_12"));
+	REQUIRE(!adv_on_12->isChecked());
+	adv_on_12->setChecked(true);
+	pump_ui();
+	auto *adv_err_banner = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvErrorBanner"));
+	REQUIRE(!adv_err_banner->isHidden());
+	REQUIRE(adv_err_banner->text() == QStringLiteral("Setting 'radius' on 'Blur' is already controlled by FX 1."));
+	REQUIRE(!eng.fader_slots[12].enabled);
 
 	dlg->close();
 	dlg.reset();
 	mfd_engine_destroy_mutex(&eng);
 
 	std::printf(
-		"test-ui-dialog: PASS (all end-to-end flows, multi-controller profiles & 10 screenshots verified in %s)\n",
+		"test-ui-dialog: PASS (all end-to-end flows, FX bank, filter_param, multi-controller profiles & 12 screenshots verified in %s)\n",
 		screenshot_dir.toUtf8().constData());
 	return 0;
 }

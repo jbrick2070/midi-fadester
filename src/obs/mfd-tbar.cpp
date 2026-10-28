@@ -618,6 +618,7 @@ struct selftest_sig_capture {
 	char slot[32];
 	float value;
 	char origin[32];
+	char display_value[64];
 };
 
 static void on_selftest_fader_signal(void *data, calldata_t *cd)
@@ -629,8 +630,10 @@ static void on_selftest_fader_signal(void *data, calldata_t *cd)
 	++cap->count;
 	const char *s = calldata_string(cd, "slot");
 	const char *o = calldata_string(cd, "origin");
+	const char *dv = calldata_string(cd, "display_value");
 	std::snprintf(cap->slot, sizeof(cap->slot), "%s", s ? s : "");
 	std::snprintf(cap->origin, sizeof(cap->origin), "%s", o ? o : "");
+	std::snprintf(cap->display_value, sizeof(cap->display_value), "%s", dv ? dv : "");
 	cap->value = static_cast<float>(calldata_float(cd, "value"));
 }
 
@@ -709,6 +712,7 @@ static void run_live_selftest_worker(void)
 				"__mfd_selftest_tbar_blue__",    "__mfd_selftest_tbar_blue__ 2",
 				"__mfd_selftest_tbar_red_src__", "__mfd_selftest_tbar_blue_src__",
 				"__mfd_selftest_program_tap__",  "__mfd_selftest_program_tap__ 2",
+				"mfd_selftest_fx_src",           "mfd_selftest_fx_src_renamed",
 			};
 			for (const char *sn : stale_names) {
 				obs_source_t *old = obs_get_source_by_name(sn);
@@ -2313,6 +2317,287 @@ static void run_live_selftest_worker(void)
 		obs_source_release(vs_test_src);
 	}
 
+	/*
+	 * 0.4.0 Live FX Bank, get_catalog, filter_param (color_filter_v2), live filter/source signals,
+	 * GetSourceScreenshot GPU pixel check, reset_fx (CLEAN / ALL FX OFF), and bypass lease restore check.
+	 */
+	bool fx_catalog_ok = false;
+	bool fx_bind_ok = false;
+	bool fx_pixel_dark_ok = false;
+	bool fx_ext_update_ok = false;
+	bool fx_props_enable_ok = false;
+	bool fx_rename_ok = false;
+	bool fx_remove_readd_ok = false;
+	bool fx_reset_clean_ok = false;
+	bool fx_unbind_restore_ok = false;
+
+	{
+		obs_data_t *fx_src_set = obs_data_create();
+		obs_data_set_int(fx_src_set, "color", 0xFF00FF00LL); /* Pure Green */
+		obs_data_set_int(fx_src_set, "width", 256);
+		obs_data_set_int(fx_src_set, "height", 256);
+		obs_source_t *fx_src = obs_source_create("color_source", "mfd_selftest_fx_src", fx_src_set, nullptr);
+		obs_data_release(fx_src_set);
+
+		obs_data_t *fx_flt_set = obs_data_create();
+		obs_data_set_double(fx_flt_set, "brightness", 0.0);
+		obs_source_t *fx_flt =
+			obs_source_create("color_filter_v2", "mfd_selftest_color_fx", fx_flt_set, nullptr);
+		if (!fx_flt) {
+			fx_flt = obs_source_create("color_filter", "mfd_selftest_color_fx", fx_flt_set, nullptr);
+		}
+		obs_data_release(fx_flt_set);
+
+		if (fx_src && fx_flt) {
+			obs_source_filter_add(fx_src, fx_flt);
+			std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+			/* 1. get_catalog (host summary + source-scoped filter/property discovery) */
+			bool saw_host = false;
+			bool saw_brightness = false;
+			obs_data_t *cat_res = call_real_ws_vendor_request("get_catalog", nullptr);
+			if (cat_res) {
+				obs_data_array_t *hosts = obs_data_get_array(cat_res, "filter_hosts");
+				const size_t nh = hosts ? obs_data_array_count(hosts) : 0U;
+				for (size_t i = 0U; i < nh; ++i) {
+					obs_data_t *h = obs_data_array_item(hosts, i);
+					const char *sn = h ? obs_data_get_string(h, "source") : "";
+					if (sn && std::strcmp(sn, "mfd_selftest_fx_src") == 0 &&
+					    obs_data_get_int(h, "filter_count") == 1) {
+						saw_host = true;
+					}
+					if (h) {
+						obs_data_release(h);
+					}
+				}
+				if (hosts) {
+					obs_data_array_release(hosts);
+				}
+				obs_data_release(cat_res);
+			}
+
+			obs_data_t *cat_sreq = obs_data_create();
+			obs_data_set_string(cat_sreq, "source", "mfd_selftest_fx_src");
+			obs_data_t *cat_sres = call_real_ws_vendor_request("get_catalog", cat_sreq);
+			obs_data_release(cat_sreq);
+			if (cat_sres) {
+				obs_data_array_t *flts = obs_data_get_array(cat_sres, "filters");
+				obs_data_t *f0 = (flts && obs_data_array_count(flts) > 0U)
+							 ? obs_data_array_item(flts, 0U)
+							 : nullptr;
+				if (f0 && std::strcmp(obs_data_get_string(f0, "name"), "mfd_selftest_color_fx") == 0) {
+					obs_data_array_t *parr = obs_data_get_array(f0, "properties");
+					const size_t np = parr ? obs_data_array_count(parr) : 0U;
+					for (size_t pi = 0U; pi < np; ++pi) {
+						obs_data_t *p = obs_data_array_item(parr, pi);
+						const char *pn = p ? obs_data_get_string(p, "name") : "";
+						if (pn && std::strcmp(pn, "brightness") == 0) {
+							saw_brightness = true;
+						}
+						if (p) {
+							obs_data_release(p);
+						}
+					}
+					if (parr) {
+						obs_data_array_release(parr);
+					}
+				}
+				if (f0) {
+					obs_data_release(f0);
+				}
+				if (flts) {
+					obs_data_array_release(flts);
+				}
+				obs_data_release(cat_sres);
+			}
+			fx_catalog_ok = saw_host && saw_brightness;
+
+			/* 2. Baseline pure-green screenshot + bind fx_1 to brightness [0.0 .. -1.0], bypass_at_zero=true */
+			const char *fx_uuid = obs_source_get_uuid(fx_src);
+			float fx_r0 = 0.0f, fx_g0 = 0.0f, fx_b0 = 0.0f;
+			const bool fx_ss0_ok = capture_source_screenshot_by_uuid_srgb(fx_uuid, &fx_r0, &fx_g0, &fx_b0);
+
+			obs_data_t *ss_req = obs_data_create();
+			obs_data_set_string(ss_req, "slot", "fx_1");
+			obs_data_set_string(ss_req, "target_mode", "filter_param");
+			obs_data_set_string(ss_req, "source_a", "mfd_selftest_fx_src");
+			obs_data_set_string(ss_req, "filter_name", "mfd_selftest_color_fx");
+			obs_data_set_string(ss_req, "filter_prop", "brightness");
+			obs_data_set_double(ss_req, "from_val", 0.0);
+			obs_data_set_double(ss_req, "to_val", -1.0);
+			obs_data_set_bool(ss_req, "bypass_at_zero", true);
+			obs_data_t *ss_res = call_real_ws_vendor_request("set_slot", ss_req);
+			obs_data_release(ss_req);
+			if (ss_res) {
+				fx_bind_ok = obs_data_get_bool(ss_res, "available") &&
+					     !obs_data_has_user_value(ss_res, "error");
+				obs_data_release(ss_res);
+			}
+
+			/* 3. Drive fx_1 = 1.0 -> brightness = -1.0 -> verify rendered GPU pixels darken to black */
+			obs_data_t *fv_req = obs_data_create();
+			obs_data_set_string(fv_req, "slot", "fx_1");
+			obs_data_set_double(fv_req, "value", 1.0);
+			obs_data_t *fv_res = call_real_ws_vendor_request("set_fader_value", fv_req);
+			if (fv_res) {
+				obs_data_release(fv_res);
+			}
+			obs_data_release(fv_req);
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+			float fx_r1 = 1.0f, fx_g1 = 1.0f, fx_b1 = 1.0f;
+			const bool fx_ss1_ok = capture_source_screenshot_by_uuid_srgb(fx_uuid, &fx_r1, &fx_g1, &fx_b1);
+			fx_pixel_dark_ok = fx_ss0_ok && (fx_g0 > 0.85f) && fx_ss1_ok && (fx_g1 < 0.12f) &&
+					   obs_source_enabled(fx_flt);
+
+			/* 4. External OBS "update" signal -> inverse sync + origin=="obs" + display_value */
+			selftest_sig_capture fx_sig{};
+			if (sh) {
+				signal_handler_connect(sh, "midi_fadester_fader_changed", on_selftest_fader_signal,
+						       &fx_sig);
+			}
+			obs_data_t *ext_upd = obs_data_create();
+			obs_data_set_double(ext_upd, "brightness", -0.5);
+			obs_source_update(fx_flt, ext_upd);
+			obs_data_release(ext_upd);
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+			if (sh) {
+				signal_handler_disconnect(sh, "midi_fadester_fader_changed", on_selftest_fader_signal,
+							  &fx_sig);
+			}
+			fx_ext_update_ok = (fx_sig.count >= 1) && (std::strcmp(fx_sig.slot, "fx_1") == 0) &&
+					   (std::strcmp(fx_sig.origin, "obs") == 0) &&
+					   (std::fabs(fx_sig.value - 0.50f) < 0.03f) &&
+					   (fx_sig.display_value[0] != '\0');
+
+			/* 5. Live "enable" and "update_properties" signals (non-deadlocking) */
+			obs_source_set_enabled(fx_flt, false);
+			obs_source_set_enabled(fx_flt, true);
+			obs_source_update_properties(fx_flt);
+			std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+			auto read_fx1_slot = [&]() -> obs_data_t * {
+				obs_data_t *gr = call_real_ws_vendor_request("get_state", nullptr);
+				if (!gr) {
+					return nullptr;
+				}
+				obs_data_array_t *arr = obs_data_get_array(gr, "slots");
+				obs_data_t *found = nullptr;
+				const size_t ns = arr ? obs_data_array_count(arr) : 0U;
+				for (size_t i = 0U; i < ns; ++i) {
+					obs_data_t *it = obs_data_array_item(arr, i);
+					if (it && std::strcmp(obs_data_get_string(it, "id"), "fx_1") == 0) {
+						found = it;
+						break;
+					}
+					if (it) {
+						obs_data_release(it);
+					}
+				}
+				if (arr) {
+					obs_data_array_release(arr);
+				}
+				obs_data_release(gr);
+				return found;
+			};
+
+			if (obs_data_t *s_fx1 = read_fx1_slot()) {
+				fx_props_enable_ok = obs_data_get_bool(s_fx1, "available");
+				obs_data_release(s_fx1);
+			}
+
+			/* 6. Live filter rename + host source rename */
+			obs_source_set_name(fx_flt, "mfd_selftest_color_fx_renamed");
+			obs_source_set_name(fx_src, "mfd_selftest_fx_src_renamed");
+			std::this_thread::sleep_for(std::chrono::milliseconds(40));
+			if (obs_data_t *s_fx1 = read_fx1_slot()) {
+				fx_rename_ok = obs_data_get_bool(s_fx1, "available") &&
+					       (std::strcmp(obs_data_get_string(s_fx1, "source_a"),
+							    "mfd_selftest_fx_src_renamed") == 0) &&
+					       (std::strcmp(obs_data_get_string(s_fx1, "filter_name"),
+							    "mfd_selftest_color_fx_renamed") == 0);
+				obs_data_release(s_fx1);
+			}
+
+			/* 7. Live filter remove -> available=false, then re-add -> available=true */
+			obs_source_filter_remove(fx_src, fx_flt);
+			std::this_thread::sleep_for(std::chrono::milliseconds(40));
+			bool unavail_on_rm = false;
+			if (obs_data_t *s_fx1 = read_fx1_slot()) {
+				unavail_on_rm = !obs_data_get_bool(s_fx1, "available") &&
+						(std::strstr(obs_data_get_string(s_fx1, "reason"),
+							     "mfd_selftest_color_fx_renamed") != nullptr);
+				obs_data_release(s_fx1);
+			}
+			obs_source_filter_add(fx_src, fx_flt);
+			std::this_thread::sleep_for(std::chrono::milliseconds(40));
+			bool avail_on_readd = false;
+			if (obs_data_t *s_fx1 = read_fx1_slot()) {
+				avail_on_readd = obs_data_get_bool(s_fx1, "available");
+				obs_data_release(s_fx1);
+			}
+			fx_remove_readd_ok = unavail_on_rm && avail_on_readd;
+
+			/* 8. Drive fx_1 back to 1.0, then reset_fx({ ms: 0 }) -> clean green pixels + filter disabled */
+			fv_req = obs_data_create();
+			obs_data_set_string(fv_req, "slot", "fx_1");
+			obs_data_set_double(fv_req, "value", 1.0);
+			fv_res = call_real_ws_vendor_request("set_fader_value", fv_req);
+			if (fv_res) {
+				obs_data_release(fv_res);
+			}
+			obs_data_release(fv_req);
+			std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+			obs_data_t *rfx_req = obs_data_create();
+			obs_data_set_int(rfx_req, "ms", 0);
+			obs_data_t *rfx_res = call_real_ws_vendor_request("reset_fx", rfx_req);
+			obs_data_release(rfx_req);
+			bool rfx_counts_ok = false;
+			if (rfx_res) {
+				rfx_counts_ok = (obs_data_get_int(rfx_res, "eligible_count") >= 1) &&
+						(obs_data_get_int(rfx_res, "reset_count") >= 1);
+				obs_data_release(rfx_res);
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+			float fx_rc = 0.0f, fx_gc = 0.0f, fx_bc = 0.0f;
+			const bool fx_ssc_ok = capture_source_screenshot_by_uuid_srgb(fx_uuid, &fx_rc, &fx_gc, &fx_bc);
+			fx_reset_clean_ok = rfx_counts_ok && !obs_source_enabled(fx_flt) && fx_ssc_ok &&
+					    (fx_gc > 0.85f);
+
+			/* 9. Unbind fx_1 -> bypass lease restores obs_source_enabled(fx_flt) == true */
+			obs_data_t *ub_req = obs_data_create();
+			obs_data_set_string(ub_req, "slot", "fx_1");
+			obs_data_set_string(ub_req, "target_mode", "unassigned");
+			obs_data_t *ub_res = call_real_ws_vendor_request("set_slot", ub_req);
+			if (ub_res) {
+				obs_data_release(ub_res);
+			}
+			obs_data_release(ub_req);
+			fx_unbind_restore_ok = obs_source_enabled(fx_flt);
+		}
+
+		if (fx_flt) {
+			if (fx_src) {
+				obs_source_filter_remove(fx_src, fx_flt);
+			}
+			obs_source_release(fx_flt);
+		}
+		if (fx_src) {
+			obs_source_remove(fx_src);
+			obs_source_release(fx_src);
+		}
+	}
+
+	const bool fx_filter_pass = fx_catalog_ok && fx_bind_ok && fx_pixel_dark_ok && fx_ext_update_ok &&
+				    fx_props_enable_ok && fx_rename_ok && fx_remove_readd_ok && fx_reset_clean_ok &&
+				    fx_unbind_restore_ok;
+	obs_log(fx_filter_pass ? LOG_INFO : LOG_ERROR,
+		"FX FILTER LIVE CHECK [%s]: catalog=%d bind=%d pixel_dark=%d ext_update=%d props_enable=%d rename=%d remove_readd=%d reset_clean=%d unbind_restore=%d",
+		fx_filter_pass ? "PASS" : "FAIL", (int)fx_catalog_ok, (int)fx_bind_ok, (int)fx_pixel_dark_ok,
+		(int)fx_ext_update_ok, (int)fx_props_enable_ok, (int)fx_rename_ok, (int)fx_remove_readd_ok,
+		(int)fx_reset_clean_ok, (int)fx_unbind_restore_ok);
+
 	req = obs_data_create();
 	obs_data_set_string(req, "name", "apc40mk2");
 	res = call_real_ws_vendor_request("load_profile", req);
@@ -2394,11 +2679,11 @@ static void run_live_selftest_worker(void)
 	base_set_log_handler(g_orig_log_handler, g_orig_log_param);
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d studio_off=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
+		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d studio_off=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f fx_filter_pass=%d",
 		(int)ws_build_ok, (int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end,
 		(int)screenshot_all_pass, (int)loopmidi_tested, (int)loopmidi_pass, slider_mid, (int)mid_ok,
 		(int)end_ok, (int)completed, (int)studio_off_after, (int)(bridge_set_ok && bridge_get_ok),
-		bridge_get_val, sig_cap.value, sig_cap.slot, vs_fader2_val);
+		bridge_get_val, sig_cap.value, sig_cap.slot, vs_fader2_val, (int)fx_filter_pass);
 }
 
 static std::thread g_selftest_thread;

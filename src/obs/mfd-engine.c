@@ -4761,7 +4761,8 @@ static void connect_host_source_signals_locked(struct mfd_engine *eng, obs_sourc
 	if (stype != OBS_SOURCE_TYPE_INPUT && stype != OBS_SOURCE_TYPE_SCENE) {
 		return;
 	}
-	if (is_internal_source_name(obs_source_get_name(src))) {
+	const char *sname = obs_source_get_name(src);
+	if (!sname || sname[0] == '\0') {
 		return;
 	}
 	if (find_tracked_signal_entry_locked(eng, src) == NULL) {

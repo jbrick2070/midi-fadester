@@ -1,6 +1,6 @@
 # Midi Fadester
 
-**Midi Fadester** is a continuous MIDI fader controller and video layer mixer plugin for OBS Studio 33 on Windows x64, built for any class-compliant MIDI controller with plug-and-play support for the **Akai APC40 mkII**. It provides channel-aware MIDI learn (`Ch 1–16` + `CC/Note`, 7-bit and 14-bit CC pairs), 30 ms slew smoothing, soft takeover (pick-up), Studio Mode T-bar crossfades (fixing OBS 33's Studio Mode off crash and `release_tbar` cancellation bug), single-layer opacity fades, two-source dip-free layer crossfades (`Source A ↔ Source B`), and cubic-dB audio faders (Phase 1), followed by `Thru | Bus A | Bus B` multi-strip mixing, filter modulation, and hotkeys (Phase 2), hardware blend modes (`NAM`/Lighten, Additive, Screen), Luma Key, and Wipe faders (Phase 3), a dockable mixer panel (Phase 4), and APC40 mkII RGB LED feedback (Phase 5).
+**Midi Fadester** is a continuous MIDI fader controller and video layer/filter mixer plugin for OBS Studio 33 on Windows x64, built for any class-compliant MIDI controller with plug-and-play support for the **Akai APC40 mkII** and full two-way `obs-websocket` sync with **Stream Deck + (`Fadester for OBS`)**. It provides an **18-slot control desk** (`crossfader`, `fader_1..fader_8`, `master`, plus 8 dedicated **`fx_1..fx_8`** filter/knob slots), channel-aware MIDI learn (`Ch 1–16` + `CC/Note`, 7-bit and 14-bit CC pairs), 30 ms slew smoothing, bidirectional Soft Takeover (including external OBS filter edits), Studio Mode T-bar crossfades (fixing OBS 33's Studio Mode off crash and `release_tbar` cancellation bug), single-layer and whole-scene opacity fades, two-source dip-free layer crossfades (`Source A ↔ Source B`), cubic-dB audio faders, **Filter & Effect Parameter Modulation (`filter_param`)** on any numeric float/int OBS filter setting (Blur, Color Correction, Chroma/Luma Key, Shaderfilter uniforms, Visual Sidechain reactivity) with shared-filter `bypass_at_zero` lease management, and one-click **`Clean / All FX Off` (`reset_fx`)** panic reset.
 
 > **Disclaimer:** Midi Fadester is an independent third-party plugin for OBS Studio. It is not made, endorsed, or supported by the OBS Project or by Akai Professional / inMusic Brands.
 
@@ -13,18 +13,18 @@ Download the latest release from [GitHub Releases](https://github.com/jbrick2070
 
 Open OBS Studio 33 and choose **Tools → Midi Fadester — Video Mixer & Fader Control**. When a recognized controller is connected, Midi Fadester auto-detects its USB MIDI port and loads its control layout (or lets you switch layouts under **Change controller → Layout** on **Strips** or **Profile** on **Advanced**).
 
-## Supported MIDI Controllers (`0.3.0` Profile Registry)
+## Supported MIDI Controllers (`0.4.0` Profile Registry — 10 Faders + 8 FX/Knob Slots)
 
-Midi Fadester uses a declarative **Controller Profile Registry** (`src/core/apc40-profile.c`) that pairs each controller's factory MIDI CC map with its physical strip count, `[Show controller]` vector desk topology, and explicit verification tier:
+Midi Fadester uses a declarative **Controller Profile Registry** (`src/core/apc40-profile.c`) that pairs each controller's factory MIDI CC map (faders + dedicated FX knobs) with its physical strip count, `[Show controller]` vector desk topology, and explicit verification tier. All `fx_1..fx_8` slots remain active across every profile for **Stream Deck +** dials/keys and `obs-websocket` even when no physical MIDI knobs are connected:
 
-| Controller | Profile ID (`obs-websocket`) | Support Tier | Physical Faders & Factory MIDI CC Map |
+| Controller | Profile ID (`obs-websocket`) | Support Tier | Physical Faders & Pre-Mapped FX Knobs (`fx_1..fx_8`) |
 |---|---|---|---|
-| **Akai APC40 mkII** | `apc40mk2` | **Hardware-Verified** | **10 controls:** Crossfader (`Ch 1 CC 15`), Faders 1–8 (`Ch 1–8 CC 7`), Master (`Ch 1 CC 14`) |
-| **Akai APC mini mk2** | `apcminimk2` | **Beta** *(Manufacturer spec — untested on hardware)* | **9 controls:** Faders 1–8 (`Ch 1 CC 48–55`), Master (`Ch 1 CC 56`), no crossfader |
-| **Akai MIDImix** | `midimix` | **Beta** *(Manufacturer spec — untested on hardware)* | **9 controls:** Faders 1–8 (`Ch 1 CC 19, 23, 27, 31, 49, 53, 57, 61`), Master (`Ch 1 CC 62`), no crossfader |
-| **Korg nanoKONTROL2** | `nanokontrol2` | **Beta** *(Manufacturer spec — untested on hardware)* | **8 controls:** Sliders 1–8 (`Ch 1 CC 0–7`, Default CC Mode), no crossfader or master |
-| **Novation Launch Control XL** | `launchcontrolxl` | **Beta** *(Manufacturer spec — untested on hardware)* | **8 controls:** Faders 1–8 (`Ch 1 CC 77–84`, Factory User Template 1), no crossfader or master |
-| **Generic MIDI (Custom)** | `generic` | **Custom / 1-Click MIDI Learn** | **Up to 10 controls:** Any class-compliant 7-bit/14-bit CC, Pitch Bend, or Note via **Set up** / **Learn** |
+| **Akai APC40 mkII** | `apc40mk2` | **Hardware-Verified** | **10 faders:** Crossfader (`Ch 1 CC 15`), Faders 1–8 (`Ch 1–8 CC 7`), Master (`Ch 1 CC 14`) + **8 Device Knobs:** `FX 1–8` (`Ch 1 CC 16–23`) |
+| **Akai APC mini mk2** | `apcminimk2` | **Beta** *(Manufacturer spec — untested on hardware)* | **9 faders:** Faders 1–8 (`Ch 1 CC 48–55`), Master (`Ch 1 CC 56`); `FX 1–8` active via Stream Deck / MIDI Learn |
+| **Akai MIDImix** | `midimix` | **Beta** *(Manufacturer spec — untested on hardware)* | **9 faders:** Faders 1–8 (`Ch 1 CC 19, 23, 27, 31, 49, 53, 57, 61`), Master (`Ch 1 CC 62`) + **8 Row-3 Knobs:** `FX 1–8` (`Ch 1 CC 18, 22, 26, 30, 48, 52, 56, 60`) |
+| **Korg nanoKONTROL2** | `nanokontrol2` | **Beta** *(Manufacturer spec — untested on hardware)* | **8 sliders:** Sliders 1–8 (`Ch 1 CC 0–7`, Default CC Mode) + **8 Knobs:** `FX 1–8` (`Ch 1 CC 16–23`) |
+| **Novation Launch Control XL** | `launchcontrolxl` | **Beta** *(Manufacturer spec — untested on hardware)* | **8 faders:** Faders 1–8 (`Ch 1 CC 77–84`, Factory User Template 1) + **8 Row-3 Pan/Device Knobs:** `FX 1–8` (`Ch 1 CC 49–56`) |
+| **Generic MIDI (Custom)** | `generic` | **Custom / 1-Click MIDI Learn** | **Up to 18 controls:** 10 fader slots + 8 `FX 1–8` slots via **Set up** / **Learn** or Stream Deck + |
 
 > **Beta Controller Note:** Profiles marked **Beta** are built from published manufacturer MIDI implementation specs and have not yet been verified on physical hardware. They display an amber `BETA` badge in the UI and `[Show controller]` map; if a fader uses a custom hardware editor template, re-learn it in one move via **Set up → Wrong fader? Move a different one** (or **Learn** in **Advanced**). Controllers without a horizontal crossfader can assign any vertical fader to **Switch scenes (T-bar)**. Adding a new controller requires only a single `struct mfd_controller_profile_def` entry in `src/core/apc40-profile.c`.
 
@@ -49,5 +49,6 @@ This project is developed with the assistance of AI coding tools under human dir
 - [REQUIREMENTS.md](REQUIREMENTS.md) — Functional, fader target (`R-FADE-*`), two-source & bus mixer (`R-MIX-*`), smoothing/takeover/LED feedback (`R-FEEL-*`), WinMM MIDI (`R-MIDI-*`), threading, and testing requirements, plus approved operator decisions (`D-1..D-7`).
 - [PLAN.md](PLAN.md) — Pre-planning OBS 33 & APC40 mkII audit findings, architecture, file layout, phased implementation plan (Phase 1 MVP through Phase 5), test matrix, risk register, and autonomous decisions (`D-8..D-21`).
 - [PLAN-UI.md](PLAN-UI.md) — `0.2.0` three-zone `Strips` UI, 3-step `Set up` sheet, live controller SVG desk view, concurrency/locking architecture, and 4-round `kibitz` review disposition.
-- [TESTING.md](TESTING.md) — Automated `ctest` suite (`14` targets), rendered `0.3.0` dialog state screenshot gallery (`10` states including Beta controller hardware map), and live OBS 33 + `loopMIDI` verification guide.
+- [PLAN-FX.md](PLAN-FX.md) — `0.4.0` 18-slot `FX & Knobs` bank (`fx_1..fx_8`), `filter_param` engine (`R-FADE-4`), shared-filter `bypass_at_zero` lease system, `get_catalog` & `reset_fx` vendor API, and cross-repo Stream Deck `0.2.0` rollout specification.
+- [TESTING.md](TESTING.md) — Automated `ctest` suite (`15` targets), rendered `0.4.0` dialog state screenshot gallery (`12` states including `FX & Knobs` bank and `Filter or effect setting` setup), and live OBS 33 + `loopMIDI` verification guide.
 - [LICENSE](LICENSE) — GNU General Public License v2.0.
