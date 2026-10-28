@@ -281,6 +281,49 @@ int main(void)
 		REQUIRE(t_jitter.state == MFD_TAKEOVER_PARKED);
 	}
 
+	/*
+	 * 6. Unidirectional T-bar (bidirectional_flip = false, two_rail_mode = false) unpark (R-TBAR-SM):
+	 *    After completing at the upper rail (1.0), retreating > 8% (e.g. to 0.85) MUST enter WAITING
+	 *    for return to 0.0 (MOVE_DOWN, returns false, out = 0.0) rather than jumping the T-bar to 0.85!
+	 *    Once the fader reaches the <= 3% origin rail zone (e.g. 0.02), it engages cleanly for the next throw.
+	 */
+	struct mfd_takeover t_unidir;
+	mfd_takeover_init(&t_unidir, 0.0f, 0.015f, false);
+	REQUIRE(mfd_takeover_step(&t_unidir, 0.0f, &out));
+	REQUIRE(mfd_takeover_step(&t_unidir, 0.98f, &out));
+	mfd_takeover_notify_tbar_completed(&t_unidir);
+	REQUIRE(t_unidir.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(!mfd_takeover_step(&t_unidir, 1.0f, &out));
+
+	REQUIRE(!mfd_takeover_step(&t_unidir, 0.85f, &out));
+	REQUIRE(t_unidir.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(t_unidir.hint == MFD_HINT_MOVE_DOWN);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+
+	REQUIRE(!mfd_takeover_step(&t_unidir, 0.40f, &out));
+	REQUIRE(t_unidir.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+
+	/* Reaches <= 3% origin rail zone (0.02) -> engages cleanly at 0.02 */
+	REQUIRE(mfd_takeover_step(&t_unidir, 0.02f, &out));
+	REQUIRE(t_unidir.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(fabsf(out - 0.02f) < 1e-6f);
+
+	/*
+	 * 7. Fresh bidirectional T-bar starting physically at the upper rail (>= 0.97) on startup:
+	 *    Auto-selects reversed polarity (rescale_origin = 1.0, out = 0.0) so a downward throw 1.0 -> 0.0
+	 *    drives 0.0 -> 1.0 instead of insta-completing on the first MIDI packet!
+	 */
+	struct mfd_takeover t_top_start;
+	mfd_takeover_init(&t_top_start, 0.0f, 0.015f, true);
+	REQUIRE(mfd_takeover_step(&t_top_start, 1.0f, &out));
+	REQUIRE(t_top_start.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(t_top_start.polarity_reversed);
+	REQUIRE(fabsf(t_top_start.rescale_origin - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&t_top_start, 0.5f, &out));
+	REQUIRE(fabsf(out - 0.5f) < 1e-6f);
+
 	printf("test-takeover: PASS\n");
 	return 0;
 }

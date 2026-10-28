@@ -179,7 +179,17 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 					t->polarity_reversed = true;
 					t->rescale_origin = raw_clamped;
 				} else {
+					t->polarity_reversed = false;
 					t->rescale_origin = 0.0f;
+					t->target_obs = 0.0f;
+					if (raw_clamped > (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f)) {
+						t->state = MFD_TAKEOVER_WAITING;
+						t->last_fader = raw_clamped;
+						t->hint = compute_hint(raw_clamped, 0.0f, t->pickup_threshold);
+						t->has_throw_extreme = false;
+						*out_effective_norm = 0.0f;
+						return false;
+					}
 				}
 				float eff = compute_rescaled_effective(t, raw_clamped);
 				t->last_fader = eff;
@@ -293,10 +303,18 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		}
 	}
 
+	if (!t->two_rail_mode && t->bidirectional_flip && !t->has_last_fader && t->target_obs <= 1e-5f &&
+	    raw_clamped >= (MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f)) {
+		t->polarity_reversed = true;
+		t->rescale_origin = 1.0f;
+	}
+
 	float effective = compute_rescaled_effective(t, raw_clamped);
 
 	if (t->state == MFD_TAKEOVER_WAITING) {
-		bool within = (fabsf(effective - t->target_obs) <= t->pickup_threshold);
+		bool within = (fabsf(effective - t->target_obs) <= t->pickup_threshold) ||
+			      (!t->two_rail_mode && t->target_obs <= 1e-5f &&
+			       effective <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f));
 		bool crossed = false;
 		if (t->has_last_fader) {
 			crossed = ((t->last_fader <= t->target_obs && effective >= t->target_obs) ||

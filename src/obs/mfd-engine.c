@@ -18,7 +18,7 @@
 #include <string.h>
 
 #define MFD_SAVE_DATA_KEY "midi_fadester_scene_collection"
-#define MFD_HEALTH_CHECK_INTERVAL_SEC 1.0f
+#define MFD_DEFAULT_PROFILE_NAME "apc40mk2"
 
 static struct mfd_engine g_engine;
 
@@ -31,6 +31,94 @@ static float clamp01(float v)
 		return 1.0f;
 	}
 	return v;
+}
+
+static bool slot_addr_is_14bit(const struct mfd_midi_addr *addr)
+{
+	if (!addr) {
+		return false;
+	}
+	return addr->is_14bit || (addr->type == MFD_MIDI_PITCH_BEND);
+}
+
+static const char *effective_profile_name(const struct mfd_engine *eng)
+{
+	if (eng && eng->active_profile_name[0] != '\0') {
+		return eng->active_profile_name;
+	}
+	return MFD_DEFAULT_PROFILE_NAME;
+}
+
+static void store_persisted_calibration(struct mfd_engine *eng, const char *profile_name,
+					const struct mfd_midi_addr *addr, const struct mfd_control_calibration *cal)
+{
+	if (!eng || !addr || !cal || addr->type == MFD_MIDI_NONE) {
+		return;
+	}
+	const char *prof = (profile_name && profile_name[0] != '\0') ? profile_name : MFD_DEFAULT_PROFILE_NAME;
+	int free_idx = -1;
+	for (int i = 0; i < MFD_MAX_CAL_ENTRIES; ++i) {
+		struct mfd_persisted_cal_entry *e = &eng->cal_entries[i];
+		if (!e->in_use) {
+			if (free_idx < 0) {
+				free_idx = i;
+			}
+			continue;
+		}
+		if (strcmp(e->profile_name, prof) == 0 && e->addr.type == addr->type &&
+		    e->addr.channel == addr->channel && e->addr.number == addr->number &&
+		    e->addr.is_14bit == addr->is_14bit) {
+			e->cal = *cal;
+			return;
+		}
+	}
+	if (free_idx >= 0) {
+		struct mfd_persisted_cal_entry *e = &eng->cal_entries[free_idx];
+		e->in_use = true;
+		snprintf(e->profile_name, sizeof(e->profile_name), "%s", prof);
+		e->addr = *addr;
+		e->cal = *cal;
+	}
+}
+
+bool mfd_engine_lookup_persisted_calibration(const struct mfd_engine *eng, const char *profile_name,
+					     const struct mfd_midi_addr *addr, struct mfd_control_calibration *out_cal)
+{
+	if (!out_cal) {
+		return false;
+	}
+	bool is_14 = slot_addr_is_14bit(addr);
+	mfd_calibration_init(out_cal, is_14);
+	if (!eng || !addr || addr->type == MFD_MIDI_NONE) {
+		return false;
+	}
+	const char *prof = (profile_name && profile_name[0] != '\0') ? profile_name : MFD_DEFAULT_PROFILE_NAME;
+	for (int i = 0; i < MFD_MAX_CAL_ENTRIES; ++i) {
+		const struct mfd_persisted_cal_entry *e = &eng->cal_entries[i];
+		if (!e->in_use) {
+			continue;
+		}
+		if (strcmp(e->profile_name, prof) == 0 && e->addr.type == addr->type &&
+		    e->addr.channel == addr->channel && e->addr.number == addr->number &&
+		    e->addr.is_14bit == addr->is_14bit) {
+			*out_cal = e->cal;
+			return true;
+		}
+	}
+	return false;
+}
+
+void mfd_engine_set_slot_calibration(struct mfd_engine *eng, int slot_index, int cal_min, int cal_max)
+{
+	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
+		return;
+	}
+	struct mfd_fader_slot *s = &eng->fader_slots[slot_index];
+	mfd_calibration_set(&s->cal, slot_addr_is_14bit(&s->addr), cal_min, cal_max);
+	store_persisted_calibration(eng, effective_profile_name(eng), &s->addr, &s->cal);
+	if (obs_initialized()) {
+		mfd_engine_save_global_config(eng);
+	}
 }
 
 struct mfd_engine *mfd_engine_get(void)
@@ -74,6 +162,8 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	mfd_smoother_init(&slot->smoother, eng->smooth_tau_ms, initial_val);
 	mfd_takeover_init(&slot->takeover, initial_val, MFD_DEFAULT_PICKUP_THRESHOLD, bidir);
 	configure_slot_takeover_mode(eng, slot);
+	slot->tbar_state = MFD_TBAR_IDLE;
+	slot->tbar_midi_active = false;
 	slot->last_raw_norm = initial_val;
 	slot->last_applied_val = initial_val;
 	slot->last_alpha_a = 1.0f;
@@ -86,10 +176,6 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	slot->auto_fade_to = initial_val;
 	slot->auto_fade_duration_sec = 0.0f;
 	slot->auto_fade_elapsed_sec = 0.0f;
-	slot->tbar_midi_active = false;
-	slot->tbar_has_tracked_raw = false;
-	slot->tbar_last_tracked_raw_norm = initial_val;
-	slot->tbar_idle_sec = 0.0f;
 	slot->sec_since_last_fader_event = 1.0f;
 	slot->fader_event_pending = false;
 	slot->pending_origin[0] = '\0';
@@ -103,6 +189,8 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 	if (!eng) {
 		return;
 	}
+
+	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", MFD_DEFAULT_PROFILE_NAME);
 
 	struct mfd_apc40_default_slot defs[MFD_APC40_DEFAULT_SLOT_COUNT];
 	size_t count = mfd_apc40_get_default_slots(defs, MFD_APC40_DEFAULT_SLOT_COUNT);
@@ -129,6 +217,7 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 			s->target_type = MFD_TARGET_UNASSIGNED;
 			s->curve = MFD_CURVE_DIP_FREE;
 		}
+		mfd_engine_lookup_persisted_calibration(eng, eng->active_profile_name, &s->addr, &s->cal);
 		float init_val = (s->target_type == MFD_TARGET_TBAR || s->target_type == MFD_TARGET_TWO_SOURCE_MIX ||
 				  s->target_type == MFD_TARGET_UNASSIGNED)
 					 ? 0.0f
@@ -329,6 +418,98 @@ static void apply_source_opacity_and_afv(const char *source_name, float alpha_01
 	obs_source_release(src);
 }
 
+static void apply_tbar_slot_step(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val,
+				 bool force_complete, bool force_abort)
+{
+	if (!eng || !slot || !slot->enabled || slot->target_type != MFD_TARGET_TBAR) {
+		return;
+	}
+	if (slot->tbar_state == MFD_TBAR_PARKED || slot->takeover.state == MFD_TAKEOVER_PARKED) {
+		return;
+	}
+
+	float driver_val = force_complete ? 1.0f : (force_abort ? 0.0f : clamp01(norm_val));
+	bool in_target = slot->tbar_midi_active ? mfd_tbar_is_in_target_rail_zone(slot->last_raw_norm,
+										  slot->takeover.polarity_reversed)
+						: mfd_tbar_is_in_target_rail_zone(driver_val, false);
+	bool in_origin = slot->tbar_midi_active ? mfd_tbar_is_in_origin_rail_zone(slot->last_raw_norm,
+										  slot->takeover.polarity_reversed)
+						: mfd_tbar_is_in_origin_rail_zone(driver_val, false);
+
+	enum mfd_tbar_state next_state = slot->tbar_state;
+	bool completed = false;
+	bool aborted = false;
+
+	if (eng->tbar_driver) {
+		char err_buf[256] = {0};
+		bool ok = eng->tbar_driver(slot->tbar_state, driver_val, force_complete, force_abort, in_target,
+					   in_origin, &next_state, &completed, &aborted, err_buf, sizeof(err_buf));
+		if (!ok && err_buf[0] != '\0') {
+			snprintf(eng->tbar_error, sizeof(eng->tbar_error), "%s", err_buf);
+		} else if (ok) {
+			eng->tbar_error[0] = '\0';
+		}
+	} else {
+		struct mfd_tbar_release_input in;
+		memset(&in, 0, sizeof(in));
+		in.studio_mode_active = true;
+		in.slider_tbar_found = true;
+		in.state = slot->tbar_state;
+		in.release_latched = false;
+		in.force_complete = force_complete;
+		in.force_abort = force_abort;
+		in.in_target_rail_zone = in_target;
+		in.in_origin_rail_zone = in_origin;
+		in.t_norm = driver_val;
+		in.last_pos_1024 = -1;
+		struct mfd_tbar_action act;
+		mfd_tbar_compute_action_full(&in, &act);
+		next_state = act.next_state;
+		completed = act.completed_throw;
+		aborted = act.aborted_throw;
+	}
+
+	if (completed || force_complete) {
+		++slot->output_write_count;
+		slot->tbar_state = MFD_TBAR_PARKED;
+		mfd_takeover_notify_tbar_completed(&slot->takeover);
+		mfd_smoother_reset(&slot->smoother, 0.0f);
+		slot->last_applied_val = 0.0f;
+		slot->tbar_midi_active = false;
+	} else if (aborted || force_abort) {
+		++slot->output_write_count;
+		slot->tbar_state = MFD_TBAR_IDLE;
+		mfd_smoother_reset(&slot->smoother, 0.0f);
+		slot->last_applied_val = 0.0f;
+		slot->tbar_midi_active = false;
+		slot->takeover.target_obs = 0.0f;
+		slot->takeover.last_fader = 0.0f;
+		slot->takeover.rescale_origin = slot->takeover.polarity_reversed ? 1.0f : 0.0f;
+		slot->takeover.has_throw_extreme = false;
+	} else if (next_state == MFD_TBAR_IDLE) {
+		slot->tbar_state = MFD_TBAR_IDLE;
+		slot->last_applied_val = 0.0f;
+	} else {
+		++slot->output_write_count;
+		slot->tbar_state = MFD_TBAR_THROWING;
+		slot->last_applied_val = driver_val;
+	}
+}
+
+void mfd_engine_apply_tbar_abort(struct mfd_engine *eng, struct mfd_fader_slot *slot)
+{
+	if (!eng || !slot || !slot->enabled || slot->target_type != MFD_TARGET_TBAR) {
+		return;
+	}
+	if (slot->tbar_state != MFD_TBAR_THROWING) {
+		slot->tbar_state = MFD_TBAR_IDLE;
+		mfd_smoother_reset(&slot->smoother, 0.0f);
+		slot->last_applied_val = 0.0f;
+		return;
+	}
+	apply_tbar_slot_step(eng, slot, 0.0f, false, true);
+}
+
 void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val,
 				     bool force_release)
 {
@@ -344,36 +525,7 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		break;
 
 	case MFD_TARGET_TBAR:
-		if (slot->takeover.state == MFD_TAKEOVER_PARKED) {
-			return;
-		}
-		slot->last_applied_val = force_release ? 1.0f : val;
-		++slot->output_write_count;
-		if (eng->tbar_driver) {
-			float driver_val = force_release ? 1.0f : val;
-			bool in_rail = slot->tbar_midi_active
-					       ? mfd_tbar_is_in_rail_zone(slot->last_raw_norm,
-									  slot->takeover.polarity_reversed)
-					       : mfd_tbar_is_in_rail_zone(driver_val, false);
-			bool settled = !mfd_smoother_is_active(&slot->smoother);
-			float idle_sec = slot->tbar_midi_active ? slot->tbar_idle_sec : 0.0f;
-			bool completed = false;
-			char err_buf[256] = {0};
-			bool ok = eng->tbar_driver(driver_val, force_release, in_rail, settled, idle_sec, &completed,
-						   err_buf, sizeof(err_buf));
-			if (!ok && err_buf[0] != '\0') {
-				snprintf(eng->tbar_error, sizeof(eng->tbar_error), "%s", err_buf);
-			} else if (ok) {
-				eng->tbar_error[0] = '\0';
-			}
-			if (completed || force_release) {
-				mfd_takeover_notify_tbar_completed(&slot->takeover);
-				mfd_smoother_reset(&slot->smoother, 0.0f);
-				slot->last_applied_val = 0.0f;
-				slot->tbar_midi_active = false;
-				slot->tbar_idle_sec = 0.0f;
-			}
-		}
+		apply_tbar_slot_step(eng, slot, val, force_release, false);
 		break;
 
 	case MFD_TARGET_SINGLE_LAYER:
@@ -421,6 +573,33 @@ void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot 
 	mfd_engine_apply_slot_output_ex(eng, slot, norm_val, false);
 }
 
+void mfd_engine_on_external_tbar_reset(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	bool changed = false;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *slot = &eng->fader_slots[i];
+		if (!slot->enabled || slot->target_type != MFD_TARGET_TBAR) {
+			continue;
+		}
+		if (slot->tbar_state == MFD_TBAR_THROWING) {
+			slot->auto_fade_active = false;
+			slot->tbar_state = MFD_TBAR_IDLE;
+			slot->tbar_midi_active = false;
+			slot->last_applied_val = 0.0f;
+			mfd_smoother_reset(&slot->smoother, 0.0f);
+			mfd_takeover_sync_external(&slot->takeover, 0.0f);
+			changed = true;
+		}
+	}
+	if (changed) {
+		mfd_engine_unlatch_tbar(eng);
+		mfd_engine_notify_state_changed(eng);
+	}
+}
+
 void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 {
 	if (!eng) {
@@ -428,15 +607,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	}
 
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		struct mfd_fader_slot *st = &eng->fader_slots[i];
-		st->sec_since_last_fader_event += seconds;
-		if (st->enabled && st->target_type == MFD_TARGET_TBAR && st->tbar_midi_active &&
-		    st->takeover.state == MFD_TAKEOVER_ENGAGED && !st->auto_fade_active &&
-		    st->takeover.target_obs >= MFD_TBAR_MIN_RELEASE_NORM) {
-			st->tbar_idle_sec += seconds;
-		} else {
-			st->tbar_idle_sec = 0.0f;
-		}
+		eng->fader_slots[i].sec_since_last_fader_event += seconds;
 	}
 
 	struct mfd_midi_raw_event raw;
@@ -453,6 +624,8 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			if (eng->learning_slot_index >= 0 && eng->learning_slot_index < MFD_MAX_FADER_SLOTS) {
 				struct mfd_fader_slot *ls = &eng->fader_slots[eng->learning_slot_index];
 				ls->addr = learned;
+				mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &ls->addr,
+									&ls->cal);
 				ls->enabled = true;
 				obs_log(LOG_INFO, "MIDI Learn bound slot '%s' to Ch %u Type %d Num %u", ls->label,
 					(unsigned)(learned.channel + 1U), (int)learned.type, (unsigned)learned.number);
@@ -474,28 +647,103 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				continue;
 			}
 
-			float norm = slot->invert ? (1.0f - dec.normalized) : dec.normalized;
-			slot->last_raw_norm = norm;
-			if (!slot->tbar_has_tracked_raw || fabsf(norm - slot->tbar_last_tracked_raw_norm) > 1e-6f) {
-				slot->tbar_last_tracked_raw_norm = norm;
-				slot->tbar_has_tracked_raw = true;
-				slot->tbar_idle_sec = 0.0f;
-			}
-
-			float effective = slot->last_applied_val;
-			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
-			if (mfd_takeover_step(&slot->takeover, norm, &effective)) {
-				if (was_parked && slot->takeover.state != MFD_TAKEOVER_PARKED &&
-				    slot->target_type == MFD_TARGET_TBAR) {
-					mfd_engine_unlatch_tbar(eng);
-				}
-				slot->auto_fade_active = false;
-				if (slot->target_type == MFD_TARGET_TBAR) {
-					slot->tbar_midi_active = true;
-					if (effective < MFD_TBAR_MIN_RELEASE_NORM) {
-						slot->tbar_idle_sec = 0.0f;
+			float norm = 0.0f;
+			if (dec.addr.type == MFD_MIDI_CC || dec.addr.type == MFD_MIDI_PITCH_BEND) {
+				if (dec.addr.type == MFD_MIDI_CC && dec.addr.is_14bit && !slot->addr.is_14bit) {
+					int prev_min = slot->cal.cal_min;
+					int prev_max = slot->cal.cal_max;
+					slot->addr.is_14bit = true;
+					if (!mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng),
+										     &slot->addr, &slot->cal)) {
+						if (prev_min == MFD_CAL_DEFAULT_MIN &&
+						    prev_max == MFD_CAL_DEFAULT_MAX_7BIT) {
+							mfd_calibration_init(&slot->cal, true);
+						} else {
+							mfd_calibration_set(&slot->cal, true, prev_min * 128,
+									    (prev_max * 128) + 127);
+						}
 					}
 				}
+				if (mfd_calibration_observe_and_widen(&slot->cal, (int)dec.raw_value)) {
+					store_persisted_calibration(eng, effective_profile_name(eng), &slot->addr,
+								    &slot->cal);
+					if (obs_initialized()) {
+						mfd_engine_save_global_config(eng);
+					}
+					mfd_engine_notify_state_changed(eng);
+				}
+				norm = mfd_calibration_normalize(&slot->cal, (int)dec.raw_value, slot->invert);
+			} else {
+				norm = slot->invert ? (1.0f - dec.normalized) : dec.normalized;
+			}
+			slot->last_raw_norm = norm;
+
+			float effective = slot->last_applied_val;
+			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
+					  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
+			if (!mfd_takeover_step(&slot->takeover, norm, &effective)) {
+				if (slot->target_type == MFD_TARGET_TBAR && was_parked &&
+				    slot->takeover.state == MFD_TAKEOVER_WAITING) {
+					slot->tbar_state = MFD_TBAR_IDLE;
+					slot->tbar_midi_active = false;
+					slot->last_applied_val = 0.0f;
+					mfd_smoother_reset(&slot->smoother, 0.0f);
+					mfd_engine_unlatch_tbar(eng);
+					mfd_engine_notify_state_changed(eng);
+				}
+				continue;
+			}
+
+			slot->auto_fade_active = false;
+
+			if (slot->target_type == MFD_TARGET_TBAR) {
+				slot->tbar_midi_active = true;
+				if (was_parked && slot->takeover.state != MFD_TAKEOVER_PARKED) {
+					mfd_engine_unlatch_tbar(eng);
+					slot->tbar_state = MFD_TBAR_THROWING;
+				}
+
+				bool in_target =
+					mfd_tbar_is_in_target_rail_zone(norm, slot->takeover.polarity_reversed);
+				bool in_origin =
+					mfd_tbar_is_in_origin_rail_zone(norm, slot->takeover.polarity_reversed);
+
+				if (in_target) {
+					if (slot->tbar_state == MFD_TBAR_IDLE) {
+						mfd_engine_unlatch_tbar(eng);
+					}
+					apply_tbar_slot_step(eng, slot, 1.0f, false, false);
+					mfd_engine_notify_fader_changed(eng, i, "midi");
+					if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+						mfd_engine_notify_state_changed(eng);
+					}
+				} else if (in_origin) {
+					if (slot->tbar_state == MFD_TBAR_THROWING) {
+						apply_tbar_slot_step(eng, slot, 0.0f, false, false);
+						mfd_engine_notify_fader_changed(eng, i, "midi");
+					} else {
+						slot->tbar_state = MFD_TBAR_IDLE;
+						mfd_smoother_reset(&slot->smoother, 0.0f);
+						slot->last_applied_val = 0.0f;
+					}
+					if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+						mfd_engine_notify_state_changed(eng);
+					}
+				} else {
+					if (slot->tbar_state == MFD_TBAR_IDLE) {
+						mfd_engine_unlatch_tbar(eng);
+						slot->tbar_state = MFD_TBAR_THROWING;
+					}
+					mfd_smoother_set_target(&slot->smoother, effective);
+					if (!mfd_smoother_is_active(&slot->smoother)) {
+						mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
+						mfd_engine_notify_fader_changed(eng, i, "midi");
+					}
+					if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+						mfd_engine_notify_state_changed(eng);
+					}
+				}
+			} else {
 				mfd_smoother_set_target(&slot->smoother, effective);
 				if (!mfd_smoother_is_active(&slot->smoother)) {
 					mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
@@ -522,16 +770,34 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			mfd_smoother_reset(&slot->smoother, v);
 
 			if (slot->target_type == MFD_TARGET_TBAR) {
-				mfd_engine_apply_slot_output(eng, slot, v);
-				if (slot->takeover.state == MFD_TAKEOVER_PARKED) {
+				slot->tbar_midi_active = false;
+				if (slot->auto_fade_to <= MFD_TBAR_RAIL_ZONE &&
+				    (progress >= 1.0f || v <= MFD_TBAR_RAIL_ZONE)) {
+					slot->auto_fade_active = false;
+					if (slot->tbar_state == MFD_TBAR_THROWING) {
+						mfd_engine_apply_tbar_abort(eng, slot);
+					} else {
+						slot->tbar_state = MFD_TBAR_IDLE;
+						slot->last_applied_val = 0.0f;
+					}
+					mfd_engine_notify_state_changed(eng);
+				} else if (v >= (1.0f - MFD_TBAR_RAIL_ZONE - 1e-6f) ||
+					   (progress >= 1.0f &&
+					    slot->auto_fade_to >= (1.0f - MFD_TBAR_RAIL_ZONE - 1e-6f))) {
+					if (slot->tbar_state == MFD_TBAR_IDLE) {
+						mfd_engine_unlatch_tbar(eng);
+					}
+					mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
 					slot->auto_fade_active = false;
 					mfd_engine_notify_state_changed(eng);
-				} else if (progress >= 1.0f) {
-					slot->auto_fade_active = false;
-					if (slot->auto_fade_to <= 0.0f) {
-						mfd_takeover_notify_rail_completed(&slot->takeover, false, 0.0f);
-						mfd_engine_notify_state_changed(eng);
-					} else {
+				} else {
+					if (slot->tbar_state == MFD_TBAR_IDLE) {
+						mfd_engine_unlatch_tbar(eng);
+						slot->tbar_state = MFD_TBAR_THROWING;
+					}
+					mfd_engine_apply_slot_output(eng, slot, v);
+					if (progress >= 1.0f) {
+						slot->auto_fade_active = false;
 						mfd_takeover_unpark_from_api(&slot->takeover, v);
 					}
 				}
@@ -563,15 +829,6 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 			float smoothed = mfd_smoother_tick(&slot->smoother, seconds);
 			mfd_engine_apply_slot_output(eng, slot, smoothed);
-			if (!was_parked && slot->takeover.state == MFD_TAKEOVER_PARKED) {
-				mfd_engine_notify_state_changed(eng);
-			}
-			mfd_engine_notify_fader_changed(eng, i, "midi");
-		} else if (slot->target_type == MFD_TARGET_TBAR && slot->tbar_midi_active &&
-			   slot->takeover.state == MFD_TAKEOVER_ENGAGED &&
-			   slot->tbar_idle_sec >= (MFD_TBAR_FALLBACK_STALL_SEC - 1e-6f)) {
-			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
-			mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
 			if (!was_parked && slot->takeover.state == MFD_TAKEOVER_PARKED) {
 				mfd_engine_notify_state_changed(eng);
 			}
@@ -611,8 +868,8 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 		if (slot->target_type == MFD_TARGET_TBAR) {
 			if (reset_tbar) {
 				slot->auto_fade_active = false;
+				slot->tbar_state = MFD_TBAR_IDLE;
 				slot->tbar_midi_active = false;
-				slot->tbar_idle_sec = 0.0f;
 				slot->last_applied_val = 0.0f;
 				mfd_smoother_reset(&slot->smoother, 0.0f);
 				mfd_takeover_sync_external(&slot->takeover, 0.0f);
@@ -651,6 +908,57 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	}
 }
 
+static void serialize_calibrations(const struct mfd_engine *eng, obs_data_t *root)
+{
+	obs_data_array_t *arr = obs_data_array_create();
+	for (int i = 0; i < MFD_MAX_CAL_ENTRIES; ++i) {
+		const struct mfd_persisted_cal_entry *e = &eng->cal_entries[i];
+		if (!e->in_use) {
+			continue;
+		}
+		obs_data_t *item = obs_data_create();
+		obs_data_set_string(item, "profile", e->profile_name);
+		obs_data_set_int(item, "midi_type", (int)e->addr.type);
+		obs_data_set_int(item, "midi_channel", (int)e->addr.channel);
+		obs_data_set_int(item, "midi_number", (int)e->addr.number);
+		obs_data_set_bool(item, "midi_14bit", e->addr.is_14bit);
+		obs_data_set_int(item, "cal_min", e->cal.cal_min);
+		obs_data_set_int(item, "cal_max", e->cal.cal_max);
+		obs_data_array_push_back(arr, item);
+		obs_data_release(item);
+	}
+	obs_data_set_array(root, "control_calibrations", arr);
+	obs_data_array_release(arr);
+}
+
+static void deserialize_calibrations(struct mfd_engine *eng, obs_data_t *root)
+{
+	obs_data_array_t *arr = obs_data_get_array(root, "control_calibrations");
+	if (!arr) {
+		return;
+	}
+	size_t count = obs_data_array_count(arr);
+	for (size_t i = 0U; i < count; ++i) {
+		obs_data_t *item = obs_data_array_item(arr, i);
+		if (!item) {
+			continue;
+		}
+		const char *prof = obs_data_get_string(item, "profile");
+		struct mfd_midi_addr addr;
+		memset(&addr, 0, sizeof(addr));
+		addr.type = (enum mfd_midi_msg_type)obs_data_get_int(item, "midi_type");
+		addr.channel = (uint8_t)(obs_data_get_int(item, "midi_channel") & 0x0F);
+		addr.number = (uint8_t)(obs_data_get_int(item, "midi_number") & 0x7F);
+		addr.is_14bit = obs_data_get_bool(item, "midi_14bit");
+		struct mfd_control_calibration cal;
+		mfd_calibration_set(&cal, slot_addr_is_14bit(&addr), (int)obs_data_get_int(item, "cal_min"),
+				    (int)obs_data_get_int(item, "cal_max"));
+		store_persisted_calibration(eng, prof, &addr, &cal);
+		obs_data_release(item);
+	}
+	obs_data_array_release(arr);
+}
+
 static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 {
 	obs_data_array_t *arr = obs_data_array_create();
@@ -665,6 +973,8 @@ static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		obs_data_set_int(item, "midi_channel", (int)s->addr.channel);
 		obs_data_set_int(item, "midi_number", (int)s->addr.number);
 		obs_data_set_bool(item, "midi_14bit", s->addr.is_14bit);
+		obs_data_set_int(item, "cal_min", s->cal.cal_min);
+		obs_data_set_int(item, "cal_max", s->cal.cal_max);
 		obs_data_set_int(item, "target_type", (int)s->target_type);
 		obs_data_set_string(item, "source_a", s->source_a_name);
 		obs_data_set_string(item, "source_b", s->source_b_name);
@@ -705,6 +1015,14 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		s->addr.channel = (uint8_t)(obs_data_get_int(item, "midi_channel") & 0x0F);
 		s->addr.number = (uint8_t)(obs_data_get_int(item, "midi_number") & 0x7F);
 		s->addr.is_14bit = obs_data_get_bool(item, "midi_14bit");
+		if (obs_data_has_user_value(item, "cal_min") && obs_data_has_user_value(item, "cal_max")) {
+			mfd_calibration_set(&s->cal, slot_addr_is_14bit(&s->addr),
+					    (int)obs_data_get_int(item, "cal_min"),
+					    (int)obs_data_get_int(item, "cal_max"));
+			store_persisted_calibration(eng, effective_profile_name(eng), &s->addr, &s->cal);
+		} else {
+			mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &s->addr, &s->cal);
+		}
 		s->target_type = (enum mfd_target_type)obs_data_get_int(item, "target_type");
 		const char *sa = obs_data_get_string(item, "source_a");
 		const char *sb = obs_data_get_string(item, "source_b");
@@ -756,8 +1074,10 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	}
 	obs_data_t *data = obs_data_create();
 	obs_data_set_string(data, "device_name", eng->configured_device_name);
+	obs_data_set_string(data, "active_profile", effective_profile_name(eng));
 	obs_data_set_double(data, "smooth_tau_ms", (double)eng->smooth_tau_ms);
 	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
+	serialize_calibrations(eng, data);
 	serialize_slots(eng, data);
 	bool ok = obs_data_save_json_safe(data, filepath, "tmp", "bak");
 	obs_data_release(data);
@@ -777,12 +1097,17 @@ bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
 	if (dev) {
 		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", dev);
 	}
+	const char *prof = obs_data_get_string(data, "active_profile");
+	if (prof && prof[0] != '\0') {
+		snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", prof);
+	}
 	if (obs_data_has_user_value(data, "smooth_tau_ms")) {
 		eng->smooth_tau_ms = (float)obs_data_get_double(data, "smooth_tau_ms");
 	}
 	if (obs_data_has_user_value(data, "tbar_bidirectional_flip")) {
 		eng->tbar_bidirectional_flip = obs_data_get_bool(data, "tbar_bidirectional_flip");
 	}
+	deserialize_calibrations(eng, data);
 	deserialize_slots(eng, data);
 	obs_data_release(data);
 	return true;
@@ -933,6 +1258,7 @@ bool mfd_engine_init(void)
 	mfd_midi_parser_init(&g_engine.midi_parser);
 	mfd_winmm_init(&g_engine.midi_dev, &g_engine.midi_queue);
 
+	snprintf(g_engine.active_profile_name, sizeof(g_engine.active_profile_name), "%s", MFD_DEFAULT_PROFILE_NAME);
 	g_engine.smooth_tau_ms = MFD_DEFAULT_SMOOTH_TAU_MS;
 	g_engine.tbar_bidirectional_flip = true;
 	g_engine.learning_slot_index = -1;

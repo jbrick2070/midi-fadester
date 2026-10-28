@@ -249,8 +249,9 @@ public:
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 				struct mfd_fader_slot *slot = &eng->fader_slots[i];
 				if (slot->enabled && slot->target_type == MFD_TARGET_TBAR &&
-				    slot->takeover.state != MFD_TAKEOVER_PARKED) {
+				    slot->tbar_state == MFD_TBAR_THROWING) {
 					slot->auto_fade_active = false;
+					slot->tbar_midi_active = false;
 					mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
 					mfd_engine_notify_fader_changed(eng, i, "api");
 					mfd_engine_notify_state_changed(eng);
@@ -286,7 +287,8 @@ public:
 			QStringLiteral(
 				"Tip \xE2\x80\x94 Studio Mode T-Bar vs. Two-Source Crossfade (A \xE2\x86\x94 B): "
 				"Studio Mode T-Bar drives Preview \xE2\x86\x92 Program linearly from 0\xE2\x80\x93"
-				"100% and completes when the fader enters the 3% rail zone (or stops for 150 ms above 90%), "
+				"100% and completes only when the fader enters the calibrated 3% target rail zone "
+				"(returning to the origin 3% rail cancels the throw cleanly), "
 				"swapping the old scene into the left Preview box while the live Program output on the right stays smooth. "
 				"For a DJ/video-mixer crossfader where Left is always Source A and Right is always Source B "
 				"(0\xE2\x80\x93"
@@ -755,7 +757,10 @@ private:
 					s->takeover.bidirectional_flip = is_tbar ? e->tbar_bidirectional_flip : false;
 					mfd_takeover_set_two_rail_mode(&s->takeover, is_two_rail);
 					if (is_tbar && s->takeover.state != MFD_TAKEOVER_PARKED) {
+						s->tbar_state = MFD_TBAR_IDLE;
 						mfd_engine_unlatch_tbar(e);
+					} else if (!is_tbar) {
+						s->tbar_state = MFD_TBAR_IDLE;
 					}
 					mfd_engine_save_global_config(e);
 					mfd_engine_notify_state_changed(e);
@@ -888,7 +893,7 @@ private:
 			const struct mfd_fader_slot &s = eng->fader_slots[i];
 			if (s.enabled && s.target_type == MFD_TARGET_TBAR) {
 				++active_tbar_slots;
-				if (studio_on && s.takeover.state != MFD_TAKEOVER_PARKED && s.last_applied_val > 0.0f) {
+				if (studio_on && s.tbar_state == MFD_TBAR_THROWING) {
 					can_finish_tbar = true;
 				}
 			}

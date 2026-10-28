@@ -44,6 +44,18 @@ static int mfd_compute_sweep_step_value(int start_val, int end_val, int step_ind
 	return start_val + (delta * step_index) / total_intervals;
 }
 
+static int mfd_compute_slow_pause_wait_ms(int val, int end_val, int step_ms, int pause_cc, int pause_ms)
+{
+	if (val == end_val) {
+		return 0;
+	}
+	int wait_ms = (step_ms > 0) ? step_ms : 0;
+	if (val == pause_cc && pause_ms > 0) {
+		wait_ms += pause_ms;
+	}
+	return wait_ms;
+}
+
 static bool match_port_substring_ci(const char *haystack, const char *needle)
 {
 	if (!haystack || !needle || needle[0] == '\0') {
@@ -85,6 +97,12 @@ static int run_self_test(void)
 	ASSERT_TRUE(match_port_substring_ci("loopMIDI Port 1", "loopMIDI"));
 	ASSERT_TRUE(match_port_substring_ci("loopMIDI Port", "loopmidi"));
 	ASSERT_TRUE(!match_port_substring_ci("Microsoft GS Wavetable Synth", "loopMIDI"));
+
+	/* 6. Verify --slow-pause step & pause wait schedule (100..127 @ 300 ms/CC + 2000 ms pause at CC 116) */
+	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(100, 127, 300, 116, 2000) == 300);
+	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(116, 127, 300, 116, 2000) == 2300);
+	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(119, 127, 300, 116, 2000) == 300);
+	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(127, 127, 300, 116, 2000) == 0);
 
 	printf("test-midi-send: PASS\n");
 	return 0;
@@ -196,6 +214,87 @@ int main(int argc, char **argv)
 
 		printf("midi-send: sent 3 rapid throws (sweep=%d ms, pause=%d ms) ch=%d cc=%d to '%s'\n", sweep_ms,
 		       pause_ms, channel, cc, resolved_name);
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "--slow-pause") == 0) {
+		if (argc < 10) {
+			fprintf(stderr,
+				"Usage: %s --slow-pause <port_name> <channel_1_16> <cc_0_127> <start_0_127> <end_0_127> <step_ms> <pause_cc> <pause_ms>\n",
+				argv[0]);
+			return 2;
+		}
+		const char *port_arg = argv[2];
+		int channel = atoi(argv[3]);
+		int cc = atoi(argv[4]);
+		int start_val = atoi(argv[5]);
+		int end_val = atoi(argv[6]);
+		int step_ms = atoi(argv[7]);
+		int pause_cc = atoi(argv[8]);
+		int pause_ms = atoi(argv[9]);
+
+		if (channel < 1 || channel > 16 || cc < 0 || cc > 127 || start_val < 0 || start_val > 127 ||
+		    end_val < 0 || end_val > 127 || step_ms < 0 || pause_cc < -1 || pause_cc > 127 || pause_ms < 0) {
+			fprintf(stderr, "midi-send --slow-pause: invalid parameters\n");
+			return 2;
+		}
+
+		char resolved_name[128] = {0};
+		int dev_id = find_midi_out_port(port_arg, resolved_name, sizeof(resolved_name));
+		if (dev_id < 0) {
+			fprintf(stderr, "midi-send: no WinMM MIDI Out port matching '%s'\n", port_arg);
+			return 1;
+		}
+
+		HMIDIOUT hout = NULL;
+		MMRESULT mm = midiOutOpen(&hout, (UINT)dev_id, 0, 0, CALLBACK_NULL);
+		if (mm != MMSYSERR_NOERROR || !hout) {
+			fprintf(stderr, "midi-send: midiOutOpen failed for '%s' (mm=%u)\n", resolved_name,
+				(unsigned)mm);
+			return 1;
+		}
+
+		timeBeginPeriod(1);
+		LARGE_INTEGER freq;
+		LARGE_INTEGER t0;
+		QueryPerformanceFrequency(&freq);
+		QueryPerformanceCounter(&t0);
+		double target_ms = 0.0;
+		int dir = (end_val >= start_val) ? 1 : -1;
+
+		for (int val = start_val;; val += dir) {
+			uint32_t msg = mfd_pack_cc_short_msg(channel, cc, val);
+			midiOutShortMsg(hout, (DWORD)msg);
+
+			int wait_ms = mfd_compute_slow_pause_wait_ms(val, end_val, step_ms, pause_cc, pause_ms);
+			if (val == end_val) {
+				break;
+			}
+			if (wait_ms > 0) {
+				target_ms += (double)wait_ms;
+				for (;;) {
+					LARGE_INTEGER now;
+					QueryPerformanceCounter(&now);
+					double elapsed_ms =
+						((double)(now.QuadPart - t0.QuadPart) * 1000.0) / (double)freq.QuadPart;
+					double remain_ms = target_ms - elapsed_ms;
+					if (remain_ms <= 0.2) {
+						break;
+					}
+					if (remain_ms >= 2.0) {
+						Sleep(1);
+					} else {
+						SwitchToThread();
+					}
+				}
+			}
+		}
+
+		timeEndPeriod(1);
+		midiOutClose(hout);
+
+		printf("midi-send: sent --slow-pause ch=%d cc=%d %d..%d (step=%d ms, pause_cc=%d pause=%d ms) to '%s'\n",
+		       channel, cc, start_val, end_val, step_ms, pause_cc, pause_ms, resolved_name);
 		return 0;
 	}
 

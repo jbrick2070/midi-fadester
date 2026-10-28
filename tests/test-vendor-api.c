@@ -27,6 +27,7 @@ OBS_MODULE_USE_DEFAULT_LOCALE("midi-fadester", "en-US")
 static int g_mock_tbar_calls = 0;
 static int g_mock_tbar_set_writes = 0;
 static int g_mock_tbar_completions = 0;
+static int g_mock_tbar_aborts = 0;
 static int g_mock_tbar_unlatches = 0;
 static int g_mock_tbar_last_pos = 0;
 static bool g_mock_tbar_latched = false;
@@ -39,8 +40,9 @@ static void mock_tbar_unlatch(void)
 	g_mock_tbar_last_pos = 0;
 }
 
-static bool mock_tbar_driver(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
-			     float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size)
+static bool mock_tbar_driver(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,
+			     bool in_target_rail_zone, bool in_origin_rail_zone, enum mfd_tbar_state *out_next_state,
+			     bool *out_completed_throw, bool *out_aborted_throw, char *out_err, size_t err_size)
 {
 	if (out_err && err_size > 0U) {
 		out_err[0] = '\0';
@@ -52,25 +54,37 @@ static bool mock_tbar_driver(float t_norm, bool force_release, bool in_rail_zone
 	memset(&in, 0, sizeof(in));
 	in.studio_mode_active = true;
 	in.slider_tbar_found = true;
+	in.state = state;
 	in.release_latched = g_mock_tbar_latched;
-	in.force_release = force_release;
-	in.in_rail_zone = in_rail_zone;
-	in.smoother_settled = smoother_settled;
+	in.force_complete = force_complete;
+	in.force_abort = force_abort;
+	in.in_target_rail_zone = in_target_rail_zone;
+	in.in_origin_rail_zone = in_origin_rail_zone;
 	in.t_norm = t_norm;
-	in.fader_idle_sec = fader_idle_sec;
 	in.last_pos_1024 = g_mock_tbar_last_pos;
 
 	struct mfd_tbar_action act;
 	mfd_tbar_compute_action_full(&in, &act);
+	if (out_next_state) {
+		*out_next_state = act.next_state;
+	}
 	if (act.call_set_tbar) {
 		++g_mock_tbar_set_writes;
 	}
 	if (act.call_release_tbar) {
 		g_mock_tbar_latched = true;
 		g_mock_tbar_last_pos = 0;
-		++g_mock_tbar_completions;
+		if (act.completed_throw) {
+			++g_mock_tbar_completions;
+		}
+		if (act.aborted_throw) {
+			++g_mock_tbar_aborts;
+		}
 		if (out_completed_throw) {
-			*out_completed_throw = true;
+			*out_completed_throw = act.completed_throw;
+		}
+		if (out_aborted_throw) {
+			*out_aborted_throw = act.aborted_throw;
 		}
 	} else {
 		if (!g_mock_tbar_latched) {
@@ -78,6 +92,9 @@ static bool mock_tbar_driver(float t_norm, bool force_release, bool in_rail_zone
 		}
 		if (out_completed_throw) {
 			*out_completed_throw = false;
+		}
+		if (out_aborted_throw) {
+			*out_aborted_throw = false;
 		}
 	}
 	return true;
@@ -206,7 +223,7 @@ int main(void)
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.1.1") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.1.2") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");
 	REQUIRE(build_obj != NULL);
 	const char *b_commit = obs_data_get_string(build_obj, "commit");
@@ -739,6 +756,7 @@ int main(void)
 	/* 10d: nudge_fader right after a completed throw (Stream Deck dial) */
 	/* 10d-1: Physical MIDI throw 0 -> 127 on crossfader (T-bar), then negative Stream Deck dial nudge */
 	mfd_engine_unlatch_tbar(&eng);
+	eng.fader_slots[0].tbar_state = MFD_TBAR_IDLE;
 	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 	eng.fader_slots[0].takeover.polarity_reversed = false;
 	eng.fader_slots[0].takeover.rescale_origin = 0.0f;
@@ -917,14 +935,17 @@ int main(void)
 	REQUIRE(g_mock_tbar_latched);
 
 	/*
-	 * 12. Linear 0-100% T-bar drive + 3% rail zone release (CC >= 124 / CC <= 3) + 150 ms > 90% stall fallback:
-	 *     - 12a: Slow sweep at 2 CC per 100 ms (50 ms per CC step in 5 x 10 ms ticks, tau = 30 ms):
-	 *            no release before CC 124 (including CC 115, CC 118, CC 119 ~93%, CC 123 ~96.8%),
-	 *            monotonic T-bar value through CC 123, and exactly 1 release once CC >= 124 enters the 3% rail zone.
-	 *     - 12b: Reversed-polarity slow return sweep 127 -> 0 at 2 CC per 100 ms:
-	 *            no release before CC <= 3 (0 completions at CC 12 .. CC 4), and exactly 1 release at CC <= 3.
-	 *     - 12c: Short-travel fader stopping at CC 121 (95.28%, < CC 124):
-	 *            0 releases at 120 ms idle, then releases once at >= 150 ms idle above 90%.
+	 * 12. 0.1.2 Timer-Free R-TBAR-SM State Machine & Calibrated Rail Zone Tests:
+	 *     - 12a: 0 -> 100, then 1 CC step every 300 ms (30 x 10 ms ticks) from 100 to 127 with a 2 s pause
+	 *            (200 x 10 ms ticks) at CC 116 (tau = 30 ms): 0 releases before CC 124 (including across the
+	 *            entire 2 s pause at CC 116), ~93.7% mix at CC 119, monotonic T-bar value, and 1 release at CC 124.
+	 *     - 12b: Reversed-polarity slow return 127 -> 0 with a 2 s pause at CC 12 (~90.55% throw progress):
+	 *            0 extra releases before CC <= 3, and 1 release at CC 3.
+	 *     - 12c: Throwing -> Idle aborted throw (0 -> 60 -> 0 + origin-rail jitter 2, 1, 0):
+	 *            1 abort release (pos = 0 + release), 0 completions, Idle (t = 0, no polarity flip, no park),
+	 *            0 further writes at CC 2/1/0; followed immediately by 0 -> 60 -> 2 s pause -> 127 asserting
+	 *            0 releases during pause and 1 completion at the rail (CC 124) only.
+	 *     - 12d: Calibrated control range [0, 125] via set_slot + persistence + auto-widening to [0, 127] on CC 127.
 	 */
 	mfd_engine_load_apc40_defaults(&eng);
 	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
@@ -932,71 +953,204 @@ int main(void)
 	g_mock_tbar_calls = 0;
 	g_mock_tbar_set_writes = 0;
 	g_mock_tbar_completions = 0;
+	g_mock_tbar_aborts = 0;
 	g_mock_tbar_last_val = 0.0f;
 
-	float prev_slow_val = 0.0f;
-	float val_at_cc119 = 0.0f;
-	for (int cc = 0; cc <= 127; ++cc) {
+	for (int cc = 0; cc <= 100; cc += 10) {
 		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
-		for (int sub = 0; sub < 5; ++sub) {
+		mfd_engine_tick(&eng, 0.010f);
+	}
+	float prev_slow_val = g_mock_tbar_last_val;
+	float val_at_cc119 = 0.0f;
+	for (int cc = 100; cc <= 127; ++cc) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
+		int ticks = (cc == 116) ? 230 : 30; /* 300 ms/step + 2000 ms pause at CC 116 */
+		for (int sub = 0; sub < ticks; ++sub) {
 			mfd_engine_tick(&eng, 0.010f);
+			if (cc < 124) {
+				REQUIRE(g_mock_tbar_completions == 0);
+				REQUIRE(g_mock_tbar_aborts == 0);
+				REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+			}
 		}
 		if (cc < 124) {
-			REQUIRE(g_mock_tbar_completions == 0);
-			REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
 			REQUIRE(g_mock_tbar_last_val + 1e-5f >= prev_slow_val);
 			prev_slow_val = g_mock_tbar_last_val;
 			if (cc == 119) {
 				val_at_cc119 = g_mock_tbar_last_val;
 			}
+		} else if (cc == 124) {
+			REQUIRE(g_mock_tbar_completions == 1);
+			REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 		}
 	}
-	/* At CC 119 (~93.7%), T-bar mix must be ~93% (0.91..0.95), NOT snapped to 100% */
-	REQUIRE(val_at_cc119 >= 0.91f && val_at_cc119 <= 0.95f);
+	/* At CC 119 (~93.7%), T-bar mix must be ~93.7% (0.92..0.95), NOT snapped to 100% */
+	REQUIRE(val_at_cc119 >= 0.92f && val_at_cc119 <= 0.95f);
 	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(g_mock_tbar_aborts == 0);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 
-	/* 12b: Reversed-polarity return slow sweep 127 -> 0 at 2 CC per 100 ms */
+	/* 12b: Reversed-polarity return slow sweep 127 -> 0 with 2 s pause at CC 12 (~90.55% throw progress) */
 	float prev_rev_val = 0.0f;
 	for (int cc = 127; cc >= 0; --cc) {
 		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
-		for (int sub = 0; sub < 5; ++sub) {
+		int ticks = (cc == 12) ? 230 : 30;
+		for (int sub = 0; sub < ticks; ++sub) {
 			mfd_engine_tick(&eng, 0.010f);
+			if (cc > 3) {
+				REQUIRE(g_mock_tbar_completions == 1);
+				REQUIRE(g_mock_tbar_aborts == 0);
+			}
 		}
 		if (cc > 3) {
-			REQUIRE(g_mock_tbar_completions == 1);
 			if (!get_slot_parked_via_get_state(&eng, 0)) {
 				REQUIRE(g_mock_tbar_last_val + 1e-5f >= prev_rev_val);
 				prev_rev_val = g_mock_tbar_last_val;
 			}
+		} else if (cc == 3) {
+			REQUIRE(g_mock_tbar_completions == 2);
+			REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 		}
 	}
 	REQUIRE(g_mock_tbar_completions == 2);
+	REQUIRE(g_mock_tbar_aborts == 0);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 
-	/* 12c: Short-travel fader stopping at CC 121 (95.28%) triggers 150 ms stall fallback */
+	/* 12c: Throwing -> Idle aborted throw (0 -> 60 -> 0), then immediate 0 -> 60 -> 2 s pause -> 127 */
 	mfd_engine_load_apc40_defaults(&eng);
 	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
 	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	g_mock_tbar_calls = 0;
+	g_mock_tbar_set_writes = 0;
 	g_mock_tbar_completions = 0;
+	g_mock_tbar_aborts = 0;
 
-	for (int cc = 0; cc <= 121; cc += 11) {
+	for (int cc = 0; cc <= 60; cc += 5) {
 		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
 		mfd_engine_tick(&eng, 0.010f);
 	}
-	/* 120 ms idle at CC 121 (< 150 ms): smoother has settled (~95.3%), still 0 completions */
-	for (int t = 0; t < 12; ++t) {
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+	REQUIRE(g_mock_tbar_aborts == 0);
+	REQUIRE(g_mock_tbar_completions == 0);
+
+	for (int cc = 55; cc >= 0; cc -= 5) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
 		mfd_engine_tick(&eng, 0.010f);
 	}
+	REQUIRE(g_mock_tbar_aborts == 1);
 	REQUIRE(g_mock_tbar_completions == 0);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	REQUIRE(!eng.fader_slots[0].takeover.polarity_reversed);
 	REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+	REQUIRE(fabsf(eng.fader_slots[0].last_applied_val - 0.0f) < 1e-6f);
 
-	/* 40 ms more (160 ms total idle >= 150 ms while at 95.3% > 90%): fallback fires once and parks */
-	for (int t = 0; t < 4; ++t) {
+	int writes_after_abort = g_mock_tbar_set_writes;
+	uint8_t origin_jitter[] = {2, 1, 3, 0};
+	for (size_t ji = 0U; ji < sizeof(origin_jitter) / sizeof(origin_jitter[0]); ++ji) {
+		push_midi_cc(&eng, 0, 15, origin_jitter[ji]);
+		mfd_engine_tick(&eng, 0.016f);
+	}
+	REQUIRE(g_mock_tbar_set_writes == writes_after_abort);
+	REQUIRE(g_mock_tbar_aborts == 1);
+	REQUIRE(g_mock_tbar_completions == 0);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+
+	/* Immediate follow-up without resetting slot: 0 -> 60 -> 2 s pause -> 127 */
+	for (int cc = 0; cc <= 60; cc += 5) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
 		mfd_engine_tick(&eng, 0.010f);
+	}
+	for (int sub = 0; sub < 200; ++sub) {
+		mfd_engine_tick(&eng, 0.010f);
+	}
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+	REQUIRE(g_mock_tbar_aborts == 1);
+	REQUIRE(g_mock_tbar_completions == 0);
+
+	for (int cc = 61; cc <= 127; ++cc) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
+		mfd_engine_tick(&eng, 0.010f);
+		if (cc < 124) {
+			REQUIRE(g_mock_tbar_completions == 0);
+		}
+	}
+	REQUIRE(g_mock_tbar_aborts == 1);
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_PARKED);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/* 12d: Calibrated control range [0, 125] via set_slot, persistence, and auto-widening on CC 127 */
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_int(req, "cal_min", 0);
+	obs_data_set_int(req, "cal_max", 125);
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(obs_data_get_int(res, "cal_min") == 0);
+	REQUIRE(obs_data_get_int(res, "cal_max") == 125);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* Reloading profile preserves persisted [0, 125] calibration for (apc40mk2, Ch 1 CC 15) */
+	mfd_engine_load_apc40_defaults(&eng);
+	REQUIRE(eng.fader_slots[0].cal.cal_min == 0);
+	REQUIRE(eng.fader_slots[0].cal.cal_max == 125);
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	g_mock_tbar_completions = 0;
+
+	/* Short-travel fader stopping mechanically at CC 125 completes cleanly at its calibrated rail [122..125] */
+	for (int cc = 0; cc <= 125; ++cc) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
+		mfd_engine_tick(&eng, 0.010f);
+		if (cc <= 121) {
+			REQUIRE(g_mock_tbar_completions == 0);
+		}
 	}
 	REQUIRE(g_mock_tbar_completions == 1);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/* Export/Import round-trip preserves control_calibrations [0, 125], and CC 127 auto-widens to [0, 127] */
+	const char *tmp_cal_json = "test-mfd-cal-roundtrip.json";
+	REQUIRE(mfd_engine_export_config_file(&eng, tmp_cal_json));
+	memset(eng.cal_entries, 0, sizeof(eng.cal_entries));
+	eng.fader_slots[0].cal.cal_max = 127;
+	REQUIRE(mfd_engine_import_config_file(&eng, tmp_cal_json));
+	remove(tmp_cal_json);
+	REQUIRE(eng.fader_slots[0].cal.cal_min == 0);
+	REQUIRE(eng.fader_slots[0].cal.cal_max == 125);
+
+	push_midi_cc(&eng, 0, 15, 127);
+	mfd_engine_tick(&eng, 0.010f);
+	REQUIRE(eng.fader_slots[0].cal.cal_min == 0);
+	REQUIRE(eng.fader_slots[0].cal.cal_max == 127);
+
+	/* 12e: 14-bit CC pair (CC 7 MSB + CC 39 LSB) auto-upgrades 7-bit slot calibration [0, 127] -> [0, 16383] */
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	obs_data_set_string(req, "source_b", "Loop 3");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
+	REQUIRE(eng.fader_slots[1].cal.cal_max == 127);
+
+	/* Send 14-bit 25% (v14 = 4096 -> MSB = 32, LSB = 0) on Ch 1 CC 7 / CC 39 */
+	push_midi_cc(&eng, 0, 7, 32);
+	push_midi_cc(&eng, 0, 39, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[1].addr.is_14bit);
+	REQUIRE(eng.fader_slots[1].cal.cal_min == 0);
+	REQUIRE(eng.fader_slots[1].cal.cal_max == 16383);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (4096.0f / 16383.0f)) < 1e-4f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");

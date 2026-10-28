@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "core/tbar-logic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,14 +18,15 @@ void mfd_tbar_init(void);
 void mfd_tbar_shutdown(void);
 
 /*
- * Safe Studio Mode T-bar driver callback registered with mfd_engine.
+ * Safe, timer-free Studio Mode T-bar driver callback registered with mfd_engine (R-TBAR-SM).
  * Returns false and populates out_err if Studio Mode is active but "slider-tbar" is missing.
  */
-bool mfd_tbar_driver_apply(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
-			   float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size);
+bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,
+			   bool in_target_rail_zone, bool in_origin_rail_zone, enum mfd_tbar_state *out_next_state,
+			   bool *out_completed_throw, bool *out_aborted_throw, char *out_err, size_t err_size);
 
 /*
- * Resets the per-transition T-bar release latch when a T-bar slot unparks or reinitializes.
+ * Resets the per-transition T-bar release latch when a new throw starts or unparks.
  */
 void mfd_tbar_reset_release_latch(void);
 bool mfd_tbar_is_release_latched(void);

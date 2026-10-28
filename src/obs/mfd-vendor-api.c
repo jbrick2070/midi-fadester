@@ -91,6 +91,8 @@ static void populate_slot_data(const struct mfd_engine *eng, const struct mfd_fa
 	obs_data_set_string(out, "curve", mfd_curve_to_string(s->curve));
 	obs_data_set_bool(out, "afv", s->audio_follows_video);
 	obs_data_set_double(out, "value", (double)s->last_applied_val);
+	obs_data_set_int(out, "cal_min", s->cal.cal_min);
+	obs_data_set_int(out, "cal_max", s->cal.cal_max);
 	obs_data_set_string(out, "takeover_pending", takeover_pending_str(&s->takeover));
 	obs_data_set_bool(out, "parked", s->takeover.state == MFD_TAKEOVER_PARKED);
 	obs_data_set_string(out, "label", dyn_label);
@@ -230,26 +232,44 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 	float val = clamp01((float)calldata_float(cd, "value"));
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
+			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
 	slot->auto_fade_active = false;
 	slot->tbar_midi_active = false;
-	slot->tbar_idle_sec = 0.0f;
 	slot->takeover.dial_reversed = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
-		if (mfd_tbar_is_in_rail_zone(val, false)) {
-			if (!(was_parked && slot->last_applied_val <= 0.0f)) {
-				mfd_engine_apply_slot_output_ex(eng, slot, val, true);
+		if (mfd_tbar_is_in_target_rail_zone(val, false)) {
+			if (!was_parked) {
+				if (slot->tbar_state == MFD_TBAR_IDLE) {
+					mfd_engine_unlatch_tbar(eng);
+				}
+				mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
 				mfd_engine_notify_fader_changed(eng, idx, "api");
 				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
 					mfd_engine_notify_state_changed(eng);
 				}
 			}
+		} else if (mfd_tbar_is_in_origin_rail_zone(val, false)) {
+			if (slot->tbar_state == MFD_TBAR_THROWING) {
+				mfd_engine_apply_tbar_abort(eng, slot);
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				mfd_engine_notify_state_changed(eng);
+			} else if (was_parked) {
+				mfd_engine_unlatch_tbar(eng);
+				slot->tbar_state = MFD_TBAR_IDLE;
+				mfd_takeover_unpark_from_api(&slot->takeover, 0.0f);
+				mfd_smoother_reset(&slot->smoother, 0.0f);
+				slot->last_applied_val = 0.0f;
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				mfd_engine_notify_state_changed(eng);
+			}
 		} else {
-			if (was_parked) {
+			if (was_parked || slot->tbar_state == MFD_TBAR_IDLE) {
 				mfd_engine_unlatch_tbar(eng);
 			}
+			slot->tbar_state = MFD_TBAR_THROWING;
 			mfd_takeover_unpark_from_api(&slot->takeover, val);
 			mfd_smoother_reset(&slot->smoother, val);
 			mfd_engine_apply_slot_output(eng, slot, val);
@@ -362,27 +382,45 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	float val = clamp01((float)obs_data_get_double(request_data, "value"));
 	bool release = obs_data_get_bool(request_data, "release");
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
+			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 	bool prev_upper = slot->takeover.parked_at_upper_rail;
 
 	slot->auto_fade_active = false;
 	slot->tbar_midi_active = false;
-	slot->tbar_idle_sec = 0.0f;
 	slot->takeover.dial_reversed = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
-		if (release || mfd_tbar_is_in_rail_zone(val, false)) {
-			if (!(was_parked && slot->last_applied_val <= 0.0f)) {
-				mfd_engine_apply_slot_output_ex(eng, slot, val, release);
+		if (release || mfd_tbar_is_in_target_rail_zone(val, false)) {
+			if (!was_parked) {
+				if (slot->tbar_state == MFD_TBAR_IDLE) {
+					mfd_engine_unlatch_tbar(eng);
+				}
+				mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
 				mfd_engine_notify_fader_changed(eng, idx, "api");
 				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
 					mfd_engine_notify_state_changed(eng);
 				}
 			}
+		} else if (mfd_tbar_is_in_origin_rail_zone(val, false)) {
+			if (slot->tbar_state == MFD_TBAR_THROWING) {
+				mfd_engine_apply_tbar_abort(eng, slot);
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				mfd_engine_notify_state_changed(eng);
+			} else if (was_parked) {
+				mfd_engine_unlatch_tbar(eng);
+				slot->tbar_state = MFD_TBAR_IDLE;
+				mfd_takeover_unpark_from_api(&slot->takeover, 0.0f);
+				mfd_smoother_reset(&slot->smoother, 0.0f);
+				slot->last_applied_val = 0.0f;
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				mfd_engine_notify_state_changed(eng);
+			}
 		} else {
-			if (was_parked) {
+			if (was_parked || slot->tbar_state == MFD_TBAR_IDLE) {
 				mfd_engine_unlatch_tbar(eng);
 			}
+			slot->tbar_state = MFD_TBAR_THROWING;
 			mfd_takeover_unpark_from_api(&slot->takeover, val);
 			mfd_smoother_reset(&slot->smoother, val);
 			mfd_engine_apply_slot_output_ex(eng, slot, val, false);
@@ -440,11 +478,11 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
 	float delta = (float)obs_data_get_double(request_data, "delta");
-	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
+			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
 	slot->auto_fade_active = false;
 	slot->tbar_midi_active = false;
-	slot->tbar_idle_sec = 0.0f;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
 		if (!(was_parked && fabsf(delta) <= 1e-6f)) {
@@ -453,13 +491,36 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 				slot->takeover.dial_reversed = (delta < 0.0f);
 				eff_delta = fabsf(delta);
 				mfd_engine_unlatch_tbar(eng);
+				slot->tbar_state = MFD_TBAR_IDLE;
 			} else if (slot->takeover.dial_reversed) {
 				eff_delta = -delta;
 			}
 			float val = clamp01(slot->last_applied_val + eff_delta);
-			mfd_takeover_unpark_from_api(&slot->takeover, val);
-			mfd_smoother_reset(&slot->smoother, val);
-			mfd_engine_apply_slot_output(eng, slot, val);
+			if (mfd_tbar_is_in_target_rail_zone(val, false)) {
+				if (slot->tbar_state == MFD_TBAR_IDLE) {
+					mfd_engine_unlatch_tbar(eng);
+				}
+				mfd_takeover_unpark_from_api(&slot->takeover, val);
+				mfd_smoother_reset(&slot->smoother, 1.0f);
+				mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
+			} else if (mfd_tbar_is_in_origin_rail_zone(val, false)) {
+				mfd_takeover_unpark_from_api(&slot->takeover, 0.0f);
+				mfd_smoother_reset(&slot->smoother, 0.0f);
+				if (slot->tbar_state == MFD_TBAR_THROWING) {
+					mfd_engine_apply_tbar_abort(eng, slot);
+				} else {
+					slot->tbar_state = MFD_TBAR_IDLE;
+					slot->last_applied_val = 0.0f;
+				}
+			} else {
+				if (slot->tbar_state == MFD_TBAR_IDLE) {
+					mfd_engine_unlatch_tbar(eng);
+				}
+				slot->tbar_state = MFD_TBAR_THROWING;
+				mfd_takeover_unpark_from_api(&slot->takeover, val);
+				mfd_smoother_reset(&slot->smoother, val);
+				mfd_engine_apply_slot_output(eng, slot, val);
+			}
 			mfd_engine_notify_fader_changed(eng, idx, "api");
 			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
 				mfd_engine_notify_state_changed(eng);
@@ -512,13 +573,13 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
 	float to_val = clamp01((float)obs_data_get_double(request_data, "to"));
-	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
+			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
 	if (was_parked) {
 		if (slot->target_type == MFD_TARGET_TBAR && to_val <= 0.0f && slot->last_applied_val <= 0.0f) {
 			slot->auto_fade_active = false;
 			slot->tbar_midi_active = false;
-			slot->tbar_idle_sec = 0.0f;
 			obs_data_set_string(response_data, "slot", slot->id);
 			return;
 		}
@@ -528,7 +589,6 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 		    fabsf(slot->last_applied_val - to_val) < 1e-5f) {
 			slot->auto_fade_active = false;
 			slot->tbar_midi_active = false;
-			slot->tbar_idle_sec = 0.0f;
 			obs_data_set_string(response_data, "slot", slot->id);
 			return;
 		}
@@ -540,10 +600,10 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
 	slot->tbar_midi_active = false;
-	slot->tbar_idle_sec = 0.0f;
 	if (was_parked) {
 		if (slot->target_type == MFD_TARGET_TBAR) {
 			mfd_engine_unlatch_tbar(eng);
+			slot->tbar_state = MFD_TBAR_IDLE;
 		}
 		mfd_takeover_unpark_from_api(&slot->takeover, slot->auto_fade_from);
 		mfd_engine_notify_state_changed(eng);
@@ -574,6 +634,16 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	bool has_curve = obs_data_has_user_value(request_data, "curve");
 	bool has_sa = obs_data_has_user_value(request_data, "source_a");
 	bool has_sb = obs_data_has_user_value(request_data, "source_b");
+	bool has_cal_min = obs_data_has_user_value(request_data, "cal_min");
+	bool has_cal_max = obs_data_has_user_value(request_data, "cal_max");
+	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
+	int new_cal_max = has_cal_max ? (int)obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
+
+	if ((has_cal_min || has_cal_max) && (new_cal_min < 0 || new_cal_max <= new_cal_min)) {
+		set_error_comment(response_data,
+				  "Invalid calibration range: 'cal_max' must be greater than 'cal_min' (>= 0).");
+		return;
+	}
 
 	if (has_target) {
 		const char *tm = obs_data_get_string(request_data, "target_mode");
@@ -639,8 +709,14 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		s->takeover.bidirectional_flip = is_tbar ? eng->tbar_bidirectional_flip : false;
 		mfd_takeover_set_two_rail_mode(&s->takeover, is_two_rail);
 		if (is_tbar && s->takeover.state != MFD_TAKEOVER_PARKED) {
+			s->tbar_state = MFD_TBAR_IDLE;
 			mfd_engine_unlatch_tbar(eng);
+		} else if (!is_tbar) {
+			s->tbar_state = MFD_TBAR_IDLE;
 		}
+	}
+	if (has_cal_min || has_cal_max) {
+		mfd_engine_set_slot_calibration(eng, idx, new_cal_min, new_cal_max);
 	}
 	if (has_curve) {
 		s->curve = new_curve;

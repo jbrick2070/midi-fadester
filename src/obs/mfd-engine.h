@@ -14,6 +14,7 @@
 #include "core/midi-parser.h"
 #include "core/smoother.h"
 #include "core/takeover.h"
+#include "core/tbar-logic.h"
 #include "core/apc40-profile.h"
 #include "midi/winmm-device.h"
 
@@ -22,11 +23,20 @@ extern "C" {
 #endif
 
 #define MFD_MAX_FADER_SLOTS 10
+#define MFD_MAX_CAL_ENTRIES 64
+#define MFD_PROFILE_NAME_MAX 32
 #define MFD_SOURCE_NAME_MAX 256
 #define MFD_SLOT_LABEL_MAX 64
 #define MFD_SLOT_ID_MAX 32
 #define MFD_SLOT_KIND_MAX 16
 #define MFD_FADER_EVENT_MIN_INTERVAL_SEC (1.0f / 30.0f)
+
+struct mfd_persisted_cal_entry {
+	bool in_use;
+	char profile_name[MFD_PROFILE_NAME_MAX];
+	struct mfd_midi_addr addr;
+	struct mfd_control_calibration cal;
+};
 
 struct mfd_fader_slot {
 	bool enabled;
@@ -34,6 +44,7 @@ struct mfd_fader_slot {
 	char kind[MFD_SLOT_KIND_MAX];
 	char label[MFD_SLOT_LABEL_MAX];
 	struct mfd_midi_addr addr;
+	struct mfd_control_calibration cal;
 	enum mfd_target_type target_type;
 	char source_a_name[MFD_SOURCE_NAME_MAX];
 	char source_b_name[MFD_SOURCE_NAME_MAX];
@@ -44,6 +55,8 @@ struct mfd_fader_slot {
 	/* Runtime state */
 	struct mfd_smoother smoother;
 	struct mfd_takeover takeover;
+	enum mfd_tbar_state tbar_state;
+	bool tbar_midi_active;
 	float last_raw_norm;
 	float last_applied_val;
 	float last_alpha_a;
@@ -59,20 +72,16 @@ struct mfd_fader_slot {
 	float auto_fade_duration_sec;
 	float auto_fade_elapsed_sec;
 
-	/* T-bar physical MIDI 3% rail-zone & 150 ms >90% stall fallback state */
-	bool tbar_midi_active;
-	bool tbar_has_tracked_raw;
-	float tbar_last_tracked_raw_norm;
-	float tbar_idle_sec;
-
 	/* Coalesced fader_changed event state (max 30 Hz per slot) */
 	float sec_since_last_fader_event;
 	bool fader_event_pending;
 	char pending_origin[16];
 };
 
-typedef bool (*mfd_tbar_apply_fn)(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
-				  float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size);
+typedef bool (*mfd_tbar_apply_fn)(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,
+				  bool in_target_rail_zone, bool in_origin_rail_zone,
+				  enum mfd_tbar_state *out_next_state, bool *out_completed_throw,
+				  bool *out_aborted_throw, char *out_err, size_t err_size);
 typedef void (*mfd_tbar_unlatch_fn)(void);
 typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
 
@@ -82,9 +91,11 @@ struct mfd_engine {
 	struct mfd_winmm_device midi_dev;
 
 	char configured_device_name[MFD_MIDI_DEV_NAME_MAX];
+	char active_profile_name[MFD_PROFILE_NAME_MAX];
 	float smooth_tau_ms;
 	bool tbar_bidirectional_flip;
 
+	struct mfd_persisted_cal_entry cal_entries[MFD_MAX_CAL_ENTRIES];
 	struct mfd_fader_slot fader_slots[MFD_MAX_FADER_SLOTS];
 	int learning_slot_index; /* -1 when not learning */
 	bool has_last_midi;
@@ -112,9 +123,13 @@ void mfd_engine_shutdown(void);
 void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn);
 void mfd_engine_set_tbar_unlatch_fn(mfd_tbar_unlatch_fn unlatch_fn);
 void mfd_engine_unlatch_tbar(struct mfd_engine *eng);
+void mfd_engine_on_external_tbar_reset(struct mfd_engine *eng);
 void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng);
 
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng);
+void mfd_engine_set_slot_calibration(struct mfd_engine *eng, int slot_index, int cal_min, int cal_max);
+bool mfd_engine_lookup_persisted_calibration(const struct mfd_engine *eng, const char *profile_name,
+					     const struct mfd_midi_addr *addr, struct mfd_control_calibration *out_cal);
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name);
 void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms);
 void mfd_engine_set_tbar_bidirectional_flip(struct mfd_engine *eng, bool flip);
@@ -142,6 +157,7 @@ void mfd_engine_notify_state_changed(struct mfd_engine *eng);
 void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val);
 void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val,
 				     bool force_release);
+void mfd_engine_apply_tbar_abort(struct mfd_engine *eng, struct mfd_fader_slot *slot);
 
 /*
  * Steps MIDI queue decoding, smoother, auto-fade ramps, and coalesced vendor events by `seconds`.
