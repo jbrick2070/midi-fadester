@@ -53,7 +53,7 @@ private:
 	struct mfd_engine *eng_ = nullptr;
 	struct mfd_ui_catalog *catalog_ = nullptr;
 	struct mfd_source_filter_catalog *filter_cat_ = nullptr;
-	struct mfd_ui_snapshot snap_{};
+	struct mfd_ui_snapshot snap_ {};
 	uint64_t last_topology_rev_ = 0ULL;
 	int slot_index_ = 0;
 	bool committed_or_unassigned_ = false;

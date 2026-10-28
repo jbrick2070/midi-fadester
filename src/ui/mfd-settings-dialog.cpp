@@ -2189,7 +2189,7 @@ private:
 	struct mfd_engine *eng_ = nullptr;
 	bool owns_engine_notify_ = false;
 	std::atomic<bool> local_refresh_queued_{false};
-	struct mfd_ui_snapshot snap_{};
+	struct mfd_ui_snapshot snap_ {};
 	struct mfd_ui_catalog *adv_catalog_ = nullptr;
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
@@ -2226,7 +2226,7 @@ private:
 	QLabel *strip_assign_labels_[MFD_MAX_FADER_SLOTS]{};
 	QLabel *strip_status_labels_[MFD_MAX_FADER_SLOTS]{};
 	QPushButton *strip_action_btns_[MFD_MAX_FADER_SLOTS]{};
-	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS]{};
+	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS] {};
 
 	QLabel *z3_status_label_ = nullptr;
 

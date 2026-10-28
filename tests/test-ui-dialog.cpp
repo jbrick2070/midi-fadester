@@ -73,7 +73,7 @@ static bool mock_tbar_driver(enum mfd_tbar_state state, float t_norm, bool force
 	if (out_err && err_size > 0U) {
 		out_err[0] = '\0';
 	}
-	struct mfd_tbar_release_input in{};
+	struct mfd_tbar_release_input in {};
 	in.studio_mode_active = true;
 	in.slider_tbar_found = true;
 	in.state = state;
@@ -86,7 +86,7 @@ static bool mock_tbar_driver(enum mfd_tbar_state state, float t_norm, bool force
 	in.in_start_deadband = in_start_deadband;
 	in.last_pos_1024 = g_mock_tbar_last_pos;
 
-	struct mfd_tbar_action act{};
+	struct mfd_tbar_action act {};
 	mfd_tbar_compute_action_full(&in, &act);
 	if (out_next_state) {
 		*out_next_state = act.next_state;
@@ -734,7 +734,7 @@ int main(int argc, char **argv)
 	REQUIRE(QDir().mkpath(screenshot_dir));
 
 	/* Initialize standalone engine with recursive state_mutex and fake OBS scene graph */
-	struct mfd_engine eng{};
+	struct mfd_engine eng {};
 	REQUIRE(mfd_engine_init_mutex(&eng));
 	mfd_midi_queue_init(&eng.midi_queue);
 	mfd_midi_parser_init(&eng.midi_parser);
@@ -749,7 +749,7 @@ int main(int argc, char **argv)
 	eng.midi_dev.is_open = true;
 	eng.midi_dev.error_kind = MFD_WINMM_OK;
 
-	struct fake_scene_graph sg{};
+	struct fake_scene_graph sg {};
 	sg.owner_eng = &eng;
 	eng.scene_graph_ops = &k_fake_sg_ops;
 	eng.scene_graph_user_data = &sg;
@@ -877,7 +877,7 @@ int main(int argc, char **argv)
 	/* --- 3. Active Strips Across All Modes + Throwing & [Finish now] --- */
 	{
 		/* Strip 1: Mix two layers (Color & Color 2 in Red) */
-		struct mfd_slot_config_edit e1{};
+		struct mfd_slot_config_edit e1 {};
 		e1.enabled = true;
 		e1.target_type = MFD_TARGET_TWO_SOURCE_MIX;
 		e1.preserve_scene = false;
@@ -888,7 +888,7 @@ int main(int argc, char **argv)
 		mfd_engine_update_slot_config(&eng, 1, &e1);
 
 		/* Strip 2: Show or hide a layer (Cam in Blue) */
-		struct mfd_slot_config_edit e2{};
+		struct mfd_slot_config_edit e2 {};
 		e2.enabled = true;
 		e2.target_type = MFD_TARGET_SINGLE_LAYER;
 		e2.preserve_scene = false;
@@ -897,7 +897,7 @@ int main(int argc, char **argv)
 		mfd_engine_update_slot_config(&eng, 2, &e2);
 
 		/* Strip 3: Volume (Mic/Aux) */
-		struct mfd_slot_config_edit e3{};
+		struct mfd_slot_config_edit e3 {};
 		e3.enabled = true;
 		e3.target_type = MFD_TARGET_AUDIO_VOLUME;
 		std::snprintf(e3.source_a_name, sizeof(e3.source_a_name), "Mic/Aux");
@@ -951,7 +951,7 @@ int main(int argc, char **argv)
 		REQUIRE(mfd_engine_set_slot_value(&eng, 1, 0.12f, false, "api", err_tmp, sizeof(err_tmp)));
 
 		/* Strip 4: Mix two layers in Red, then remove Color 2 from Red */
-		struct mfd_slot_config_edit e4{};
+		struct mfd_slot_config_edit e4 {};
 		e4.enabled = true;
 		e4.target_type = MFD_TARGET_TWO_SOURCE_MIX;
 		e4.preserve_scene = false;
@@ -961,7 +961,7 @@ int main(int argc, char **argv)
 		mfd_engine_update_slot_config(&eng, 4, &e4);
 
 		/* Strip 5: Show or hide Cam in OldScene, then delete OldScene */
-		struct mfd_slot_config_edit e5{};
+		struct mfd_slot_config_edit e5 {};
 		e5.enabled = true;
 		e5.target_type = MFD_TARGET_SINGLE_LAYER;
 		e5.preserve_scene = false;
@@ -970,14 +970,14 @@ int main(int argc, char **argv)
 		mfd_engine_update_slot_config(&eng, 5, &e5);
 
 		/* Strip 6: Volume on Guest Mic, then delete Guest Mic */
-		struct mfd_slot_config_edit e6{};
+		struct mfd_slot_config_edit e6 {};
 		e6.enabled = true;
 		e6.target_type = MFD_TARGET_AUDIO_VOLUME;
 		std::snprintf(e6.source_a_name, sizeof(e6.source_a_name), "Guest Mic");
 		mfd_engine_update_slot_config(&eng, 6, &e6);
 
 		/* Strip 7: Volume on Title Card (has no audio) */
-		struct mfd_slot_config_edit e7{};
+		struct mfd_slot_config_edit e7 {};
 		e7.enabled = true;
 		e7.target_type = MFD_TARGET_AUDIO_VOLUME;
 		std::snprintf(e7.source_a_name, sizeof(e7.source_a_name), "Title Card");
@@ -1013,7 +1013,7 @@ int main(int argc, char **argv)
 
 	/* Remove Color 2 from Red exclusively for Strip 4 by pinning Strip 1 to Blue */
 	{
-		struct mfd_slot_config_edit e1b{};
+		struct mfd_slot_config_edit e1b {};
 		e1b.enabled = true;
 		e1b.target_type = MFD_TARGET_TWO_SOURCE_MIX;
 		e1b.preserve_scene = false;
@@ -1196,7 +1196,7 @@ int main(int argc, char **argv)
 	REQUIRE(svg_canvas != nullptr);
 	REQUIRE(svg_canvas->is_valid());
 	{
-		struct mfd_ui_snapshot svg_snap{};
+		struct mfd_ui_snapshot svg_snap {};
 		mfd_engine_get_ui_snapshot(&eng, &svg_snap);
 		const QByteArray desk_xml = mfd_make_apc40_desk_svg(svg_snap);
 		REQUIRE(desk_xml.contains("Clip launch pads"));
@@ -1280,7 +1280,7 @@ int main(int argc, char **argv)
 	svg_canvas = static_cast<MfdSvgCanvas *>(must_find<QWidget>(svg_dlg, QStringLiteral("mfdControllerSvgCanvas")));
 	REQUIRE(svg_canvas->is_valid());
 	{
-		struct mfd_ui_snapshot mm_snap{};
+		struct mfd_ui_snapshot mm_snap {};
 		mfd_engine_get_ui_snapshot(&eng, &mm_snap);
 		const QByteArray mm_xml = mfd_make_controller_desk_svg(mm_snap);
 		REQUIRE(mm_xml.contains("Akai MIDImix"));
@@ -1316,7 +1316,7 @@ int main(int argc, char **argv)
 		const struct mfd_controller_profile_def *pdef = mfd_profile_get_by_index(pi);
 		REQUIRE(pdef != nullptr);
 		REQUIRE(mfd_engine_select_profile(&eng, pdef->id, false));
-		struct mfd_ui_snapshot psnap{};
+		struct mfd_ui_snapshot psnap {};
 		mfd_engine_get_ui_snapshot(&eng, &psnap);
 		MfdSvgCanvas tmp_svg;
 		tmp_svg.set_svg_utf8(mfd_make_controller_desk_svg(psnap));
@@ -1547,7 +1547,7 @@ int main(int argc, char **argv)
 
 	/* Configure disabled duplicate on FX 3 (row 12), then toggle On in Advanced -> banner surfaces single-writer error */
 	{
-		struct mfd_slot_config_edit dup_edit{};
+		struct mfd_slot_config_edit dup_edit {};
 		dup_edit.enabled = false;
 		dup_edit.target_type = MFD_TARGET_FILTER_PARAM;
 		std::snprintf(dup_edit.source_a_name, sizeof(dup_edit.source_a_name), "Cam");
