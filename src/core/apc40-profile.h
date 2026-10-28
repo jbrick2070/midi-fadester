@@ -23,7 +23,13 @@ struct mfd_apc40_default_slot {
 	enum mfd_crossfade_curve default_curve;
 };
 
+enum mfd_controller_profile {
+	MFD_PROFILE_GENERIC = 0,
+	MFD_PROFILE_APC40_MK2 = 1,
+};
+
 bool mfd_is_apc40_mk2_name(const char *device_name);
+enum mfd_controller_profile mfd_profile_for_device(const char *configured_name, bool is_open, const char *opened_name);
 size_t mfd_apc40_get_default_slots(struct mfd_apc40_default_slot *out_slots, size_t max_slots);
 
 int mfd_slot_index_for_id(const char *slot_id);

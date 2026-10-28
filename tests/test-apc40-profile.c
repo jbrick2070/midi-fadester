@@ -23,6 +23,14 @@ int main(void)
 	REQUIRE(!mfd_is_apc40_mk2_name("Launchpad Mini"));
 	REQUIRE(!mfd_is_apc40_mk2_name(NULL));
 
+	/* Auto-selected profile resolution when picking or auto-detecting APC40 mkII (R-MIDI-6) */
+	REQUIRE(mfd_profile_for_device("APC40 mkII", false, "") == MFD_PROFILE_APC40_MK2);
+	REQUIRE(mfd_profile_for_device("APC40 mkII", true, "APC40 mkII") == MFD_PROFILE_APC40_MK2);
+	REQUIRE(mfd_profile_for_device("loopMIDI Port", true, "loopMIDI Port") == MFD_PROFILE_GENERIC);
+	REQUIRE(mfd_profile_for_device("", true, "APC40 mkII") == MFD_PROFILE_APC40_MK2);
+	REQUIRE(mfd_profile_for_device("", true, "loopMIDI Port") == MFD_PROFILE_GENERIC);
+	REQUIRE(mfd_profile_for_device("", false, "") == MFD_PROFILE_GENERIC);
+
 	struct mfd_apc40_default_slot slots[MFD_APC40_DEFAULT_SLOT_COUNT];
 	size_t n = mfd_apc40_get_default_slots(slots, MFD_APC40_DEFAULT_SLOT_COUNT);
 	REQUIRE(n == MFD_APC40_DEFAULT_SLOT_COUNT);

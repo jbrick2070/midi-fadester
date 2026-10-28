@@ -169,7 +169,7 @@ public:
 		top_bar->addWidget(new QLabel(QStringLiteral("MIDI In:"), this));
 
 		device_combo_ = new QComboBox(this);
-		device_combo_->setMinimumWidth(250);
+		device_combo_->setMinimumWidth(240);
 		device_combo_->setToolTip(
 			QStringLiteral("Select a WinMM MIDI input controller or auto-detect an Akai APC40 mkII."));
 		top_bar->addWidget(device_combo_);
@@ -181,6 +181,16 @@ public:
 		btn_reconnect->setToolTip(
 			QStringLiteral("Rescan WinMM MIDI ports and reconnect to the selected device."));
 		top_bar->addWidget(btn_reconnect);
+
+		top_bar->addSpacing(8);
+		top_bar->addWidget(new QLabel(QStringLiteral("Profile:"), this));
+
+		profile_combo_ = new QComboBox(this);
+		profile_combo_->addItem(QStringLiteral("Generic MIDI (Custom)"), static_cast<int>(MFD_PROFILE_GENERIC));
+		profile_combo_->addItem(QStringLiteral("Akai APC40 mkII"), static_cast<int>(MFD_PROFILE_APC40_MK2));
+		profile_combo_->setToolTip(QStringLiteral(
+			"Controller profile (auto-selects Akai APC40 mkII when an APC40 mkII port is active, or choose manually)."));
+		top_bar->addWidget(profile_combo_);
 
 		auto *btn_defaults = new QPushButton(QStringLiteral("Load APC40 mkII Defaults"), this);
 		btn_defaults->setToolTip(QStringLiteral(
@@ -325,20 +335,53 @@ public:
 			mfd_engine_export_config_file(eng, path.toUtf8().constData());
 		});
 
-		connect(btn_reconnect, &QPushButton::clicked, this, [this]() {
+		auto apply_device_selection = [this]() {
 			struct mfd_engine *eng = mfd_engine_get();
 			const QString chosen = device_combo_->currentData().toString();
 			mfd_engine_reconnect_midi(eng, chosen.toUtf8().constData());
+			manual_profile_override_ = false;
+			const enum mfd_controller_profile prof = mfd_profile_for_device(
+				eng->configured_device_name, eng->midi_dev.is_open, eng->midi_dev.opened_name);
+			if (prof == MFD_PROFILE_APC40_MK2) {
+				ensure_apc40_profile_bindings(eng);
+			}
 			mfd_engine_save_global_config(eng);
+			mfd_engine_notify_state_changed(eng);
 			populate_device_combo();
+			sync_profile_combo();
+			rebuild_table_rows();
+			update_live_status();
+		};
+
+		connect(device_combo_, QOverload<int>::of(&QComboBox::activated), this,
+			[apply_device_selection](int) { apply_device_selection(); });
+
+		connect(btn_reconnect, &QPushButton::clicked, this,
+			[apply_device_selection]() { apply_device_selection(); });
+
+		connect(profile_combo_, QOverload<int>::of(&QComboBox::activated), this, [this](int) {
+			struct mfd_engine *eng = mfd_engine_get();
+			const auto chosen_prof =
+				static_cast<enum mfd_controller_profile>(profile_combo_->currentData().toInt());
+			manual_profile_override_ = true;
+			manual_profile_ = chosen_prof;
+			if (chosen_prof == MFD_PROFILE_APC40_MK2) {
+				ensure_apc40_profile_bindings(eng);
+				mfd_engine_save_global_config(eng);
+				mfd_engine_notify_state_changed(eng);
+				rebuild_table_rows();
+			}
 			update_live_status();
 		});
 
 		connect(btn_defaults, &QPushButton::clicked, this, [this]() {
 			struct mfd_engine *eng = mfd_engine_get();
 			mfd_engine_load_apc40_defaults(eng);
+			manual_profile_override_ = true;
+			manual_profile_ = MFD_PROFILE_APC40_MK2;
 			mfd_engine_save_global_config(eng);
 			mfd_engine_notify_state_changed(eng);
+			sync_profile_combo();
 			rebuild_table_rows();
 			update_live_status();
 		});
@@ -373,6 +416,57 @@ public:
 	}
 
 private:
+	static void ensure_apc40_profile_bindings(struct mfd_engine *eng)
+	{
+		if (!eng) {
+			return;
+		}
+		bool has_custom_target = false;
+		for (size_t i = 0U; i < MFD_MAX_FADER_SLOTS; ++i) {
+			const struct mfd_fader_slot &s = eng->fader_slots[i];
+			if (s.source_a_name[0] != '\0' || s.source_b_name[0] != '\0') {
+				has_custom_target = true;
+				break;
+			}
+			if (i > 0U && s.target_type != MFD_TARGET_UNASSIGNED) {
+				has_custom_target = true;
+				break;
+			}
+		}
+		if (!has_custom_target) {
+			mfd_engine_load_apc40_defaults(eng);
+			return;
+		}
+		struct mfd_apc40_default_slot defs[MFD_APC40_DEFAULT_SLOT_COUNT];
+		const size_t count = mfd_apc40_get_default_slots(defs, MFD_APC40_DEFAULT_SLOT_COUNT);
+		for (size_t i = 0U; i < count && i < MFD_MAX_FADER_SLOTS; ++i) {
+			struct mfd_fader_slot *s = &eng->fader_slots[i];
+			if (s->addr.type == MFD_MIDI_NONE) {
+				s->addr = defs[i].addr;
+			}
+			std::snprintf(s->label, sizeof(s->label), "%s", defs[i].label);
+		}
+	}
+
+	void sync_profile_combo()
+	{
+		if (!profile_combo_ || (profile_combo_->view() && profile_combo_->view()->isVisible())) {
+			return;
+		}
+		const struct mfd_engine *eng = mfd_engine_get();
+		const enum mfd_controller_profile desired =
+			manual_profile_override_
+				? manual_profile_
+				: mfd_profile_for_device(eng->configured_device_name, eng->midi_dev.is_open,
+							 eng->midi_dev.opened_name);
+		const int idx = profile_combo_->findData(static_cast<int>(desired));
+		if (idx >= 0 && profile_combo_->currentIndex() != idx) {
+			profile_combo_->blockSignals(true);
+			profile_combo_->setCurrentIndex(idx);
+			profile_combo_->blockSignals(false);
+		}
+	}
+
 	void populate_device_combo()
 	{
 		struct mfd_engine *eng = mfd_engine_get();
@@ -381,6 +475,7 @@ private:
 
 		struct mfd_midi_device_info devs[MFD_MAX_MIDI_DEVICES];
 		size_t count = mfd_winmm_enumerate(devs, MFD_MAX_MIDI_DEVICES);
+		last_device_count_ = count;
 
 		device_combo_->addItem(QStringLiteral("(Auto-Detect APC40 mkII / First Port)"), QStringLiteral(""));
 		int select_idx = 0;
@@ -406,6 +501,8 @@ private:
 		flip_check_->blockSignals(true);
 		flip_check_->setChecked(eng->tbar_bidirectional_flip);
 		flip_check_->blockSignals(false);
+
+		sync_profile_combo();
 	}
 
 	static void populate_source_combo(QComboBox *combo, const QStringList &sources, const char *current_name)
@@ -711,10 +808,23 @@ private:
 	{
 		struct mfd_engine *eng = mfd_engine_get();
 
+		++rescan_tick_counter_;
+		const bool combo_popup_open = device_combo_ && device_combo_->view() &&
+					      device_combo_->view()->isVisible();
 		if (eng->midi_dev.is_open != last_midi_connected_) {
 			last_midi_connected_ = eng->midi_dev.is_open;
-			populate_device_combo();
+			if (!combo_popup_open) {
+				populate_device_combo();
+			}
+		} else if (!combo_popup_open && rescan_tick_counter_ >= 60) {
+			rescan_tick_counter_ = 0;
+			struct mfd_midi_device_info devs[MFD_MAX_MIDI_DEVICES];
+			const size_t cur_count = mfd_winmm_enumerate(devs, MFD_MAX_MIDI_DEVICES);
+			if (cur_count != last_device_count_) {
+				populate_device_combo();
+			}
 		}
+		sync_profile_combo();
 
 		/* Connection status pill */
 		if (eng->midi_dev.is_open) {
@@ -935,11 +1045,16 @@ private:
 	QPushButton *btn_finish_tbar_ = nullptr;
 	QLabel *last_midi_label_ = nullptr;
 	QComboBox *device_combo_ = nullptr;
+	QComboBox *profile_combo_ = nullptr;
 	QDoubleSpinBox *tau_spin_ = nullptr;
 	QCheckBox *flip_check_ = nullptr;
 	QTableWidget *table_ = nullptr;
 	QTimer *timer_ = nullptr;
 	bool last_midi_connected_ = false;
+	size_t last_device_count_ = 0U;
+	int rescan_tick_counter_ = 0;
+	bool manual_profile_override_ = false;
+	enum mfd_controller_profile manual_profile_ = MFD_PROFILE_GENERIC;
 	QPointer<QLabel> addr_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> learn_buttons_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> clear_buttons_[MFD_MAX_FADER_SLOTS];

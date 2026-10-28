@@ -53,6 +53,17 @@ bool mfd_is_apc40_mk2_name(const char *device_name)
 	       contains_case_insensitive(device_name, "APC40 mk2") || contains_case_insensitive(device_name, "APC40");
 }
 
+enum mfd_controller_profile mfd_profile_for_device(const char *configured_name, bool is_open, const char *opened_name)
+{
+	if (configured_name && configured_name[0] != '\0') {
+		return mfd_is_apc40_mk2_name(configured_name) ? MFD_PROFILE_APC40_MK2 : MFD_PROFILE_GENERIC;
+	}
+	if (is_open && opened_name && opened_name[0] != '\0' && mfd_is_apc40_mk2_name(opened_name)) {
+		return MFD_PROFILE_APC40_MK2;
+	}
+	return MFD_PROFILE_GENERIC;
+}
+
 size_t mfd_apc40_get_default_slots(struct mfd_apc40_default_slot *out_slots, size_t max_slots)
 {
 	if (!out_slots || max_slots == 0U) {
