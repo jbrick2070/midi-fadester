@@ -44,6 +44,25 @@ static void set_error_comment(obs_data_t *response_data, const char *sentence)
 	obs_data_set_string(response_data, "comment", sentence);
 }
 
+/* Caller holds the engine lock, so validation and the subsequent write are atomic. */
+static bool validate_slot_movement_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot, int slot_index,
+					  obs_data_t *response_data)
+{
+	if (eng->setup_session.active && eng->setup_session.slot_index == slot_index) {
+		set_error_comment(response_data, "Strip is currently paused while Set up is open.");
+		return false;
+	}
+	if (!mfd_engine_is_slot_writable(eng, slot)) {
+		char reason[160] = {0};
+		mfd_engine_get_slot_status(eng, slot, NULL, 0U, NULL, reason, sizeof(reason));
+		set_error_comment(response_data,
+				  reason[0] ? reason
+					    : "This slot is unavailable. Review its assignment in Midi Fadester.");
+		return false;
+	}
+	return true;
+}
+
 static int resolve_slot_or_error(obs_data_t *request_data, obs_data_t *response_data)
 {
 	const char *slot_id = request_data ? obs_data_get_string(request_data, "slot") : NULL;
@@ -488,10 +507,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 		return;
 	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if ((eng->setup_session.active && eng->setup_session.slot_index == idx) ||
-	    !mfd_engine_is_slot_writable(eng, slot)) {
-		obs_data_set_string(response_data, "slot", slot->id);
-		obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+	if (!validate_slot_movement_locked(eng, slot, idx, response_data)) {
 		mfd_engine_unlock(eng);
 		return;
 	}
@@ -600,10 +616,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 		return;
 	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if ((eng->setup_session.active && eng->setup_session.slot_index == idx) ||
-	    !mfd_engine_is_slot_writable(eng, slot)) {
-		obs_data_set_string(response_data, "slot", slot->id);
-		obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+	if (!validate_slot_movement_locked(eng, slot, idx, response_data)) {
 		mfd_engine_unlock(eng);
 		return;
 	}
@@ -712,9 +725,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 		return;
 	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if ((eng->setup_session.active && eng->setup_session.slot_index == idx) ||
-	    !mfd_engine_is_slot_writable(eng, slot)) {
-		obs_data_set_string(response_data, "slot", slot->id);
+	if (!validate_slot_movement_locked(eng, slot, idx, response_data)) {
 		mfd_engine_unlock(eng);
 		return;
 	}
@@ -939,6 +950,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		}
 	}
 
+	if (has_target || (has_enabled && !new_enabled)) {
+		mfd_engine_abort_tbar_for_config_change_locked(eng, s);
+	}
 	mfd_engine_detach_filter_binding_locked(eng, idx);
 	s->enabled = new_enabled;
 	if (has_enabled && !new_enabled) {

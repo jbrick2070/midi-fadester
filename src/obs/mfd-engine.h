@@ -510,6 +510,8 @@ void mfd_engine_apply_slot_output(struct mfd_engine *eng, struct mfd_fader_slot 
 void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_slot *slot, float norm_val,
 				     bool force_release);
 void mfd_engine_apply_tbar_abort(struct mfd_engine *eng, struct mfd_fader_slot *slot);
+/* Caller holds the engine lock; call before overwriting an old T-bar binding. */
+void mfd_engine_abort_tbar_for_config_change_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot);
 
 /*
  * Steps MIDI queue decoding, smoother, auto-fade ramps, and coalesced vendor events by `seconds`.

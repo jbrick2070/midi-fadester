@@ -510,6 +510,20 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	}
 }
 
+void mfd_engine_abort_tbar_for_config_change_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot)
+{
+	if (!eng || !slot || slot->target_type != MFD_TARGET_TBAR) {
+		return;
+	}
+	if (slot->enabled && slot->tbar_state == MFD_TBAR_THROWING) {
+		mfd_engine_apply_tbar_abort(eng, slot);
+	}
+	slot->auto_fade_active = false;
+	slot->auto_fade_is_reset_fx = false;
+	slot->tbar_midi_active = false;
+	slot->tbar_from_idle_band = false;
+}
+
 void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_slot *slot,
 				      enum mfd_target_type new_target)
 {
@@ -517,6 +531,7 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 		return;
 	}
 	mfd_engine_lock(eng);
+	mfd_engine_abort_tbar_for_config_change_locked(eng, slot);
 	enum mfd_target_type prev_target = slot->target_type;
 	slot->target_type = new_target;
 	if (prev_target == new_target) {
@@ -611,6 +626,7 @@ bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controlle
 
 	mfd_engine_lock(eng);
 	for (int k = 0; k < MFD_MAX_FADER_SLOTS; ++k) {
+		mfd_engine_abort_tbar_for_config_change_locked(eng, &eng->fader_slots[k]);
 		mfd_engine_detach_filter_binding_locked(eng, k);
 	}
 	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
@@ -699,6 +715,7 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 						mfd_engine_reset_slot_mode_state(eng, s, def->slots[i].default_target);
 					}
 				} else {
+					mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 					mfd_engine_detach_filter_binding_locked(eng, i);
 					s->enabled = false;
 					s->addr.type = MFD_MIDI_NONE;
@@ -3410,6 +3427,7 @@ bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_se
 	mfd_engine_detach_filter_binding_locked(eng, cand->slot_index);
 
 	struct mfd_fader_slot *s = &eng->fader_slots[cand->slot_index];
+	mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 	s->enabled = cand->enabled;
 	s->addr = chosen_addr;
 	s->cal = chosen_cal;
@@ -3604,6 +3622,7 @@ bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, co
 		}
 	}
 
+	mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 	mfd_engine_detach_filter_binding_locked(eng, slot_index);
 
 	s->enabled = edit->enabled;

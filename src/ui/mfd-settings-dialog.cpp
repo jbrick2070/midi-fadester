@@ -737,7 +737,7 @@ private:
 		btn_clean_all_fx_->setObjectName(QStringLiteral("mfdBtnCleanAllFx"));
 		btn_clean_all_fx_->setCursor(Qt::PointingHandCursor);
 		btn_clean_all_fx_->setToolTip(QStringLiteral(
-			"Instantly return all FX & Knobs slots and filter controls to 0% (Clean) without touching A/B mixes or audio faders."));
+			"Instantly return enabled filter controls in either bank to 0% (Clean). Audio, layer and T-bar controls stay unchanged."));
 		bb_lay->addWidget(btn_clean_all_fx_);
 
 		lay->addWidget(bank_bar);

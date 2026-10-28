@@ -926,8 +926,169 @@ static void on_fake_signal(void *data, calldata_t *cd)
 	sig->value = (float)calldata_float(cd, "value");
 }
 
+static bool start_config_test_throw(struct mfd_engine *eng)
+{
+	mfd_engine_cancel_setup_session(eng);
+	eng->studio_mode_override = true;
+	eng->tbar_error[0] = '\0';
+	mfd_engine_load_apc40_defaults(eng);
+	char error[160] = {0};
+	return mfd_engine_set_slot_value(eng, 0, 0.5f, false, "api", error, sizeof(error)) &&
+	       eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING;
+}
+
+static int test_config_abort_and_movement_errors(void)
+{
+	struct mfd_engine *eng = calloc(1U, sizeof(*eng));
+	REQUIRE(eng != NULL);
+	REQUIRE(mfd_engine_init_mutex(eng));
+	eng->tbar_driver = mock_tbar_driver;
+	eng->tbar_unlatch = mock_tbar_unlatch;
+	eng->studio_mode_override_set = true;
+	eng->studio_mode_override = true;
+
+	/* Valid vendor disables/reassignments/same-mode resets abort before fields change. */
+	for (int edit_case = 0; edit_case < 3; ++edit_case) {
+		REQUIRE(start_config_test_throw(eng));
+		int aborts = g_mock_tbar_aborts;
+		int completions = g_mock_tbar_completions;
+		obs_data_t *req = obs_data_create();
+		obs_data_t *res = obs_data_create();
+		obs_data_set_string(req, "slot", "crossfader");
+		if (edit_case == 0) {
+			obs_data_set_bool(req, "enabled", false);
+		} else {
+			obs_data_set_string(req, "target_mode", edit_case == 1 ? "unassigned" : "tbar");
+		}
+		mfd_vendor_handle_set_slot(req, res, eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(g_mock_tbar_aborts == aborts + 1);
+		REQUIRE(g_mock_tbar_completions == completions);
+		REQUIRE(g_mock_tbar_last_pos == 0);
+		REQUIRE(eng->fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+		REQUIRE(fabsf(eng->fader_slots[0].last_applied_val) < 1e-6f);
+		obs_data_release(req);
+		obs_data_release(res);
+	}
+
+	/* Invalid vendor and Advanced candidates leave the in-flight throw untouched. */
+	REQUIRE(start_config_test_throw(eng));
+	int aborts = g_mock_tbar_aborts;
+	obs_data_t *req = obs_data_create();
+	obs_data_t *res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_bool(req, "enabled", false);
+	obs_data_set_string(req, "target_mode", "not_a_target");
+	mfd_vendor_handle_set_slot(req, res, eng);
+	REQUIRE(obs_data_has_user_value(res, "error"));
+	REQUIRE(g_mock_tbar_aborts == aborts);
+	REQUIRE(eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+	obs_data_release(req);
+	obs_data_release(res);
+	struct mfd_slot_config_edit edit = {0};
+	edit.enabled = true;
+	edit.target_type = MFD_TARGET_FILTER_PARAM;
+	edit.has_filter_range = true;
+	snprintf(edit.source_a_name, sizeof(edit.source_a_name), "Missing source");
+	char error[256] = {0};
+	REQUIRE(!mfd_engine_update_slot_config_ex(eng, 0, &edit, error, sizeof(error)));
+	REQUIRE(g_mock_tbar_aborts == aborts);
+	REQUIRE(eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+
+	for (int edit_case = 0; edit_case < 3; ++edit_case) {
+		REQUIRE(start_config_test_throw(eng));
+		aborts = g_mock_tbar_aborts;
+		memset(&edit, 0, sizeof(edit));
+		edit.enabled = edit_case != 0;
+		edit.target_type = edit_case == 1 ? MFD_TARGET_UNASSIGNED : MFD_TARGET_TBAR;
+		REQUIRE(mfd_engine_update_slot_config_ex(eng, 0, &edit, error, sizeof(error)));
+		REQUIRE(g_mock_tbar_aborts == aborts + 1);
+		REQUIRE(eng->fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	}
+
+	/* Opening/canceling Set up is still a pause; only a valid commit aborts. */
+	for (int setup_case = 0; setup_case < 3; ++setup_case) {
+		REQUIRE(start_config_test_throw(eng));
+		aborts = g_mock_tbar_aborts;
+		mfd_engine_begin_setup_session(eng, 0);
+		REQUIRE(g_mock_tbar_aborts == aborts);
+		REQUIRE(eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+		struct mfd_setup_candidate cand = {0};
+		cand.slot_index = 0;
+		cand.enabled = true;
+		cand.target_type = MFD_TARGET_SINGLE_LAYER;
+		REQUIRE(!mfd_engine_commit_setup_session(eng, &cand, error, sizeof(error)));
+		REQUIRE(g_mock_tbar_aborts == aborts);
+		cand.enabled = setup_case != 0;
+		cand.target_type = setup_case == 1 ? MFD_TARGET_UNASSIGNED : MFD_TARGET_TBAR;
+		REQUIRE(mfd_engine_commit_setup_session(eng, &cand, error, sizeof(error)));
+		REQUIRE(g_mock_tbar_aborts == aborts + 1);
+		REQUIRE(eng->fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+		REQUIRE(!eng->setup_session.active);
+	}
+
+	REQUIRE(start_config_test_throw(eng));
+	aborts = g_mock_tbar_aborts;
+	REQUIRE(mfd_engine_load_profile_defaults(eng, MFD_PROFILE_AKAI_MIDIMIX));
+	REQUIRE(g_mock_tbar_aborts == aborts + 1);
+	REQUIRE(!eng->fader_slots[0].enabled);
+	REQUIRE(start_config_test_throw(eng));
+	aborts = g_mock_tbar_aborts;
+	REQUIRE(mfd_engine_select_profile(eng, MFD_PROFILE_AKAI_MIDIMIX, false));
+	REQUIRE(g_mock_tbar_aborts == aborts + 1);
+	REQUIRE(!eng->fader_slots[0].enabled);
+
+	/* Every movement request must report failure before changing paused/unavailable state. */
+	void (*handlers[])(obs_data_t *, obs_data_t *, void *) = {
+		mfd_vendor_handle_set_fader_value, mfd_vendor_handle_nudge_fader, mfd_vendor_handle_auto_fade};
+	for (int blocked_case = 0; blocked_case < 3; ++blocked_case) {
+		mfd_engine_cancel_setup_session(eng);
+		eng->studio_mode_override = true;
+		mfd_engine_load_apc40_defaults(eng);
+		const char *expected = "Not used. Click to set up.";
+		if (blocked_case == 0) {
+			eng->fader_slots[0].enabled = false;
+		} else if (blocked_case == 1) {
+			eng->studio_mode_override = false;
+			expected = "Studio Mode is off.";
+		} else {
+			mfd_engine_begin_setup_session(eng, 0);
+			expected = "Strip is currently paused while Set up is open.";
+		}
+		mfd_engine_reevaluate_slots(eng, false);
+		int driver_calls = g_mock_tbar_calls;
+		uint32_t output_writes = eng->fader_slots[0].output_write_count;
+		for (size_t i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "crossfader");
+			obs_data_set_double(req, "value", 0.5);
+			obs_data_set_double(req, "delta", 0.1);
+			obs_data_set_double(req, "to", 1.0);
+			obs_data_set_int(req, "ms", 300);
+			handlers[i](req, res, eng);
+			REQUIRE(strcmp(obs_data_get_string(res, "error"), expected) == 0);
+			REQUIRE(strcmp(obs_data_get_string(res, "comment"), expected) == 0);
+			REQUIRE(!obs_data_has_user_value(res, "value"));
+			REQUIRE(g_mock_tbar_calls == driver_calls);
+			REQUIRE(eng->fader_slots[0].output_write_count == output_writes);
+			REQUIRE(!eng->fader_slots[0].auto_fade_active);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+	}
+	mfd_engine_cancel_setup_session(eng);
+	mfd_engine_destroy_mutex(eng);
+	free(eng);
+	g_mock_tbar_calls = g_mock_tbar_set_writes = g_mock_tbar_completions = g_mock_tbar_aborts = 0;
+	g_mock_tbar_unlatches = g_mock_tbar_last_pos = 0;
+	g_mock_tbar_latched = false;
+	return 0;
+}
+
 int main(void)
 {
+	REQUIRE(test_config_abort_and_movement_errors() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
 	fake_sg_add_source(&fake_sg, "Cam 1", true);
@@ -1011,7 +1172,7 @@ int main(void)
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.4.0") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.6.0") == 0);
 	REQUIRE(strcmp(obs_data_get_string(res, "profile"), "apc40mk2") == 0);
 	REQUIRE(strcmp(obs_data_get_string(res, "profile_tier"), "verified") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");

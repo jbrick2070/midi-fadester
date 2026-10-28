@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 param(
     [string]$RepoDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$ObsRoot = "C:\Users\jeffr\OBS-Studio-33-Portable-MidiFadester",
@@ -90,7 +91,7 @@ $startedLoopProc = $null
 if (-not $loopMidiAlreadyRunning) {
     $loopMidiExe = "C:\Program Files (x86)\Tobias Erichsen\loopMIDI\loopMIDI.exe"
     if (Test-Path $loopMidiExe) {
-        $startedLoopProc = Start-Process -FilePath $loopMidiExe -PassThru
+        $startedLoopProc = Start-Process -FilePath $loopMidiExe -WindowStyle Hidden -PassThru
         [void]$startedLoopProc.WaitForInputIdle(5000)
     }
 }
