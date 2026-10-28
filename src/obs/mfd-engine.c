@@ -515,32 +515,55 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 	mfd_engine_unlock(eng);
 }
 
-void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
+enum mfd_controller_profile mfd_engine_get_active_profile(const struct mfd_engine *eng)
 {
 	if (!eng) {
-		return;
+		return MFD_PROFILE_APC40_MK2;
 	}
-	mfd_engine_lock(eng);
+	if (eng->active_profile_name[0] != '\0') {
+		const struct mfd_controller_profile_def *def = mfd_profile_find_by_slug(eng->active_profile_name);
+		if (def) {
+			return def->id;
+		}
+	}
+	enum mfd_controller_profile from_dev =
+		mfd_profile_for_device(eng->configured_device_name, eng->midi_dev.is_open, eng->midi_dev.opened_name);
+	if (from_dev != MFD_PROFILE_GENERIC) {
+		return from_dev;
+	}
+	return MFD_PROFILE_APC40_MK2;
+}
 
-	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", MFD_DEFAULT_PROFILE_NAME);
+bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controller_profile prof)
+{
+	if (!eng) {
+		return false;
+	}
+	const struct mfd_controller_profile_def *def = mfd_profile_get_def(prof);
+	if (!def) {
+		return false;
+	}
+
+	mfd_engine_lock(eng);
+	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
 	if (!eng->has_last_midi) {
 		eng->last_moved_slot_index = -1;
 	}
 
-	struct mfd_apc40_default_slot defs[MFD_APC40_DEFAULT_SLOT_COUNT];
-	size_t count = mfd_apc40_get_default_slots(defs, MFD_APC40_DEFAULT_SLOT_COUNT);
-
 	for (size_t i = 0U; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		memset(s, 0, sizeof(*s));
-		if (i < count) {
-			s->enabled = true;
-			snprintf(s->id, sizeof(s->id), "%s", defs[i].id);
-			snprintf(s->kind, sizeof(s->kind), "%s", defs[i].kind);
-			snprintf(s->label, sizeof(s->label), "%s", defs[i].label);
-			s->addr = defs[i].addr;
-			s->target_type = defs[i].default_target;
-			s->curve = defs[i].default_curve;
+		if (i < MFD_APC40_DEFAULT_SLOT_COUNT) {
+			bool phys = mfd_profile_has_physical_slot(def->id, (int)i);
+			s->enabled = (def->id == MFD_PROFILE_GENERIC)
+					     ? true
+					     : (phys && def->slots[i].addr.type != MFD_MIDI_NONE);
+			snprintf(s->id, sizeof(s->id), "%s", def->slots[i].id);
+			snprintf(s->kind, sizeof(s->kind), "%s", def->slots[i].kind);
+			snprintf(s->label, sizeof(s->label), "%s", def->slots[i].label);
+			s->addr = def->slots[i].addr;
+			s->target_type = def->slots[i].default_target;
+			s->curve = def->slots[i].default_curve;
 			s->audio_follows_video = false;
 			s->invert = false;
 		} else {
@@ -562,6 +585,64 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 	mfd_engine_bump_slot_rev(eng, -1);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_unlock(eng);
+	return true;
+}
+
+bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profile prof, bool reset_targets)
+{
+	if (!eng) {
+		return false;
+	}
+	const struct mfd_controller_profile_def *def = mfd_profile_get_def(prof);
+	if (!def) {
+		return false;
+	}
+
+	mfd_engine_lock(eng);
+	mfd_engine_cancel_setup_session(eng);
+	if (reset_targets) {
+		mfd_engine_load_profile_defaults(eng, prof);
+	} else {
+		snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
+		if (def->id != MFD_PROFILE_GENERIC) {
+			for (int i = 0; i < MFD_MAX_FADER_SLOTS && (size_t)i < MFD_APC40_DEFAULT_SLOT_COUNT; ++i) {
+				struct mfd_fader_slot *s = &eng->fader_slots[i];
+				if (mfd_profile_has_physical_slot(def->id, i) &&
+				    def->slots[i].addr.type != MFD_MIDI_NONE) {
+					s->enabled = true;
+					snprintf(s->label, sizeof(s->label), "%s", def->slots[i].label);
+					s->addr = def->slots[i].addr;
+					mfd_engine_lookup_persisted_calibration(eng, eng->active_profile_name, &s->addr,
+										&s->cal);
+					if (s->target_type == MFD_TARGET_UNASSIGNED &&
+					    def->slots[i].default_target != MFD_TARGET_UNASSIGNED) {
+						mfd_engine_reset_slot_mode_state(eng, s, def->slots[i].default_target);
+					}
+				} else {
+					s->enabled = false;
+					s->addr.type = MFD_MIDI_NONE;
+					s->scene_name[0] = '\0';
+					s->resolved_scene_name[0] = '\0';
+					s->source_a_name[0] = '\0';
+					s->source_b_name[0] = '\0';
+					mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
+				}
+			}
+		}
+		mfd_engine_bump_slot_rev(eng, -1);
+		mfd_engine_reevaluate_slots(eng, false);
+	}
+	if (def->id != MFD_PROFILE_APC40_MK2) {
+		eng->first_run_offer_dismissed = true;
+	}
+	mfd_engine_notify_state_changed(eng);
+	unlock_and_persist_global_config(eng);
+	return true;
+}
+
+void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
+{
+	(void)mfd_engine_load_profile_defaults(eng, MFD_PROFILE_APC40_MK2);
 }
 
 static bool slots_differ_from_apc40_defaults(const struct mfd_engine *eng)
@@ -1365,7 +1446,11 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 	out->midi_connected = eng->midi_dev.is_open;
 	out->midi_error_kind = eng->midi_dev.error_kind;
 	snprintf(out->midi_last_error, sizeof(out->midi_last_error), "%s", eng->midi_dev.last_error);
-	snprintf(out->active_profile_name, sizeof(out->active_profile_name), "%s", effective_profile_name(eng));
+	out->active_profile = mfd_engine_get_active_profile(eng);
+	const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(out->active_profile);
+	out->active_profile_tier = pdef ? pdef->tier : MFD_PROFILE_TIER_CUSTOM;
+	snprintf(out->active_profile_name, sizeof(out->active_profile_name), "%s",
+		 pdef ? pdef->slug : effective_profile_name(eng));
 	out->smooth_tau_ms = eng->smooth_tau_ms;
 	out->tbar_bidirectional_flip = eng->tbar_bidirectional_flip;
 	out->frontend_finished_loading = eng->frontend_finished_loading;
@@ -1373,7 +1458,7 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 	snprintf(out->preview_scene_name, sizeof(out->preview_scene_name), "%s", eng->cached_preview_scene);
 	snprintf(out->program_scene_name, sizeof(out->program_scene_name), "%s", eng->cached_program_scene);
 	out->first_run_offer_pending = eng->frontend_finished_loading && !eng->first_run_offer_dismissed &&
-				       eng->apc40_controller_detected;
+				       eng->apc40_controller_detected && (out->active_profile == MFD_PROFILE_APC40_MK2);
 	out->learning_slot_index = eng->learning_slot_index;
 	out->has_last_midi = eng->has_last_midi;
 	out->last_midi_decoded = eng->last_midi_decoded;
@@ -3074,19 +3159,26 @@ bool mfd_engine_save_global_config(struct mfd_engine *eng)
 	return ok;
 }
 
-void mfd_engine_load_global_config(struct mfd_engine *eng)
+static bool load_global_config_if_present(struct mfd_engine *eng)
 {
 	if (!eng) {
-		return;
+		return false;
 	}
 	char *cfg_path = obs_module_config_path("global.json");
 	if (!cfg_path) {
-		return;
+		return false;
 	}
+	bool loaded = false;
 	if (os_file_exists(cfg_path)) {
-		mfd_engine_import_config_file(eng, cfg_path);
+		loaded = mfd_engine_import_config_file(eng, cfg_path);
 	}
 	bfree(cfg_path);
+	return loaded;
+}
+
+void mfd_engine_load_global_config(struct mfd_engine *eng)
+{
+	(void)load_global_config_if_present(eng);
 }
 
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)
@@ -3240,9 +3332,15 @@ bool mfd_engine_init(void)
 	g_engine.first_run_offer_dismissed = false;
 
 	mfd_engine_load_apc40_defaults(&g_engine);
-	mfd_engine_load_global_config(&g_engine);
+	bool had_global_cfg = load_global_config_if_present(&g_engine);
 
 	mfd_winmm_open_by_name(&g_engine.midi_dev, g_engine.configured_device_name);
+	if (!had_global_cfg && g_engine.midi_dev.is_open) {
+		enum mfd_controller_profile detected = mfd_profile_match_device_name(g_engine.midi_dev.opened_name);
+		if (detected != MFD_PROFILE_GENERIC && detected != MFD_PROFILE_APC40_MK2) {
+			mfd_engine_load_profile_defaults(&g_engine, detected);
+		}
+	}
 	refresh_apc40_detected_locked(&g_engine);
 	refresh_frontend_cache_on_ui_thread_locked(&g_engine);
 

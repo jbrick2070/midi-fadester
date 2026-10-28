@@ -600,6 +600,14 @@ private:
 		z1_status_label_->setWordWrap(true);
 		z1_lay->addWidget(z1_status_label_, 1);
 
+		z1_beta_badge_ = new QLabel(zone1);
+		z1_beta_badge_->setObjectName(QStringLiteral("mfdBetaProfileBadge"));
+		z1_beta_badge_->setStyleSheet(QStringLiteral(
+			"QLabel { background-color: #451a03; color: #fde68a; border: 1px solid #f59e0b; "
+			"border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: bold; }"));
+		z1_beta_badge_->hide();
+		z1_lay->addWidget(z1_beta_badge_);
+
 		z1_btn_reconnect_ = new QPushButton(QStringLiteral("Reconnect"), zone1);
 		z1_btn_reconnect_->setObjectName(QStringLiteral("mfdBtnReconnect"));
 		z1_btn_reconnect_->setCursor(Qt::PointingHandCursor);
@@ -612,10 +620,21 @@ private:
 		auto *cp_lay = new QHBoxLayout(z1_change_panel_);
 		cp_lay->setContentsMargins(0, 0, 0, 0);
 		cp_lay->setSpacing(6);
+		auto *lbl_z1_port = new QLabel(QStringLiteral("Port:"), z1_change_panel_);
+		lbl_z1_port->setStyleSheet(QStringLiteral("color: #cbd5e1; font-size: 12px; font-weight: bold;"));
+		cp_lay->addWidget(lbl_z1_port);
 		zone1_device_combo_ = new QComboBox(z1_change_panel_);
 		zone1_device_combo_->setObjectName(QStringLiteral("mfdZone1DeviceCombo"));
-		zone1_device_combo_->setMinimumWidth(220);
+		zone1_device_combo_->setMinimumWidth(190);
 		cp_lay->addWidget(zone1_device_combo_);
+		auto *lbl_z1_layout = new QLabel(QStringLiteral("Layout:"), z1_change_panel_);
+		lbl_z1_layout->setStyleSheet(QStringLiteral("color: #cbd5e1; font-size: 12px; font-weight: bold;"));
+		cp_lay->addWidget(lbl_z1_layout);
+		zone1_profile_combo_ = new QComboBox(z1_change_panel_);
+		zone1_profile_combo_->setObjectName(QStringLiteral("mfdZone1ProfileCombo"));
+		zone1_profile_combo_->setMinimumWidth(210);
+		populate_profile_combo(zone1_profile_combo_);
+		cp_lay->addWidget(zone1_profile_combo_);
 		z1_change_panel_->hide();
 		z1_lay->addWidget(z1_change_panel_);
 
@@ -652,6 +671,14 @@ private:
 			const QString chosen = zone1_device_combo_->currentData().toString();
 			apply_controller_selection(chosen);
 			z1_change_panel_->hide();
+		});
+		connect(zone1_profile_combo_, QOverload<int>::of(&QComboBox::activated), this, [this](int) {
+			const auto chosen_prof =
+				static_cast<enum mfd_controller_profile>(zone1_profile_combo_->currentData().toInt());
+			mfd_engine_select_profile(eng_, chosen_prof, false);
+			z1_change_panel_->hide();
+			last_adv_topology_rev_ = ~0ULL;
+			refresh_from_engine();
 		});
 		connect(z1_btn_show_ctrl_, &QPushButton::clicked, this, [this]() { open_controller_svg_view(); });
 
@@ -826,15 +853,23 @@ private:
 
 		profile_combo_ = new QComboBox(adv_tab);
 		profile_combo_->setObjectName(QStringLiteral("mfdAdvProfileCombo"));
-		profile_combo_->addItem(QStringLiteral("Generic MIDI (Custom)"), static_cast<int>(MFD_PROFILE_GENERIC));
-		profile_combo_->addItem(QStringLiteral("Akai APC40 mkII"), static_cast<int>(MFD_PROFILE_APC40_MK2));
+		populate_profile_combo(profile_combo_);
 		top_bar->addWidget(profile_combo_);
 
-		auto *btn_defaults = new QPushButton(QStringLiteral("Load APC40 mkII Defaults"), adv_tab);
-		btn_defaults->setObjectName(QStringLiteral("mfdAdvDefaultsBtn"));
-		top_bar->addWidget(btn_defaults);
+		btn_defaults_ = new QPushButton(QStringLiteral("Load APC40 mkII Defaults"), adv_tab);
+		btn_defaults_->setObjectName(QStringLiteral("mfdAdvDefaultsBtn"));
+		top_bar->addWidget(btn_defaults_);
 		top_bar->addStretch(1);
 		root->addLayout(top_bar);
+
+		adv_beta_note_ = new QLabel(adv_tab);
+		adv_beta_note_->setObjectName(QStringLiteral("mfdAdvBetaNote"));
+		adv_beta_note_->setWordWrap(true);
+		adv_beta_note_->setStyleSheet(
+			QStringLiteral("QLabel { background-color: #3f2b05; color: #fde68a; border: 1px solid #d97706; "
+				       "border-radius: 5px; padding: 6px 10px; font-size: 12px; font-weight: bold; }"));
+		adv_beta_note_->hide();
+		root->addWidget(adv_beta_note_);
 
 		auto *telemetry_bar = new QHBoxLayout();
 		studio_status_label_ = new QLabel(QStringLiteral("Studio Mode: Off"), adv_tab);
@@ -983,21 +1018,16 @@ private:
 		connect(profile_combo_, QOverload<int>::of(&QComboBox::activated), this, [this](int) {
 			const auto chosen_prof =
 				static_cast<enum mfd_controller_profile>(profile_combo_->currentData().toInt());
-			manual_profile_override_ = true;
-			manual_profile_ = chosen_prof;
-			if (chosen_prof == MFD_PROFILE_APC40_MK2) {
-				ensure_apc40_profile_bindings();
-			}
+			mfd_engine_select_profile(eng_, chosen_prof, false);
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
 		});
 
-		connect(btn_defaults, &QPushButton::clicked, this, [this]() {
-			mfd_engine_load_apc40_defaults(eng_);
-			manual_profile_override_ = true;
-			manual_profile_ = MFD_PROFILE_APC40_MK2;
-			mfd_engine_save_global_config(eng_);
-			mfd_engine_notify_state_changed(eng_);
+		connect(btn_defaults_, &QPushButton::clicked, this, [this]() {
+			const auto chosen_prof = profile_combo_ ? static_cast<enum mfd_controller_profile>(
+									  profile_combo_->currentData().toInt())
+								: snap_.active_profile;
+			mfd_engine_select_profile(eng_, chosen_prof, true);
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
 		});
@@ -1025,43 +1055,40 @@ private:
 		main_tabs_->addTab(adv_tab, QStringLiteral("Advanced"));
 	}
 
-	void ensure_apc40_profile_bindings()
+	static void populate_profile_combo(QComboBox *cb)
 	{
-		if (!eng_) {
+		if (!cb) {
 			return;
 		}
-		mfd_engine_get_ui_snapshot(eng_, &snap_);
-		bool has_custom_target = false;
-		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-			const struct mfd_fader_slot &s = snap_.slots[i];
-			if (s.source_a_name[0] != '\0' || s.source_b_name[0] != '\0') {
-				has_custom_target = true;
-				break;
+		cb->blockSignals(true);
+		cb->clear();
+		const size_t n = mfd_profile_count();
+		for (size_t i = 0U; i < n; ++i) {
+			const struct mfd_controller_profile_def *def = mfd_profile_get_by_index(i);
+			if (!def) {
+				continue;
 			}
-			if (i > 0 && s.target_type != MFD_TARGET_UNASSIGNED) {
-				has_custom_target = true;
-				break;
-			}
+			const QString name = (def->tier == MFD_PROFILE_TIER_BETA_UNTESTED)
+						     ? QStringLiteral("%1 (Beta \xE2\x80\x94 untested)")
+							       .arg(QString::fromUtf8(def->display_name))
+						     : QString::fromUtf8(def->display_name);
+			cb->addItem(name, static_cast<int>(def->id));
 		}
-		if (!has_custom_target) {
-			mfd_engine_load_apc40_defaults(eng_);
-			mfd_engine_save_global_config(eng_);
-			mfd_engine_notify_state_changed(eng_);
-		}
+		cb->blockSignals(false);
 	}
 
 	void apply_controller_selection(const QString &chosen_port)
 	{
 		mfd_engine_reconnect_midi(eng_, chosen_port.toUtf8().constData());
-		manual_profile_override_ = false;
 		mfd_engine_get_ui_snapshot(eng_, &snap_);
-		const enum mfd_controller_profile prof = mfd_profile_for_device(
+		const enum mfd_controller_profile detected = mfd_profile_for_device(
 			snap_.configured_device_name, snap_.midi_connected, snap_.opened_device_name);
-		if (prof == MFD_PROFILE_APC40_MK2) {
-			ensure_apc40_profile_bindings();
+		if (detected != MFD_PROFILE_GENERIC) {
+			mfd_engine_select_profile(eng_, detected, false);
+		} else {
+			mfd_engine_save_global_config(eng_);
+			mfd_engine_notify_state_changed(eng_);
 		}
-		mfd_engine_save_global_config(eng_);
-		mfd_engine_notify_state_changed(eng_);
 		populate_device_combos();
 		last_adv_topology_rev_ = ~0ULL;
 		refresh_from_engine();
@@ -1080,12 +1107,23 @@ private:
 			}
 			cb->blockSignals(true);
 			cb->clear();
-			cb->addItem(QStringLiteral("(Auto-Detect APC40 mkII / First Port)"), QStringLiteral(""));
+			cb->addItem(QStringLiteral("(Auto-Detect Known Controller / First Port)"), QStringLiteral(""));
 			int select_idx = 0;
 			for (size_t i = 0U; i < count; ++i) {
 				const QString name = QString::fromUtf8(devs[i].name);
-				const QString label = devs[i].is_apc40_mk2 ? QStringLiteral("%1 [APC40 mkII]").arg(name)
-									   : name;
+				QString label = name;
+				if (devs[i].detected_profile != MFD_PROFILE_GENERIC) {
+					const struct mfd_controller_profile_def *pdef =
+						mfd_profile_get_def(devs[i].detected_profile);
+					if (pdef) {
+						label = (pdef->tier == MFD_PROFILE_TIER_BETA_UNTESTED)
+								? QStringLiteral("%1 [%2 \xE2\x80\x94 Beta]")
+									  .arg(name,
+									       QString::fromUtf8(pdef->short_name))
+								: QStringLiteral("%1 [%2]").arg(
+									  name, QString::fromUtf8(pdef->short_name));
+					}
+				}
 				cb->addItem(label, name);
 				if (name == cfg_name) {
 					select_idx = static_cast<int>(i) + 1;
@@ -1138,9 +1176,36 @@ private:
 							       : QStringLiteral("color: #fca5a5; font-weight: bold;"));
 		z1_btn_reconnect_->setVisible(ctrl.show_reconnect);
 
+		const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(snap_.active_profile);
+		if (zone1_profile_combo_ &&
+		    !(zone1_profile_combo_->view() && zone1_profile_combo_->view()->isVisible())) {
+			const int pidx = zone1_profile_combo_->findData(static_cast<int>(snap_.active_profile));
+			if (pidx >= 0) {
+				zone1_profile_combo_->blockSignals(true);
+				zone1_profile_combo_->setCurrentIndex(pidx);
+				zone1_profile_combo_->blockSignals(false);
+			}
+		}
+		if (z1_beta_badge_) {
+			if (pdef && pdef->tier == MFD_PROFILE_TIER_BETA_UNTESTED) {
+				z1_beta_badge_->setText(QStringLiteral("BETA: %1 (untested spec)")
+								.arg(QString::fromUtf8(pdef->short_name)));
+				z1_beta_badge_->setToolTip(QString::fromUtf8(pdef->spec_note));
+				z1_beta_badge_->show();
+			} else {
+				z1_beta_badge_->hide();
+			}
+		}
+
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+			const struct mfd_fader_slot &s = snap_.slots[i];
+			const bool show_strip =
+				mfd_profile_has_physical_slot(snap_.active_profile, i) ||
+				(s.enabled && (s.addr.type != MFD_MIDI_NONE || s.target_type != MFD_TARGET_UNASSIGNED));
+			strip_cards_[i]->setVisible(show_strip);
+
 			struct mfd_ui_strip_presentation sp;
-			build_strip_presentation_from_slot(i, snap_.slots[i], &sp);
+			build_strip_presentation_from_slot(i, s, &sp);
 			strip_bottom_actions_[i] = sp.bottom_action;
 
 			QString border_hex = QStringLiteral("#1e293b");
@@ -1389,12 +1454,7 @@ private:
 		flip_check_->blockSignals(false);
 
 		if (profile_combo_ && !(profile_combo_->view() && profile_combo_->view()->isVisible())) {
-			const enum mfd_controller_profile desired =
-				manual_profile_override_
-					? manual_profile_
-					: mfd_profile_for_device(snap_.configured_device_name, snap_.midi_connected,
-								 snap_.opened_device_name);
-			const int idx = profile_combo_->findData(static_cast<int>(desired));
+			const int idx = profile_combo_->findData(static_cast<int>(snap_.active_profile));
 			if (idx >= 0) {
 				profile_combo_->blockSignals(true);
 				profile_combo_->setCurrentIndex(idx);
@@ -1676,6 +1736,28 @@ private:
 			rebuild_table_rows();
 		}
 
+		const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(snap_.active_profile);
+		if (btn_defaults_ && pdef) {
+			const QString btn_txt =
+				(pdef->id == MFD_PROFILE_GENERIC)
+					? QStringLiteral("Reset Generic Slots")
+					: QStringLiteral("Load %1 Defaults").arg(QString::fromUtf8(pdef->short_name));
+			if (btn_defaults_->text() != btn_txt) {
+				btn_defaults_->setText(btn_txt);
+			}
+		}
+		if (adv_beta_note_) {
+			if (pdef && pdef->tier == MFD_PROFILE_TIER_BETA_UNTESTED) {
+				const QString note_txt = QString::fromUtf8(pdef->spec_note);
+				if (adv_beta_note_->text() != note_txt) {
+					adv_beta_note_->setText(note_txt);
+				}
+				adv_beta_note_->show();
+			} else {
+				adv_beta_note_->hide();
+			}
+		}
+
 		struct mfd_ui_controller_presentation ctrl;
 		mfd_ui_format_controller_status(snap_.midi_connected, snap_.configured_device_name,
 						snap_.opened_device_name, snap_.midi_error_kind, &ctrl);
@@ -1834,8 +1916,6 @@ private:
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
 	bool last_midi_connected_ = false;
-	bool manual_profile_override_ = false;
-	enum mfd_controller_profile manual_profile_ = MFD_PROFILE_GENERIC;
 
 	QWidget *first_run_banner_ = nullptr;
 	QWidget *studio_note_widget_ = nullptr;
@@ -1845,9 +1925,11 @@ private:
 	QLabel *z1_name_label_ = nullptr;
 	QLabel *z1_dot_label_ = nullptr;
 	QLabel *z1_status_label_ = nullptr;
+	QLabel *z1_beta_badge_ = nullptr;
 	QPushButton *z1_btn_reconnect_ = nullptr;
 	QWidget *z1_change_panel_ = nullptr;
 	QComboBox *zone1_device_combo_ = nullptr;
+	QComboBox *zone1_profile_combo_ = nullptr;
 	QPushButton *z1_btn_change_ctrl_ = nullptr;
 	QPushButton *z1_btn_show_ctrl_ = nullptr;
 
@@ -1869,12 +1951,14 @@ private:
 
 	/* Advanced tab widgets */
 	QLabel *banner_label_ = nullptr;
+	QLabel *adv_beta_note_ = nullptr;
 	QLabel *conn_status_label_ = nullptr;
 	QLabel *studio_status_label_ = nullptr;
 	QPushButton *btn_finish_tbar_ = nullptr;
 	QLabel *last_midi_label_ = nullptr;
 	QComboBox *device_combo_ = nullptr;
 	QComboBox *profile_combo_ = nullptr;
+	QPushButton *btn_defaults_ = nullptr;
 	QDoubleSpinBox *tau_spin_ = nullptr;
 	QCheckBox *flip_check_ = nullptr;
 	QTableWidget *table_ = nullptr;

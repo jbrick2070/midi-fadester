@@ -26,7 +26,47 @@ struct mfd_apc40_default_slot {
 enum mfd_controller_profile {
 	MFD_PROFILE_GENERIC = 0,
 	MFD_PROFILE_APC40_MK2 = 1,
+	MFD_PROFILE_APC_MINI_MK2 = 2,
+	MFD_PROFILE_AKAI_MIDIMIX = 3,
+	MFD_PROFILE_KORG_NANOKONTROL2 = 4,
+	MFD_PROFILE_LAUNCH_CONTROL_XL = 5,
 };
+
+enum mfd_profile_support_tier {
+	MFD_PROFILE_TIER_CUSTOM = 0,
+	MFD_PROFILE_TIER_VERIFIED = 1,
+	MFD_PROFILE_TIER_BETA_UNTESTED = 2,
+};
+
+enum mfd_desk_upper_style {
+	MFD_DESK_UPPER_NONE = 0,
+	MFD_DESK_UPPER_CLIP_PADS = 1,
+	MFD_DESK_UPPER_KNOB_ROWS_3 = 2,
+	MFD_DESK_UPPER_TRANSPORT_AND_KNOBS_1 = 3,
+};
+
+struct mfd_controller_profile_def {
+	enum mfd_controller_profile id;
+	const char *slug;
+	const char *display_name;
+	const char *short_name;
+	enum mfd_profile_support_tier tier;
+	const char *spec_note;
+	bool has_crossfader;
+	int track_fader_count;
+	bool has_master_fader;
+	enum mfd_desk_upper_style upper_style;
+	const char *const *usb_match_tokens;
+	struct mfd_apc40_default_slot slots[MFD_APC40_DEFAULT_SLOT_COUNT];
+};
+
+size_t mfd_profile_count(void);
+const struct mfd_controller_profile_def *mfd_profile_get_by_index(size_t index);
+const struct mfd_controller_profile_def *mfd_profile_get_def(enum mfd_controller_profile profile);
+const struct mfd_controller_profile_def *mfd_profile_find_by_slug(const char *slug);
+const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier);
+bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot_index);
+enum mfd_controller_profile mfd_profile_match_device_name(const char *device_name);
 
 bool mfd_is_apc40_mk2_name(const char *device_name);
 enum mfd_controller_profile mfd_profile_for_device(const char *configured_name, bool is_open, const char *opened_name);

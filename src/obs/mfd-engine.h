@@ -159,6 +159,8 @@ struct mfd_ui_snapshot {
 	enum mfd_winmm_error_kind midi_error_kind;
 	char midi_last_error[MFD_MIDI_ERROR_MAX];
 	char active_profile_name[MFD_PROFILE_NAME_MAX];
+	enum mfd_controller_profile active_profile;
+	enum mfd_profile_support_tier active_profile_tier;
 	float smooth_tau_ms;
 	bool tbar_bidirectional_flip;
 	bool frontend_finished_loading;
@@ -316,6 +318,9 @@ void mfd_engine_unlatch_tbar(struct mfd_engine *eng);
 void mfd_engine_on_external_tbar_reset(struct mfd_engine *eng);
 void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng);
 
+enum mfd_controller_profile mfd_engine_get_active_profile(const struct mfd_engine *eng);
+bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controller_profile prof);
+bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profile prof, bool reset_targets);
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng);
 void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_slot *slot,
 				      enum mfd_target_type new_target);

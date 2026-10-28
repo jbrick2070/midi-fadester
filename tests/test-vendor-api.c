@@ -629,21 +629,52 @@ int main(void)
 	memset(&ws_log, 0, sizeof(ws_log));
 	mfd_vendor_set_event_sink(on_fake_ws_event, &ws_log);
 
-	/* 1. load_profile { name: "apc40mk2" } and error check on unknown profile */
+	/* 1. load_profile across verified + beta profiles and error check on unknown profile */
 	obs_data_t *req = obs_data_create();
 	obs_data_t *res = obs_data_create();
 	obs_data_set_string(req, "name", "nonexistent_desk");
 	mfd_vendor_handle_load_profile(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "comment"),
-		       "Unknown profile 'nonexistent_desk'. Valid profiles: apc40mk2.") == 0);
+		       "Unknown profile 'nonexistent_desk'. Valid profiles: apc40mk2, apcminimk2, midimix, nanokontrol2, launchcontrolxl, generic.") ==
+		0);
 	obs_data_release(req);
 	obs_data_release(res);
+
+	/* Beta profile load_profile check: Akai MIDImix (9 vertical faders, no crossfader) */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "name", "midimix");
+	mfd_vendor_handle_load_profile(req, res, &eng);
+	REQUIRE(strcmp(obs_data_get_string(res, "loaded"), "midimix") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "profile_tier"), "beta") == 0);
+	REQUIRE(!eng.fader_slots[0].enabled);
+	REQUIRE(eng.fader_slots[0].addr.type == MFD_MIDI_NONE);
+	REQUIRE(eng.fader_slots[1].enabled && eng.fader_slots[1].addr.number == 19U);
+	REQUIRE(eng.fader_slots[9].enabled && eng.fader_slots[9].addr.number == 62U);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* Beta profile load_profile check: Korg nanoKONTROL2 (8 vertical sliders CC 0..7, no crossfader/master) */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "name", "nanokontrol2");
+	mfd_vendor_handle_load_profile(req, res, &eng);
+	REQUIRE(strcmp(obs_data_get_string(res, "loaded"), "nanokontrol2") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "profile_tier"), "beta") == 0);
+	REQUIRE(!eng.fader_slots[0].enabled && !eng.fader_slots[9].enabled);
+	REQUIRE(eng.fader_slots[1].enabled && eng.fader_slots[1].addr.number == 0U);
+	REQUIRE(eng.fader_slots[8].enabled && eng.fader_slots[8].addr.number == 7U);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	ws_log.state_changed_count = 0;
 
 	req = obs_data_create();
 	res = obs_data_create();
 	obs_data_set_string(req, "name", "apc40mk2");
 	mfd_vendor_handle_load_profile(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "loaded"), "apc40mk2") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "profile_tier"), "verified") == 0);
 	REQUIRE(ws_log.state_changed_count == 1);
 	REQUIRE(strcmp(eng.fader_slots[0].id, "crossfader") == 0);
 	REQUIRE(eng.fader_slots[0].target_type == MFD_TARGET_TBAR);
@@ -653,12 +684,14 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 
-	/* 2. get_state: verify version, build identity, studio_mode, device, and slot availability/reason when Studio Mode is OFF */
+	/* 2. get_state: verify version, build identity, profile, studio_mode, device, and slot availability/reason when Studio Mode is OFF */
 	req = obs_data_create();
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.2.2") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.3.0") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "profile"), "apc40mk2") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "profile_tier"), "verified") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");
 	REQUIRE(build_obj != NULL);
 	const char *b_commit = obs_data_get_string(build_obj, "commit");

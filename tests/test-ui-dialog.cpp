@@ -1027,11 +1027,100 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_4"))->text() ==
 		QStringLiteral("Volume: Mic/Aux"));
 
+	/* --- 8. Multi-Controller Beta Profiles (MIDImix, nanoKONTROL2, APC mini mk2, Launch Control XL) --- */
+	auto *beta_badge = must_find<QLabel>(dlg.get(), QStringLiteral("mfdBetaProfileBadge"));
+	auto *adv_beta_note = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvBetaNote"));
+	auto *adv_defaults_btn = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvDefaultsBtn"));
+	REQUIRE(beta_badge->isHidden());
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+	}
+
+	/* Switch to Beta profile: Akai MIDImix (9 vertical faders: 1..8 + Master, no Crossfader) */
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_AKAI_MIDIMIX, false));
+	pump_ui();
+	REQUIRE(!beta_badge->isHidden());
+	REQUIRE(beta_badge->text() == QStringLiteral("BETA: MIDImix (untested spec)"));
+	REQUIRE(must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_0"))->isHidden());
+	for (int i = 1; i <= 9; ++i) {
+		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+	}
+	/* Strip 1 preserved its OBS assignment while rebinding to MIDImix Fader 1 (Ch 1 CC 19) */
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_1"))->text() ==
+		QStringLiteral("Mixes Color and Color 2 in Red"));
+	REQUIRE(eng.fader_slots[1].addr.channel == 0U && eng.fader_slots[1].addr.number == 19U);
+	push_midi_cc(&eng, 0, 19, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	pump_ui();
+	REQUIRE(must_find<QWidget>(dlg.get(), QStringLiteral("mfdStripBar_1"))->property("barPercent").toInt() == 100);
+
+	/* Open [Show controller] on Akai MIDImix -> verify generalized SVG hardware map & export screenshot */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnShowController"))->click();
+	pump_ui();
+	svg_dlg = must_find<QDialog>(dlg.get(), QStringLiteral("mfdControllerSvgDialog"));
+	REQUIRE(!svg_dlg->isHidden());
+	svg_canvas = static_cast<MfdSvgCanvas *>(must_find<QWidget>(svg_dlg, QStringLiteral("mfdControllerSvgCanvas")));
+	REQUIRE(svg_canvas->is_valid());
+	{
+		struct mfd_ui_snapshot mm_snap {};
+		mfd_engine_get_ui_snapshot(&eng, &mm_snap);
+		const QByteArray mm_xml = mfd_make_controller_desk_svg(mm_snap);
+		REQUIRE(mm_xml.contains("Akai MIDImix"));
+		REQUIRE(mm_xml.contains("BETA"));
+		REQUIRE(mm_xml.contains("Channel knobs"));
+		REQUIRE(mm_xml.contains("Ch 1 CC 19"));
+		REQUIRE(mm_xml.contains("Ch 1 CC 62"));
+	}
+	capture_and_verify_png(svg_dlg, screenshot_dir, QStringLiteral("10-beta-midimix-svg.png"));
+	svg_dlg->close();
+	pump_ui();
+
+	/* Switch to Beta profile: Korg nanoKONTROL2 (8 vertical sliders CC 0..7, no Crossfader, no Master) */
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_KORG_NANOKONTROL2, false));
+	pump_ui();
+	REQUIRE(!beta_badge->isHidden());
+	REQUIRE(beta_badge->text() == QStringLiteral("BETA: nanoKONTROL2 (untested spec)"));
+	REQUIRE(must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_0"))->isHidden());
+	REQUIRE(must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_9"))->isHidden());
+	for (int i = 1; i <= 8; ++i) {
+		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+	}
+
+	/* Verify Advanced tab Beta notice & dynamic Load Defaults button */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnOpenAdvanced"))->click();
+	pump_ui();
+	REQUIRE(!adv_beta_note->isHidden());
+	REQUIRE(adv_beta_note->text().contains(QStringLiteral("Beta (untested on hardware)")));
+	REQUIRE(adv_defaults_btn->text() == QStringLiteral("Load nanoKONTROL2 Defaults"));
+
+	/* Verify SVG validity across every registered controller profile (including Generic, APC mini mk2, LCXL) */
+	for (size_t pi = 0U; pi < mfd_profile_count(); ++pi) {
+		const struct mfd_controller_profile_def *pdef = mfd_profile_get_by_index(pi);
+		REQUIRE(pdef != nullptr);
+		REQUIRE(mfd_engine_select_profile(&eng, pdef->id, false));
+		struct mfd_ui_snapshot psnap {};
+		mfd_engine_get_ui_snapshot(&eng, &psnap);
+		MfdSvgCanvas tmp_svg;
+		tmp_svg.set_svg_utf8(mfd_make_controller_desk_svg(psnap));
+		REQUIRE(tmp_svg.is_valid());
+	}
+
+	/* Restore verified Akai APC40 mkII profile -> Beta notices hide and all 10 strips return */
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC40_MK2, false));
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnBackToStrips"))->click();
+	pump_ui();
+	REQUIRE(beta_badge->isHidden());
+	REQUIRE(adv_beta_note->isHidden());
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		REQUIRE(!must_find<QWidget>(dlg.get(), QStringLiteral("mfdStrip_%1").arg(i))->isHidden());
+	}
+
 	dlg->close();
 	dlg.reset();
 	mfd_engine_destroy_mutex(&eng);
 
-	std::printf("test-ui-dialog: PASS (all end-to-end flows & 9 screenshots verified in %s)\n",
-		    screenshot_dir.toUtf8().constData());
+	std::printf(
+		"test-ui-dialog: PASS (all end-to-end flows, multi-controller profiles & 10 screenshots verified in %s)\n",
+		screenshot_dir.toUtf8().constData());
 	return 0;
 }

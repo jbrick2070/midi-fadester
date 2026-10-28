@@ -14,6 +14,7 @@ class MfdSvgCanvas;
 class QLabel;
 
 QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode);
+QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap);
 QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap);
 
 class MfdControllerViewDialog final : public QDialog {

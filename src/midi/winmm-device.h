@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "core/apc40-profile.h"
 #include "core/midi-queue.h"
 
 #ifdef __cplusplus
@@ -32,6 +33,7 @@ struct mfd_midi_device_info {
 	uint32_t index;
 	char name[MFD_MIDI_DEV_NAME_MAX];
 	bool is_apc40_mk2;
+	enum mfd_controller_profile detected_profile;
 };
 
 struct mfd_winmm_device {

@@ -11,7 +11,22 @@ Download the latest release from [GitHub Releases](https://github.com/jbrick2070
 - **Standard Install (`midi-fadester-<version>-windows-x64-Installer.exe` or `.zip`):** Installs into `C:\ProgramData\obs-studio\plugins\midi-fadester\` using the OBS 33 non-legacy plugin layout.
 - **Portable Install (`midi-fadester-<version>-windows-x64-Portable.zip`):** Extract directly into your portable OBS Studio 33 root folder (`<OBS root>\plugins\midi-fadester\`).
 
-Open OBS Studio 33 and choose **Tools → Midi Fadester — Video Mixer & Fader Control**. When an **Akai APC40 mkII** is connected or selected in **MIDI In**, the **Akai APC40 mkII** profile auto-selects (`Crossfader` on `Ch 1 CC 15`, `Track Faders 1–8` on `Ch 1–8 CC 7`, and `Master Fader` on `Ch 1 CC 14`).
+Open OBS Studio 33 and choose **Tools → Midi Fadester — Video Mixer & Fader Control**. When a recognized controller is connected, Midi Fadester auto-detects its USB MIDI port and loads its control layout (or lets you switch layouts under **Change controller → Layout** on **Strips** or **Profile** on **Advanced**).
+
+## Supported MIDI Controllers (`0.3.0` Profile Registry)
+
+Midi Fadester uses a declarative **Controller Profile Registry** (`src/core/apc40-profile.c`) that pairs each controller's factory MIDI CC map with its physical strip count, `[Show controller]` vector desk topology, and explicit verification tier:
+
+| Controller | Profile ID (`obs-websocket`) | Support Tier | Physical Faders & Factory MIDI CC Map |
+|---|---|---|---|
+| **Akai APC40 mkII** | `apc40mk2` | **Hardware-Verified** | **10 controls:** Crossfader (`Ch 1 CC 15`), Faders 1–8 (`Ch 1–8 CC 7`), Master (`Ch 1 CC 14`) |
+| **Akai APC mini mk2** | `apcminimk2` | **Beta** *(Manufacturer spec — untested on hardware)* | **9 controls:** Faders 1–8 (`Ch 1 CC 48–55`), Master (`Ch 1 CC 56`), no crossfader |
+| **Akai MIDImix** | `midimix` | **Beta** *(Manufacturer spec — untested on hardware)* | **9 controls:** Faders 1–8 (`Ch 1 CC 19, 23, 27, 31, 49, 53, 57, 61`), Master (`Ch 1 CC 62`), no crossfader |
+| **Korg nanoKONTROL2** | `nanokontrol2` | **Beta** *(Manufacturer spec — untested on hardware)* | **8 controls:** Sliders 1–8 (`Ch 1 CC 0–7`, Default CC Mode), no crossfader or master |
+| **Novation Launch Control XL** | `launchcontrolxl` | **Beta** *(Manufacturer spec — untested on hardware)* | **8 controls:** Faders 1–8 (`Ch 1 CC 77–84`, Factory User Template 1), no crossfader or master |
+| **Generic MIDI (Custom)** | `generic` | **Custom / 1-Click MIDI Learn** | **Up to 10 controls:** Any class-compliant 7-bit/14-bit CC, Pitch Bend, or Note via **Set up** / **Learn** |
+
+> **Beta Controller Note:** Profiles marked **Beta** are built from published manufacturer MIDI implementation specs and have not yet been verified on physical hardware. They display an amber `BETA` badge in the UI and `[Show controller]` map; if a fader uses a custom hardware editor template, re-learn it in one move via **Set up → Wrong fader? Move a different one** (or **Learn** in **Advanced**). Controllers without a horizontal crossfader can assign any vertical fader to **Switch scenes (T-bar)**. Adding a new controller requires only a single `struct mfd_controller_profile_def` entry in `src/core/apc40-profile.c`.
 
 ## Choosing Your Crossfader Mode: `Studio Mode T-Bar` vs. `Two-Source Crossfade (A ↔ B)`
 
@@ -32,7 +47,7 @@ This project is developed with the assistance of AI coding tools under human dir
 ## Documentation
 
 - [REQUIREMENTS.md](REQUIREMENTS.md) — Functional, fader target (`R-FADE-*`), two-source & bus mixer (`R-MIX-*`), smoothing/takeover/LED feedback (`R-FEEL-*`), WinMM MIDI (`R-MIDI-*`), threading, and testing requirements, plus approved operator decisions (`D-1..D-7`).
-- [PLAN.md](PLAN.md) — Pre-planning OBS 33 & APC40 mkII audit findings, architecture, file layout, phased implementation plan (Phase 1 MVP through Phase 5), test matrix, risk register, and autonomous decisions (`D-8..D-20`).
-- [PLAN-UI.md](PLAN-UI.md) — `0.2.0` three-zone `Strips` UI, 3-step `Set up` sheet, live APC40 mkII SVG desk view, concurrency/locking architecture, and 4-round `kibitz` review disposition.
-- [TESTING.md](TESTING.md) — Automated `ctest` suite (`14` targets), rendered `0.2.0` dialog state screenshot gallery, and live OBS 33 + `loopMIDI` verification guide.
+- [PLAN.md](PLAN.md) — Pre-planning OBS 33 & APC40 mkII audit findings, architecture, file layout, phased implementation plan (Phase 1 MVP through Phase 5), test matrix, risk register, and autonomous decisions (`D-8..D-21`).
+- [PLAN-UI.md](PLAN-UI.md) — `0.2.0` three-zone `Strips` UI, 3-step `Set up` sheet, live controller SVG desk view, concurrency/locking architecture, and 4-round `kibitz` review disposition.
+- [TESTING.md](TESTING.md) — Automated `ctest` suite (`14` targets), rendered `0.3.0` dialog state screenshot gallery (`10` states including Beta controller hardware map), and live OBS 33 + `loopMIDI` verification guide.
 - [LICENSE](LICENSE) — GNU General Public License v2.0.

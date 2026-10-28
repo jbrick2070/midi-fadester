@@ -15,7 +15,9 @@
 #include <QString>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -54,6 +56,24 @@ static QString elide_plain(const QString &s, int max_chars)
 		return s;
 	}
 	return s.left(max_chars - 1) + QStringLiteral("\xE2\x80\xA6");
+}
+
+static QString compact_midi_addr(const struct mfd_midi_addr &addr)
+{
+	switch (addr.type) {
+	case MFD_MIDI_CC:
+		return QStringLiteral("Ch %1 CC %2")
+			.arg(static_cast<int>(addr.channel) + 1)
+			.arg(static_cast<int>(addr.number));
+	case MFD_MIDI_PITCH_BEND:
+		return QStringLiteral("Ch %1 Bend").arg(static_cast<int>(addr.channel) + 1);
+	case MFD_MIDI_NOTE_ON:
+		return QStringLiteral("Ch %1 Note %2")
+			.arg(static_cast<int>(addr.channel) + 1)
+			.arg(static_cast<int>(addr.number));
+	default:
+		return QStringLiteral("Unbound");
+	}
 }
 
 } // namespace
@@ -108,51 +128,203 @@ QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
 	}
 }
 
-QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
+QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 {
+	const struct mfd_controller_profile_def *def = mfd_profile_get_def(snap.active_profile);
+	if (!def) {
+		def = mfd_profile_get_def(MFD_PROFILE_APC40_MK2);
+	}
+	const bool is_beta = (def->tier == MFD_PROFILE_TIER_BETA_UNTESTED);
+
 	struct mfd_ui_controller_presentation ctrl;
 	mfd_ui_format_controller_status(snap.midi_connected, snap.configured_device_name, snap.opened_device_name,
 					snap.midi_error_kind, &ctrl);
 
 	QString svg;
-	svg.reserve(16384);
+	svg.reserve(20480);
 	svg.append(QStringLiteral(
 		"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 980 500'>"
 		"<rect width='980' height='500' rx='16' fill='#0b1120' stroke='#334155' stroke-width='2'/>"
 		"<rect x='18' y='16' width='944' height='468' rx='12' fill='#111827' stroke='#1f2937' stroke-width='1.5'/>"));
 
 	/* Desk header */
+	const QString header_title =
+		QStringLiteral("%1 \xE2\x80\x94 Hardware Map").arg(QString::fromUtf8(def->display_name));
+	const int status_cx = std::max(388, 52 + static_cast<int>(header_title.size()) * 11);
 	const QString dot_hex = ctrl.dot_green ? QStringLiteral("#22c55e") : QStringLiteral("#ef4444");
-	svg.append(QStringLiteral("<text x='38' y='48' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
-				  "font-size='18' font-weight='bold'>Akai APC40 mkII \xE2\x80\x94 Hardware Map</text>"
-				  "<circle cx='388' cy='42' r='6' fill='%1'/>"
-				  "<text x='403' y='47' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
-				  "font-size='13'>%2</text>")
-			   .arg(dot_hex, xml_escape(QString::fromUtf8(ctrl.status_sentence))));
+	const QString status_txt = elide_plain(QString::fromUtf8(ctrl.status_sentence), is_beta ? 26 : 50);
 
-	/* Labeled clip-launch & scene-launch pad zones for instant physical desk orientation */
-	svg.append(QStringLiteral(
-		"<rect x='36' y='60' width='674' height='74' rx='6' fill='#0d1526' stroke='#1e293b' stroke-width='1'/>"
-		"<text x='46' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' font-size='11.5' "
-		"font-weight='bold'>Clip launch pads (for desk orientation \xE2\x80\x94 Midi Fadester uses the faders below)</text>"
-		"<rect x='734' y='60' width='88' height='74' rx='6' fill='#0d1526' stroke='#1e293b' stroke-width='1'/>"
-		"<text x='778' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' font-size='11.5' "
-		"font-weight='bold' text-anchor='middle'>Scene pads</text>"));
-	for (int col = 0; col < 8; ++col) {
-		const int gx = 42 + col * 84;
+	svg.append(QStringLiteral("<text x='38' y='48' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
+				  "font-size='18' font-weight='bold'>%1</text>"
+				  "<circle cx='%2' cy='42' r='6' fill='%3'/>"
+				  "<text x='%4' y='47' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
+				  "font-size='13'>%5</text>")
+			   .arg(xml_escape(header_title))
+			   .arg(status_cx)
+			   .arg(dot_hex)
+			   .arg(status_cx + 15)
+			   .arg(xml_escape(status_txt)));
+
+	if (is_beta) {
+		svg.append(QStringLiteral("<rect x='736' y='26' width='206' height='26' rx='13' fill='#451a03' "
+					  "stroke='#f59e0b' stroke-width='1.5'/>"
+					  "<text x='839' y='43' fill='#fde68a' font-family='Segoe UI, sans-serif' "
+					  "font-size='11.5' font-weight='bold' text-anchor='middle'>"
+					  "BETA \xE2\x80\x94 UNTESTED SPEC</text>"));
+	}
+
+	/* Column X centers tailored to each controller's physical fader topology */
+	auto col_cx = [&](int v) -> int {
+		if (def->has_crossfader) {
+			/* APC40 mkII & Generic MIDI: 8 track faders + Master on right above crossfader */
+			return (v < 8) ? (75 + v * 84) : 778;
+		}
+		if (def->has_master_fader) {
+			/* APC mini mk2 & Akai MIDImix: 8 track faders + separated Master across full width */
+			return (v < 8) ? (78 + v * 96) : 886;
+		}
+		if (def->upper_style == MFD_DESK_UPPER_TRANSPORT_AND_KNOBS_1) {
+			/* Korg nanoKONTROL2: left transport section + 8 sliders on right */
+			return 274 + v * 90;
+		}
+		/* Novation Launch Control XL: 8 evenly spaced channel strips */
+		return 92 + v * 113;
+	};
+
+	/* Upper physical orientation zones */
+	switch (def->upper_style) {
+	case MFD_DESK_UPPER_CLIP_PADS: {
+		const int grid_w = col_cx(7) + 47 - 36;
+		const int scene_x = col_cx(8) - 44;
+		svg.append(
+			QStringLiteral(
+				"<rect x='36' y='60' width='%1' height='74' rx='6' fill='#0d1526' "
+				"stroke='#1e293b' stroke-width='1'/>"
+				"<text x='46' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+				"font-size='11.5' font-weight='bold'>"
+				"Clip launch pads (for desk orientation \xE2\x80\x94 Midi Fadester uses the faders below)</text>"
+				"<rect x='%2' y='60' width='88' height='74' rx='6' fill='#0d1526' "
+				"stroke='#1e293b' stroke-width='1'/>"
+				"<text x='%3' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+				"font-size='11.5' font-weight='bold' text-anchor='middle'>Scene pads</text>")
+				.arg(grid_w)
+				.arg(scene_x)
+				.arg(col_cx(8)));
+		for (int col = 0; col < 8; ++col) {
+			const int gx = col_cx(col) - 33;
+			for (int row = 0; row < 2; ++row) {
+				const int gy = 86 + row * 21;
+				svg.append(QStringLiteral("<rect x='%1' y='%2' width='66' height='15' rx='3' "
+							  "fill='#172033' stroke='#334155' stroke-width='1'/>")
+						   .arg(gx)
+						   .arg(gy));
+			}
+		}
 		for (int row = 0; row < 2; ++row) {
 			const int gy = 86 + row * 21;
-			svg.append(QStringLiteral("<rect x='%1' y='%2' width='66' height='15' rx='3' "
+			svg.append(QStringLiteral("<rect x='%1' y='%2' width='68' height='15' rx='3' "
 						  "fill='#172033' stroke='#334155' stroke-width='1'/>")
-					   .arg(gx)
+					   .arg(col_cx(8) - 34)
 					   .arg(gy));
 		}
+		break;
 	}
-	for (int row = 0; row < 2; ++row) {
-		const int gy = 86 + row * 21;
-		svg.append(QStringLiteral("<rect x='744' y='%1' width='68' height='15' rx='3' "
-					  "fill='#172033' stroke='#334155' stroke-width='1'/>")
-				   .arg(gy));
+
+	case MFD_DESK_UPPER_KNOB_ROWS_3: {
+		const int box_w = col_cx(7) + 48 - 36;
+		svg.append(
+			QStringLiteral(
+				"<rect x='36' y='60' width='%1' height='74' rx='6' fill='#0d1526' "
+				"stroke='#1e293b' stroke-width='1'/>"
+				"<text x='46' y='75' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+				"font-size='11.5' font-weight='bold'>"
+				"Channel knobs \xE2\x80\x94 3 rows (for desk orientation \xE2\x80\x94 Midi Fadester uses the faders below)</text>")
+				.arg(box_w));
+		for (int col = 0; col < 8; ++col) {
+			const int kx = col_cx(col);
+			for (int row = 0; row < 3; ++row) {
+				const int ky = 88 + row * 17;
+				svg.append(QStringLiteral("<circle cx='%1' cy='%2' r='5.5' fill='#172033' "
+							  "stroke='#475569' stroke-width='1.2'/>"
+							  "<line x1='%1' y1='%2' x2='%1' y2='%3' "
+							  "stroke='#94a3b8' stroke-width='1.2'/>")
+						   .arg(kx)
+						   .arg(ky)
+						   .arg(ky - 5));
+			}
+		}
+		if (def->has_master_fader) {
+			const int mx = col_cx(8);
+			svg.append(QStringLiteral(
+					   "<rect x='%1' y='60' width='76' height='74' rx='6' fill='#0d1526' "
+					   "stroke='#1e293b' stroke-width='1'/>"
+					   "<text x='%2' y='88' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+					   "font-size='10.5' font-weight='bold' text-anchor='middle'>Send All</text>"
+					   "<rect x='%3' y='100' width='52' height='18' rx='4' fill='#172033' "
+					   "stroke='#334155' stroke-width='1'/>")
+					   .arg(mx - 38)
+					   .arg(mx)
+					   .arg(mx - 26));
+		}
+		break;
+	}
+
+	case MFD_DESK_UPPER_TRANSPORT_AND_KNOBS_1: {
+		/* Left-hand transport & marker section matching Korg nanoKONTROL2 physical layout */
+		svg.append(QStringLiteral(
+			"<rect x='36' y='60' width='182' height='334' rx='7' fill='#0d1526' "
+			"stroke='#1e293b' stroke-width='1.2'/>"
+			"<text x='127' y='82' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+			"font-size='12' font-weight='bold' text-anchor='middle'>Transport &amp; markers</text>"
+			"<text x='127' y='98' fill='#64748b' font-family='Segoe UI, sans-serif' "
+			"font-size='10.5' text-anchor='middle'>(for desk orientation)</text>"
+			"<rect x='52' y='124' width='68' height='22' rx='4' fill='#172033' stroke='#334155'/>"
+			"<text x='86' y='139' fill='#64748b' font-family='Segoe UI, sans-serif' font-size='9.5' text-anchor='middle'>TRACK &lt; &gt;</text>"
+			"<rect x='132' y='124' width='70' height='22' rx='4' fill='#172033' stroke='#334155'/>"
+			"<text x='167' y='139' fill='#64748b' font-family='Segoe UI, sans-serif' font-size='9.5' text-anchor='middle'>CYCLE</text>"
+			"<rect x='52' y='162' width='150' height='22' rx='4' fill='#172033' stroke='#334155'/>"
+			"<text x='127' y='177' fill='#64748b' font-family='Segoe UI, sans-serif' font-size='9.5' text-anchor='middle'>MARKER SET / &lt; / &gt;</text>"));
+		const char *const k_trans[5] = {"&lt;&lt;", "&gt;&gt;", "STOP", "PLAY", "REC"};
+		for (int tb = 0; tb < 5; ++tb) {
+			const int tx = 48 + tb * 32;
+			svg.append(
+				QStringLiteral("<rect x='%1' y='224' width='28' height='28' rx='4' "
+					       "fill='#172033' stroke='#475569' stroke-width='1'/>"
+					       "<text x='%2' y='242' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+					       "font-size='8.5' font-weight='bold' text-anchor='middle'>%3</text>")
+					.arg(tx)
+					.arg(tx + 14)
+					.arg(QString::fromLatin1(k_trans[tb])));
+		}
+		svg.append(QStringLiteral(
+			"<rect x='230' y='60' width='712' height='74' rx='6' fill='#0d1526' "
+			"stroke='#1e293b' stroke-width='1'/>"
+			"<text x='242' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+			"font-size='11.5' font-weight='bold'>"
+			"Channel pan knobs (for desk orientation \xE2\x80\x94 Midi Fadester uses the sliders below)</text>"));
+		for (int col = 0; col < 8; ++col) {
+			const int kx = col_cx(col);
+			svg.append(QStringLiteral("<circle cx='%1' cy='107' r='12' fill='#172033' "
+						  "stroke='#475569' stroke-width='1.5'/>"
+						  "<line x1='%1' y1='107' x2='%1' y2='96' "
+						  "stroke='#94a3b8' stroke-width='1.8'/>")
+					   .arg(kx));
+		}
+		break;
+	}
+
+	case MFD_DESK_UPPER_NONE:
+	default:
+		svg.append(QStringLiteral(
+			"<rect x='36' y='60' width='906' height='74' rx='6' fill='#0d1526' "
+			"stroke='#1e293b' stroke-width='1'/>"
+			"<text x='489' y='94' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
+			"font-size='12.5' font-weight='bold' text-anchor='middle'>"
+			"Custom MIDI Controller Layout</text>"
+			"<text x='489' y='115' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+			"font-size='11.5' text-anchor='middle'>"
+			"Open Set up (Step 3 \xE2\x86\x92 Wrong fader?) or Advanced \xE2\x86\x92 Learn to bind any physical fader or knob.</text>"));
+		break;
 	}
 
 	auto accent_for_strip = [](const struct mfd_ui_strip_presentation &sp) -> QString {
@@ -201,25 +373,29 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 		mfd_ui_format_strip_presentation(&in, out);
 	};
 
-	/* Vertical faders: Track 1..8 (indices 1..8) + Master (index 9) */
-	for (int v = 0; v < 9; ++v) {
-		const int slot_idx = v + 1;
-		const int cx = (v < 8) ? (75 + v * 84) : 778;
+	/* Vertical faders: Track 1..track_fader_count + optional Master (index 9) */
+	const int vert_count = def->track_fader_count + (def->has_master_fader ? 1 : 0);
+	for (int v = 0; v < vert_count; ++v) {
+		const int slot_idx = (v < def->track_fader_count) ? (v + 1) : 9;
+		const int cx = col_cx(v);
 		struct mfd_ui_strip_presentation sp;
 		build_strip_pres(slot_idx, &sp);
 		const QString accent = accent_for_strip(sp);
 		const QString title = xml_escape(elide_plain(QString::fromUtf8(sp.title), 10));
+		const QString cc_lbl = xml_escape(compact_midi_addr(snap.slots[slot_idx].addr));
 		const QString short_lbl = xml_escape(elide_plain(QString::fromUtf8(sp.svg_short_label), 13));
 
-		const int track_top = 182;
-		const int track_h = 150;
+		const int track_top = 188;
+		const int track_h = 144;
 		const int fill_h = (sp.bar_percent * track_h) / 100;
 		const int cap_y = track_top + track_h - fill_h - 8;
 
 		svg.append(QStringLiteral("<rect x='%1' y='146' width='74' height='248' rx='7' fill='#0f172a' "
 					  "stroke='%2' stroke-width='1.5'/>"
-					  "<text x='%3' y='163' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
+					  "<text x='%3' y='162' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
 					  "font-size='12' font-weight='bold' text-anchor='middle'>%4</text>"
+					  "<text x='%3' y='175' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+					  "font-size='9.5' text-anchor='middle'>%14</text>"
 					  "<rect x='%5' y='%6' width='8' height='%7' rx='4' fill='#1e293b'/>"
 					  "<rect x='%5' y='%8' width='8' height='%9' rx='4' fill='%2'/>"
 					  "<rect x='%10' y='%11' width='26' height='16' rx='3' fill='#e2e8f0' "
@@ -240,11 +416,12 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 				   .arg(cx - 13)
 				   .arg(cap_y)
 				   .arg(sp.bar_percent)
-				   .arg(short_lbl));
+				   .arg(short_lbl)
+				   .arg(cc_lbl));
 	}
 
-	/* Horizontal Crossfader (index 0) at bottom right of APC40 mkII */
-	{
+	if (def->has_crossfader) {
+		/* Horizontal Crossfader (index 0) at bottom right */
 		struct mfd_ui_strip_presentation sp0;
 		build_strip_pres(0, &sp0);
 		const QString accent0 = accent_for_strip(sp0);
@@ -272,6 +449,18 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 				   .arg(xf_w)
 				   .arg(fill_w)
 				   .arg(cap_x));
+	} else {
+		/* Beta spec & crossfader-less T-bar guidance card at bottom right */
+		svg.append(QStringLiteral(
+			"<rect x='592' y='406' width='350' height='68' rx='8' fill='#1c1507' "
+			"stroke='#d97706' stroke-width='1.5'/>"
+			"<text x='606' y='426' fill='#fde68a' font-family='Segoe UI, sans-serif' "
+			"font-size='11.5' font-weight='bold'>"
+			"Beta profile \xE2\x80\x94 mapped from manufacturer MIDI spec</text>"
+			"<text x='606' y='445' fill='#e2e8f0' font-family='Segoe UI, sans-serif' "
+			"font-size='10.5'>No physical crossfader; set any fader to Switch scenes (T-bar).</text>"
+			"<text x='606' y='462' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
+			"font-size='10'>Use Learn in Set up or Advanced if your unit uses custom CCs.</text>"));
 	}
 
 	/* Legend at bottom left */
@@ -289,6 +478,11 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 	return svg.toUtf8();
 }
 
+QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
+{
+	return mfd_make_controller_desk_svg(snap);
+}
+
 MfdControllerViewDialog::MfdControllerViewDialog(QWidget *parent) : QDialog(parent)
 {
 	setObjectName(QStringLiteral("mfdControllerSvgDialog"));
@@ -304,6 +498,7 @@ MfdControllerViewDialog::MfdControllerViewDialog(QWidget *parent) : QDialog(pare
 		QStringLiteral("Move any physical fader to verify its live position and assignment on the desk."),
 		this);
 	subtitle_label_->setObjectName(QStringLiteral("mfdControllerSvgSubtitle"));
+	subtitle_label_->setWordWrap(true);
 	subtitle_label_->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 13px;"));
 	root->addWidget(subtitle_label_);
 
@@ -326,7 +521,19 @@ MfdControllerViewDialog::MfdControllerViewDialog(QWidget *parent) : QDialog(pare
 
 void MfdControllerViewDialog::refresh_from_snapshot(const struct mfd_ui_snapshot &snap)
 {
+	const struct mfd_controller_profile_def *def = mfd_profile_get_def(snap.active_profile);
+	if (subtitle_label_ && def) {
+		if (def->tier == MFD_PROFILE_TIER_BETA_UNTESTED) {
+			subtitle_label_->setText(QString::fromUtf8(def->spec_note));
+			subtitle_label_->setStyleSheet(
+				QStringLiteral("color: #fde68a; font-size: 13px; font-weight: bold;"));
+		} else {
+			subtitle_label_->setText(QStringLiteral(
+				"Move any physical fader to verify its live position and assignment on the desk."));
+			subtitle_label_->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 13px;"));
+		}
+	}
 	if (svg_canvas_) {
-		svg_canvas_->set_svg_utf8(mfd_make_apc40_desk_svg(snap));
+		svg_canvas_->set_svg_utf8(mfd_make_controller_desk_svg(snap));
 	}
 }

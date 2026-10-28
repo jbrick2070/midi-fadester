@@ -406,6 +406,12 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	obs_data_set_int(response_data, "api_version", MFD_API_VERSION);
 	obs_data_set_bool(response_data, "studio_mode", mfd_engine_is_studio_mode_active(eng));
 
+	const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(mfd_engine_get_active_profile(eng));
+	obs_data_set_string(response_data, "profile", pdef ? pdef->slug : "apc40mk2");
+	obs_data_set_string(response_data, "profile_display_name", pdef ? pdef->display_name : "Akai APC40 mkII");
+	obs_data_set_string(response_data, "profile_tier",
+			    mfd_profile_tier_to_string(pdef ? pdef->tier : MFD_PROFILE_TIER_VERIFIED));
+
 	obs_data_t *dev = obs_data_create();
 	obs_data_set_string(dev, "name",
 			    eng->midi_dev.is_open ? eng->midi_dev.opened_name : eng->configured_device_name);
@@ -871,9 +877,13 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 	}
 
 	const char *name = request_data ? obs_data_get_string(request_data, "name") : NULL;
-	if (!name || strcmp(name, "apc40mk2") != 0) {
-		char msg[192];
-		snprintf(msg, sizeof(msg), "Unknown profile '%s'. Valid profiles: apc40mk2.", name ? name : "");
+	const struct mfd_controller_profile_def *def = mfd_profile_find_by_slug(name);
+	if (!def) {
+		char msg[240];
+		snprintf(
+			msg, sizeof(msg),
+			"Unknown profile '%s'. Valid profiles: apc40mk2, apcminimk2, midimix, nanokontrol2, launchcontrolxl, generic.",
+			name ? name : "");
 		set_error_comment(response_data, msg);
 		return;
 	}
@@ -883,12 +893,13 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 		mfd_engine_unlock(eng);
 		return;
 	}
-	mfd_engine_load_apc40_defaults(eng);
+	mfd_engine_load_profile_defaults(eng, def->id);
 	if (obs_initialized()) {
 		eng->pending_config_save = true;
 	}
 	mfd_engine_notify_state_changed(eng);
-	obs_data_set_string(response_data, "loaded", "apc40mk2");
+	obs_data_set_string(response_data, "loaded", def->slug);
+	obs_data_set_string(response_data, "profile_tier", mfd_profile_tier_to_string(def->tier));
 	mfd_engine_unlock(eng);
 }
 

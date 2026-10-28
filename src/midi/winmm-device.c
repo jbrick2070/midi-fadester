@@ -67,7 +67,8 @@ size_t mfd_winmm_enumerate(struct mfd_midi_device_info *out_list, size_t max_dev
 		if (midiInGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
 			out_list[written].index = (uint32_t)i;
 			wide_to_utf8(caps.szPname, out_list[written].name, sizeof(out_list[written].name));
-			out_list[written].is_apc40_mk2 = mfd_is_apc40_mk2_name(out_list[written].name);
+			out_list[written].detected_profile = mfd_profile_match_device_name(out_list[written].name);
+			out_list[written].is_apc40_mk2 = (out_list[written].detected_profile == MFD_PROFILE_APC40_MK2);
 			++written;
 		}
 	}
@@ -143,6 +144,14 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 			if (list[i].is_apc40_mk2) {
 				selected_idx = (int)i;
 				break;
+			}
+		}
+		if (selected_idx < 0) {
+			for (size_t i = 0U; i < count; ++i) {
+				if (list[i].detected_profile != MFD_PROFILE_GENERIC) {
+					selected_idx = (int)i;
+					break;
+				}
 			}
 		}
 		if (selected_idx < 0) {

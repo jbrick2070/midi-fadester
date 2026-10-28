@@ -1,4 +1,4 @@
-# Midi Fadester — Verification & UI State Gallery (`0.2.0`)
+# Midi Fadester — Verification & UI State Gallery (`0.3.0`)
 
 Midi Fadester verifies every engine invariant, T-bar state transition, Soft Takeover rail/pickup rule, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 
@@ -24,11 +24,11 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 | 3 | `test-smoother` | First-order exponential smoother (`tau_ms`), instant snap at `tau_ms = 0`, frame-rate independence, and rail convergence. |
 | 4 | `test-takeover` | Soft Takeover state machine (`UNINITIALIZED`, `PICKUP_WAITING`, `CAPTURED`), calibrated `[raw_min, raw_max]` auto-widening, directional pickup hints (`ABOVE` / `BELOW`), polarity reversal, and mode-switch reset to `Idle`. |
 | 5 | `test-mixer-math` | Crossfade laws (`Dip-free`, `Full-center`, `Equal power`, `Linear`, `Cut`), `[-60 dB, 0 dB]` audio deflection taper, and top/bottom layer alpha inversion when OBS scene stack order flips. |
-| 6 | `test-apc40-profile` | Akai APC40 mkII hardware map (Crossfader `Ch 1 CC 15`, Track Faders 1–8 `Ch 1..8 CC 7`, Master `Ch 1 CC 14`), device-name auto-detection, and default strip labels. |
+| 6 | `test-apc40-profile` | Declarative 6-controller profile registry (`apc40mk2` Verified; `apcminimk2`, `midimix`, `nanokontrol2`, `launchcontrolxl` Beta untested manufacturer specs; `generic` Custom), factory MIDI CC maps, physical strip presence flags (`10` / `9` / `8` strips), and WinMM USB port name auto-detection. |
 | 7 | `test-tbar-logic` | Pure-C T-bar state machine (`R-TBAR-SM`): `6%` start deadband (`x > 0.06` starts throw with `t` rescaled `[0.06, 1.0] -> [0.0, 1.0]`), linear tracking to `100%`, `3%` target rail completion (`x >= 0.97` normal / `x <= 0.03` reversed), `3%` origin rail abort (`Throwing -> Idle` with `pos = 0`, single `release`, zero polarity flip), and bidirectional park/unpark. |
 | 8 | `test-ui-sentences` | Pure-C table-driven test of every plain-English UI sentence in `src/core/ui-sentences.c`: controller status bar (`Connected`, unplugged, WinMM busy/error, generic/none), strip assignment/state/action precedence (`Not used`, `Studio Mode is off`, missing scene/layer/audio recovery sentences, `Throwing N%` + `Finish now`, `At end.`, Soft Takeover pickup arrows/sentences, live `%` / `dB` readouts), 3-step `Set up` sheet copy & multi-scene warning, Zone 3 live status line, and `Advanced` tab Output cell text. |
-| 9 | `test-vendor-api` | Full engine & `obs-websocket` vendor API (`get_state`, `set_slot_value`, `configure_slot`, `load_profile`, `bind_midi`), recursive `state_mutex` + outermost-unlock deferred disk/UI drain, `0.2.0` First-Run Offer (`Yes` vs `I'll set it up`), 3-step `mfd_setup_session` transaction/cancel rollback, `[Not used]` MIDI binding preservation, and 4-thread concurrent stress (`tick` + `snapshot` + `setup_session` + `shutdown`). |
-| 10 | `test-ui-dialog` | Real Qt6 `qwindows` (`Qt::WA_DontShowOnScreen`) end-to-end dialog test instantiating `mfd_ui_create_settings_dialog`: drives First-Run banner, Studio Mode amber banner & one-click recovery, live MIDI CC throws/fades, Soft Takeover pickup arrows, red precondition recovery flows, 3-step `Set up` modal sheet (`Step 1` -> `Step 2` -> `Step 3 Try it` + `Cancel` rollback), `[Show controller]` live SVG desk view (`QSvgRenderer::isValid()`), `Advanced` tab round-trip synchronization, and non-blank `QDialog::grab()` PNG verification of all 9 states below. |
+| 9 | `test-vendor-api` | Full engine & `obs-websocket` vendor API (`get_state` including `profile` / `profile_display_name` / `profile_tier`, `set_slot_value`, `configure_slot`, `load_profile` across all 6 controller slugs, `bind_midi`), target-preserving layout switching (`mfd_engine_select_profile`), recursive `state_mutex` + outermost-unlock deferred disk/UI drain, `0.2.0` First-Run Offer (`Yes` vs `I'll set it up`), 3-step `mfd_setup_session` transaction/cancel rollback, `[Not used]` MIDI binding preservation, and 4-thread concurrent stress (`tick` + `snapshot` + `setup_session` + `shutdown`). |
+| 10 | `test-ui-dialog` | Real Qt6 `qwindows` (`Qt::WA_DontShowOnScreen`) end-to-end dialog test instantiating `mfd_ui_create_settings_dialog`: drives First-Run banner, Studio Mode amber banner & one-click recovery, live MIDI CC throws/fades, Soft Takeover pickup arrows, red precondition recovery flows, 3-step `Set up` modal sheet (`Step 1` -> `Step 2` -> `Step 3 Try it` + `Cancel` rollback), `[Show controller]` live SVG desk view (`QSvgRenderer::isValid()` across all 6 controller profiles), Beta profile badges & physical strip card filtering (`10` / `9` / `8` strips), `Advanced` tab round-trip synchronization, and non-blank `QDialog::grab()` PNG verification of all 10 states below. |
 | 11 | `test-midi-send` | CLI argument validation and WinMM loopback message framing for `midi-send.exe`. |
 | 12 | `test-shader-syntax` | HLSL `data/effects/mfd_layer_mixer.effect` uniform/pass validation, repository-wide UTF-8 no-BOM guard across 33 source/config files, and zero-timer / zero-sleep static source audit (`QTimer`, `startTimer`, `SetTimer`, `QThread::msleep`, `os_sleep_ms`). |
 | 13 | `check-locale-keys` | Verifies every `obs_module_text(...)` key in `src/` exists in `data/locale/en-US.ini` with non-empty text and no `"OBS"` prefix violation. |
@@ -36,9 +36,9 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 
 ---
 
-## 2. Dialog State Screenshot Gallery (`0.2.0` UI)
+## 2. Dialog State Screenshot Gallery (`0.3.0` UI)
 
-All 9 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
+All 10 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
 
 ```powershell
 ctest --preset windows-x64 -C RelWithDebInfo -R test-ui-dialog --output-on-failure
@@ -77,7 +77,7 @@ Each strip reports the highest-priority actionable sentence without abbreviation
 
 ### State 5 — 3-Step `Set up` Sheet: Step 1 of 3 (`What should Fader 1 do?`)
 
-Clicking `[Set up]` (or `[Fix]`) opens a non-destructive transactional sheet over `Strips`. Step 1 presents the five plain-English role cards (`Switch scenes (T-bar)` appears only on Crossfader in `Strips`; vertical strips show the four vertical-appropriate roles). Clicking `Cancel` or `Esc` at any step rolls back without touching live bindings.
+Clicking `[Set up]` (or `[Fix]`) opens a non-destructive transactional sheet over `Strips`. Step 1 presents the four plain-English role cards (`Switch scenes`, `Mix two layers`, `Show or hide a layer`, `Volume`) plus `Not used` on any strip, so controllers without a physical horizontal crossfader can assign any vertical fader to `Switch scenes`. Clicking `Cancel` or `Esc` at any step rolls back without touching live bindings.
 
 ![State 5: Set up Step 1 Role Cards](docs/screenshots/05-setup-step1-cards.png)
 
@@ -93,17 +93,23 @@ Step 3 lets the operator move the physical fader and watch the live response bar
 
 ![State 7: Set up Step 3 Try It](docs/screenshots/07-setup-step3-try-it.png)
 
-### State 8 — `[Show controller]` Live APC40 mkII SVG Desk Map
+### State 8 — `[Show controller]` Live APC40 mkII SVG Desk Map (Hardware-Verified)
 
-Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Akai APC40 mkII desk showing all 8 track faders, Master fader, clip/scene launch grid orientation silhouette, horizontal Crossfader, live `%` positions, short assignment labels, and color-coded state accents (`Active / Ready`, `At end (parked)`, `Needs pickup / Studio Mode`, `Needs attention`) updating event-driven on every MIDI/OBS change.
+Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Akai APC40 mkII desk showing labeled orientation zones above the faders (`"Clip launch pads (for desk orientation — Midi Fadester uses the faders below)"` and `"Scene pads"`), all 8 track faders (`Ch 1–8 CC 7`), Master fader (`Ch 1 CC 14`), horizontal Crossfader (`Ch 1 CC 15`), live `%` positions, short assignment labels, and color-coded state accents (`Active / Ready`, `At end (parked)`, `Needs pickup / Studio Mode`, `Needs attention`) updating event-driven on every MIDI/OBS change.
 
 ![State 8: Live APC40 mkII SVG Desk View](docs/screenshots/08-show-controller-svg.png)
 
-### State 9 — `Advanced` Tab (10-Row Power-User Table Preserved & Synchronized)
+### State 9 — `Advanced` Tab (Multi-Controller Profile Picker, 10-Row Power-User Table & High-Contrast Help Callout)
 
-Switching to `Advanced` preserves the full 10-row power-user matrix (`On`, `Strip`, `MIDI Control` + `Learn` / clear, `Reverse direction`, `What it does`, `Left`, `Right`, `Feel`, `Also fade audio`, stretched `Output` readout bar, `Smoothing (ms)`, `T-bar works in both directions`, `Import...` / `Export...`, and `Back to Strips`). Edits in `Advanced` and `Strips` share the exact same `mfd_engine` snapshot and round-trip instantaneously.
+Switching to `Advanced` provides the multi-controller `Profile:` picker (Verified & Beta controller layouts), `Load <Profile> Defaults`, the full 10-row power-user matrix (`On`, `Strip`, `MIDI Control` + `Learn` / clear, `Reverse direction`, `What it does`, `Left`, `Right`, `Feel`, `Also fade audio`, stretched `Output` readout bar), `Smoothing (ms)`, `T-bar works in both directions`, `Import...` / `Export...`, `Back to Strips`, and a full-width `13px` two-line callout comparing **Switch scenes (T-bar)** vs. **Mix two layers**. Edits in `Advanced` and `Strips` share the exact same `mfd_engine` snapshot and round-trip instantaneously.
 
 ![State 9: Advanced Tab](docs/screenshots/09-advanced-tab.png)
+
+### State 10 — `[Show controller]` Beta Controller Hardware Map (`Akai MIDImix` — Untested Manufacturer Spec)
+
+Selecting one of the four **Beta** profiles (`Akai APC mini mk2`, `Akai MIDImix`, `Korg nanoKONTROL2`, `Novation Launch Control XL`) filters `Strips` to the controller's physical fader count (`9` or `8`), displays an explicit amber `BETA — UNTESTED SPEC` badge, renders the matching upper desk silhouette (`3×8` channel EQ/aux knobs + `Send All` on `MIDImix`, clip pads on `APC mini mk2`, left-hand Transport & Markers + `1×8` pan knobs on `nanoKONTROL2`), shows each strip's exact factory MIDI CC binding (`Ch 1 CC 19..62`), and explains how to assign any vertical fader to `Switch scenes (T-bar)` or re-learn custom CCs.
+
+![State 10: Beta Akai MIDImix SVG Desk View](docs/screenshots/10-beta-midimix-svg.png)
 
 ---
 
