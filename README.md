@@ -4,6 +4,27 @@
 
 > **Disclaimer:** Midi Fadester is an independent third-party plugin for OBS Studio. It is not made, endorsed, or supported by the OBS Project or by Akai Professional / inMusic Brands.
 
+## Installation (OBS Studio 33, Windows x64)
+
+Download the latest release from [GitHub Releases](https://github.com/jbrick2070/midi-fadester/releases):
+
+- **Standard Install (`midi-fadester-<version>-windows-x64-Installer.exe` or `.zip`):** Installs into `C:\ProgramData\obs-studio\plugins\midi-fadester\` using the OBS 33 non-legacy plugin layout.
+- **Portable Install (`midi-fadester-<version>-windows-x64-Portable.zip`):** Extract directly into your portable OBS Studio 33 root folder (`<OBS root>\plugins\midi-fadester\`).
+
+Open OBS Studio 33 and choose **Tools → Midi Fadester — Video Mixer & Fader Control**. When an **Akai APC40 mkII** is connected or selected in **MIDI In**, the **Akai APC40 mkII** profile auto-selects (`Crossfader` on `Ch 1 CC 15`, `Track Faders 1–8` on `Ch 1–8 CC 7`, and `Master Fader` on `Ch 1 CC 14`).
+
+## Choosing Your Crossfader Mode: `Studio Mode T-Bar` vs. `Two-Source Crossfade (A ↔ B)`
+
+Midi Fadester supports two distinct ways to crossfade video—understanding the difference makes setup intuitive:
+
+1. **`Studio Mode T-Bar` (Default on Crossfader — Broadcast Switcher Style):**
+   - Works out of the box with all of your existing OBS scenes when **Studio Mode** is enabled.
+   - **Why the left `Preview` box swaps sides at the end of a throw:** In OBS Studio Mode, the **right box (`Program`)** is your actual live stream/recording output, while the **left box (`Preview`)** is your "next scene on deck" monitor. As you throw the crossfader, `Program` on the right fades smoothly into the new scene. When the throw reaches OBS's built-in `90%` completion threshold (the same threshold as dragging OBS's white T-bar slider with a mouse), OBS automatically swaps the old scene into the left `Preview` box so it is queued up for your next throw and resets its white T-bar slider to `0%`. Watch the **right (`Program`)** box to see your true live output—it never jumps. With **Bidirectional T-Bar (`0 → 1 then 1 → 0`)** checked, your next throw back in the opposite physical direction starts cleanly from `0%` without needing to reset the fader.
+2. **`Two-Source Crossfade (A ↔ B)` (DJ / Hardware Video Mixer Style — Fixed Left = A, Right = B):**
+   - If you want a traditional DJ or hardware video mixer crossfader where **Left (`0%`) is always Source A**, **Center (`50%`) is a 50/50 blend**, and **Right (`100%`) is always Source B** across the full `0–100%` throw with **no Studio Mode Preview/Program swap**:
+   - Place both video sources (or two nested scenes!) inside a single scene with **Source A** stacked directly below **Source B**.
+   - Set **Target Mode** to **`Two-Source Crossfade (A ↔ B)`** and choose **Source A** and **Source B**. The default **Dip-Free Dissolve** holds Source A at `100%` while Source B fades in (`0 → 100%`), giving a true optical crossfade with **0% black background bleed-through**.
+
 ## Development & AI Disclosure
 
 This project is developed with the assistance of AI coding tools under human direction, review, and hardware verification on OBS Studio 33.

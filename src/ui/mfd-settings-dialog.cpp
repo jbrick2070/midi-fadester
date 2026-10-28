@@ -282,9 +282,13 @@ public:
 		auto *footer = new QHBoxLayout();
 		auto *hint = new QLabel(
 			QStringLiteral(
-				"Tip: For Two-Source Crossfade (A \xE2\x86\x94 B), stack Source A below Source B in your scene. "
-				"Dip-Free Dissolve holds Source A at 100% while Source B fades in so 0% black background bleeds through. "
-				"Rail parking absorbs hardware jitter within 8% of each rail."),
+				"Tip \xE2\x80\x94 Studio Mode T-Bar vs. Two-Source Crossfade (A \xE2\x86\x94 B): "
+				"Studio Mode T-Bar transitions Preview \xE2\x86\x92 Program; when a throw finishes (90%), Studio Mode "
+				"swaps the old scene into the left Preview box and resets its T-bar slider while the live Program output "
+				"on the right stays smooth. For a DJ/video-mixer crossfader where Left is always Source A and Right is "
+				"always Source B (0\xE2\x80\x93"
+				"100% linear, no Preview swap, 0% black dip), stack Source A below Source B in one scene "
+				"and pick Two-Source Crossfade (A \xE2\x86\x94 B)."),
 			this);
 		hint->setWordWrap(true);
 		footer->addWidget(hint, 1);
@@ -637,6 +641,12 @@ private:
 					      static_cast<int>(MFD_TARGET_SINGLE_LAYER));
 			target_combo->addItem(QStringLiteral("Audio Volume (Cubic dB)"),
 					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
+			target_combo->setToolTip(QStringLiteral(
+				"Studio Mode T-Bar: transitions Preview \xE2\x86\x92 Program (swaps Preview on deck at 90% completion; live Program output stays smooth).\n"
+				"Two-Source Crossfade (A \xE2\x86\x94 B): DJ/video-mixer mode inside one scene \xE2\x80\x94 Left (0%) is always Source A, Right (100%) is always Source B, dip-free with no Preview swap.\n"
+				"Single Layer Opacity: fades one video source or nested scene 0\xE2\x80\x93"
+				"100%.\n"
+				"Audio Volume (Cubic dB): smooth 60 log10 audio fader curve."));
 			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot->target_type)));
 			table_->setCellWidget(row, 4, target_combo);
 
@@ -900,10 +910,22 @@ private:
 			if (prog_src) {
 				obs_source_release(prog_src);
 			}
+			if (prev_nm != prog_nm) {
+				last_stable_program_scene_ = prog_nm;
+			}
+			const QString pill_text =
+				(prev_nm == prog_nm && !last_stable_program_scene_.isEmpty() &&
+				 last_stable_program_scene_ != prev_nm)
+					? QStringLiteral("\xE2\x97\x8F Studio Mode: Transitioning [%1 \xE2\x86\x92 %2]")
+						  .arg(last_stable_program_scene_, prev_nm)
+					: QStringLiteral(
+						  "\xE2\x97\x8F Studio Mode: Preview [%1] \xE2\x86\x92 Program [%2]")
+						  .arg(prev_nm, prog_nm);
+			studio_status_label_->setToolTip(QStringLiteral(
+				"Right box (Program) is your live broadcast output. Left box (Preview) is the next scene on deck "
+				"and automatically swaps when a T-bar throw completes at 90%."));
 			set_label_text_and_style(
-				studio_status_label_,
-				QStringLiteral("\xE2\x97\x8F Studio Mode: Preview [%1] \xE2\x86\x92 Program [%2]")
-					.arg(prev_nm, prog_nm),
+				studio_status_label_, pill_text,
 				QStringLiteral("QLabel { background-color: #172554; color: #bfdbfe; padding: 4px 10px; "
 					       "border: 1px solid #2563eb; border-radius: 4px; font-weight: bold; }"));
 		} else {
@@ -1055,6 +1077,7 @@ private:
 	int rescan_tick_counter_ = 0;
 	bool manual_profile_override_ = false;
 	enum mfd_controller_profile manual_profile_ = MFD_PROFILE_GENERIC;
+	QString last_stable_program_scene_;
 	QPointer<QLabel> addr_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> learn_buttons_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> clear_buttons_[MFD_MAX_FADER_SLOTS];
