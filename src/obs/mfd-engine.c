@@ -184,6 +184,63 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	}
 }
 
+void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_slot *slot,
+				      enum mfd_target_type new_target)
+{
+	if (!eng || !slot) {
+		return;
+	}
+	enum mfd_target_type prev_target = slot->target_type;
+	slot->target_type = new_target;
+	if (prev_target == new_target) {
+		configure_slot_takeover_mode(eng, slot);
+		if (new_target == MFD_TARGET_TBAR && slot->takeover.state != MFD_TAKEOVER_PARKED) {
+			slot->tbar_state = MFD_TBAR_IDLE;
+			mfd_engine_unlatch_tbar(eng);
+		} else if (new_target != MFD_TARGET_TBAR) {
+			slot->tbar_state = MFD_TBAR_IDLE;
+		}
+		return;
+	}
+
+	bool had_raw = slot->takeover.has_last_fader;
+	float preserved_raw = slot->last_raw_norm;
+	if (prev_target == MFD_TARGET_TBAR || new_target == MFD_TARGET_TBAR) {
+		mfd_engine_unlatch_tbar(eng);
+	}
+
+	float init_val = (new_target == MFD_TARGET_SINGLE_LAYER || new_target == MFD_TARGET_AUDIO_VOLUME) ? 1.0f : 0.0f;
+	bool bidir = (new_target == MFD_TARGET_TBAR) ? eng->tbar_bidirectional_flip : false;
+	mfd_smoother_reset(&slot->smoother, init_val);
+	mfd_takeover_init(&slot->takeover, init_val, MFD_DEFAULT_PICKUP_THRESHOLD, bidir);
+	configure_slot_takeover_mode(eng, slot);
+
+	slot->tbar_state = MFD_TBAR_IDLE;
+	slot->tbar_midi_active = false;
+	slot->tbar_from_idle_band = false;
+	slot->auto_fade_active = false;
+	slot->last_applied_val = init_val;
+	slot->last_alpha_a = 1.0f;
+	slot->last_alpha_b = 0.0f;
+	slot->last_audio_mul = mfd_deflection_to_mul(init_val);
+	slot->last_audio_db = mfd_deflection_to_db(init_val);
+
+	if (had_raw) {
+		slot->last_raw_norm = preserved_raw;
+		slot->takeover.has_last_fader = true;
+		slot->takeover.last_raw_fader = preserved_raw;
+		slot->takeover.last_fader = preserved_raw;
+		float diff = preserved_raw - init_val;
+		if (fabsf(diff) > slot->takeover.pickup_threshold) {
+			slot->takeover.hint = (diff < 0.0f) ? MFD_HINT_MOVE_UP : MFD_HINT_MOVE_DOWN;
+		} else {
+			slot->takeover.hint = MFD_HINT_NONE;
+		}
+	} else {
+		slot->last_raw_norm = init_val;
+	}
+}
+
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 {
 	if (!eng) {

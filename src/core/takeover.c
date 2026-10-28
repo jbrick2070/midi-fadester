@@ -481,30 +481,82 @@ float mfd_takeover_mix_to_throw_progress(const struct mfd_takeover *t, float mix
 	return m;
 }
 
+int mfd_calibrated_percent(float calibrated_norm)
+{
+	return (int)lroundf(clamp01(calibrated_norm) * 100.0f);
+}
+
 int mfd_takeover_format_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type, float applied_val,
 				   float alpha_a, float alpha_b, float db_val, char *out_text, size_t text_size)
 {
-	int pct = (int)lroundf(clamp01(applied_val) * 100.0f);
+	int pct = mfd_calibrated_percent(applied_val);
 	if (!out_text || text_size == 0U) {
 		return pct;
 	}
 
 	if (t && t->state == MFD_TAKEOVER_WAITING) {
-		int tgt_pct = (int)lroundf(clamp01(t->target_obs) * 100.0f);
+		int tgt_pct = mfd_calibrated_percent(t->target_obs);
 		const char *arrow = (t->hint == MFD_HINT_MOVE_UP) ? "\xE2\x86\x91" : "\xE2\x86\x93";
 		snprintf(out_text, text_size, "%s %d%%", arrow, tgt_pct);
 		return tgt_pct;
 	}
 
 	if (target_type == MFD_TARGET_TWO_SOURCE_MIX) {
-		int a_pct = (int)lroundf(clamp01(alpha_a) * 100.0f);
-		int b_pct = (int)lroundf(clamp01(alpha_b) * 100.0f);
+		int a_pct = mfd_calibrated_percent(alpha_a);
+		int b_pct = mfd_calibrated_percent(alpha_b);
 		snprintf(out_text, text_size, "%d%% (A:%d%% B:%d%%)", pct, a_pct, b_pct);
 	} else if (target_type == MFD_TARGET_AUDIO_VOLUME) {
 		if (isfinite(db_val)) {
 			snprintf(out_text, text_size, "%.1f dB (%d%%)", (double)db_val, pct);
 		} else {
 			snprintf(out_text, text_size, "-inf dB (0%%)");
+		}
+	} else {
+		snprintf(out_text, text_size, "%d%%", pct);
+	}
+
+	return pct;
+}
+
+int mfd_takeover_format_calibrated_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type,
+					      float calibrated_norm, bool available, const char *reason, float alpha_a,
+					      float alpha_b, float db_val, char *out_text, size_t text_size)
+{
+	int pct = mfd_calibrated_percent(calibrated_norm);
+	if (!out_text || text_size == 0U) {
+		return pct;
+	}
+
+	if (target_type == MFD_TARGET_UNASSIGNED) {
+		snprintf(out_text, text_size, "%d%%", pct);
+		return pct;
+	}
+
+	if (!available) {
+		if (reason && reason[0] != '\0') {
+			snprintf(out_text, text_size, "%d%% \xE2\x80\x94 %s", pct, reason);
+		} else {
+			snprintf(out_text, text_size, "%d%%", pct);
+		}
+		return pct;
+	}
+
+	if (t && t->state == MFD_TAKEOVER_WAITING && t->hint != MFD_HINT_NONE) {
+		int tgt_pct = mfd_calibrated_percent(t->target_obs);
+		const char *arrow = (t->hint == MFD_HINT_MOVE_UP) ? "\xE2\x86\x91" : "\xE2\x86\x93";
+		snprintf(out_text, text_size, "%d%% (%s %d%%)", pct, arrow, tgt_pct);
+		return pct;
+	}
+
+	if (target_type == MFD_TARGET_TWO_SOURCE_MIX) {
+		int a_pct = mfd_calibrated_percent(alpha_a);
+		int b_pct = mfd_calibrated_percent(alpha_b);
+		snprintf(out_text, text_size, "%d%% (A:%d%% B:%d%%)", pct, a_pct, b_pct);
+	} else if (target_type == MFD_TARGET_AUDIO_VOLUME) {
+		if (isfinite(db_val)) {
+			snprintf(out_text, text_size, "%.1f dB (%d%%)", (double)db_val, pct);
+		} else {
+			snprintf(out_text, text_size, "-inf dB (%d%%)", pct);
 		}
 	} else {
 		snprintf(out_text, text_size, "%d%%", pct);

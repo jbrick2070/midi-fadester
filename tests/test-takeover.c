@@ -324,6 +324,39 @@ int main(void)
 	REQUIRE(mfd_takeover_step(&t_top_start, 0.5f, &out));
 	REQUIRE(fabsf(out - 0.5f) < 1e-6f);
 
+	/*
+	 * 8. Exact Calibrated Output Readout (R-FEEL-2 / D-12):
+	 *    CC 51 of [0, 127] (51/127 = 0.4015748) MUST always format and return 40% (never 33% from an unpark
+	 *    rescale), and must keep moving with calibrated_norm even while !available or WAITING.
+	 */
+	const float cc51_norm = 51.0f / 127.0f;
+	REQUIRE(mfd_calibrated_percent(cc51_norm) == 40);
+	REQUIRE(mfd_calibrated_percent(0.0f) == 0);
+	REQUIRE(mfd_calibrated_percent(1.0f) == 100);
+
+	/* Advance two_rail from bottom-parked unpark rescale [0.10, 1.00] to CC 51: effective is ~0.335 (34%),
+	 * yet calibrated output bar percentage MUST still equal 40%! */
+	struct mfd_takeover t_rescaled;
+	mfd_takeover_init(&t_rescaled, 0.0f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_rescaled, true);
+	mfd_takeover_notify_rail_completed(&t_rescaled, false, 0.0f);
+	REQUIRE(mfd_takeover_step(&t_rescaled, 0.10f,
+				  &out)); /* unparks at 0.10 -> rescales [0.10, 1.00] -> [0.0, 1.0] */
+	REQUIRE(mfd_takeover_step(&t_rescaled, cc51_norm, &out));
+	REQUIRE(fabsf(out - ((cc51_norm - 0.10f) / 0.90f)) < 1e-5f); /* effective ~ 0.3351 (33.5%) */
+	pct = mfd_takeover_format_calibrated_output_bar(&t_rescaled, MFD_TARGET_TWO_SOURCE_MIX, cc51_norm, true, "",
+							1.0f, out, 0.0f, bar_text, sizeof(bar_text));
+	REQUIRE(pct == 40);
+	REQUIRE(strncmp(bar_text, "40% ", 4) == 0);
+
+	/* While !available ("Studio Mode is off."), calibrated bar still reports 40% at CC 51 */
+	pct = mfd_takeover_format_calibrated_output_bar(&t_rescaled, MFD_TARGET_TBAR, cc51_norm, false,
+							"Studio Mode is off.", 1.0f, 0.0f, 0.0f, bar_text,
+							sizeof(bar_text));
+	REQUIRE(pct == 40);
+	REQUIRE(strstr(bar_text, "40%") != NULL);
+	REQUIRE(strstr(bar_text, "Studio Mode is off.") != NULL);
+
 	printf("test-takeover: PASS\n");
 	return 0;
 }

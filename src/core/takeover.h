@@ -68,8 +68,12 @@ void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val);
 float mfd_takeover_throw_to_mix_value(const struct mfd_takeover *t, float throw_progress);
 float mfd_takeover_mix_to_throw_progress(const struct mfd_takeover *t, float mix_value);
 
+int mfd_calibrated_percent(float calibrated_norm);
 int mfd_takeover_format_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type, float applied_val,
 				   float alpha_a, float alpha_b, float db_val, char *out_text, size_t text_size);
+int mfd_takeover_format_calibrated_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type,
+					      float calibrated_norm, bool available, const char *reason, float alpha_a,
+					      float alpha_b, float db_val, char *out_text, size_t text_size);
 
 #ifdef __cplusplus
 }

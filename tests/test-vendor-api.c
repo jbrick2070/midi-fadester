@@ -488,7 +488,7 @@ int main(void)
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.1.2") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.1.3") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");
 	REQUIRE(build_obj != NULL);
 	const char *b_commit = obs_data_get_string(build_obj, "commit");
@@ -1755,6 +1755,72 @@ int main(void)
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(fabsf(eng.fader_slots[3].last_raw_norm - (100.0f / 127.0f)) < 1e-5f);
 	REQUIRE(fake_sg.total_volume_writes == vol_writes_before);
+
+	/*
+	 * 15. 0.1.3 Exact Calibrated Output Readout & Mode-Switch Reset (R-FEEL-2 / D-12):
+	 *     - Reproduce the exact 0.1.2 bug: park crossfader in T-bar mode at CC 127, unpark or park at bottom
+	 *       with a non-identity rescale (or switch from parked/rescaled two-rail mode), leave physical fader at
+	 *       CC 51 (40%), then switch crossfader mode to crossfade_ab!
+	 *     - Assert: switching mode resets takeover cleanly to Idle (WAITING, parked=false, polarity_reversed=false,
+	 *       lower_rescale_origin=0.0, upper_rescale_origin=1.0, tbar_state=MFD_TBAR_IDLE), preserves last_raw_norm
+	 *       at 51/127 (40%), and once picked up and moved back to CC 51, BOTH calibrated readout AND applied mix
+	 *       equal 51/127 (40%) with zero carried-over rescale!
+	 */
+	fake_sg_scene_add_item(&fake_sg, "Blue", "Color"); /* Blue now has both Color and Color 2 */
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+	eng.studio_mode_override = true;
+	mfd_engine_reevaluate_slots(&eng, false);
+
+	/* Complete a T-bar throw 0 -> 127 (parked at top rail), unpark at CC 114 (reversed polarity, rescale_origin ~0.8976),
+	 * move to CC 51 (40% physical, but ~70% reversed throw!) */
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	push_midi_cc(&eng, 0, 15, 0);
+	push_midi_cc(&eng, 0, 15, 64);
+	push_midi_cc(&eng, 0, 15, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	push_midi_cc(&eng, 0, 15, 114);
+	push_midi_cc(&eng, 0, 15, 51);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+	REQUIRE(eng.fader_slots[0].takeover.polarity_reversed);
+	REQUIRE(mfd_calibrated_percent(eng.fader_slots[0].last_raw_norm) == 40);
+
+	/* Now switch crossfader mode from tbar -> crossfade_ab ("Color" <-> "Color 2" in scene "Blue") */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "scene", "Blue");
+	obs_data_set_string(req, "source_a", "Color");
+	obs_data_set_string(req, "source_b", "Color 2");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(obs_data_get_bool(res, "available"));
+	REQUIRE(!obs_data_get_bool(res, "parked"));
+	REQUIRE(strcmp(obs_data_get_string(res, "takeover_pending"), "down") == 0);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	REQUIRE(eng.fader_slots[0].takeover.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(!eng.fader_slots[0].takeover.polarity_reversed);
+	REQUIRE(fabsf(eng.fader_slots[0].takeover.lower_rescale_origin - 0.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[0].takeover.upper_rescale_origin - 1.0f) < 1e-6f);
+	REQUIRE(mfd_calibrated_percent(eng.fader_slots[0].last_raw_norm) == 40);
+
+	/* Pick up 0% at CC 0 and move to CC 51 -> applied mix and calibrated readout are BOTH exact 51/127 (40%, NOT 33%!) */
+	push_midi_cc(&eng, 0, 15, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	push_midi_cc(&eng, 0, 15, 51);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].takeover.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(fabsf(eng.fader_slots[0].last_raw_norm - (51.0f / 127.0f)) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[0].last_applied_val - (51.0f / 127.0f)) < 1e-6f);
+	REQUIRE(mfd_calibrated_percent(eng.fader_slots[0].last_raw_norm) == 40);
+	REQUIRE(mfd_calibrated_percent(eng.fader_slots[0].last_applied_val) == 40);
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");

@@ -149,6 +149,8 @@ void mfd_engine_on_external_tbar_reset(struct mfd_engine *eng);
 void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng);
 
 void mfd_engine_load_apc40_defaults(struct mfd_engine *eng);
+void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_slot *slot,
+				      enum mfd_target_type new_target);
 void mfd_engine_set_slot_calibration(struct mfd_engine *eng, int slot_index, int cal_min, int cal_max);
 bool mfd_engine_lookup_persisted_calibration(const struct mfd_engine *eng, const char *profile_name,
 					     const struct mfd_midi_addr *addr, struct mfd_control_calibration *out_cal);

@@ -727,31 +727,8 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	}
 
 	if (has_target) {
-		enum mfd_target_type prev_target = s->target_type;
-		s->target_type = new_target;
 		s->enabled = true;
-		bool is_tbar = (s->target_type == MFD_TARGET_TBAR);
-		bool is_two_rail = (s->target_type == MFD_TARGET_TWO_SOURCE_MIX ||
-				    s->target_type == MFD_TARGET_SINGLE_LAYER ||
-				    s->target_type == MFD_TARGET_AUDIO_VOLUME);
-		if (prev_target == MFD_TARGET_UNASSIGNED && new_target != MFD_TARGET_UNASSIGNED) {
-			float init_val =
-				(new_target == MFD_TARGET_SINGLE_LAYER || new_target == MFD_TARGET_AUDIO_VOLUME) ? 1.0f
-														 : 0.0f;
-			mfd_smoother_reset(&s->smoother, init_val);
-			mfd_takeover_init(&s->takeover, init_val, MFD_DEFAULT_PICKUP_THRESHOLD,
-					  is_tbar ? eng->tbar_bidirectional_flip : false);
-			s->last_raw_norm = init_val;
-			s->last_applied_val = init_val;
-		}
-		s->takeover.bidirectional_flip = is_tbar ? eng->tbar_bidirectional_flip : false;
-		mfd_takeover_set_two_rail_mode(&s->takeover, is_two_rail);
-		if (is_tbar && s->takeover.state != MFD_TAKEOVER_PARKED) {
-			s->tbar_state = MFD_TBAR_IDLE;
-			mfd_engine_unlatch_tbar(eng);
-		} else if (!is_tbar) {
-			s->tbar_state = MFD_TBAR_IDLE;
-		}
+		mfd_engine_reset_slot_mode_state(eng, s, new_target);
 	}
 	if (has_cal_min || has_cal_max) {
 		mfd_engine_set_slot_calibration(eng, idx, new_cal_min, new_cal_max);
