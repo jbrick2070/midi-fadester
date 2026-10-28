@@ -21,6 +21,7 @@
 !PLAN-UI.md
 !TESTING.md
 !/docs
+!/scripts
 
 # Exclude lock files
 *.lock.json

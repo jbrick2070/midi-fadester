@@ -109,7 +109,19 @@ Switching to `Advanced` preserves the full 10-row power-user matrix (`On`, `Stri
 
 ## 3. Live Portable OBS 33 + `loopMIDI` Self-Test (`MFD_SELF_TEST=1`)
 
-When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback device active, `src/obs/mfd-vendor-api.c` runs the full hardware-timed integration suite inside real OBS Studio 33.0.0:
+Run the live hardware-loopback and GPU pixel suite via `scripts/run-live-selftest.ps1`, which targets Midi Fadester's **dedicated Portable OBS copy** (`C:\Users\jeffr\OBS-Studio-33-Portable-MidiFadester`) so it never contends with sibling plugin test harnesses sharing `C:\Users\jeffr\OBS-Studio-33-Portable`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-live-selftest.ps1
+```
+
+### Portable OBS Isolation & State-Hygiene Guarantees
+1. **Dedicated Portable OBS Copy + Process Ownership Check:** `scripts/run-live-selftest.ps1` defaults to `C:\Users\jeffr\OBS-Studio-33-Portable-MidiFadester`, ignores `obs64.exe` processes running from any other directory, and aborts rather than closing `obs64.exe` if any `obs64.exe` or sibling test runner (`obs-playlister`, `visual-sidechain`, `ctest`, `pytest`) is actively using the target root.
+2. **Studio Mode Turned Off & `user.ini` Restored:** `run_live_selftest_worker()` in `src/obs/mfd-tbar.cpp` explicitly turns Studio Mode off (`obs_frontend_set_preview_program_mode(false)`) before teardown (`studio_off=1`), and `scripts/run-live-selftest.ps1` backs up and restores `config\obs-studio\user.ini` byte-for-byte after `obs64.exe` exits.
+3. **Scene Collection (`basic\scenes\Untitled.json`) Protected & Restored:** `on_save_callback` in `src/obs/mfd-engine.c` skips writing `"midi_fadester_scene_collection"` when `MFD_SELF_TEST=1`, `run_live_selftest_worker()` detaches its opacity filters and removes all self-test scenes/sources, and `scripts/run-live-selftest.ps1` backs up and restores `basic\scenes\Untitled.json`, `Untitled.json.bak`, and `plugin_config\midi-fadester\global.json` byte-for-byte.
+
+### Live Verification Matrix
+When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback device active, `src/obs/mfd-tbar.cpp` runs the full hardware-timed integration suite inside real OBS Studio 33.0.0:
 
 - **GPU Pixel & Stack-Order Checks (`SCREENSHOT CHECK` & `SCENE SIGNALS`):**
   - Verifies HLSL `mfd_layer_mixer.effect` compositing via `obs-websocket` `GetSourceScreenshot` at `0%`, `50%`, and `100%` crossfade, plus T-bar mid-throw (`CC 119` -> `~93%` mix, asserting OBS does **not** snap early at `90%`).

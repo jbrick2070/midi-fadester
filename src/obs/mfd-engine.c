@@ -2969,6 +2969,11 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 
 	mfd_engine_lock(eng);
 	if (saving) {
+		const char *self_test_env = getenv("MFD_SELF_TEST");
+		if (self_test_env && strcmp(self_test_env, "1") == 0) {
+			mfd_engine_unlock(eng);
+			return;
+		}
 		obs_data_t *obj = obs_data_create();
 		serialize_slots(eng, obj);
 		obs_data_set_obj(save_data, MFD_SAVE_DATA_KEY, obj);

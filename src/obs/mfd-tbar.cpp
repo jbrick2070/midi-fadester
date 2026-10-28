@@ -2321,21 +2321,20 @@ static void run_live_selftest_worker(void)
 	}
 	obs_data_release(req);
 
-	/* Clean up test scene and restore previous state on UI thread */
+	/* Clean up test scenes/sources and always leave Studio Mode OFF before closing OBS */
+	bool studio_off_after = false;
 	QMetaObject::invokeMethod(
 		main_win,
 		[&]() {
-			if (!was_studio) {
+			if (obs_frontend_preview_program_mode_active()) {
 				obs_frontend_set_preview_program_mode(false);
 				refresh_studio_mode_state_on_ui_thread();
 			}
 			if (prev_scene) {
 				obs_frontend_set_current_scene(prev_scene);
-				if (obs_frontend_preview_program_mode_active()) {
-					obs_frontend_set_current_preview_scene(prev_scene);
-				}
 				obs_source_release(prev_scene);
 			}
+			studio_off_after = !obs_frontend_preview_program_mode_active();
 		},
 		Qt::BlockingQueuedConnection);
 
@@ -2344,11 +2343,24 @@ static void run_live_selftest_worker(void)
 	QMetaObject::invokeMethod(
 		main_win,
 		[&]() {
+			auto detach_opacity_filter = [](obs_source_t *src) {
+				if (!src) {
+					return;
+				}
+				obs_source_t *flt =
+					obs_source_get_filter_by_name(src, MFD_INTERNAL_OPACITY_FILTER_NAME);
+				if (flt) {
+					obs_source_filter_remove(src, flt);
+					obs_source_release(flt);
+				}
+			};
 			if (src_a) {
+				detach_opacity_filter(src_a);
 				obs_source_remove(src_a);
 				obs_source_release(src_a);
 			}
 			if (src_b) {
+				detach_opacity_filter(src_b);
 				obs_source_remove(src_b);
 				obs_source_release(src_b);
 			}
@@ -2382,11 +2394,11 @@ static void run_live_selftest_worker(void)
 	base_set_log_handler(g_orig_log_handler, g_orig_log_param);
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
+		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d studio_off=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
 		(int)ws_build_ok, (int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end,
 		(int)screenshot_all_pass, (int)loopmidi_tested, (int)loopmidi_pass, slider_mid, (int)mid_ok,
-		(int)end_ok, (int)completed, (int)(bridge_set_ok && bridge_get_ok), bridge_get_val, sig_cap.value,
-		sig_cap.slot, vs_fader2_val);
+		(int)end_ok, (int)completed, (int)studio_off_after, (int)(bridge_set_ok && bridge_get_ok),
+		bridge_get_val, sig_cap.value, sig_cap.slot, vs_fader2_val);
 }
 
 static std::thread g_selftest_thread;
