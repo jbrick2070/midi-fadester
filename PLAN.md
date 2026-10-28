@@ -216,3 +216,15 @@ C:\midi-fadester\
 | `R4` | **WinMM deadlock if `midiInClose` or `midiOut*` is called inside `midiInProc`** | `midiInProc` only pushes 8-byte events into the lock-free SPSC ring buffer (`R-THR-1`). All device open/close calls happen on the UI thread. |
 | `R5` | **WinMM exclusive device lock (`MMSYSERR_ALLOCATED`)** when another app holds the APC40 mkII | Never fail silently (`R-MIDI-1`); display an explicit error banner naming the device and explaining that WinMM allows only one app at a time, with a 1-click **Reconnect** button. |
 | `R6` | **Filter `obs_source_update` overhead during fast fader sweeps** | Layer opacity updates write directly to atomic floats in `mfd_layer_filter` (zero `obs_source_update` cost during a fade!). |
+
+---
+
+## 6. Autonomous Overnight Decisions (`D-8+`, 2026-10-27)
+
+| ID | Decision | One-Line Reasoning |
+|---|---|---|
+| `D-8` | Apply the `6 %` T-bar origin start band symmetrically (`x > 0.06` normal polarity, `x < 0.94` reversed polarity) with throw progress $t$ rescaled to `0` at `0.06` / `0.94` on `Idle -> Throwing`, while keeping `Throwing -> Idle` abort at `x <= 0.03` / `x >= 0.97`. | Gives both rails an identical `3 %` hysteresis deadband (`CC 4..7` and `CC 120..123`) so rail jitter never starts spurious transitions regardless of current bidirectional polarity. |
+| `D-9` | Normalize all `get_state` and UI `reason` strings to the exact trailing-period sentences in `MIDI-FADESTER-UI.md` (`"Studio Mode is off."`, `"Not used. Click to set up."`, `"<Layer> is no longer in scene <Scene>."`, `"Scene <Scene> was deleted."`, `"<Source> has no audio."`). | Ensures the engine, Tools dialog, and external obs-websocket surfaces share a single canonical sentence source of truth without string rewriting. |
+| `D-10` | Ground scene stack-order detection in `libobs/obs-scene.c` (`scene->first_item` = index `0` rendered first/bottom; higher index = rendered later/on top), with an optional pinned `scene` per slot and automatic scene resolution when `scene` is omitted. | Preserves full v1 `API-CONTRACT.md` backward compatibility while guaranteeing Left (`0 %`) and Right (`100 %`) always show the user's chosen Left and Right layers regardless of scene stacking order. |
+| `D-11` | Check `!obs_source_removed(src)` in `libobs` scene/source queries and subscribe to both `"source_remove"` and `"source_destroy"` on `obs_get_signal_handler()`. | `libobs` fires `"source_remove"` after setting `s->removed = true` but before unlinking the name from `public_sources`, so checking `obs_source_removed` updates preconditions immediately on deletion with zero polling. |
+| `D-12` | Report the Output bar percentage directly from the calibrated position `last_raw_norm` ($\text{round}(x \times 100)$) in all states, and reset takeover (`WAITING`, `parked = false`, identity `[0, 1]` rescale, `polarity_reversed = false`) plus `tbar_state = MFD_TBAR_IDLE` whenever a slot's `target_type` changes. | Prevents carried-over rescale anchors or parked/throw flags from distorting the live readout or the next mode's fader mapping. |
