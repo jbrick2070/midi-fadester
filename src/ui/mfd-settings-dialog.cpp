@@ -908,22 +908,28 @@ private:
 		table_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 		root->addWidget(table_, 1);
 
+		auto *hint = new QLabel(
+			QStringLiteral(
+				"<b style='color:#f8fafc;'>Switch scenes (T-bar):</b> Fades Preview &rarr; "
+				"Program from 0&ndash;100%. Reach the far end to finish, or return to the start "
+				"to cancel.<br>"
+				"<b style='color:#f8fafc;'>Mix two layers:</b> Crossfades Left and Right in one scene "
+				"(layer order is detected automatically)."),
+			adv_tab);
+		hint->setObjectName(QStringLiteral("mfdAdvHelpLabel"));
+		hint->setTextFormat(Qt::RichText);
+		hint->setWordWrap(true);
+		hint->setStyleSheet(QStringLiteral(
+			"QLabel#mfdAdvHelpLabel { background-color: #111827; color: #cbd5e1; font-size: 13px; "
+			"padding: 7px 12px; border: 1px solid #1e293b; border-radius: 5px; }"));
+		root->addWidget(hint);
+
 		auto *footer = new QHBoxLayout();
 		auto *btn_back_strips = new QPushButton(QStringLiteral("Back to Strips"), adv_tab);
 		btn_back_strips->setObjectName(QStringLiteral("mfdBtnBackToStrips"));
 		footer->addWidget(btn_back_strips);
 		connect(btn_back_strips, &QPushButton::clicked, this, [this]() { main_tabs_->setCurrentIndex(0); });
-
-		auto *hint = new QLabel(
-			QStringLiteral(
-				"Switch scenes (T-bar) drives Preview \xE2\x86\x92 Program linearly 0\xE2\x80\x93"
-				"100% and completes in the 3% target rail zone (returning to the 3% origin rail "
-				"cancels). Mix two layers fades Left and Right inside one scene with automatic "
-				"stack-order detection."),
-			adv_tab);
-		hint->setWordWrap(true);
-		hint->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		footer->addWidget(hint, 1);
+		footer->addStretch(1);
 
 		auto *btn_import = new QPushButton(QStringLiteral("Import..."), adv_tab);
 		btn_import->setObjectName(QStringLiteral("mfdBtnImport"));

@@ -130,22 +130,28 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 				  "font-size='13'>%2</text>")
 			   .arg(dot_hex, xml_escape(QString::fromUtf8(ctrl.status_sentence))));
 
-	/* Decorative 8x4 clip launch grid silhouette for instant physical desk orientation */
+	/* Labeled clip-launch & scene-launch pad zones for instant physical desk orientation */
+	svg.append(QStringLiteral(
+		"<rect x='36' y='60' width='674' height='74' rx='6' fill='#0d1526' stroke='#1e293b' stroke-width='1'/>"
+		"<text x='46' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' font-size='11.5' "
+		"font-weight='bold'>Clip launch pads (for desk orientation \xE2\x80\x94 Midi Fadester uses the faders below)</text>"
+		"<rect x='734' y='60' width='88' height='74' rx='6' fill='#0d1526' stroke='#1e293b' stroke-width='1'/>"
+		"<text x='778' y='76' fill='#94a3b8' font-family='Segoe UI, sans-serif' font-size='11.5' "
+		"font-weight='bold' text-anchor='middle'>Scene pads</text>"));
 	for (int col = 0; col < 8; ++col) {
 		const int gx = 42 + col * 84;
-		for (int row = 0; row < 3; ++row) {
-			const int gy = 68 + row * 22;
+		for (int row = 0; row < 2; ++row) {
+			const int gy = 86 + row * 21;
 			svg.append(QStringLiteral("<rect x='%1' y='%2' width='66' height='15' rx='3' "
-						  "fill='#1e293b' stroke='#334155' stroke-width='1'/>")
+						  "fill='#172033' stroke='#334155' stroke-width='1'/>")
 					   .arg(gx)
 					   .arg(gy));
 		}
 	}
-	/* Scene launch column silhouette above Master */
-	for (int row = 0; row < 3; ++row) {
-		const int gy = 68 + row * 22;
-		svg.append(QStringLiteral("<rect x='740' y='%1' width='76' height='15' rx='3' "
-					  "fill='#1e293b' stroke='#475569' stroke-width='1'/>")
+	for (int row = 0; row < 2; ++row) {
+		const int gy = 86 + row * 21;
+		svg.append(QStringLiteral("<rect x='744' y='%1' width='68' height='15' rx='3' "
+					  "fill='#172033' stroke='#334155' stroke-width='1'/>")
 				   .arg(gy));
 	}
 

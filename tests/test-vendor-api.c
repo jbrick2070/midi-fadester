@@ -658,7 +658,7 @@ int main(void)
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
-	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.2.1") == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.2.2") == 0);
 	obs_data_t *build_obj = obs_data_get_obj(res, "build");
 	REQUIRE(build_obj != NULL);
 	const char *b_commit = obs_data_get_string(build_obj, "commit");

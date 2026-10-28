@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-svg-canvas.hpp"
 #include "obs/mfd-engine.h"
@@ -976,6 +977,13 @@ int main(int argc, char **argv)
 		static_cast<MfdSvgCanvas *>(must_find<QWidget>(svg_dlg, QStringLiteral("mfdControllerSvgCanvas")));
 	REQUIRE(svg_canvas != nullptr);
 	REQUIRE(svg_canvas->is_valid());
+	{
+		struct mfd_ui_snapshot svg_snap {};
+		mfd_engine_get_ui_snapshot(&eng, &svg_snap);
+		const QByteArray desk_xml = mfd_make_apc40_desk_svg(svg_snap);
+		REQUIRE(desk_xml.contains("Clip launch pads"));
+		REQUIRE(desk_xml.contains("Scene pads"));
+	}
 
 	capture_and_verify_png(svg_dlg, screenshot_dir, QStringLiteral("08-show-controller-svg.png"));
 	svg_dlg->close();
@@ -988,6 +996,10 @@ int main(int argc, char **argv)
 	REQUIRE(tabs->currentIndex() == 1);
 
 	auto *table = must_find<QTableWidget>(dlg.get(), QStringLiteral("mfdAdvancedTable"));
+	auto *adv_help = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvHelpLabel"));
+	REQUIRE(!adv_help->isHidden());
+	REQUIRE(adv_help->text().contains(QStringLiteral("Switch scenes (T-bar):")));
+	REQUIRE(adv_help->text().contains(QStringLiteral("Mix two layers:")));
 	REQUIRE(table->horizontalHeaderItem(4)->text() == QStringLiteral("What it does"));
 	REQUIRE(table->horizontalHeaderItem(5)->text() == QStringLiteral("Left"));
 	REQUIRE(table->horizontalHeaderItem(6)->text() == QStringLiteral("Right"));
