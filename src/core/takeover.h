@@ -16,6 +16,7 @@ extern "C" {
 
 #define MFD_DEFAULT_PICKUP_THRESHOLD 0.015f
 #define MFD_THROW_COMPLETE_THRESHOLD 0.90f
+#define MFD_LOWER_RAIL_COMPLETE_THRESHOLD 0.10f
 #define MFD_PARKED_UNPARK_HYSTERESIS 0.08f
 
 enum mfd_takeover_state {
@@ -39,16 +40,28 @@ struct mfd_takeover {
 	float pickup_threshold;
 	float parked_peak;
 	float rescale_origin;
+	float lower_rescale_origin;
+	float upper_rescale_origin;
 	bool has_last_fader;
 	bool bidirectional_flip;
+	bool two_rail_mode;
 	bool polarity_reversed;
 	bool parked_at_upper_rail;
+	bool armed_lower_rail;
+	bool armed_upper_rail;
+	bool dial_reversed;
+	bool midi_at_rail_deadzone;
 };
 
 void mfd_takeover_init(struct mfd_takeover *t, float initial_obs_val, float pickup_threshold, bool bidirectional_flip);
+void mfd_takeover_set_two_rail_mode(struct mfd_takeover *t, bool two_rail_mode);
 void mfd_takeover_sync_external(struct mfd_takeover *t, float new_obs_val);
 bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_effective_norm);
 void mfd_takeover_notify_tbar_completed(struct mfd_takeover *t);
+bool mfd_takeover_check_two_rail_completion(const struct mfd_takeover *t, float val, float *out_rail_val,
+					    bool *out_upper_rail);
+void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail);
+void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val);
 float mfd_takeover_throw_to_mix_value(const struct mfd_takeover *t, float throw_progress);
 float mfd_takeover_mix_to_throw_progress(const struct mfd_takeover *t, float mix_value);
 

@@ -48,6 +48,9 @@ struct mfd_fader_slot {
 	float last_applied_val;
 	float last_alpha_a;
 	float last_alpha_b;
+	float last_audio_mul;
+	float last_audio_db;
+	uint32_t output_write_count;
 
 	/* Auto-fade state */
 	bool auto_fade_active;

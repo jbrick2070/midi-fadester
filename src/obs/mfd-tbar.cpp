@@ -542,8 +542,79 @@ static void run_live_selftest_worker(void)
 	}
 	obs_data_release(req);
 
-	/* Allow the vendor API T-bar release transition to finish before loopMIDI sweeps */
+	/* Verify get_state exposes parked=true, repeated "Finish T-bar" is a one-shot no-op, and nudge_fader unparks */
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	int rel_after_first_finish = g_tbar_release_count.load(std::memory_order_relaxed);
+	bool ws_parked_true = false;
+	obs_data_t *gs_res = call_real_ws_vendor_request("get_state", nullptr);
+	if (gs_res) {
+		obs_data_array_t *gs_slots = obs_data_get_array(gs_res, "slots");
+		if (gs_slots) {
+			obs_data_t *gs_s0 = obs_data_array_item(gs_slots, 0);
+			if (gs_s0) {
+				ws_parked_true = obs_data_get_bool(gs_s0, "parked");
+				obs_data_release(gs_s0);
+			}
+			obs_data_array_release(gs_slots);
+		}
+		obs_data_release(gs_res);
+	}
+
+	req = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "value", 1.0);
+	obs_data_set_bool(req, "release", true);
+	res = call_real_ws_vendor_request("set_fader_value", req);
+	if (res) {
+		obs_data_release(res);
+	}
+	obs_data_release(req);
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	bool finish_tbar_oneshot_ok = (g_tbar_release_count.load(std::memory_order_relaxed) == rel_after_first_finish);
+
+	/* Allow the vendor API T-bar release transition to finish before nudge + loopMIDI sweeps */
 	std::this_thread::sleep_for(std::chrono::milliseconds(550));
+
+	req = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "delta", -0.05);
+	res = call_real_ws_vendor_request("nudge_fader", req);
+	bool nudge_val_ok = res && (std::fabs(obs_data_get_double(res, "value") - 0.05) < 1e-4);
+	if (res) {
+		obs_data_release(res);
+	}
+	obs_data_release(req);
+
+	bool ws_unparked_false = false;
+	gs_res = call_real_ws_vendor_request("get_state", nullptr);
+	if (gs_res) {
+		obs_data_array_t *gs_slots = obs_data_get_array(gs_res, "slots");
+		if (gs_slots) {
+			obs_data_t *gs_s0 = obs_data_array_item(gs_slots, 0);
+			if (gs_s0) {
+				ws_unparked_false = !obs_data_get_bool(gs_s0, "parked");
+				obs_data_release(gs_s0);
+			}
+			obs_data_array_release(gs_slots);
+		}
+		obs_data_release(gs_res);
+	}
+
+	req = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "value", 1.0);
+	obs_data_set_bool(req, "release", true);
+	res = call_real_ws_vendor_request("set_fader_value", req);
+	if (res) {
+		obs_data_release(res);
+	}
+	obs_data_release(req);
+	std::this_thread::sleep_for(std::chrono::milliseconds(550));
+
+	obs_log((ws_parked_true && finish_tbar_oneshot_ok && nudge_val_ok && ws_unparked_false) ? LOG_INFO : LOG_ERROR,
+		"WS RAIL CHECK [%s]: get_state_parked=%d finish_tbar_oneshot=%d nudge_after_throw_ok=%d get_state_unparked=%d",
+		(ws_parked_true && finish_tbar_oneshot_ok && nudge_val_ok && ws_unparked_false) ? "PASS" : "FAIL",
+		(int)ws_parked_true, (int)finish_tbar_oneshot_ok, (int)nudge_val_ok, (int)ws_unparked_false);
 
 	/* Check (1): loopMIDI + tests/midi-send.c live CC sweep & soft takeover test */
 	char loopmidi_port[128] = {0};

@@ -468,11 +468,14 @@ private:
 					struct mfd_engine *e = mfd_engine_get();
 					e->fader_slots[row].target_type =
 						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
+					const bool is_tbar = (e->fader_slots[row].target_type == MFD_TARGET_TBAR);
+					const bool is_two_rail =
+						(e->fader_slots[row].target_type == MFD_TARGET_TWO_SOURCE_MIX ||
+						 e->fader_slots[row].target_type == MFD_TARGET_SINGLE_LAYER ||
+						 e->fader_slots[row].target_type == MFD_TARGET_AUDIO_VOLUME);
 					e->fader_slots[row].takeover.bidirectional_flip =
-						(e->fader_slots[row].target_type == MFD_TARGET_TBAR)
-							? e->tbar_bidirectional_flip
-							: (e->fader_slots[row].target_type ==
-							   MFD_TARGET_TWO_SOURCE_MIX);
+						is_tbar ? e->tbar_bidirectional_flip : false;
+					mfd_takeover_set_two_rail_mode(&e->fader_slots[row].takeover, is_two_rail);
 					mfd_engine_save_global_config(e);
 					mfd_engine_notify_state_changed(e);
 					rebuild_table_rows();

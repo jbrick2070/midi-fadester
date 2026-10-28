@@ -29,7 +29,17 @@ static enum mfd_takeover_hint compute_hint(float fader_val, float target_val, fl
 
 static float compute_rescaled_effective(const struct mfd_takeover *t, float raw_clamped)
 {
-	if (!t || !t->bidirectional_flip) {
+	if (!t) {
+		return raw_clamped;
+	}
+	if (t->two_rail_mode) {
+		float span = t->upper_rescale_origin - t->lower_rescale_origin;
+		if (span <= 1e-5f) {
+			return raw_clamped;
+		}
+		return clamp01((raw_clamped - t->lower_rescale_origin) / span);
+	}
+	if (!t->bidirectional_flip) {
 		return raw_clamped;
 	}
 	if (!t->polarity_reversed) {
@@ -61,10 +71,33 @@ void mfd_takeover_init(struct mfd_takeover *t, float initial_obs_val, float pick
 										      : MFD_DEFAULT_PICKUP_THRESHOLD;
 	t->parked_peak = 0.0f;
 	t->rescale_origin = 0.0f;
+	t->lower_rescale_origin = 0.0f;
+	t->upper_rescale_origin = 1.0f;
 	t->has_last_fader = false;
 	t->bidirectional_flip = bidirectional_flip;
+	t->two_rail_mode = false;
 	t->polarity_reversed = false;
 	t->parked_at_upper_rail = false;
+	t->armed_lower_rail = (t->target_obs > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
+	t->armed_upper_rail = (t->target_obs < MFD_THROW_COMPLETE_THRESHOLD);
+	t->dial_reversed = false;
+	t->midi_at_rail_deadzone = false;
+}
+
+void mfd_takeover_set_two_rail_mode(struct mfd_takeover *t, bool two_rail_mode)
+{
+	if (!t) {
+		return;
+	}
+	t->two_rail_mode = two_rail_mode;
+	if (two_rail_mode) {
+		t->bidirectional_flip = false;
+		t->polarity_reversed = false;
+		t->lower_rescale_origin = 0.0f;
+		t->upper_rescale_origin = 1.0f;
+		t->armed_lower_rail = (t->target_obs > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
+		t->armed_upper_rail = (t->target_obs < MFD_THROW_COMPLETE_THRESHOLD);
+	}
 }
 
 void mfd_takeover_sync_external(struct mfd_takeover *t, float new_obs_val)
@@ -77,6 +110,11 @@ void mfd_takeover_sync_external(struct mfd_takeover *t, float new_obs_val)
 		t->target_obs = clamped;
 		t->state = MFD_TAKEOVER_WAITING;
 		t->rescale_origin = t->polarity_reversed ? 1.0f : 0.0f;
+		t->lower_rescale_origin = 0.0f;
+		t->upper_rescale_origin = 1.0f;
+		t->armed_lower_rail = (clamped > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
+		t->armed_upper_rail = (clamped < MFD_THROW_COMPLETE_THRESHOLD);
+		t->midi_at_rail_deadzone = false;
 		if (t->has_last_fader) {
 			t->hint = compute_hint(t->last_fader, t->target_obs, t->pickup_threshold);
 		}
@@ -102,9 +140,16 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 			if ((t->parked_peak - raw_clamped) > MFD_PARKED_UNPARK_HYSTERESIS) {
 				t->state = MFD_TAKEOVER_ENGAGED;
 				t->hint = MFD_HINT_NONE;
-				if (t->bidirectional_flip) {
+				if (t->two_rail_mode) {
+					t->upper_rescale_origin = raw_clamped;
+					t->lower_rescale_origin = 0.0f;
+					t->armed_upper_rail = false;
+					t->armed_lower_rail = true;
+				} else if (t->bidirectional_flip) {
 					t->polarity_reversed = true;
 					t->rescale_origin = raw_clamped;
+				} else {
+					t->rescale_origin = 0.0f;
 				}
 				float eff = compute_rescaled_effective(t, raw_clamped);
 				t->last_fader = eff;
@@ -119,9 +164,16 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 			if ((raw_clamped - t->parked_peak) > MFD_PARKED_UNPARK_HYSTERESIS) {
 				t->state = MFD_TAKEOVER_ENGAGED;
 				t->hint = MFD_HINT_NONE;
-				if (t->bidirectional_flip) {
+				if (t->two_rail_mode) {
+					t->lower_rescale_origin = raw_clamped;
+					t->upper_rescale_origin = 1.0f;
+					t->armed_lower_rail = false;
+					t->armed_upper_rail = true;
+				} else if (t->bidirectional_flip) {
 					t->polarity_reversed = false;
 					t->rescale_origin = raw_clamped;
+				} else {
+					t->rescale_origin = 0.0f;
 				}
 				float eff = compute_rescaled_effective(t, raw_clamped);
 				t->last_fader = eff;
@@ -135,7 +187,58 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		return false;
 	}
 
+	if (t->midi_at_rail_deadzone) {
+		if (t->parked_at_upper_rail) {
+			if (raw_clamped > t->parked_peak) {
+				t->parked_peak = raw_clamped;
+			}
+			if ((t->parked_peak - raw_clamped) <= MFD_PARKED_UNPARK_HYSTERESIS) {
+				t->last_raw_fader = raw_clamped;
+				*out_effective_norm = t->target_obs;
+				return false;
+			}
+		} else {
+			if (raw_clamped < t->parked_peak) {
+				t->parked_peak = raw_clamped;
+			}
+			if ((raw_clamped - t->parked_peak) <= MFD_PARKED_UNPARK_HYSTERESIS) {
+				t->last_raw_fader = raw_clamped;
+				*out_effective_norm = t->target_obs;
+				return false;
+			}
+		}
+		t->midi_at_rail_deadzone = false;
+	}
+
+	if (t->two_rail_mode && !t->has_last_fader) {
+		if (raw_clamped <= MFD_LOWER_RAIL_COMPLETE_THRESHOLD) {
+			t->armed_lower_rail = false;
+			t->armed_upper_rail = true;
+		} else if (raw_clamped >= MFD_THROW_COMPLETE_THRESHOLD) {
+			t->armed_upper_rail = false;
+			t->armed_lower_rail = true;
+		} else {
+			t->armed_lower_rail = true;
+			t->armed_upper_rail = true;
+		}
+	}
+
 	float effective = compute_rescaled_effective(t, raw_clamped);
+
+	if (t->two_rail_mode) {
+		if (effective > MFD_LOWER_RAIL_COMPLETE_THRESHOLD) {
+			t->armed_lower_rail = true;
+		}
+		if (effective < MFD_THROW_COMPLETE_THRESHOLD) {
+			t->armed_upper_rail = true;
+		}
+		if (t->upper_rescale_origin < 1.0f && raw_clamped > t->upper_rescale_origin + 1e-4f) {
+			t->armed_upper_rail = true;
+		}
+		if (t->lower_rescale_origin > 0.0f && raw_clamped < t->lower_rescale_origin - 1e-4f) {
+			t->armed_lower_rail = true;
+		}
+	}
 
 	if (t->state == MFD_TAKEOVER_WAITING) {
 		bool within = (fabsf(effective - t->target_obs) <= t->pickup_threshold);
@@ -176,18 +279,103 @@ void mfd_takeover_notify_tbar_completed(struct mfd_takeover *t)
 	if (!t) {
 		return;
 	}
-	if (t->bidirectional_flip) {
-		t->parked_at_upper_rail = !t->polarity_reversed;
-		t->parked_peak = t->has_last_fader ? t->last_raw_fader : (t->parked_at_upper_rail ? 1.0f : 0.0f);
-		t->target_obs = 0.0f;
-		t->last_fader = 0.0f;
-		t->has_last_fader = true;
-		t->state = MFD_TAKEOVER_PARKED;
-		t->hint = MFD_HINT_NONE;
-	} else {
-		t->target_obs = 0.0f;
+	t->parked_at_upper_rail = t->bidirectional_flip ? !t->polarity_reversed : true;
+	t->parked_peak = t->has_last_fader ? t->last_raw_fader : (t->parked_at_upper_rail ? 1.0f : 0.0f);
+	t->target_obs = 0.0f;
+	t->last_fader = 0.0f;
+	t->state = MFD_TAKEOVER_PARKED;
+	t->hint = MFD_HINT_NONE;
+	t->midi_at_rail_deadzone = false;
+}
+
+bool mfd_takeover_check_two_rail_completion(const struct mfd_takeover *t, float val, float *out_rail_val,
+					    bool *out_upper_rail)
+{
+	if (!t || !t->two_rail_mode || t->state != MFD_TAKEOVER_ENGAGED) {
+		return false;
+	}
+	if (t->armed_upper_rail && val >= MFD_THROW_COMPLETE_THRESHOLD - 1e-5f) {
+		if (out_rail_val) {
+			*out_rail_val = 1.0f;
+		}
+		if (out_upper_rail) {
+			*out_upper_rail = true;
+		}
+		return true;
+	}
+	if (t->armed_lower_rail && val <= MFD_LOWER_RAIL_COMPLETE_THRESHOLD + 1e-5f) {
+		if (out_rail_val) {
+			*out_rail_val = 0.0f;
+		}
+		if (out_upper_rail) {
+			*out_upper_rail = false;
+		}
+		return true;
+	}
+	return false;
+}
+
+void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail)
+{
+	if (!t) {
+		return;
+	}
+	float rail_val = upper_rail ? 1.0f : 0.0f;
+	t->parked_at_upper_rail = upper_rail;
+	t->parked_peak = t->has_last_fader ? t->last_raw_fader : rail_val;
+	t->target_obs = rail_val;
+	t->last_fader = rail_val;
+	t->armed_upper_rail = !upper_rail;
+	t->armed_lower_rail = upper_rail;
+	t->state = MFD_TAKEOVER_PARKED;
+	t->hint = MFD_HINT_NONE;
+	t->midi_at_rail_deadzone = false;
+}
+
+void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val)
+{
+	if (!t) {
+		return;
+	}
+	float clamped = clamp01(api_val);
+	bool was_parked = (t->state == MFD_TAKEOVER_PARKED);
+	if (was_parked && t->has_last_fader) {
+		t->midi_at_rail_deadzone = true;
+	}
+
+	if (t->two_rail_mode) {
+		t->lower_rescale_origin = 0.0f;
+		t->upper_rescale_origin = 1.0f;
+		if (was_parked) {
+			t->armed_upper_rail = !t->parked_at_upper_rail || (clamped < MFD_THROW_COMPLETE_THRESHOLD);
+			t->armed_lower_rail = t->parked_at_upper_rail || (clamped > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
+		} else {
+			if (clamped > MFD_LOWER_RAIL_COMPLETE_THRESHOLD) {
+				t->armed_lower_rail = true;
+			}
+			if (clamped < MFD_THROW_COMPLETE_THRESHOLD) {
+				t->armed_upper_rail = true;
+			}
+		}
+	} else if (t->bidirectional_flip) {
+		if (was_parked) {
+			t->polarity_reversed = t->parked_at_upper_rail;
+			t->rescale_origin = t->polarity_reversed ? 1.0f : 0.0f;
+		}
+	}
+
+	t->target_obs = clamped;
+	if (t->has_last_fader) {
+		float anchor_raw = t->midi_at_rail_deadzone ? t->parked_peak : t->last_raw_fader;
+		float fader_eff = compute_rescaled_effective(t, anchor_raw);
+		t->last_fader = fader_eff;
 		t->state = MFD_TAKEOVER_WAITING;
-		t->hint = MFD_HINT_MOVE_DOWN;
+		t->hint = compute_hint(fader_eff, clamped, t->pickup_threshold);
+	} else {
+		t->midi_at_rail_deadzone = false;
+		t->last_fader = clamped;
+		t->state = MFD_TAKEOVER_ENGAGED;
+		t->hint = MFD_HINT_NONE;
 	}
 }
 

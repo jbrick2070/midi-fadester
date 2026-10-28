@@ -23,6 +23,7 @@ OBS_MODULE_USE_DEFAULT_LOCALE("midi-fadester", "en-US")
 	} while (0)
 
 static int g_mock_tbar_calls = 0;
+static int g_mock_tbar_completions = 0;
 static float g_mock_tbar_last_val = -1.0f;
 
 static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size)
@@ -32,10 +33,36 @@ static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_
 	}
 	++g_mock_tbar_calls;
 	g_mock_tbar_last_val = t_norm;
+	bool completed = (t_norm >= MFD_THROW_COMPLETE_THRESHOLD);
+	if (completed) {
+		++g_mock_tbar_completions;
+	}
 	if (out_completed_throw) {
-		*out_completed_throw = (t_norm >= MFD_THROW_COMPLETE_THRESHOLD);
+		*out_completed_throw = completed;
 	}
 	return true;
+}
+
+static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t val)
+{
+	uint32_t raw_msg = (uint32_t)(0xB0U | (ch & 0x0FU)) | ((uint32_t)(cc & 0x7FU) << 8) |
+			   ((uint32_t)(val & 0x7FU) << 16);
+	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
+}
+
+static bool get_slot_parked_via_get_state(struct mfd_engine *eng, int slot_idx)
+{
+	obs_data_t *req = obs_data_create();
+	obs_data_t *res = obs_data_create();
+	mfd_vendor_handle_get_state(req, res, eng);
+	obs_data_array_t *arr = obs_data_get_array(res, "slots");
+	obs_data_t *item = obs_data_array_item(arr, (size_t)slot_idx);
+	bool parked = obs_data_get_bool(item, "parked");
+	obs_data_release(item);
+	obs_data_array_release(arr);
+	obs_data_release(req);
+	obs_data_release(res);
+	return parked;
 }
 
 static bool mock_source_exists(const char *source_name, void *user_data)
@@ -380,6 +407,346 @@ int main(void)
 	mfd_bridge_register_with_handlers(NULL, NULL, NULL);
 	signal_handler_destroy(fake_sh);
 	proc_handler_destroy(fake_ph);
+
+	/*
+	 * 10. Rail Behavior Audit (R-FEEL-4):
+	 *     - 10a: Two-source crossfade (crossfade_ab) and single-layer opacity (layer_opacity) at 0 and 100
+	 *            (fader jitter at a rail must not flicker the picture; 0 extra output_write_count).
+	 *     - 10b: Audio volume (audio_volume) at the bottom rail (no flicker between silent -inf dB and -60 dB).
+	 *     - 10c: set_fader_value with release and auto_fade reaching a rail over the API (one-shot finish + parked).
+	 *     - 10d: nudge_fader right after a completed throw (Stream Deck dial on T-bar and two-rail slots).
+	 *     - 10e: "Finish T-bar" press (one-shot finish when active, no-op when already parked).
+	 *     - get_state exposes `"parked": true | false` per API-CONTRACT.md.
+	 */
+	mfd_midi_queue_init(&eng.midi_queue);
+	mfd_midi_parser_init(&eng.midi_parser);
+	eng.learning_slot_index = -1;
+	eng.tbar_bidirectional_flip = true;
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+
+	/* Configure fader_1 (Ch 1, CC 7) as crossfade_ab and fader_2 (Ch 2, CC 7) as layer_opacity */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	obs_data_set_string(req, "source_b", "Loop 3");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_get_bool(res, "parked"));
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_2");
+	obs_data_set_string(req, "target_mode", "layer_opacity");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_get_bool(res, "parked"));
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* 10a-1: Two-source crossfade (fader_1, Ch 0 CC 7) at 100 and 0 */
+	push_midi_cc(&eng, 0, 7, 0);
+	push_midi_cc(&eng, 0, 7, 64);
+	push_midi_cc(&eng, 0, 7, 115); /* 115/127 = 0.9055 >= 0.90 -> snaps one-shot to 1.0 and parks */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_a - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 1.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+	uint32_t writes_xfade_top = eng.fader_slots[1].output_write_count;
+
+	/* Rail travel + jitter at 100% rail (CC 120, 127, 122, 126, 118, 127 — all within 8% of peak 127) */
+	push_midi_cc(&eng, 0, 7, 120);
+	push_midi_cc(&eng, 0, 7, 127);
+	push_midi_cc(&eng, 0, 7, 122);
+	push_midi_cc(&eng, 0, 7, 126);
+	push_midi_cc(&eng, 0, 7, 118);
+	push_midi_cc(&eng, 0, 7, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[1].output_write_count == writes_xfade_top);
+	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 1.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+
+	/* Retreat > 8% (CC 114 = 0.8976 < 1.0 - 0.08) unparks with zero jump, then sweep down to <= 10% (CC 11) */
+	push_midi_cc(&eng, 0, 7, 114);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
+
+	push_midi_cc(&eng, 0, 7, 57);
+	push_midi_cc(&eng, 0, 7, 11); /* 11/114 = 0.0965 <= 0.10 -> snaps one-shot to 0.0 and parks */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 0.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 0.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+	uint32_t writes_xfade_bot = eng.fader_slots[1].output_write_count;
+
+	/* Rail travel + jitter at 0% rail (CC 5, 0, 4, 1, 9, 0 — all within 8% of peak 0) -> 0 writes */
+	push_midi_cc(&eng, 0, 7, 5);
+	push_midi_cc(&eng, 0, 7, 0);
+	push_midi_cc(&eng, 0, 7, 4);
+	push_midi_cc(&eng, 0, 7, 1);
+	push_midi_cc(&eng, 0, 7, 9);
+	push_midi_cc(&eng, 0, 7, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[1].output_write_count == writes_xfade_bot);
+	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 0.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+
+	/* 10a-2: Single-layer opacity (fader_2, Ch 1 CC 7, starts at 1.0) at 0 and 100 */
+	push_midi_cc(&eng, 1, 7, 127);
+	push_midi_cc(&eng, 1, 7, 64);
+	push_midi_cc(&eng, 1, 7, 12); /* 12/127 = 0.0945 <= 0.10 -> snaps one-shot to 0.0 and parks */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[2].last_applied_val - 0.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[2].last_alpha_a - 0.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 2));
+	uint32_t writes_layer_bot = eng.fader_slots[2].output_write_count;
+
+	/* Bottom rail jitter on layer_opacity -> 0 writes */
+	push_midi_cc(&eng, 1, 7, 4);
+	push_midi_cc(&eng, 1, 7, 0);
+	push_midi_cc(&eng, 1, 7, 7);
+	push_midi_cc(&eng, 1, 7, 2);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[2].output_write_count == writes_layer_bot);
+
+	/* Unpark upward (> 8% from 0: CC 13) and sweep to top rail (CC 116) -> snaps one-shot to 1.0 and parks */
+	push_midi_cc(&eng, 1, 7, 13);
+	push_midi_cc(&eng, 1, 7, 64);
+	push_midi_cc(&eng, 1, 7, 116);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[2].last_applied_val - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[2].last_alpha_a - 1.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 2));
+	uint32_t writes_layer_top = eng.fader_slots[2].output_write_count;
+
+	/* Top rail jitter on layer_opacity -> 0 writes (never toggles >= 0.999 shader bypass) */
+	push_midi_cc(&eng, 1, 7, 127);
+	push_midi_cc(&eng, 1, 7, 121);
+	push_midi_cc(&eng, 1, 7, 126);
+	push_midi_cc(&eng, 1, 7, 118);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[2].output_write_count == writes_layer_top);
+
+	/* 10b: Audio volume (fader_3, Ch 2 CC 7) at the bottom rail (no flicker between silent and -60 dB) */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_3");
+	obs_data_set_string(req, "target_mode", "audio_volume");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	push_midi_cc(&eng, 2, 7, 127);
+	push_midi_cc(&eng, 2, 7, 64);
+	push_midi_cc(&eng, 2, 7, 12); /* 12/127 = 0.0945 <= 0.10 (-60 dB threshold) -> snaps one-shot to silent 0.0 */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_applied_val - 0.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_audio_mul - 0.0f) < 1e-6f);
+	REQUIRE(!isfinite(eng.fader_slots[3].last_audio_db)); /* -inf dB (silent), not -60 dB */
+	REQUIRE(get_slot_parked_via_get_state(&eng, 3));
+	uint32_t writes_audio_bot = eng.fader_slots[3].output_write_count;
+
+	/* Jitter at bottom rail (CC 6, 0, 9, 2, 10, 0) produces 0 volume writes and stays silent (-inf dB) */
+	push_midi_cc(&eng, 2, 7, 6);
+	push_midi_cc(&eng, 2, 7, 0);
+	push_midi_cc(&eng, 2, 7, 9);
+	push_midi_cc(&eng, 2, 7, 2);
+	push_midi_cc(&eng, 2, 7, 10);
+	push_midi_cc(&eng, 2, 7, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[3].output_write_count == writes_audio_bot);
+	REQUIRE(fabsf(eng.fader_slots[3].last_audio_mul - 0.0f) < 1e-6f);
+	REQUIRE(!isfinite(eng.fader_slots[3].last_audio_db));
+	REQUIRE(get_slot_parked_via_get_state(&eng, 3));
+
+	/* Advance > 8% (CC 13 = 0.1024 > 0.08) unparks smoothly from silent (0.0f) */
+	push_midi_cc(&eng, 2, 7, 13);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 3));
+	REQUIRE(fabsf(eng.fader_slots[3].last_applied_val - 0.0f) < 1e-6f);
+
+	/* 10c: set_fader_value with release and auto_fade reaching a rail over the API */
+	/* 10c-1: set_fader_value with release on two-rail target (fader_1) snaps one-shot to rail and parks */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.50);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.80);
+	obs_data_set_bool(req, "release", true);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 1.0) < 1e-6);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+	uint32_t writes_after_api_rel = eng.fader_slots[1].output_write_count;
+
+	/* Repeating set_fader_value at the same rail while parked is a one-shot no-op */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 1.0);
+	obs_data_set_bool(req, "release", true);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(eng.fader_slots[1].output_write_count == writes_after_api_rel);
+
+	/* 10c-2: auto_fade to 0.0 on fader_1 parks one-shot on completion */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "to", 0.0);
+	obs_data_set_int(req, "ms", 100);
+	mfd_vendor_handle_auto_fade(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+	mfd_engine_tick(&eng, 0.05f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+	mfd_engine_tick(&eng, 0.05f);
+	REQUIRE(!eng.fader_slots[1].auto_fade_active);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 0.0f) < 1e-6f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+
+	/* 10c-3: auto_fade 0.0 -> 1.0 on T-bar (crossfader) over 10 ticks completes ONE-SHOT at 90% and stops */
+	g_mock_tbar_calls = 0;
+	g_mock_tbar_completions = 0;
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "to", 1.0);
+	obs_data_set_int(req, "ms", 100);
+	mfd_vendor_handle_auto_fade(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	for (int tick = 0; tick < 11; ++tick) {
+		mfd_engine_tick(&eng, 0.01f);
+	}
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(!eng.fader_slots[0].auto_fade_active);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+	REQUIRE(fabsf(eng.fader_slots[0].last_applied_val - 0.0f) < 1e-6f);
+
+	/* 10d: nudge_fader right after a completed throw (Stream Deck dial) */
+	/* 10d-1: Physical MIDI throw 0 -> 127 on crossfader (T-bar), then negative Stream Deck dial nudge */
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	eng.fader_slots[0].takeover.polarity_reversed = false;
+	eng.fader_slots[0].takeover.rescale_origin = 0.0f;
+	push_midi_cc(&eng, 0, 15, 0);
+	push_midi_cc(&eng, 0, 15, 115);
+	push_midi_cc(&eng, 0, 15, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/* Turn Stream Deck dial counter-clockwise (delta: -0.05) right after completed throw */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "delta", -0.05);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.05) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+
+	/* Second dial click in the same direction (-0.05) continues to 0.10 */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "delta", -0.05);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.10) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* 1-LSB physical MIDI jitter at top rail (CC 126) does NOT jump T-bar away from 0.10 */
+	push_midi_cc(&eng, 0, 15, 126);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[0].last_applied_val - 0.10f) < 1e-5f);
+
+	/* 10d-2: Physical MIDI throw 0 -> 127 on fader_1 (crossfade_ab), then small -0.02 dial nudge */
+	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
+	eng.fader_slots[1].takeover.lower_rescale_origin = 0.0f;
+	eng.fader_slots[1].takeover.upper_rescale_origin = 1.0f;
+	eng.fader_slots[1].takeover.armed_upper_rail = true;
+	push_midi_cc(&eng, 0, 7, 0);
+	push_midi_cc(&eng, 0, 7, 115);
+	push_midi_cc(&eng, 0, 7, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "delta", -0.02);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.98) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	/* 1-LSB MIDI jitter at top rail (CC 126) does NOT re-snap fader_1 to 1.0 or re-park */
+	push_midi_cc(&eng, 0, 7, 126);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 0.98f) < 1e-5f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	/* 10e: "Finish T-bar" press (one-shot finish when active, no-op when already parked) */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "value", 0.45);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+
+	int calls_before_finish = g_mock_tbar_calls;
+	int completions_before_finish = g_mock_tbar_completions;
+
+	/* First "Finish T-bar" press -> completes throw once and parks */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "value", 1.0);
+	obs_data_set_bool(req, "release", true);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(g_mock_tbar_calls == calls_before_finish + 1);
+	REQUIRE(g_mock_tbar_completions == completions_before_finish + 1);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/* Second and third "Finish T-bar" presses while already parked -> strict no-op (0 calls) */
+	for (int press = 0; press < 2; ++press) {
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "crossfader");
+		obs_data_set_double(req, "value", 1.0);
+		obs_data_set_bool(req, "release", true);
+		mfd_vendor_handle_set_fader_value(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+	}
+	REQUIRE(g_mock_tbar_calls == calls_before_finish + 1);
+	REQUIRE(g_mock_tbar_completions == completions_before_finish + 1);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");

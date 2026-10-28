@@ -91,6 +91,7 @@ static void populate_slot_data(const struct mfd_engine *eng, const struct mfd_fa
 	obs_data_set_bool(out, "afv", s->audio_follows_video);
 	obs_data_set_double(out, "value", (double)s->last_applied_val);
 	obs_data_set_string(out, "takeover_pending", takeover_pending_str(&s->takeover));
+	obs_data_set_bool(out, "parked", s->takeover.state == MFD_TAKEOVER_PARKED);
 	obs_data_set_string(out, "label", dyn_label);
 	obs_data_set_bool(out, "available", available);
 	obs_data_set_string(out, "reason", reason);
@@ -228,19 +229,21 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 	float val = clamp01((float)calldata_float(cd, "value"));
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 
 	slot->auto_fade_active = false;
-	slot->last_raw_norm = val;
-	slot->takeover.state = MFD_TAKEOVER_ENGAGED;
-	slot->takeover.hint = MFD_HINT_NONE;
-	slot->takeover.target_obs = val;
-	slot->takeover.last_fader = val;
-	slot->takeover.last_raw_fader = val;
-	slot->takeover.has_last_fader = true;
+	slot->takeover.dial_reversed = false;
+	mfd_takeover_unpark_from_api(&slot->takeover, val);
 	mfd_smoother_reset(&slot->smoother, val);
 
 	mfd_engine_apply_slot_output(eng, slot, val);
+	if (slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
+		mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f);
+	}
 	mfd_engine_notify_fader_changed(eng, idx, "api");
+	if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+		mfd_engine_notify_state_changed(eng);
+	}
 
 	calldata_set_bool(cd, "ok", true);
 	calldata_set_bool(cd, "success", true);
@@ -326,19 +329,53 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	float val = clamp01((float)obs_data_get_double(request_data, "value"));
 	bool release = obs_data_get_bool(request_data, "release");
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+	bool prev_upper = slot->takeover.parked_at_upper_rail;
 
 	slot->auto_fade_active = false;
-	slot->last_raw_norm = val;
-	slot->takeover.state = MFD_TAKEOVER_ENGAGED;
-	slot->takeover.hint = MFD_HINT_NONE;
-	slot->takeover.target_obs = val;
-	slot->takeover.last_fader = val;
-	slot->takeover.last_raw_fader = val;
-	slot->takeover.has_last_fader = true;
-	mfd_smoother_reset(&slot->smoother, val);
+	slot->takeover.dial_reversed = false;
 
-	mfd_engine_apply_slot_output_ex(eng, slot, val, release);
-	mfd_engine_notify_fader_changed(eng, idx, "api");
+	if (slot->target_type == MFD_TARGET_TBAR) {
+		if (release || val >= MFD_THROW_COMPLETE_THRESHOLD) {
+			if (!(was_parked && slot->last_applied_val <= 0.0f)) {
+				mfd_engine_apply_slot_output_ex(eng, slot, val, release);
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+					mfd_engine_notify_state_changed(eng);
+				}
+			}
+		} else {
+			mfd_takeover_unpark_from_api(&slot->takeover, val);
+			mfd_smoother_reset(&slot->smoother, val);
+			mfd_engine_apply_slot_output_ex(eng, slot, val, false);
+			mfd_engine_notify_fader_changed(eng, idx, "api");
+			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+				mfd_engine_notify_state_changed(eng);
+			}
+		}
+	} else {
+		bool at_upper = (val >= 1.0f) || (release && val >= 0.5f);
+		bool at_lower = (val <= 0.0f) || (release && val < 0.5f);
+		if (slot->takeover.two_rail_mode && (at_upper || at_lower)) {
+			float rail_val = at_upper ? 1.0f : 0.0f;
+			if (!(was_parked && prev_upper == at_upper &&
+			      fabsf(slot->last_applied_val - rail_val) < 1e-5f)) {
+				mfd_smoother_reset(&slot->smoother, rail_val);
+				mfd_engine_apply_slot_output_ex(eng, slot, rail_val, false);
+				mfd_takeover_notify_rail_completed(&slot->takeover, at_upper);
+				mfd_engine_notify_fader_changed(eng, idx, "api");
+				mfd_engine_notify_state_changed(eng);
+			}
+		} else {
+			mfd_takeover_unpark_from_api(&slot->takeover, val);
+			mfd_smoother_reset(&slot->smoother, val);
+			mfd_engine_apply_slot_output_ex(eng, slot, val, false);
+			mfd_engine_notify_fader_changed(eng, idx, "api");
+			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+				mfd_engine_notify_state_changed(eng);
+			}
+		}
+	}
 
 	obs_data_set_string(response_data, "slot", slot->id);
 	obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
@@ -365,20 +402,40 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
 	float delta = (float)obs_data_get_double(request_data, "delta");
-	float val = clamp01(slot->last_applied_val + delta);
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 
 	slot->auto_fade_active = false;
-	slot->last_raw_norm = val;
-	slot->takeover.state = MFD_TAKEOVER_ENGAGED;
-	slot->takeover.hint = MFD_HINT_NONE;
-	slot->takeover.target_obs = val;
-	slot->takeover.last_fader = val;
-	slot->takeover.last_raw_fader = val;
-	slot->takeover.has_last_fader = true;
-	mfd_smoother_reset(&slot->smoother, val);
 
-	mfd_engine_apply_slot_output(eng, slot, val);
-	mfd_engine_notify_fader_changed(eng, idx, "api");
+	if (slot->target_type == MFD_TARGET_TBAR) {
+		float eff_delta = delta;
+		if (was_parked) {
+			slot->takeover.dial_reversed = (delta < 0.0f);
+			eff_delta = fabsf(delta);
+		} else if (slot->takeover.dial_reversed) {
+			eff_delta = -delta;
+		}
+		float val = clamp01(slot->last_applied_val + eff_delta);
+		mfd_takeover_unpark_from_api(&slot->takeover, val);
+		mfd_smoother_reset(&slot->smoother, val);
+		mfd_engine_apply_slot_output(eng, slot, val);
+		mfd_engine_notify_fader_changed(eng, idx, "api");
+		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+			mfd_engine_notify_state_changed(eng);
+		}
+	} else {
+		slot->takeover.dial_reversed = false;
+		float val = clamp01(slot->last_applied_val + delta);
+		mfd_takeover_unpark_from_api(&slot->takeover, val);
+		mfd_smoother_reset(&slot->smoother, val);
+		mfd_engine_apply_slot_output(eng, slot, val);
+		if (!was_parked && slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
+			mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f);
+		}
+		mfd_engine_notify_fader_changed(eng, idx, "api");
+		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+			mfd_engine_notify_state_changed(eng);
+		}
+	}
 
 	obs_data_set_string(response_data, "slot", slot->id);
 	obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
@@ -411,11 +468,34 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	}
 
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	float to_val = clamp01((float)obs_data_get_double(request_data, "to"));
+	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+
+	if (was_parked) {
+		if (slot->target_type == MFD_TARGET_TBAR && to_val <= 0.0f && slot->last_applied_val <= 0.0f) {
+			slot->auto_fade_active = false;
+			obs_data_set_string(response_data, "slot", slot->id);
+			return;
+		}
+		if (slot->target_type != MFD_TARGET_TBAR &&
+		    ((slot->takeover.parked_at_upper_rail && to_val >= 1.0f) ||
+		     (!slot->takeover.parked_at_upper_rail && to_val <= 0.0f)) &&
+		    fabsf(slot->last_applied_val - to_val) < 1e-5f) {
+			slot->auto_fade_active = false;
+			obs_data_set_string(response_data, "slot", slot->id);
+			return;
+		}
+	}
+
 	slot->auto_fade_from = slot->last_applied_val;
-	slot->auto_fade_to = clamp01((float)obs_data_get_double(request_data, "to"));
+	slot->auto_fade_to = to_val;
 	slot->auto_fade_duration_sec = (float)ms / 1000.0f;
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
+	if (was_parked) {
+		mfd_takeover_unpark_from_api(&slot->takeover, slot->auto_fade_from);
+		mfd_engine_notify_state_changed(eng);
+	}
 
 	obs_data_set_string(response_data, "slot", slot->id);
 }
@@ -487,11 +567,25 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	}
 
 	if (has_target) {
+		enum mfd_target_type prev_target = s->target_type;
 		s->target_type = new_target;
 		s->enabled = true;
-		s->takeover.bidirectional_flip = (s->target_type == MFD_TARGET_TBAR)
-							 ? eng->tbar_bidirectional_flip
-							 : (s->target_type == MFD_TARGET_TWO_SOURCE_MIX);
+		bool is_tbar = (s->target_type == MFD_TARGET_TBAR);
+		bool is_two_rail = (s->target_type == MFD_TARGET_TWO_SOURCE_MIX ||
+				    s->target_type == MFD_TARGET_SINGLE_LAYER ||
+				    s->target_type == MFD_TARGET_AUDIO_VOLUME);
+		if (prev_target == MFD_TARGET_UNASSIGNED && new_target != MFD_TARGET_UNASSIGNED) {
+			float init_val =
+				(new_target == MFD_TARGET_SINGLE_LAYER || new_target == MFD_TARGET_AUDIO_VOLUME) ? 1.0f
+														 : 0.0f;
+			mfd_smoother_reset(&s->smoother, init_val);
+			mfd_takeover_init(&s->takeover, init_val, MFD_DEFAULT_PICKUP_THRESHOLD,
+					  is_tbar ? eng->tbar_bidirectional_flip : false);
+			s->last_raw_norm = init_val;
+			s->last_applied_val = init_val;
+		}
+		s->takeover.bidirectional_flip = is_tbar ? eng->tbar_bidirectional_flip : false;
+		mfd_takeover_set_two_rail_mode(&s->takeover, is_two_rail);
 	}
 	if (has_curve) {
 		s->curve = new_curve;
