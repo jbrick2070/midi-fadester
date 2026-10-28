@@ -70,6 +70,37 @@ static bool match_port_substring_ci(const char *haystack, const char *needle)
 	return false;
 }
 
+static int mfd_parse_cc_csv(const char *csv, int *out_vals, int max_vals)
+{
+	if (!csv || csv[0] == '\0' || !out_vals || max_vals <= 0) {
+		return -1;
+	}
+	int count = 0;
+	const char *p = csv;
+	while (*p != '\0') {
+		char *endp = NULL;
+		long v = strtol(p, &endp, 10);
+		if (endp == p || v < 0L || v > 127L) {
+			return -1;
+		}
+		if (count >= max_vals) {
+			return -1;
+		}
+		out_vals[count++] = (int)v;
+		if (*endp == '\0') {
+			break;
+		}
+		if (*endp != ',') {
+			return -1;
+		}
+		p = endp + 1;
+		if (*p == '\0') {
+			return -1;
+		}
+	}
+	return (count > 0) ? count : -1;
+}
+
 static int run_self_test(void)
 {
 	/* 1. Verify WinMM short message packing for Ch 1 CC 15 = 64 */
@@ -103,6 +134,15 @@ static int run_self_test(void)
 	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(116, 127, 300, 116, 2000) == 2300);
 	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(119, 127, 300, 116, 2000) == 300);
 	ASSERT_TRUE(mfd_compute_slow_pause_wait_ms(127, 127, 300, 116, 2000) == 0);
+
+	/* 7. Verify --seq CSV parser */
+	int seq_vals[32] = {0};
+	ASSERT_TRUE(mfd_parse_cc_csv("0,8,3", seq_vals, 32) == 3);
+	ASSERT_TRUE(seq_vals[0] == 0 && seq_vals[1] == 8 && seq_vals[2] == 3);
+	ASSERT_TRUE(mfd_parse_cc_csv("3,4,3,4,3,4", seq_vals, 32) == 6);
+	ASSERT_TRUE(mfd_parse_cc_csv("0,128", seq_vals, 32) == -1);
+	ASSERT_TRUE(mfd_parse_cc_csv("0,-1", seq_vals, 32) == -1);
+	ASSERT_TRUE(mfd_parse_cc_csv("", seq_vals, 32) == -1);
 
 	printf("test-midi-send: PASS\n");
 	return 0;
@@ -348,6 +388,57 @@ int main(int argc, char **argv)
 
 		printf("midi-send: sent CC jitter ch=%d cc=%d (%d/%d x %d every %d ms) to '%s'\n", channel, cc, val_a,
 		       val_b, steps, interval_ms, resolved_name);
+		return 0;
+	}
+
+	if (argc >= 2 && strcmp(argv[1], "--seq") == 0) {
+		if (argc < 7) {
+			fprintf(stderr,
+				"Usage: %s --seq <port_name> <channel_1_16> <cc_0_127> <step_ms> <csv_values>\n",
+				argv[0]);
+			return 2;
+		}
+		const char *port_arg = argv[2];
+		int channel = atoi(argv[3]);
+		int cc = atoi(argv[4]);
+		int step_ms = atoi(argv[5]);
+		const char *csv_arg = argv[6];
+
+		int seq_vals[256] = {0};
+		int count = mfd_parse_cc_csv(csv_arg, seq_vals, 256);
+		if (channel < 1 || channel > 16 || cc < 0 || cc > 127 || step_ms < 0 || count <= 0) {
+			fprintf(stderr, "midi-send --seq: invalid parameters\n");
+			return 2;
+		}
+
+		char resolved_name[128] = {0};
+		int dev_id = find_midi_out_port(port_arg, resolved_name, sizeof(resolved_name));
+		if (dev_id < 0) {
+			fprintf(stderr, "midi-send: no WinMM MIDI Out port matching '%s'\n", port_arg);
+			return 1;
+		}
+
+		HMIDIOUT hout = NULL;
+		MMRESULT mm = midiOutOpen(&hout, (UINT)dev_id, 0, 0, CALLBACK_NULL);
+		if (mm != MMSYSERR_NOERROR || !hout) {
+			fprintf(stderr, "midi-send: midiOutOpen failed for '%s' (mm=%u)\n", resolved_name,
+				(unsigned)mm);
+			return 1;
+		}
+
+		timeBeginPeriod(1);
+		for (int i = 0; i < count; ++i) {
+			uint32_t msg = mfd_pack_cc_short_msg(channel, cc, seq_vals[i]);
+			midiOutShortMsg(hout, (DWORD)msg);
+			if (i + 1 < count && step_ms > 0) {
+				Sleep((DWORD)step_ms);
+			}
+		}
+		timeEndPeriod(1);
+		midiOutClose(hout);
+
+		printf("midi-send: sent CC seq ch=%d cc=%d (%d steps every %d ms: %s) to '%s'\n", channel, cc, count,
+		       step_ms, csv_arg, resolved_name);
 		return 0;
 	}
 

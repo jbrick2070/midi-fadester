@@ -99,6 +99,28 @@ bool mfd_tbar_is_in_rail_zone(float x_cal, bool polarity_reversed)
 	return mfd_tbar_is_in_target_rail_zone(x_cal, polarity_reversed);
 }
 
+bool mfd_tbar_is_past_start_zone(float x_cal, bool polarity_reversed)
+{
+	float clamped = clamp01(x_cal);
+	if (polarity_reversed) {
+		return clamped < ((1.0f - MFD_TBAR_START_ZONE) - 1e-6f);
+	}
+	return clamped > (MFD_TBAR_START_ZONE + 1e-6f);
+}
+
+float mfd_tbar_rescale_from_start_zone(float x_cal, bool polarity_reversed)
+{
+	float clamped = clamp01(x_cal);
+	float span = 1.0f - MFD_TBAR_START_ZONE;
+	if (span <= 1e-6f) {
+		return 1.0f;
+	}
+	if (polarity_reversed) {
+		return clamp01(((1.0f - MFD_TBAR_START_ZONE) - clamped) / span);
+	}
+	return clamp01((clamped - MFD_TBAR_START_ZONE) / span);
+}
+
 static int clamp_throwing_pos(float t_norm)
 {
 	int pos = (int)lroundf(clamp01(t_norm) * (float)MFD_TBAR_RANGE_MAX);
@@ -152,7 +174,7 @@ void mfd_tbar_compute_action_full(const struct mfd_tbar_release_input *in, struc
 			out_action->completed_throw = true;
 			return;
 		}
-		if (in->force_abort || in->in_origin_rail_zone) {
+		if (in->force_abort || in->in_origin_rail_zone || in->in_start_deadband) {
 			out_action->next_state = MFD_TBAR_IDLE;
 			out_action->target_pos_1024 = 0;
 			out_action->call_set_tbar = false;
@@ -206,6 +228,7 @@ void mfd_tbar_compute_action_ex(bool studio_mode_active, bool slider_tbar_found,
 	in.force_abort = false;
 	in.in_target_rail_zone = mfd_tbar_is_in_target_rail_zone(t_norm, false);
 	in.in_origin_rail_zone = mfd_tbar_is_in_origin_rail_zone(t_norm, false);
+	in.in_start_deadband = !mfd_tbar_is_past_start_zone(t_norm, false);
 	in.t_norm = t_norm;
 	in.last_pos_1024 = last_pos_1024;
 	mfd_tbar_compute_action_full(&in, out_action);

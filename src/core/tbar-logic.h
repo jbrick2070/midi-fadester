@@ -24,11 +24,15 @@ extern "C" {
 #define MFD_TBAR_COMPLETE_POS MFD_TBAR_OBS_MIN_RELEASE_POS
 
 /*
- * Calibrated 3% rail zone threshold (R-TBAR-SM, zero timers anywhere):
- * - Lower rail zone: x <= 0.03 (CC 0..3 under default [0, 127])
- * - Upper rail zone: x >= 0.97 (CC 124..127 under default [0, 127]; CC 122..125 with 125 = 1.0 under [0, 125])
+ * Calibrated 3% rail zone threshold and 6% origin start band (R-TBAR-SM, zero timers anywhere):
+ * - Lower 3% rail zone (abort / target): x <= 0.03 (CC 0..3 under default [0, 127])
+ * - Upper 3% rail zone (target / abort): x >= 0.97 (CC 124..127 under default [0, 127]; CC 122..125 under [0, 125])
+ * - Origin 6% start band (Idle -> Throwing threshold, D-8): throw starts only when x > 0.06 (CC >= 8 under [0, 127])
+ *   in normal polarity, or x < 0.94 (CC <= 119 under [0, 127]) in reversed polarity, with throw progress t rescaled
+ *   to 0.0 at x = 0.06 (or 0.94 reversed). Once Throwing, (0.03, 0.06] stays Throwing and aborts only at x <= 0.03.
  */
 #define MFD_TBAR_RAIL_ZONE 0.03f
+#define MFD_TBAR_START_ZONE 0.06f
 
 #define MFD_CAL_DEFAULT_MIN 0
 #define MFD_CAL_DEFAULT_MAX_7BIT 127
@@ -65,6 +69,7 @@ struct mfd_tbar_release_input {
 	bool force_abort;
 	bool in_target_rail_zone;
 	bool in_origin_rail_zone;
+	bool in_start_deadband;
 	float t_norm;
 	int last_pos_1024;
 };
@@ -83,16 +88,20 @@ struct mfd_tbar_action {
 bool mfd_tbar_is_in_target_rail_zone(float x_cal, bool polarity_reversed);
 bool mfd_tbar_is_in_origin_rail_zone(float x_cal, bool polarity_reversed);
 bool mfd_tbar_is_in_rail_zone(float x_cal, bool polarity_reversed);
+bool mfd_tbar_is_past_start_zone(float x_cal, bool polarity_reversed);
+float mfd_tbar_rescale_from_start_zone(float x_cal, bool polarity_reversed);
 
 /*
  * Timer-free pure-C decision function implementing the Section 5.1.1 (R-TBAR-SM) T-bar state machine:
  * - Guards against OBSBasic::tBar uninitialized/dangling pointer crash when studio_mode_active is false.
  * - Reports a loud error if studio_mode_active is true but the Qt "slider-tbar" QSlider is missing.
- * - Idle: writes nothing inside the origin 3% rail zone; enters Throwing on (0.03, 0.97); completes to Parked if
- *   jumping directly into the target 3% rail zone or on force_complete.
- * - Throwing: drives pos in [1, 1022] linearly with zero idle/stall timers; completes (pos = 1023 + release once ->
- *   Parked) only in the target 3% calibrated rail zone or on force_complete; aborts (pos = 0 + release once -> Idle,
- *   no polarity flip, no park) when returning into the origin 3% calibrated rail zone or on force_abort.
+ * - Idle: writes nothing inside the origin 3% rail zone or 6% origin start band (in_start_deadband); enters Throwing
+ *   past the 6% start band (x > 0.06 normal / x < 0.94 reversed); completes to Parked if jumping directly into the
+ *   target 3% rail zone or on force_complete.
+ * - Throwing: drives pos in [1, 1022] linearly with zero idle/stall timers (staying in Throwing across (0.03, 0.06]);
+ *   completes (pos = 1023 + release once -> Parked) only in the target 3% calibrated rail zone or on force_complete;
+ *   aborts (pos = 0 + release once -> Idle, no polarity flip, no park) when returning into the origin 3% calibrated
+ *   rail zone or on force_abort.
  * - Parked: writes nothing and never calls release until an explicit unpark leaves Parked.
  */
 void mfd_tbar_compute_action_full(const struct mfd_tbar_release_input *in, struct mfd_tbar_action *out_action);

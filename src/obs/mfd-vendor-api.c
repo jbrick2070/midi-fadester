@@ -237,6 +237,7 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 	slot->auto_fade_active = false;
 	slot->tbar_midi_active = false;
+	slot->tbar_from_idle_band = false;
 	slot->takeover.dial_reversed = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
@@ -388,6 +389,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 
 	slot->auto_fade_active = false;
 	slot->tbar_midi_active = false;
+	slot->tbar_from_idle_band = false;
 	slot->takeover.dial_reversed = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
@@ -483,6 +485,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 
 	slot->auto_fade_active = false;
 	slot->tbar_midi_active = false;
+	slot->tbar_from_idle_band = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
 		if (!(was_parked && fabsf(delta) <= 1e-6f)) {
@@ -600,6 +603,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
 	slot->tbar_midi_active = false;
+	slot->tbar_from_idle_band = false;
 	if (was_parked) {
 		if (slot->target_type == MFD_TARGET_TBAR) {
 			mfd_engine_unlatch_tbar(eng);

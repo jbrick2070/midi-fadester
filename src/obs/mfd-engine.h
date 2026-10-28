@@ -57,6 +57,7 @@ struct mfd_fader_slot {
 	struct mfd_takeover takeover;
 	enum mfd_tbar_state tbar_state;
 	bool tbar_midi_active;
+	bool tbar_from_idle_band;
 	float last_raw_norm;
 	float last_applied_val;
 	float last_alpha_a;
@@ -79,7 +80,7 @@ struct mfd_fader_slot {
 };
 
 typedef bool (*mfd_tbar_apply_fn)(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,
-				  bool in_target_rail_zone, bool in_origin_rail_zone,
+				  bool in_target_rail_zone, bool in_origin_rail_zone, bool in_start_deadband,
 				  enum mfd_tbar_state *out_next_state, bool *out_completed_throw,
 				  bool *out_aborted_throw, char *out_err, size_t err_size);
 typedef void (*mfd_tbar_unlatch_fn)(void);

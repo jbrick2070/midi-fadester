@@ -22,8 +22,9 @@ void mfd_tbar_shutdown(void);
  * Returns false and populates out_err if Studio Mode is active but "slider-tbar" is missing.
  */
 bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,
-			   bool in_target_rail_zone, bool in_origin_rail_zone, enum mfd_tbar_state *out_next_state,
-			   bool *out_completed_throw, bool *out_aborted_throw, char *out_err, size_t err_size);
+			   bool in_target_rail_zone, bool in_origin_rail_zone, bool in_start_deadband,
+			   enum mfd_tbar_state *out_next_state, bool *out_completed_throw, bool *out_aborted_throw,
+			   char *out_err, size_t err_size);
 
 /*
  * Resets the per-transition T-bar release latch when a new throw starts or unparks.

@@ -41,8 +41,9 @@ static void mock_tbar_unlatch(void)
 }
 
 static bool mock_tbar_driver(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,
-			     bool in_target_rail_zone, bool in_origin_rail_zone, enum mfd_tbar_state *out_next_state,
-			     bool *out_completed_throw, bool *out_aborted_throw, char *out_err, size_t err_size)
+			     bool in_target_rail_zone, bool in_origin_rail_zone, bool in_start_deadband,
+			     enum mfd_tbar_state *out_next_state, bool *out_completed_throw, bool *out_aborted_throw,
+			     char *out_err, size_t err_size)
 {
 	if (out_err && err_size > 0U) {
 		out_err[0] = '\0';
@@ -60,6 +61,7 @@ static bool mock_tbar_driver(enum mfd_tbar_state state, float t_norm, bool force
 	in.force_abort = force_abort;
 	in.in_target_rail_zone = in_target_rail_zone;
 	in.in_origin_rail_zone = in_origin_rail_zone;
+	in.in_start_deadband = in_start_deadband;
 	in.t_norm = t_norm;
 	in.last_pos_1024 = g_mock_tbar_last_pos;
 
@@ -1151,6 +1153,102 @@ int main(void)
 	REQUIRE(eng.fader_slots[1].cal.cal_max == 16383);
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (4096.0f / 16383.0f)) < 1e-4f);
 	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	/*
+	 * 13. 0.1.3 Bottom-Rail 6% Hysteresis Band (R-TBAR-SM / D-8):
+	 *     - 13a: CC 3,4,3,4,3,4 five times (30 steps) on T-bar from Idle -> 0 driver calls, 0 writes,
+	 *            0 completions, 0 aborts, stays Idle.
+	 *     - 13b: CC 0 -> 8 -> 3 across ticks AND in a single tick -> 1 start (Throwing) and 1 cancel (Idle).
+	 *     - 13c: Reversed polarity CC 124,123 five times from Idle -> 0 transitions; 127 -> 119 -> 124 -> 1 start & 1 cancel.
+	 */
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	g_mock_tbar_calls = 0;
+	g_mock_tbar_set_writes = 0;
+	g_mock_tbar_completions = 0;
+	g_mock_tbar_aborts = 0;
+	g_mock_tbar_latched = false;
+	g_mock_tbar_last_pos = 0;
+
+	for (int rep = 0; rep < 5; ++rep) {
+		const uint8_t osc34[] = {3, 4, 3, 4, 3, 4};
+		for (size_t oi = 0U; oi < sizeof(osc34) / sizeof(osc34[0]); ++oi) {
+			push_midi_cc(&eng, 0, 15, osc34[oi]);
+			mfd_engine_tick(&eng, 0.016f);
+		}
+	}
+	REQUIRE(g_mock_tbar_calls == 0);
+	REQUIRE(g_mock_tbar_set_writes == 0);
+	REQUIRE(g_mock_tbar_completions == 0);
+	REQUIRE(g_mock_tbar_aborts == 0);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+
+	/* 13b-1: CC 0 -> 8 -> 3 across ticks */
+	push_midi_cc(&eng, 0, 15, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	REQUIRE(g_mock_tbar_set_writes == 0);
+
+	push_midi_cc(&eng, 0, 15, 8);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+	REQUIRE(g_mock_tbar_set_writes >= 1);
+	REQUIRE(g_mock_tbar_aborts == 0);
+	REQUIRE(g_mock_tbar_completions == 0);
+
+	/* Retreat into (0.03, 0.06] deadband (CC 4) stays Throwing without aborting */
+	push_midi_cc(&eng, 0, 15, 4);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+	REQUIRE(g_mock_tbar_aborts == 0);
+
+	push_midi_cc(&eng, 0, 15, 3);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	REQUIRE(g_mock_tbar_aborts == 1);
+	REQUIRE(g_mock_tbar_completions == 0);
+
+	/* 13b-2: CC 0 -> 8 -> 3 queued inside a single mfd_engine_tick */
+	g_mock_tbar_set_writes = 0;
+	g_mock_tbar_aborts = 0;
+	g_mock_tbar_completions = 0;
+	push_midi_cc(&eng, 0, 15, 0);
+	push_midi_cc(&eng, 0, 15, 8);
+	push_midi_cc(&eng, 0, 15, 3);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	REQUIRE(g_mock_tbar_set_writes == 2); /* pos=1 on start at CC 8, pos=0 on cancel at CC 3 */
+	REQUIRE(g_mock_tbar_aborts == 1);
+	REQUIRE(g_mock_tbar_completions == 0);
+
+	/* 13c: Reversed polarity upper-rail 6% start band (CC 124,123 x5 = 0 transitions; 127 -> 119 -> 124 = 1 start & 1 cancel) */
+	eng.fader_slots[0].takeover.polarity_reversed = true;
+	eng.fader_slots[0].takeover.rescale_origin = 1.0f;
+	g_mock_tbar_calls = 0;
+	g_mock_tbar_set_writes = 0;
+	g_mock_tbar_aborts = 0;
+	g_mock_tbar_completions = 0;
+	for (int rep = 0; rep < 5; ++rep) {
+		const uint8_t osc_top[] = {124, 123, 124, 123, 124, 123};
+		for (size_t oi = 0U; oi < sizeof(osc_top) / sizeof(osc_top[0]); ++oi) {
+			push_midi_cc(&eng, 0, 15, osc_top[oi]);
+			mfd_engine_tick(&eng, 0.016f);
+		}
+	}
+	REQUIRE(g_mock_tbar_calls == 0);
+	REQUIRE(g_mock_tbar_set_writes == 0);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+
+	push_midi_cc(&eng, 0, 15, 127);
+	push_midi_cc(&eng, 0, 15, 119);
+	push_midi_cc(&eng, 0, 15, 124);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	REQUIRE(g_mock_tbar_set_writes == 2);
+	REQUIRE(g_mock_tbar_aborts == 1);
+	REQUIRE(g_mock_tbar_completions == 0);
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");
