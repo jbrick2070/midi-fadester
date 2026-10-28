@@ -20,7 +20,8 @@ void mfd_tbar_shutdown(void);
  * Safe Studio Mode T-bar driver callback registered with mfd_engine.
  * Returns false and populates out_err if Studio Mode is active but "slider-tbar" is missing.
  */
-bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size);
+bool mfd_tbar_driver_apply(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
+			   float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size);
 
 /*
  * Resets the per-transition T-bar release latch when a T-bar slot unparks or reinitializes.

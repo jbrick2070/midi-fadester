@@ -8,6 +8,7 @@
 #include "obs/mfd-layer-filter.h"
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
+#include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/platform.h>
@@ -85,6 +86,10 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	slot->auto_fade_to = initial_val;
 	slot->auto_fade_duration_sec = 0.0f;
 	slot->auto_fade_elapsed_sec = 0.0f;
+	slot->tbar_midi_active = false;
+	slot->tbar_has_tracked_raw = false;
+	slot->tbar_last_tracked_raw_norm = initial_val;
+	slot->tbar_idle_sec = 0.0f;
 	slot->sec_since_last_fader_event = 1.0f;
 	slot->fader_event_pending = false;
 	slot->pending_origin[0] = '\0';
@@ -342,13 +347,20 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		if (slot->takeover.state == MFD_TAKEOVER_PARKED) {
 			return;
 		}
-		slot->last_applied_val = val;
+		slot->last_applied_val = force_release ? 1.0f : val;
 		++slot->output_write_count;
 		if (eng->tbar_driver) {
 			float driver_val = force_release ? 1.0f : val;
+			bool in_rail = slot->tbar_midi_active
+					       ? mfd_tbar_is_in_rail_zone(slot->last_raw_norm,
+									  slot->takeover.polarity_reversed)
+					       : mfd_tbar_is_in_rail_zone(driver_val, false);
+			bool settled = !mfd_smoother_is_active(&slot->smoother);
+			float idle_sec = slot->tbar_midi_active ? slot->tbar_idle_sec : 0.0f;
 			bool completed = false;
 			char err_buf[256] = {0};
-			bool ok = eng->tbar_driver(driver_val, &completed, err_buf, sizeof(err_buf));
+			bool ok = eng->tbar_driver(driver_val, force_release, in_rail, settled, idle_sec, &completed,
+						   err_buf, sizeof(err_buf));
 			if (!ok && err_buf[0] != '\0') {
 				snprintf(eng->tbar_error, sizeof(eng->tbar_error), "%s", err_buf);
 			} else if (ok) {
@@ -358,6 +370,8 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 				mfd_takeover_notify_tbar_completed(&slot->takeover);
 				mfd_smoother_reset(&slot->smoother, 0.0f);
 				slot->last_applied_val = 0.0f;
+				slot->tbar_midi_active = false;
+				slot->tbar_idle_sec = 0.0f;
 			}
 		}
 		break;
@@ -414,7 +428,15 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	}
 
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		eng->fader_slots[i].sec_since_last_fader_event += seconds;
+		struct mfd_fader_slot *st = &eng->fader_slots[i];
+		st->sec_since_last_fader_event += seconds;
+		if (st->enabled && st->target_type == MFD_TARGET_TBAR && st->tbar_midi_active &&
+		    st->takeover.state == MFD_TAKEOVER_ENGAGED && !st->auto_fade_active &&
+		    st->takeover.target_obs >= MFD_TBAR_MIN_RELEASE_NORM) {
+			st->tbar_idle_sec += seconds;
+		} else {
+			st->tbar_idle_sec = 0.0f;
+		}
 	}
 
 	struct mfd_midi_raw_event raw;
@@ -454,6 +476,11 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 
 			float norm = slot->invert ? (1.0f - dec.normalized) : dec.normalized;
 			slot->last_raw_norm = norm;
+			if (!slot->tbar_has_tracked_raw || fabsf(norm - slot->tbar_last_tracked_raw_norm) > 1e-6f) {
+				slot->tbar_last_tracked_raw_norm = norm;
+				slot->tbar_has_tracked_raw = true;
+				slot->tbar_idle_sec = 0.0f;
+			}
 
 			float effective = slot->last_applied_val;
 			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
@@ -463,6 +490,12 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 					mfd_engine_unlatch_tbar(eng);
 				}
 				slot->auto_fade_active = false;
+				if (slot->target_type == MFD_TARGET_TBAR) {
+					slot->tbar_midi_active = true;
+					if (effective < MFD_TBAR_MIN_RELEASE_NORM) {
+						slot->tbar_idle_sec = 0.0f;
+					}
+				}
 				mfd_smoother_set_target(&slot->smoother, effective);
 				if (!mfd_smoother_is_active(&slot->smoother)) {
 					mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
@@ -534,6 +567,15 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				mfd_engine_notify_state_changed(eng);
 			}
 			mfd_engine_notify_fader_changed(eng, i, "midi");
+		} else if (slot->target_type == MFD_TARGET_TBAR && slot->tbar_midi_active &&
+			   slot->takeover.state == MFD_TAKEOVER_ENGAGED &&
+			   slot->tbar_idle_sec >= (MFD_TBAR_FALLBACK_STALL_SEC - 1e-6f)) {
+			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
+			mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
+			if (!was_parked && slot->takeover.state == MFD_TAKEOVER_PARKED) {
+				mfd_engine_notify_state_changed(eng);
+			}
+			mfd_engine_notify_fader_changed(eng, i, "midi");
 		}
 
 		if (slot->fader_event_pending && slot->sec_since_last_fader_event >= MFD_FADER_EVENT_MIN_INTERVAL_SEC) {
@@ -569,6 +611,8 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 		if (slot->target_type == MFD_TARGET_TBAR) {
 			if (reset_tbar) {
 				slot->auto_fade_active = false;
+				slot->tbar_midi_active = false;
+				slot->tbar_idle_sec = 0.0f;
 				slot->last_applied_val = 0.0f;
 				mfd_smoother_reset(&slot->smoother, 0.0f);
 				mfd_takeover_sync_external(&slot->takeover, 0.0f);

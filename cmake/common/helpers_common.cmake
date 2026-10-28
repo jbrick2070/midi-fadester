@@ -39,10 +39,29 @@ function(check_uuid uuid_string return_value)
 endfunction()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/plugin-support.c.in")
+  set(_mfd_hdr "${CMAKE_BINARY_DIR}/generated/mfd-build-info.h")
+  set(_mfd_gen "${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/generate_build_info.cmake")
+  set(_mfd_src "${CMAKE_CURRENT_SOURCE_DIR}")
+
+  execute_process(COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${_mfd_src}" "-DOUTPUT_HEADER=${_mfd_hdr}" -P "${_mfd_gen}")
+
+  add_custom_target(
+    mfd-build-info
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${_mfd_src}" "-DOUTPUT_HEADER=${_mfd_hdr}" -P "${_mfd_gen}"
+    BYPRODUCTS "${_mfd_hdr}"
+    COMMENT "Updating build-time git commit and timestamp"
+    VERBATIM
+  )
+
   configure_file(src/plugin-support.c.in plugin-support.c @ONLY)
   add_library(plugin-support STATIC)
-  target_sources(plugin-support PRIVATE plugin-support.c PUBLIC src/plugin-support.h)
-  target_include_directories(plugin-support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  add_dependencies(plugin-support mfd-build-info)
+  target_sources(plugin-support PRIVATE plugin-support.c "${_mfd_hdr}" PUBLIC src/plugin-support.h)
+  target_include_directories(
+    plugin-support
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    PRIVATE "${CMAKE_BINARY_DIR}/generated"
+  )
   if(OS_LINUX OR OS_FREEBSD OR OS_OPENBSD)
     set_property(TARGET plugin-support PROPERTY POSITION_INDEPENDENT_CODE ON)
   endif()

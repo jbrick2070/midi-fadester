@@ -5,9 +5,12 @@
  */
 
 #include <plugin-support.h>
+#include "mfd-build-info.h"
 
 const char *PLUGIN_NAME = "@CMAKE_PROJECT_NAME@";
 const char *PLUGIN_VERSION = "@CMAKE_PROJECT_VERSION@";
+const char *PLUGIN_GIT_COMMIT = MFD_BUILD_GIT_COMMIT;
+const char *PLUGIN_BUILT_AT = MFD_BUILD_TIMESTAMP;
 
 void obs_log(int log_level, const char *format, ...)
 {

@@ -122,7 +122,9 @@ class MfdSettingsDialog final : public QDialog {
 public:
 	explicit MfdSettingsDialog(QWidget *parent = nullptr) : QDialog(parent)
 	{
-		setWindowTitle(QStringLiteral("Midi Fadester — Video Mixer & Fader Control"));
+		setWindowTitle(QStringLiteral("Midi Fadester %1 (commit %2, built %3)")
+				       .arg(QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
+					    QString::fromUtf8(PLUGIN_BUILT_AT)));
 		resize(1360, 600);
 
 		auto *root = new QVBoxLayout(this);
@@ -283,10 +285,11 @@ public:
 		auto *hint = new QLabel(
 			QStringLiteral(
 				"Tip \xE2\x80\x94 Studio Mode T-Bar vs. Two-Source Crossfade (A \xE2\x86\x94 B): "
-				"Studio Mode T-Bar transitions Preview \xE2\x86\x92 Program; when a throw finishes (90%), Studio Mode "
-				"swaps the old scene into the left Preview box and resets its T-bar slider while the live Program output "
-				"on the right stays smooth. For a DJ/video-mixer crossfader where Left is always Source A and Right is "
-				"always Source B (0\xE2\x80\x93"
+				"Studio Mode T-Bar drives Preview \xE2\x86\x92 Program linearly from 0\xE2\x80\x93"
+				"100% and completes when the fader enters the 3% rail zone (or stops for 150 ms above 90%), "
+				"swapping the old scene into the left Preview box while the live Program output on the right stays smooth. "
+				"For a DJ/video-mixer crossfader where Left is always Source A and Right is always Source B "
+				"(0\xE2\x80\x93"
 				"100% linear, no Preview swap, 0% black dip), stack Source A below Source B in one scene "
 				"and pick Two-Source Crossfade (A \xE2\x86\x94 B)."),
 			this);
@@ -642,7 +645,8 @@ private:
 			target_combo->addItem(QStringLiteral("Audio Volume (Cubic dB)"),
 					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
 			target_combo->setToolTip(QStringLiteral(
-				"Studio Mode T-Bar: transitions Preview \xE2\x86\x92 Program (swaps Preview on deck at 90% completion; live Program output stays smooth).\n"
+				"Studio Mode T-Bar: drives Preview \xE2\x86\x92 Program linearly 0\xE2\x80\x93"
+				"100% and swaps Preview on deck at the 3% rail zone (or after 150 ms idle above 90%); live Program output stays smooth.\n"
 				"Two-Source Crossfade (A \xE2\x86\x94 B): DJ/video-mixer mode inside one scene \xE2\x80\x94 Left (0%) is always Source A, Right (100%) is always Source B, dip-free with no Preview swap.\n"
 				"Single Layer Opacity: fades one video source or nested scene 0\xE2\x80\x93"
 				"100%.\n"
@@ -923,7 +927,7 @@ private:
 						  .arg(prev_nm, prog_nm);
 			studio_status_label_->setToolTip(QStringLiteral(
 				"Right box (Program) is your live broadcast output. Left box (Preview) is the next scene on deck "
-				"and automatically swaps when a T-bar throw completes at 90%."));
+				"and automatically swaps when a T-bar throw reaches the 3% rail zone."));
 			set_label_text_and_style(
 				studio_status_label_, pill_text,
 				QStringLiteral("QLabel { background-color: #172554; color: #bfdbfe; padding: 4px 10px; "

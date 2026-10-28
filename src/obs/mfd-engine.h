@@ -59,13 +59,20 @@ struct mfd_fader_slot {
 	float auto_fade_duration_sec;
 	float auto_fade_elapsed_sec;
 
+	/* T-bar physical MIDI 3% rail-zone & 150 ms >90% stall fallback state */
+	bool tbar_midi_active;
+	bool tbar_has_tracked_raw;
+	float tbar_last_tracked_raw_norm;
+	float tbar_idle_sec;
+
 	/* Coalesced fader_changed event state (max 30 Hz per slot) */
 	float sec_since_last_fader_event;
 	bool fader_event_pending;
 	char pending_origin[16];
 };
 
-typedef bool (*mfd_tbar_apply_fn)(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size);
+typedef bool (*mfd_tbar_apply_fn)(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
+				  float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size);
 typedef void (*mfd_tbar_unlatch_fn)(void);
 typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
 

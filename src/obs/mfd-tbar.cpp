@@ -52,6 +52,8 @@ static std::atomic<bool> g_tbar_release_latched{false};
 static std::atomic<uint64_t> g_tbar_throw_epoch{1ULL};
 static std::atomic<int> g_tbar_set_count{0};
 static std::atomic<int> g_tbar_release_count{0};
+static std::atomic<int> g_tbar_first_release_raw_cc{-1};
+static std::atomic<int> g_tbar_releases_before_cc124{0};
 static std::atomic<int> g_tbar_writes_since_release{0};
 static std::atomic<int> g_tbar_post_first_release_writes{0};
 static std::atomic<int> g_tbar_writes_before_unpark{0};
@@ -438,6 +440,155 @@ static bool capture_source_screenshot_avg_rgb(const char *source_name, float *ou
 	return ok;
 }
 
+static bool capture_source_screenshot_by_uuid_srgb(const char *source_uuid, float *out_srgb_r, float *out_srgb_g,
+						   float *out_srgb_b)
+{
+	if (!source_uuid || source_uuid[0] == '\0') {
+		return false;
+	}
+	obs_data_t *req = obs_data_create();
+	obs_data_set_string(req, "sourceUuid", source_uuid);
+	obs_data_set_string(req, "imageFormat", "bmp");
+	obs_data_set_int(req, "imageWidth", 64);
+	obs_data_set_int(req, "imageHeight", 64);
+
+	struct obs_websocket_request_response *resp = obs_websocket_call_request("GetSourceScreenshot", req);
+	obs_data_release(req);
+
+	if (!resp) {
+		obs_log(LOG_ERROR, "GetSourceScreenshot returned null response for uuid '%s'", source_uuid);
+		return false;
+	}
+
+	bool ok = false;
+	if (resp->status_code == 100 && resp->response_data) {
+		obs_data_t *full = obs_data_create_from_json(resp->response_data);
+		if (full) {
+			const char *img_data = obs_data_get_string(full, "imageData");
+			obs_data_t *rdata = nullptr;
+			if (!img_data || img_data[0] == '\0') {
+				rdata = obs_data_get_obj(full, "responseData");
+				if (rdata) {
+					img_data = obs_data_get_string(rdata, "imageData");
+				}
+			}
+			const char *comma = img_data ? std::strchr(img_data, ',') : nullptr;
+			if (comma && comma[1] != '\0') {
+				QByteArray b64(comma + 1);
+				QByteArray raw = QByteArray::fromBase64(b64);
+				QImage img = QImage::fromData(raw, "BMP");
+				if (!img.isNull() && img.width() > 0 && img.height() > 0) {
+					double sum_r = 0.0;
+					double sum_g = 0.0;
+					double sum_b = 0.0;
+					const int w = img.width();
+					const int h = img.height();
+					for (int y = 0; y < h; ++y) {
+						for (int x = 0; x < w; ++x) {
+							const QColor c = img.pixelColor(x, y);
+							sum_r += c.redF();
+							sum_g += c.greenF();
+							sum_b += c.blueF();
+						}
+					}
+					const double total = static_cast<double>(w) * static_cast<double>(h);
+					if (out_srgb_r) {
+						*out_srgb_r = static_cast<float>(sum_r / total);
+					}
+					if (out_srgb_g) {
+						*out_srgb_g = static_cast<float>(sum_g / total);
+					}
+					if (out_srgb_b) {
+						*out_srgb_b = static_cast<float>(sum_b / total);
+					}
+					ok = true;
+				}
+			}
+			if (rdata) {
+				obs_data_release(rdata);
+			}
+			obs_data_release(full);
+		}
+	} else {
+		obs_log(LOG_ERROR, "GetSourceScreenshot failed for uuid '%s': status=%u comment=%s", source_uuid,
+			resp->status_code, resp->comment ? resp->comment : "");
+	}
+
+	obs_websocket_request_response_free(resp);
+	return ok;
+}
+
+static const char *selftest_program_tap_get_name(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	return "Midi Fadester — Self-Test Program Tap";
+}
+
+static void *selftest_program_tap_create(obs_data_t *settings, obs_source_t *source)
+{
+	UNUSED_PARAMETER(settings);
+	return source;
+}
+
+static void selftest_program_tap_destroy(void *data)
+{
+	UNUSED_PARAMETER(data);
+}
+
+static uint32_t selftest_program_tap_get_width(void *data)
+{
+	UNUSED_PARAMETER(data);
+	obs_source_t *tr = obs_get_output_source(0);
+	uint32_t w = tr ? obs_source_get_width(tr) : 1920U;
+	if (tr) {
+		obs_source_release(tr);
+	}
+	return w ? w : 1920U;
+}
+
+static uint32_t selftest_program_tap_get_height(void *data)
+{
+	UNUSED_PARAMETER(data);
+	obs_source_t *tr = obs_get_output_source(0);
+	uint32_t h = tr ? obs_source_get_height(tr) : 1080U;
+	if (tr) {
+		obs_source_release(tr);
+	}
+	return h ? h : 1080U;
+}
+
+static void selftest_program_tap_video_render(void *data, gs_effect_t *effect)
+{
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(effect);
+	obs_source_t *tr = obs_get_output_source(0);
+	if (tr) {
+		obs_source_video_render(tr);
+		obs_source_release(tr);
+	}
+}
+
+static bool g_selftest_tap_registered = false;
+
+static void register_selftest_program_tap_once(void)
+{
+	if (g_selftest_tap_registered) {
+		return;
+	}
+	struct obs_source_info info = {};
+	info.id = "mfd_selftest_program_tap";
+	info.type = OBS_SOURCE_TYPE_INPUT;
+	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_SRGB | OBS_SOURCE_CAP_DISABLED;
+	info.get_name = selftest_program_tap_get_name;
+	info.create = selftest_program_tap_create;
+	info.destroy = selftest_program_tap_destroy;
+	info.get_width = selftest_program_tap_get_width;
+	info.get_height = selftest_program_tap_get_height;
+	info.video_render = selftest_program_tap_video_render;
+	obs_register_source(&info);
+	g_selftest_tap_registered = true;
+}
+
 struct selftest_sig_capture {
 	int count;
 	char slot[32];
@@ -505,8 +656,12 @@ static void run_live_selftest_worker(void)
 	obs_source_t *prev_scene = nullptr;
 	obs_scene_t *test_scene = nullptr;
 	obs_scene_t *test_scene_b = nullptr;
+	obs_scene_t *tbar_red_scene = nullptr;
+	obs_scene_t *tbar_blue_scene = nullptr;
 	obs_source_t *src_a = nullptr;
 	obs_source_t *src_b = nullptr;
+	obs_source_t *tbar_src_red = nullptr;
+	obs_source_t *tbar_src_blue = nullptr;
 
 	char src_a_actual_name[128] = "__mfd_selftest_source_a__";
 	char src_b_actual_name[128] = "__mfd_selftest_source_b__";
@@ -522,10 +677,14 @@ static void run_live_selftest_worker(void)
 
 			/* Remove any leftover self-test sources/scenes from prior interrupted runs */
 			const char *stale_names[] = {
-				"__mfd_selftest_source_a__",   "__mfd_selftest_source_b__",
-				"__mfd_selftest_source_a__ 2", "__mfd_selftest_source_b__ 2",
-				"__mfd_selftest_scene__",      "__mfd_selftest_scene__ 2",
-				"__mfd_selftest_scene_b__",    "__mfd_selftest_scene_b__ 2",
+				"__mfd_selftest_source_a__",     "__mfd_selftest_source_b__",
+				"__mfd_selftest_source_a__ 2",   "__mfd_selftest_source_b__ 2",
+				"__mfd_selftest_scene__",        "__mfd_selftest_scene__ 2",
+				"__mfd_selftest_scene_b__",      "__mfd_selftest_scene_b__ 2",
+				"__mfd_selftest_tbar_red__",     "__mfd_selftest_tbar_red__ 2",
+				"__mfd_selftest_tbar_blue__",    "__mfd_selftest_tbar_blue__ 2",
+				"__mfd_selftest_tbar_red_src__", "__mfd_selftest_tbar_blue_src__",
+				"__mfd_selftest_program_tap__",  "__mfd_selftest_program_tap__ 2",
 			};
 			for (const char *sn : stale_names) {
 				obs_source_t *old = obs_get_source_by_name(sn);
@@ -539,12 +698,16 @@ static void run_live_selftest_worker(void)
 
 			test_scene = obs_scene_create("__mfd_selftest_scene__");
 			test_scene_b = obs_scene_create("__mfd_selftest_scene_b__");
+			tbar_red_scene = obs_scene_create("__mfd_selftest_tbar_red__");
+			tbar_blue_scene = obs_scene_create("__mfd_selftest_tbar_blue__");
 
 			obs_data_t *red_settings = obs_data_create();
 			obs_data_set_int(red_settings, "color", 0xFF0000FFLL);
 			obs_data_set_int(red_settings, "width", 1920);
 			obs_data_set_int(red_settings, "height", 1080);
 			src_a = obs_source_create("color_source", "__mfd_selftest_source_a__", red_settings, nullptr);
+			tbar_src_red = obs_source_create("color_source", "__mfd_selftest_tbar_red_src__", red_settings,
+							 nullptr);
 			obs_data_release(red_settings);
 
 			obs_data_t *blue_settings = obs_data_create();
@@ -552,6 +715,8 @@ static void run_live_selftest_worker(void)
 			obs_data_set_int(blue_settings, "width", 1920);
 			obs_data_set_int(blue_settings, "height", 1080);
 			src_b = obs_source_create("color_source", "__mfd_selftest_source_b__", blue_settings, nullptr);
+			tbar_src_blue = obs_source_create("color_source", "__mfd_selftest_tbar_blue_src__",
+							  blue_settings, nullptr);
 			obs_data_release(blue_settings);
 
 			if (src_a && obs_source_get_name(src_a)) {
@@ -565,6 +730,12 @@ static void run_live_selftest_worker(void)
 
 			obs_scene_add(test_scene, src_a);
 			obs_scene_add(test_scene, src_b);
+			if (tbar_red_scene && tbar_src_red) {
+				obs_scene_add(tbar_red_scene, tbar_src_red);
+			}
+			if (tbar_blue_scene && tbar_src_blue) {
+				obs_scene_add(tbar_blue_scene, tbar_src_blue);
+			}
 
 			obs_frontend_set_current_scene(obs_scene_get_source(test_scene));
 		},
@@ -773,12 +944,40 @@ static void run_live_selftest_worker(void)
 	}
 	obs_data_release(req);
 
-	/* Verify get_state exposes parked=true, repeated "Finish T-bar" is a one-shot no-op, and nudge_fader unparks */
+	/* Verify get_state exposes build identity, parked=true, repeated "Finish T-bar" is a one-shot no-op, and nudge_fader unparks */
 	std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	int rel_after_first_finish = g_tbar_release_count.load(std::memory_order_relaxed);
 	bool ws_parked_true = false;
+	bool ws_build_ok = false;
+	char ws_ver[64] = {0};
+	char ws_commit[64] = {0};
+	char ws_built_at[64] = {0};
 	obs_data_t *gs_res = call_real_ws_vendor_request("get_state", nullptr);
 	if (gs_res) {
+		const char *v = obs_data_get_string(gs_res, "version");
+		if (v) {
+			std::snprintf(ws_ver, sizeof(ws_ver), "%s", v);
+		}
+		obs_data_t *bobj = obs_data_get_obj(gs_res, "build");
+		if (bobj) {
+			const char *cm = obs_data_get_string(bobj, "commit");
+			const char *ba = obs_data_get_string(bobj, "built_at");
+			if (cm) {
+				std::snprintf(ws_commit, sizeof(ws_commit), "%s", cm);
+			}
+			if (ba) {
+				std::snprintf(ws_built_at, sizeof(ws_built_at), "%s", ba);
+			}
+			obs_data_release(bobj);
+		}
+		ws_build_ok = (std::strcmp(ws_ver, PLUGIN_VERSION) == 0) &&
+			      (std::strcmp(ws_commit, PLUGIN_GIT_COMMIT) == 0) &&
+			      (std::strcmp(ws_built_at, PLUGIN_BUILT_AT) == 0) && (ws_commit[0] != '\0') &&
+			      (ws_built_at[0] != '\0');
+		obs_log(ws_build_ok ? LOG_INFO : LOG_ERROR,
+			"BUILD IDENTITY CHECK [%s]: version='%s' build={ commit='%s', built_at='%s' }",
+			ws_build_ok ? "PASS" : "FAIL", ws_ver, ws_commit, ws_built_at);
+
 		obs_data_array_t *gs_slots = obs_data_get_array(gs_res, "slots");
 		if (gs_slots) {
 			obs_data_t *gs_s0 = obs_data_array_item(gs_slots, 0);
@@ -968,6 +1167,9 @@ static void run_live_selftest_worker(void)
 		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
 		eng->fader_slots[0].last_applied_val = 0.0f;
+		eng->fader_slots[0].tbar_midi_active = false;
+		eng->fader_slots[0].tbar_has_tracked_raw = false;
+		eng->fader_slots[0].tbar_idle_sec = 0.0f;
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		g_obs_manual_started.store(0, std::memory_order_relaxed);
 		g_obs_manual_finished.store(0, std::memory_order_relaxed);
@@ -1031,6 +1233,9 @@ static void run_live_selftest_worker(void)
 		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
 		eng->fader_slots[0].last_applied_val = 0.0f;
+		eng->fader_slots[0].tbar_midi_active = false;
+		eng->fader_slots[0].tbar_has_tracked_raw = false;
+		eng->fader_slots[0].tbar_idle_sec = 0.0f;
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		g_obs_manual_started.store(0, std::memory_order_relaxed);
 		g_obs_manual_finished.store(0, std::memory_order_relaxed);
@@ -1104,6 +1309,9 @@ static void run_live_selftest_worker(void)
 		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
 		eng->fader_slots[0].last_applied_val = 0.0f;
+		eng->fader_slots[0].tbar_midi_active = false;
+		eng->fader_slots[0].tbar_has_tracked_raw = false;
+		eng->fader_slots[0].tbar_idle_sec = 0.0f;
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		g_obs_manual_started.store(0, std::memory_order_relaxed);
 		g_obs_manual_finished.store(0, std::memory_order_relaxed);
@@ -1196,6 +1404,9 @@ static void run_live_selftest_worker(void)
 		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
 		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
 		eng->fader_slots[0].last_applied_val = 0.0f;
+		eng->fader_slots[0].tbar_midi_active = false;
+		eng->fader_slots[0].tbar_has_tracked_raw = false;
+		eng->fader_slots[0].tbar_idle_sec = 0.0f;
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		g_obs_manual_started.store(0, std::memory_order_relaxed);
 		g_obs_manual_finished.store(0, std::memory_order_relaxed);
@@ -1248,16 +1459,252 @@ static void run_live_selftest_worker(void)
 			case5_ok ? "PASS" : "FAIL", c5_started, c5_finished, c5_releases, c5_prev_name, exp_scene_a,
 			c5_prog_name, exp_scene_b);
 
+		/*
+		 * Case (6): Slow crossfader sweep at 2 CC per 100 ms (0 -> 127 over 6350 ms = 50 ms/CC):
+		 *   6A: Asserts no release before CC 124, manual transition time monotonic to 1.0, and exactly 1 release.
+		 *   6B: GetSourceScreenshot of the Program output at CC 119 showing ~93% mix, NOT 100%.
+		 */
+		obs_source_t *saved_transition = nullptr;
+		obs_source_t *program_tap = nullptr;
+		char program_tap_uuid[128] = {0};
+		char program_tr_id[64] = {0};
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				obs_source_t *cur_tr = obs_frontend_get_current_transition();
+				if (cur_tr) {
+					const char *cid = obs_source_get_id(cur_tr);
+					if (!cid || std::strcmp(cid, "fade_transition") != 0) {
+						struct obs_frontend_source_list tr_list = {};
+						obs_frontend_get_transitions(&tr_list);
+						for (size_t ti = 0; ti < tr_list.sources.num; ++ti) {
+							obs_source_t *cand = tr_list.sources.array[ti];
+							const char *tid = cand ? obs_source_get_id(cand) : nullptr;
+							if (tid && std::strcmp(tid, "fade_transition") == 0) {
+								saved_transition = obs_source_get_ref(cur_tr);
+								obs_frontend_set_current_transition(cand);
+								break;
+							}
+						}
+						obs_frontend_source_list_free(&tr_list);
+					}
+					obs_source_release(cur_tr);
+				}
+				if (tbar_red_scene) {
+					obs_frontend_set_current_scene(obs_scene_get_source(tbar_red_scene));
+				}
+			},
+			Qt::BlockingQueuedConnection);
+		/* Wait for Program auto-transition to tbar_red_scene (and its swapScenesMode callback) to finish */
+		std::this_thread::sleep_for(std::chrono::milliseconds(650));
+
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				if (tbar_blue_scene) {
+					obs_frontend_set_current_preview_scene(obs_scene_get_source(tbar_blue_scene));
+				}
+				program_tap = obs_source_create("mfd_selftest_program_tap",
+								"__mfd_selftest_program_tap__", nullptr, nullptr);
+				if (program_tap) {
+					const char *uu = obs_source_get_uuid(program_tap);
+					if (uu) {
+						std::snprintf(program_tap_uuid, sizeof(program_tap_uuid), "%s", uu);
+					}
+				}
+				obs_source_t *prog_tr = obs_get_output_source(0);
+				if (prog_tr) {
+					const char *tid = obs_source_get_id(prog_tr);
+					if (tid) {
+						std::snprintf(program_tr_id, sizeof(program_tr_id), "%s", tid);
+					}
+					obs_source_release(prog_tr);
+				}
+			},
+			Qt::BlockingQueuedConnection);
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+		mfd_tbar_reset_release_latch();
+		mfd_takeover_init(&eng->fader_slots[0].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, true);
+		eng->fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+		mfd_smoother_reset(&eng->fader_slots[0].smoother, 0.0f);
+		eng->fader_slots[0].last_applied_val = 0.0f;
+		eng->fader_slots[0].tbar_midi_active = false;
+		eng->fader_slots[0].tbar_has_tracked_raw = false;
+		eng->fader_slots[0].tbar_idle_sec = 0.0f;
+		eng->last_midi_decoded.raw_value = 0U;
+		g_last_pos_1024.store(0, std::memory_order_relaxed);
+		g_obs_manual_started.store(0, std::memory_order_relaxed);
+		g_obs_manual_finished.store(0, std::memory_order_relaxed);
+		g_obs_manual_cancelled.store(0, std::memory_order_relaxed);
+		g_tbar_release_count.store(0, std::memory_order_relaxed);
+		g_tbar_first_release_raw_cc.store(-1, std::memory_order_relaxed);
+		g_tbar_releases_before_cc124.store(0, std::memory_order_relaxed);
+		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+		g_tbar_post_first_release_writes.store(0, std::memory_order_relaxed);
+
+		obs_log(LOG_INFO,
+			"LOOPMIDI CASE 6 (slow sweep 2 CC/100ms = 0..127 over 6350ms, tr='%s' tap_uuid='%s'): starting...",
+			program_tr_id, program_tap_uuid);
+
+		QProcess slow_proc;
+		slow_proc.start(midi_send_exe, QStringList() << QString::fromUtf8(loopmidi_port) << "1" << "15"
+							     << "6350" << "0"
+							     << "127");
+		slow_proc.waitForStarted(1500);
+
+		bool saw_sweep_start = false;
+		bool has_tr_sample = false;
+		float max_tr_time = 0.0f;
+		int monotonic_violations = 0;
+		int polled_releases_before_cc124 = 0;
+		float tr_at_cc64 = -1.0f;
+		float tr_at_cc115 = -1.0f;
+		float tr_at_cc119 = -1.0f;
+		float tr_at_cc123 = -1.0f;
+
+		bool captured_cc119 = false;
+		bool cc119_cap_ok = false;
+		uint16_t cc119_cc_seen = 0;
+		int cc119_rel_so_far = -1;
+		int cc119_slider_pos = -1;
+		float cc119_r = -1.0f;
+		float cc119_g = -1.0f;
+		float cc119_b = -1.0f;
+
+		while (!slow_proc.waitForFinished(10)) {
+			uint16_t cc_now = eng->last_midi_decoded.raw_value;
+			if (cc_now <= 5U) {
+				saw_sweep_start = true;
+			}
+			int rel_now = g_tbar_release_count.load(std::memory_order_relaxed);
+			if (saw_sweep_start && cc_now < 124U && rel_now > polled_releases_before_cc124) {
+				polled_releases_before_cc124 = rel_now;
+			}
+
+			if (g_obs_manual_started.load(std::memory_order_relaxed) >= 1) {
+				obs_source_t *tr_s = obs_get_output_source(0);
+				if (tr_s) {
+					float tr_t = obs_transition_get_time(tr_s);
+					obs_source_release(tr_s);
+					if (has_tr_sample && (tr_t + 1e-4f < max_tr_time)) {
+						++monotonic_violations;
+					}
+					has_tr_sample = true;
+					if (tr_t > max_tr_time) {
+						max_tr_time = tr_t;
+					}
+					if (cc_now == 64U && tr_at_cc64 < 0.0f) {
+						tr_at_cc64 = tr_t;
+					}
+					if (cc_now == 115U && tr_at_cc115 < 0.0f) {
+						tr_at_cc115 = tr_t;
+					}
+					if (cc_now == 123U && tr_at_cc123 < 0.0f) {
+						tr_at_cc123 = tr_t;
+					}
+				}
+			}
+
+			if (saw_sweep_start && !captured_cc119 && cc_now >= 119U) {
+				captured_cc119 = true;
+				cc119_cc_seen = cc_now;
+				std::this_thread::sleep_for(std::chrono::milliseconds(15));
+				cc119_rel_so_far = g_tbar_release_count.load(std::memory_order_relaxed);
+				obs_source_t *tr_119 = obs_get_output_source(0);
+				if (tr_119) {
+					tr_at_cc119 = obs_transition_get_time(tr_119);
+					obs_source_release(tr_119);
+				}
+				QMetaObject::invokeMethod(
+					main_win,
+					[&]() { cc119_slider_pos = g_tbar_slider ? g_tbar_slider->value() : -1; },
+					Qt::BlockingQueuedConnection);
+				cc119_cap_ok = capture_source_screenshot_by_uuid_srgb(program_tap_uuid, &cc119_r,
+										      &cc119_g, &cc119_b);
+			}
+		}
+
+		int rc_c6 = (slow_proc.exitStatus() == QProcess::NormalExit) ? slow_proc.exitCode() : -1;
+		std::this_thread::sleep_for(std::chrono::milliseconds(350));
+
+		float final_tr_time = -1.0f;
+		obs_source_t *tr_end = obs_get_output_source(0);
+		if (tr_end) {
+			final_tr_time = obs_transition_get_time(tr_end);
+			obs_source_release(tr_end);
+			if (has_tr_sample && (final_tr_time + 1e-4f < max_tr_time)) {
+				++monotonic_violations;
+			}
+			if (final_tr_time > max_tr_time) {
+				max_tr_time = final_tr_time;
+			}
+		}
+
+		float end_srgb_r = -1.0f;
+		float end_srgb_g = -1.0f;
+		float end_srgb_b = -1.0f;
+		bool end_cap_ok =
+			capture_source_screenshot_by_uuid_srgb(program_tap_uuid, &end_srgb_r, &end_srgb_g, &end_srgb_b);
+
+		QMetaObject::invokeMethod(
+			main_win,
+			[&]() {
+				if (program_tap) {
+					obs_source_remove(program_tap);
+					obs_source_release(program_tap);
+					program_tap = nullptr;
+				}
+				if (saved_transition) {
+					obs_frontend_set_current_transition(saved_transition);
+					obs_source_release(saved_transition);
+					saved_transition = nullptr;
+				}
+			},
+			Qt::BlockingQueuedConnection);
+
+		int c6_started = g_obs_manual_started.load(std::memory_order_relaxed);
+		int c6_finished = g_obs_manual_finished.load(std::memory_order_relaxed);
+		int c6_cancelled = g_obs_manual_cancelled.load(std::memory_order_relaxed);
+		int c6_releases = g_tbar_release_count.load(std::memory_order_relaxed);
+		int first_rel_cc = g_tbar_first_release_raw_cc.load(std::memory_order_relaxed);
+		int rel_before_124 = std::max(g_tbar_releases_before_cc124.load(std::memory_order_relaxed),
+					      polled_releases_before_cc124);
+		bool c6_parked = (eng->fader_slots[0].takeover.state == MFD_TAKEOVER_PARKED);
+
+		bool case6a_slow_sweep_ok = (rc_c6 == 0) && (rel_before_124 == 0) && (first_rel_cc >= 124) &&
+					    (c6_releases == 1) && (c6_started == 1) && (c6_finished == 1) &&
+					    (c6_cancelled == 0) && has_tr_sample && (monotonic_violations == 0) &&
+					    (std::fabs(final_tr_time - 1.0f) <= 1e-4f) && c6_parked;
+
+		bool case6b_cc119_mix_ok = cc119_cap_ok && (cc119_b >= 0.89f && cc119_b <= 0.965f) &&
+					   (cc119_r >= 0.035f && cc119_r <= 0.11f) && (cc119_g <= 0.02f) &&
+					   end_cap_ok && (end_srgb_b >= 0.99f && end_srgb_r <= 0.01f);
+
+		bool case6_ok = case6a_slow_sweep_ok && case6b_cc119_mix_ok;
+
+		obs_log(case6a_slow_sweep_ok ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI CASE 6A (slow sweep 2 CC/100ms) [%s]: rc=%d releases_before_cc124=%d first_release_cc=%d total_releases=%d started=%d finished=%d cancelled=%d monotonic_violations=%d tr_time(cc64=%.4f cc115=%.4f cc119=%.4f cc123=%.4f final=%.4f) parked=%d",
+			case6a_slow_sweep_ok ? "PASS" : "FAIL", rc_c6, rel_before_124, first_rel_cc, c6_releases,
+			c6_started, c6_finished, c6_cancelled, monotonic_violations, tr_at_cc64, tr_at_cc115,
+			tr_at_cc119, tr_at_cc123, final_tr_time, (int)c6_parked);
+
+		obs_log(case6b_cc119_mix_ok ? LOG_INFO : LOG_ERROR,
+			"LOOPMIDI CASE 6B (Program GetSourceScreenshot at CC %u) [%s]: cap_ok=%d srgb_rgb=(%.4f, %.4f, %.4f) mix_pct=%.1f%% (expected ~93.7%%, NOT 100%%) tr_time_at_cc119=%.4f slider_pos=%d releases_at_cc119=%d end_srgb_rgb=(%.4f, %.4f, %.4f)",
+			(unsigned)cc119_cc_seen, case6b_cc119_mix_ok ? "PASS" : "FAIL", (int)cc119_cap_ok, cc119_r,
+			cc119_g, cc119_b, cc119_b * 100.0f, tr_at_cc119, cc119_slider_pos, cc119_rel_so_far, end_srgb_r,
+			end_srgb_g, end_srgb_b);
+
 		loopmidi_pass = connected && pre_waiting_ok && pre_slider_held && saw_waiting_before_pickup &&
 				saw_engaged_after_pickup && smoothing_ok && sweep_completed_throw &&
-				(final_cc == 127) && case2_ok && case3_ok && case4_ok && case5_ok;
+				(final_cc == 127) && case2_ok && case3_ok && case4_ok && case5_ok && case6_ok;
 
 		obs_log(loopmidi_pass ? LOG_INFO : LOG_ERROR,
-			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d case2_ok=%d case3_ok=%d case4_ok=%d case5_ok=%d",
+			"LOOPMIDI SWEEP CHECK [%s]: port='%s' connected=%d pre_waiting=%d(slider=%d) saw_waiting_pre_pickup=%d saw_engaged_post_pickup=%d mid_samples=%d max_smoothing_lag=%.4f final_cc=%u throw_completed=%d case2_ok=%d case3_ok=%d case4_ok=%d case5_ok=%d case6_ok=%d",
 			loopmidi_pass ? "PASS" : "FAIL", loopmidi_port, (int)connected, (int)pre_waiting_ok, slider_pre,
 			(int)saw_waiting_before_pickup, (int)saw_engaged_after_pickup, mid_sweep_samples,
 			max_smoothing_lag, (unsigned)final_cc, (int)sweep_completed_throw, (int)case2_ok, (int)case3_ok,
-			(int)case4_ok, (int)case5_ok);
+			(int)case4_ok, (int)case5_ok, (int)case6_ok);
 
 		mfd_engine_reconnect_midi(eng, prev_midi_dev);
 	} else {
@@ -1362,10 +1809,25 @@ static void run_live_selftest_worker(void)
 	QMetaObject::invokeMethod(
 		main_win,
 		[&]() {
+			if (!was_studio) {
+				obs_frontend_set_preview_program_mode(false);
+				refresh_studio_mode_state_on_ui_thread();
+			}
 			if (prev_scene) {
 				obs_frontend_set_current_scene(prev_scene);
+				if (obs_frontend_preview_program_mode_active()) {
+					obs_frontend_set_current_preview_scene(prev_scene);
+				}
 				obs_source_release(prev_scene);
 			}
+		},
+		Qt::BlockingQueuedConnection);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
 			if (src_a) {
 				obs_source_remove(src_a);
 				obs_source_release(src_a);
@@ -1373,6 +1835,22 @@ static void run_live_selftest_worker(void)
 			if (src_b) {
 				obs_source_remove(src_b);
 				obs_source_release(src_b);
+			}
+			if (tbar_src_red) {
+				obs_source_remove(tbar_src_red);
+				obs_source_release(tbar_src_red);
+			}
+			if (tbar_src_blue) {
+				obs_source_remove(tbar_src_blue);
+				obs_source_release(tbar_src_blue);
+			}
+			if (tbar_blue_scene) {
+				obs_source_remove(obs_scene_get_source(tbar_blue_scene));
+				obs_scene_release(tbar_blue_scene);
+			}
+			if (tbar_red_scene) {
+				obs_source_remove(obs_scene_get_source(tbar_red_scene));
+				obs_scene_release(tbar_red_scene);
 			}
 			if (test_scene_b) {
 				obs_source_remove(obs_scene_get_source(test_scene_b));
@@ -1382,20 +1860,17 @@ static void run_live_selftest_worker(void)
 				obs_source_remove(obs_scene_get_source(test_scene));
 				obs_scene_release(test_scene);
 			}
-			if (!was_studio) {
-				obs_frontend_set_preview_program_mode(false);
-				refresh_studio_mode_state_on_ui_thread();
-			}
 		},
 		Qt::BlockingQueuedConnection);
 
 	base_set_log_handler(g_orig_log_handler, g_orig_log_param);
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
-		(int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end, (int)screenshot_all_pass,
-		(int)loopmidi_tested, (int)loopmidi_pass, slider_mid, (int)mid_ok, (int)end_ok, (int)completed,
-		(int)(bridge_set_ok && bridge_get_ok), bridge_get_val, sig_cap.value, sig_cap.slot, vs_fader2_val);
+		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f",
+		(int)ws_build_ok, (int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end,
+		(int)screenshot_all_pass, (int)loopmidi_tested, (int)loopmidi_pass, slider_mid, (int)mid_ok,
+		(int)end_ok, (int)completed, (int)(bridge_set_ok && bridge_get_ok), bridge_get_val, sig_cap.value,
+		sig_cap.slot, vs_fader2_val);
 }
 
 static void run_live_selftest_if_requested(void)
@@ -1456,7 +1931,8 @@ bool mfd_tbar_is_studio_mode_active(void)
 	return g_studio_mode_active.load(std::memory_order_relaxed);
 }
 
-bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size)
+bool mfd_tbar_driver_apply(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
+			   float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size)
 {
 	if (out_completed_throw) {
 		*out_completed_throw = false;
@@ -1471,8 +1947,20 @@ bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_er
 	uint64_t epoch = g_tbar_throw_epoch.load(std::memory_order_acquire);
 	int last_pos = g_last_pos_1024.load(std::memory_order_relaxed);
 
+	struct mfd_tbar_release_input in;
+	std::memset(&in, 0, sizeof(in));
+	in.studio_mode_active = studio_active;
+	in.slider_tbar_found = slider_found;
+	in.release_latched = latched;
+	in.force_release = force_release;
+	in.in_rail_zone = in_rail_zone;
+	in.smoother_settled = smoother_settled;
+	in.t_norm = t_norm;
+	in.fader_idle_sec = fader_idle_sec;
+	in.last_pos_1024 = last_pos;
+
 	struct mfd_tbar_action act;
-	mfd_tbar_compute_action_ex(studio_active, slider_found, latched, t_norm, last_pos, &act);
+	mfd_tbar_compute_action_full(&in, &act);
 
 	if (act.report_missing_slider_error) {
 		if (!g_logged_missing_error.exchange(true, std::memory_order_relaxed)) {
@@ -1495,6 +1983,19 @@ bool mfd_tbar_driver_apply(float t_norm, bool *out_completed_throw, char *out_er
 		if (g_tbar_release_latched.exchange(true, std::memory_order_acq_rel)) {
 			/* Per-transition release latch already tripped; block both slider write and release. */
 			return true;
+		}
+		struct mfd_engine *eng_rel = mfd_engine_get();
+		if (eng_rel && eng_rel->has_last_midi) {
+			int raw_cc = static_cast<int>(eng_rel->last_midi_decoded.raw_value);
+			int expected_unset = -1;
+			g_tbar_first_release_raw_cc.compare_exchange_strong(expected_unset, raw_cc,
+									    std::memory_order_relaxed);
+			bool pol_rev = eng_rel->fader_slots[0].takeover.polarity_reversed;
+			if (!pol_rev && raw_cc < 124) {
+				g_tbar_releases_before_cc124.fetch_add(1, std::memory_order_relaxed);
+			} else if (pol_rev && raw_cc > 3) {
+				g_tbar_releases_before_cc124.fetch_add(1, std::memory_order_relaxed);
+			}
 		}
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		if (out_completed_throw) {
@@ -1562,6 +2063,9 @@ void mfd_tbar_init(void)
 	g_tbar_deferred_poll_scheduled = false;
 	g_pending_deferred_tbar.active = false;
 
+#ifdef MFD_ENABLE_SELF_TEST
+	register_selftest_program_tap_once();
+#endif
 	mfd_engine_set_tbar_driver(mfd_tbar_driver_apply);
 	mfd_engine_set_tbar_unlatch_fn(mfd_tbar_reset_release_latch);
 	obs_frontend_add_event_callback(on_tbar_frontend_event, nullptr);

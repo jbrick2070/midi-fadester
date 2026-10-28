@@ -6,6 +6,7 @@
 
 #include "obs/mfd-vendor-api.h"
 #include "core/midi-parser.h"
+#include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <util/bmem.h>
 #include <assert.h>
@@ -232,10 +233,12 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 
 	slot->auto_fade_active = false;
+	slot->tbar_midi_active = false;
+	slot->tbar_idle_sec = 0.0f;
 	slot->takeover.dial_reversed = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
-		if (val >= MFD_THROW_COMPLETE_THRESHOLD) {
+		if (mfd_tbar_is_in_rail_zone(val, false)) {
 			if (!(was_parked && slot->last_applied_val <= 0.0f)) {
 				mfd_engine_apply_slot_output_ex(eng, slot, val, true);
 				mfd_engine_notify_fader_changed(eng, idx, "api");
@@ -308,6 +311,13 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	}
 
 	obs_data_set_string(response_data, "version", PLUGIN_VERSION);
+
+	obs_data_t *build = obs_data_create();
+	obs_data_set_string(build, "commit", PLUGIN_GIT_COMMIT);
+	obs_data_set_string(build, "built_at", PLUGIN_BUILT_AT);
+	obs_data_set_obj(response_data, "build", build);
+	obs_data_release(build);
+
 	obs_data_set_int(response_data, "api_version", MFD_API_VERSION);
 	obs_data_set_bool(response_data, "studio_mode", mfd_engine_is_studio_mode_active(eng));
 
@@ -356,10 +366,12 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	bool prev_upper = slot->takeover.parked_at_upper_rail;
 
 	slot->auto_fade_active = false;
+	slot->tbar_midi_active = false;
+	slot->tbar_idle_sec = 0.0f;
 	slot->takeover.dial_reversed = false;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
-		if (release || val >= MFD_THROW_COMPLETE_THRESHOLD) {
+		if (release || mfd_tbar_is_in_rail_zone(val, false)) {
 			if (!(was_parked && slot->last_applied_val <= 0.0f)) {
 				mfd_engine_apply_slot_output_ex(eng, slot, val, release);
 				mfd_engine_notify_fader_changed(eng, idx, "api");
@@ -431,6 +443,8 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 
 	slot->auto_fade_active = false;
+	slot->tbar_midi_active = false;
+	slot->tbar_idle_sec = 0.0f;
 
 	if (slot->target_type == MFD_TARGET_TBAR) {
 		if (!(was_parked && fabsf(delta) <= 1e-6f)) {
@@ -503,6 +517,8 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	if (was_parked) {
 		if (slot->target_type == MFD_TARGET_TBAR && to_val <= 0.0f && slot->last_applied_val <= 0.0f) {
 			slot->auto_fade_active = false;
+			slot->tbar_midi_active = false;
+			slot->tbar_idle_sec = 0.0f;
 			obs_data_set_string(response_data, "slot", slot->id);
 			return;
 		}
@@ -511,6 +527,8 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 		     (!slot->takeover.parked_at_upper_rail && to_val <= 0.0f)) &&
 		    fabsf(slot->last_applied_val - to_val) < 1e-5f) {
 			slot->auto_fade_active = false;
+			slot->tbar_midi_active = false;
+			slot->tbar_idle_sec = 0.0f;
 			obs_data_set_string(response_data, "slot", slot->id);
 			return;
 		}
@@ -521,6 +539,8 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	slot->auto_fade_duration_sec = (float)ms / 1000.0f;
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
+	slot->tbar_midi_active = false;
+	slot->tbar_idle_sec = 0.0f;
 	if (was_parked) {
 		if (slot->target_type == MFD_TARGET_TBAR) {
 			mfd_engine_unlatch_tbar(eng);

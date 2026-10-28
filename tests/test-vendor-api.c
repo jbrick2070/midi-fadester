@@ -7,6 +7,7 @@
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
+#include "plugin-support.h"
 #include <obs-module.h>
 #include <math.h>
 #include <stdio.h>
@@ -38,7 +39,8 @@ static void mock_tbar_unlatch(void)
 	g_mock_tbar_last_pos = 0;
 }
 
-static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_err, size_t err_size)
+static bool mock_tbar_driver(float t_norm, bool force_release, bool in_rail_zone, bool smoother_settled,
+			     float fader_idle_sec, bool *out_completed_throw, char *out_err, size_t err_size)
 {
 	if (out_err && err_size > 0U) {
 		out_err[0] = '\0';
@@ -46,8 +48,20 @@ static bool mock_tbar_driver(float t_norm, bool *out_completed_throw, char *out_
 	++g_mock_tbar_calls;
 	g_mock_tbar_last_val = t_norm;
 
+	struct mfd_tbar_release_input in;
+	memset(&in, 0, sizeof(in));
+	in.studio_mode_active = true;
+	in.slider_tbar_found = true;
+	in.release_latched = g_mock_tbar_latched;
+	in.force_release = force_release;
+	in.in_rail_zone = in_rail_zone;
+	in.smoother_settled = smoother_settled;
+	in.t_norm = t_norm;
+	in.fader_idle_sec = fader_idle_sec;
+	in.last_pos_1024 = g_mock_tbar_last_pos;
+
 	struct mfd_tbar_action act;
-	mfd_tbar_compute_action_ex(true, true, g_mock_tbar_latched, t_norm, g_mock_tbar_last_pos, &act);
+	mfd_tbar_compute_action_full(&in, &act);
 	if (act.call_set_tbar) {
 		++g_mock_tbar_set_writes;
 	}
@@ -187,10 +201,20 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 
-	/* 2. get_state: verify studio_mode, device, and slot availability/reason when Studio Mode is OFF */
+	/* 2. get_state: verify version, build identity, studio_mode, device, and slot availability/reason when Studio Mode is OFF */
 	req = obs_data_create();
 	res = obs_data_create();
 	mfd_vendor_handle_get_state(req, res, &eng);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), PLUGIN_VERSION) == 0);
+	REQUIRE(strcmp(obs_data_get_string(res, "version"), "0.1.1") == 0);
+	obs_data_t *build_obj = obs_data_get_obj(res, "build");
+	REQUIRE(build_obj != NULL);
+	const char *b_commit = obs_data_get_string(build_obj, "commit");
+	const char *b_built_at = obs_data_get_string(build_obj, "built_at");
+	REQUIRE(b_commit != NULL && strlen(b_commit) >= 7U && strcmp(b_commit, "unknown") != 0);
+	REQUIRE(b_built_at != NULL && strlen(b_built_at) == 16U);
+	REQUIRE(b_built_at[4] == '-' && b_built_at[7] == '-' && b_built_at[10] == ' ' && b_built_at[13] == ':');
+	obs_data_release(build_obj);
 	REQUIRE(obs_data_get_int(res, "api_version") == 1);
 	REQUIRE(!obs_data_get_bool(res, "studio_mode"));
 	obs_data_array_t *arr = obs_data_get_array(res, "slots");
@@ -891,6 +915,88 @@ int main(void)
 	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 	REQUIRE(g_mock_tbar_completions == 2);
 	REQUIRE(g_mock_tbar_latched);
+
+	/*
+	 * 12. Linear 0-100% T-bar drive + 3% rail zone release (CC >= 124 / CC <= 3) + 150 ms > 90% stall fallback:
+	 *     - 12a: Slow sweep at 2 CC per 100 ms (50 ms per CC step in 5 x 10 ms ticks, tau = 30 ms):
+	 *            no release before CC 124 (including CC 115, CC 118, CC 119 ~93%, CC 123 ~96.8%),
+	 *            monotonic T-bar value through CC 123, and exactly 1 release once CC >= 124 enters the 3% rail zone.
+	 *     - 12b: Reversed-polarity slow return sweep 127 -> 0 at 2 CC per 100 ms:
+	 *            no release before CC <= 3 (0 completions at CC 12 .. CC 4), and exactly 1 release at CC <= 3.
+	 *     - 12c: Short-travel fader stopping at CC 121 (95.28%, < CC 124):
+	 *            0 releases at 120 ms idle, then releases once at >= 150 ms idle above 90%.
+	 */
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	g_mock_tbar_calls = 0;
+	g_mock_tbar_set_writes = 0;
+	g_mock_tbar_completions = 0;
+	g_mock_tbar_last_val = 0.0f;
+
+	float prev_slow_val = 0.0f;
+	float val_at_cc119 = 0.0f;
+	for (int cc = 0; cc <= 127; ++cc) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
+		for (int sub = 0; sub < 5; ++sub) {
+			mfd_engine_tick(&eng, 0.010f);
+		}
+		if (cc < 124) {
+			REQUIRE(g_mock_tbar_completions == 0);
+			REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+			REQUIRE(g_mock_tbar_last_val + 1e-5f >= prev_slow_val);
+			prev_slow_val = g_mock_tbar_last_val;
+			if (cc == 119) {
+				val_at_cc119 = g_mock_tbar_last_val;
+			}
+		}
+	}
+	/* At CC 119 (~93.7%), T-bar mix must be ~93% (0.91..0.95), NOT snapped to 100% */
+	REQUIRE(val_at_cc119 >= 0.91f && val_at_cc119 <= 0.95f);
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/* 12b: Reversed-polarity return slow sweep 127 -> 0 at 2 CC per 100 ms */
+	float prev_rev_val = 0.0f;
+	for (int cc = 127; cc >= 0; --cc) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
+		for (int sub = 0; sub < 5; ++sub) {
+			mfd_engine_tick(&eng, 0.010f);
+		}
+		if (cc > 3) {
+			REQUIRE(g_mock_tbar_completions == 1);
+			if (!get_slot_parked_via_get_state(&eng, 0)) {
+				REQUIRE(g_mock_tbar_last_val + 1e-5f >= prev_rev_val);
+				prev_rev_val = g_mock_tbar_last_val;
+			}
+		}
+	}
+	REQUIRE(g_mock_tbar_completions == 2);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
+
+	/* 12c: Short-travel fader stopping at CC 121 (95.28%) triggers 150 ms stall fallback */
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
+	eng.fader_slots[0].takeover.state = MFD_TAKEOVER_ENGAGED;
+	g_mock_tbar_completions = 0;
+
+	for (int cc = 0; cc <= 121; cc += 11) {
+		push_midi_cc(&eng, 0, 15, (uint8_t)cc);
+		mfd_engine_tick(&eng, 0.010f);
+	}
+	/* 120 ms idle at CC 121 (< 150 ms): smoother has settled (~95.3%), still 0 completions */
+	for (int t = 0; t < 12; ++t) {
+		mfd_engine_tick(&eng, 0.010f);
+	}
+	REQUIRE(g_mock_tbar_completions == 0);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 0));
+
+	/* 40 ms more (160 ms total idle >= 150 ms while at 95.3% > 90%): fallback fires once and parks */
+	for (int t = 0; t < 4; ++t) {
+		mfd_engine_tick(&eng, 0.010f);
+	}
+	REQUIRE(g_mock_tbar_completions == 1);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 0));
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");
