@@ -35,6 +35,18 @@ int main(void)
 	REQUIRE(strcmp(title, "Master") == 0);
 	mfd_ui_strip_title(2, "Guest Cam", title, sizeof(title));
 	REQUIRE(strcmp(title, "Guest Cam") == 0);
+	for (int k = 0; k < 8; ++k) {
+		char def_fx[16];
+		char def_fader[16];
+		snprintf(def_fx, sizeof(def_fx), "FX %d", k + 1);
+		snprintf(def_fader, sizeof(def_fader), "Fader %d", 11 + k);
+		mfd_ui_strip_title(10 + k, def_fx, title, sizeof(title));
+		REQUIRE(strcmp(title, def_fx) == 0);
+		mfd_ui_strip_title(10 + k, def_fader, title, sizeof(title));
+		REQUIRE(strcmp(title, def_fx) == 0);
+	}
+	mfd_ui_strip_title(10, "Cam Blur", title, sizeof(title));
+	REQUIRE(strcmp(title, "Cam Blur") == 0);
 
 	/* 2. Controller bar 5-row precedence table */
 	struct mfd_ui_controller_presentation ctrl;
@@ -277,11 +289,77 @@ int main(void)
 	mfd_ui_format_strip_presentation(&in, &sp);
 	REQUIRE(strcmp(sp.state_readout, "-inf dB") == 0);
 
+	/* Row 7b: FX bank filter_param with no MIDI CC bound (knobless profile / Stream Deck + only):
+	 * no red "No MIDI control bound." error, bar reflects applied_val, readout shows display_value. */
+	memset(&in, 0, sizeof(in));
+	in.slot_index = 10;
+	in.slot_label = "FX 1";
+	in.enabled = true;
+	in.addr_type = MFD_MIDI_NONE;
+	in.target_type = MFD_TARGET_FILTER_PARAM;
+	in.source_a_name = "Cam 1";
+	in.filter_name = "Blur";
+	in.filter_prop = "radius";
+	in.filter_prop_label = "Radius";
+	in.display_value = "+12.4 px";
+	in.available = true;
+	in.raw_norm = 0.0f;
+	in.applied_val = 0.65f;
+	in.takeover_state = MFD_TAKEOVER_ENGAGED;
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(strcmp(sp.title, "FX 1") == 0);
+	REQUIRE(!sp.dimmed);
+	REQUIRE(sp.bar_percent == 65);
+	REQUIRE(sp.severity == MFD_UI_SEVERITY_NONE);
+	REQUIRE(sp.status_sentence[0] == '\0');
+	REQUIRE(strcmp(sp.state_readout, "+12.4 px") == 0);
+	REQUIRE(strcmp(sp.assignment_sentence, "Cam 1: Blur (Radius)") == 0);
+	REQUIRE(strcmp(sp.svg_short_label, "FX: Blur") == 0);
+
+	in.auto_fade_active = true;
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(strcmp(sp.state_readout, "Fading +12.4 px") == 0);
+
+	in.auto_fade_active = false;
+	in.display_value = "";
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(strcmp(sp.state_readout, "65%") == 0);
+
+	/* Physical fader strip (slot 1) bound to filter_param WITHOUT MIDI CC still flags red "No MIDI control bound." */
+	in.slot_index = 1;
+	in.slot_label = "Track Fader 1";
+	in.display_value = "+12.4 px";
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
+	REQUIRE(strcmp(sp.status_sentence, "No MIDI control bound.") == 0);
+
+	/* Filter precondition failure sentences on FX 1 */
+	const char *filter_red_reasons[] = {
+		"Cam 1 was deleted.",
+		"Filter 'Blur' is no longer on Cam 1.",
+		"Setting 'radius' is missing or not numeric on filter 'Blur'.",
+		"Range [0, 200] is outside filter 'Blur' setting 'Radius' limits [0, 100].",
+	};
+	for (size_t fri = 0U; fri < sizeof(filter_red_reasons) / sizeof(filter_red_reasons[0]); ++fri) {
+		in.slot_index = 10;
+		in.slot_label = "FX 1";
+		in.available = false;
+		in.reason = filter_red_reasons[fri];
+		mfd_ui_format_strip_presentation(&in, &sp);
+		REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
+		REQUIRE(strcmp(sp.status_sentence, filter_red_reasons[fri]) == 0);
+		REQUIRE(sp.state_readout[0] == '\0');
+	}
+
 	/* 4. Step 3 finished sentences, Step 2 live/shared-layer notes, Zone 3 status & vocabulary */
 	char sentence[192];
 	mfd_ui_format_finished_sentence(0, "Crossfader (A/B)", MFD_TARGET_TWO_SOURCE_MIX, "Red", "Color", "Color 2",
 					sentence, sizeof(sentence));
 	REQUIRE(strcmp(sentence, "Crossfader mixes Color and Color 2 in scene Red") == 0);
+
+	mfd_ui_format_finished_sentence_ex(10, "FX 1", MFD_TARGET_FILTER_PARAM, "", "Cam 1", "", "Blur", "Radius",
+					   sentence, sizeof(sentence));
+	REQUIRE(strcmp(sentence, "FX 1 controls Blur (Radius) on Cam 1") == 0);
 
 	mfd_ui_format_live_scene_note("Red", sentence, sizeof(sentence));
 	REQUIRE(strcmp(sentence, "You will see this when scene Red is live.") == 0);
@@ -299,16 +377,19 @@ int main(void)
 	char lm[96];
 	mfd_ui_format_last_move(0, "Crossfader (A/B)", true, NULL, lm, sizeof(lm));
 	REQUIRE(strcmp(lm, "Last move: Crossfader") == 0);
+	mfd_ui_format_last_move(10, "FX 1", true, NULL, lm, sizeof(lm));
+	REQUIRE(strcmp(lm, "Last move: FX 1") == 0);
 
 	mfd_ui_format_zone3_status(true, "Blue", "Red", lm, sentence, sizeof(sentence));
 	REQUIRE(strcmp(sentence,
-		       "Studio Mode on  \xE2\x80\xA2  Preview: Blue \xE2\x86\x92 Program: Red  \xE2\x80\xA2  Last move: Crossfader") ==
+		       "Studio Mode on  \xE2\x80\xA2  Preview: Blue \xE2\x86\x92 Program: Red  \xE2\x80\xA2  Last move: FX 1") ==
 		0);
 
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_TBAR), "Switch scenes (T-bar)") == 0);
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_TWO_SOURCE_MIX), "Mix two layers") == 0);
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_SINGLE_LAYER), "Show or hide a layer") == 0);
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_AUDIO_VOLUME), "Volume") == 0);
+	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_FILTER_PARAM), "Filter or effect setting") == 0);
 	REQUIRE(strcmp(mfd_ui_curve_plain_name(MFD_CURVE_DIP_FREE), "Dip-free") == 0);
 	REQUIRE(strcmp(mfd_ui_curve_plain_name(MFD_CURVE_COSINE), "Equal power") == 0);
 

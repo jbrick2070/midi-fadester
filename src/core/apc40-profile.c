@@ -32,6 +32,7 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 		true,
 		8,
 		true,
+		0,
 		MFD_DESK_UPPER_NONE,
 		NULL,
 		{
@@ -95,6 +96,14 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 			 {MFD_MIDI_NONE, 0U, 0U, false},
 			 MFD_TARGET_UNASSIGNED,
 			 MFD_CURVE_DIP_FREE},
+			{"fx_1", "FX 1", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_2", "FX 2", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_3", "FX 3", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_4", "FX 4", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_5", "FX 5", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_6", "FX 6", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_7", "FX 7", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_8", "FX 8", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
 		},
 	},
 	{
@@ -103,10 +112,11 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 		"Akai APC40 mkII",
 		"APC40 mkII",
 		MFD_PROFILE_TIER_VERIFIED,
-		"Hardware-verified on physical Akai APC40 mkII (Crossfader Ch 1 CC 15, Faders 1-8 Ch 1-8 CC 7, Master Ch 1 CC 14).",
+		"Hardware-verified on physical Akai APC40 mkII (Crossfader Ch 1 CC 15, Faders 1-8 Ch 1-8 CC 7, Master Ch 1 CC 14, Device Knobs 1-8 Ch 1 CC 16-23).",
 		true,
 		8,
 		true,
+		8,
 		MFD_DESK_UPPER_CLIP_PADS,
 		k_apc40_usb_tokens,
 		{
@@ -170,6 +180,14 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 			 {MFD_MIDI_CC, 0U, 14U, false},
 			 MFD_TARGET_UNASSIGNED,
 			 MFD_CURVE_DIP_FREE},
+			{"fx_1", "FX 1", "fx", {MFD_MIDI_CC, 0U, 16U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_2", "FX 2", "fx", {MFD_MIDI_CC, 0U, 17U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_3", "FX 3", "fx", {MFD_MIDI_CC, 0U, 18U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_4", "FX 4", "fx", {MFD_MIDI_CC, 0U, 19U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_5", "FX 5", "fx", {MFD_MIDI_CC, 0U, 20U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_6", "FX 6", "fx", {MFD_MIDI_CC, 0U, 21U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_7", "FX 7", "fx", {MFD_MIDI_CC, 0U, 22U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_8", "FX 8", "fx", {MFD_MIDI_CC, 0U, 23U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
 		},
 	},
 	{
@@ -182,6 +200,7 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 		false,
 		8,
 		true,
+		0,
 		MFD_DESK_UPPER_CLIP_PADS,
 		k_apc_mini_usb_tokens,
 		{
@@ -245,6 +264,14 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 			 {MFD_MIDI_CC, 0U, 56U, false},
 			 MFD_TARGET_UNASSIGNED,
 			 MFD_CURVE_DIP_FREE},
+			{"fx_1", "FX 1", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_2", "FX 2", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_3", "FX 3", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_4", "FX 4", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_5", "FX 5", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_6", "FX 6", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_7", "FX 7", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_8", "FX 8", "fx", {MFD_MIDI_NONE, 0U, 0U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
 		},
 	},
 	{
@@ -253,10 +280,11 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 		"Akai MIDImix",
 		"MIDImix",
 		MFD_PROFILE_TIER_BETA_UNTESTED,
-		"Beta (untested on hardware) — mapped from Akai MIDImix factory MIDI spec (Faders 1-8: Ch 1 CC 19/23/27/31/49/53/57/61, Master: Ch 1 CC 62).",
+		"Beta (untested on hardware) — mapped from Akai MIDImix factory MIDI spec (Faders 1-8: Ch 1 CC 19/23/27/31/49/53/57/61, Master: Ch 1 CC 62, Bottom Knobs 1-8: Ch 1 CC 18/22/26/30/48/52/56/60).",
 		false,
 		8,
 		true,
+		8,
 		MFD_DESK_UPPER_KNOB_ROWS_3,
 		k_midimix_usb_tokens,
 		{
@@ -320,6 +348,14 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 			 {MFD_MIDI_CC, 0U, 62U, false},
 			 MFD_TARGET_UNASSIGNED,
 			 MFD_CURVE_DIP_FREE},
+			{"fx_1", "FX 1", "fx", {MFD_MIDI_CC, 0U, 18U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_2", "FX 2", "fx", {MFD_MIDI_CC, 0U, 22U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_3", "FX 3", "fx", {MFD_MIDI_CC, 0U, 26U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_4", "FX 4", "fx", {MFD_MIDI_CC, 0U, 30U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_5", "FX 5", "fx", {MFD_MIDI_CC, 0U, 48U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_6", "FX 6", "fx", {MFD_MIDI_CC, 0U, 52U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_7", "FX 7", "fx", {MFD_MIDI_CC, 0U, 56U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_8", "FX 8", "fx", {MFD_MIDI_CC, 0U, 60U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
 		},
 	},
 	{
@@ -328,10 +364,11 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 		"Korg nanoKONTROL2",
 		"nanoKONTROL2",
 		MFD_PROFILE_TIER_BETA_UNTESTED,
-		"Beta (untested on hardware) — mapped from Korg nanoKONTROL2 CC-mode factory defaults (Sliders 1-8: Ch 1 CC 0-7).",
+		"Beta (untested on hardware) — mapped from Korg nanoKONTROL2 CC-mode factory defaults (Sliders 1-8: Ch 1 CC 0-7, Knobs 1-8: Ch 1 CC 16-23).",
 		false,
 		8,
 		false,
+		8,
 		MFD_DESK_UPPER_TRANSPORT_AND_KNOBS_1,
 		k_nanokontrol2_usb_tokens,
 		{
@@ -395,6 +432,14 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 			 {MFD_MIDI_NONE, 0U, 0U, false},
 			 MFD_TARGET_UNASSIGNED,
 			 MFD_CURVE_DIP_FREE},
+			{"fx_1", "FX 1", "fx", {MFD_MIDI_CC, 0U, 16U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_2", "FX 2", "fx", {MFD_MIDI_CC, 0U, 17U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_3", "FX 3", "fx", {MFD_MIDI_CC, 0U, 18U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_4", "FX 4", "fx", {MFD_MIDI_CC, 0U, 19U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_5", "FX 5", "fx", {MFD_MIDI_CC, 0U, 20U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_6", "FX 6", "fx", {MFD_MIDI_CC, 0U, 21U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_7", "FX 7", "fx", {MFD_MIDI_CC, 0U, 22U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_8", "FX 8", "fx", {MFD_MIDI_CC, 0U, 23U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
 		},
 	},
 	{
@@ -403,10 +448,11 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 		"Novation Launch Control XL",
 		"Launch Control XL",
 		MFD_PROFILE_TIER_BETA_UNTESTED,
-		"Beta (untested on hardware) — mapped from Novation Launch Control XL User Template 1 spec (Faders 1-8: Ch 1 CC 77-84; use Learn if on Factory Ch 9).",
+		"Beta (untested on hardware) — mapped from Novation Launch Control XL User Template 1 spec (Faders 1-8: Ch 1 CC 77-84, Bottom Knobs 1-8: Ch 1 CC 49-56; use Learn if on Factory Ch 9).",
 		false,
 		8,
 		false,
+		8,
 		MFD_DESK_UPPER_KNOB_ROWS_3,
 		k_launchcontrolxl_usb_tokens,
 		{
@@ -470,6 +516,14 @@ static const struct mfd_controller_profile_def k_profile_registry[] = {
 			 {MFD_MIDI_NONE, 0U, 0U, false},
 			 MFD_TARGET_UNASSIGNED,
 			 MFD_CURVE_DIP_FREE},
+			{"fx_1", "FX 1", "fx", {MFD_MIDI_CC, 0U, 49U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_2", "FX 2", "fx", {MFD_MIDI_CC, 0U, 50U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_3", "FX 3", "fx", {MFD_MIDI_CC, 0U, 51U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_4", "FX 4", "fx", {MFD_MIDI_CC, 0U, 52U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_5", "FX 5", "fx", {MFD_MIDI_CC, 0U, 53U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_6", "FX 6", "fx", {MFD_MIDI_CC, 0U, 54U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_7", "FX 7", "fx", {MFD_MIDI_CC, 0U, 55U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
+			{"fx_8", "FX 8", "fx", {MFD_MIDI_CC, 0U, 56U, false}, MFD_TARGET_UNASSIGNED, MFD_CURVE_LINEAR},
 		},
 	},
 };
@@ -558,6 +612,11 @@ const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier)
 	}
 }
 
+bool mfd_slot_is_fx_bank(int slot_index)
+{
+	return slot_index >= (int)MFD_FADER_STRIP_COUNT && slot_index < (int)MFD_APC40_DEFAULT_SLOT_COUNT;
+}
+
 bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot_index)
 {
 	if (slot_index < 0 || (size_t)slot_index >= MFD_APC40_DEFAULT_SLOT_COUNT) {
@@ -576,7 +635,7 @@ bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot
 	if (slot_index == 9) {
 		return def->has_master_fader;
 	}
-	return true;
+	return (slot_index - (int)MFD_FADER_STRIP_COUNT) < def->fx_knob_count;
 }
 
 enum mfd_controller_profile mfd_profile_match_device_name(const char *device_name)
@@ -668,6 +727,8 @@ const char *mfd_target_mode_to_string(enum mfd_target_type target)
 		return "layer_opacity";
 	case MFD_TARGET_AUDIO_VOLUME:
 		return "audio_volume";
+	case MFD_TARGET_FILTER_PARAM:
+		return "filter_param";
 	case MFD_TARGET_UNASSIGNED:
 	default:
 		return "unassigned";
@@ -697,6 +758,10 @@ bool mfd_target_mode_from_string(const char *str, enum mfd_target_type *out_targ
 	}
 	if (strcmp(str, "audio_volume") == 0) {
 		*out_target = MFD_TARGET_AUDIO_VOLUME;
+		return true;
+	}
+	if (strcmp(str, "filter_param") == 0) {
+		*out_target = MFD_TARGET_FILTER_PARAM;
 		return true;
 	}
 	return false;
@@ -770,6 +835,7 @@ void mfd_row_controls_for_target(enum mfd_target_type target, bool *out_show_sou
 		show_afv = true;
 		break;
 	case MFD_TARGET_AUDIO_VOLUME:
+	case MFD_TARGET_FILTER_PARAM:
 		show_a = true;
 		show_b = false;
 		show_curve = false;

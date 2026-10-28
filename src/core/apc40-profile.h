@@ -12,7 +12,9 @@
 extern "C" {
 #endif
 
-#define MFD_APC40_DEFAULT_SLOT_COUNT 10U
+#define MFD_FADER_STRIP_COUNT 10U
+#define MFD_FX_SLOT_COUNT 8U
+#define MFD_APC40_DEFAULT_SLOT_COUNT 18U
 
 struct mfd_apc40_default_slot {
 	const char *id;
@@ -55,6 +57,7 @@ struct mfd_controller_profile_def {
 	bool has_crossfader;
 	int track_fader_count;
 	bool has_master_fader;
+	int fx_knob_count;
 	enum mfd_desk_upper_style upper_style;
 	const char *const *usb_match_tokens;
 	struct mfd_apc40_default_slot slots[MFD_APC40_DEFAULT_SLOT_COUNT];
@@ -66,6 +69,7 @@ const struct mfd_controller_profile_def *mfd_profile_get_def(enum mfd_controller
 const struct mfd_controller_profile_def *mfd_profile_find_by_slug(const char *slug);
 const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier);
 bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot_index);
+bool mfd_slot_is_fx_bank(int slot_index);
 enum mfd_controller_profile mfd_profile_match_device_name(const char *device_name);
 
 bool mfd_is_apc40_mk2_name(const char *device_name);

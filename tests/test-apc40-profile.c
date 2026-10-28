@@ -99,7 +99,22 @@ int main(void)
 	REQUIRE(mfd_profile_find_by_slug("APC40MK2") == mfd_profile_get_def(MFD_PROFILE_APC40_MK2));
 	REQUIRE(mfd_profile_find_by_slug("MidiMix") == mfd_profile_get_def(MFD_PROFILE_AKAI_MIDIMIX));
 
-	/* Verify APC40 mkII exact CCs (backward-compatible mfd_apc40_get_default_slots) */
+	/* Verify canonical 18-slot constants and FX bank boundary */
+	REQUIRE(MFD_FADER_STRIP_COUNT == 10U);
+	REQUIRE(MFD_FX_SLOT_COUNT == 8U);
+	REQUIRE(MFD_APC40_DEFAULT_SLOT_COUNT == 18U);
+	REQUIRE(!mfd_slot_is_fx_bank(-1));
+	for (int s = 0; s < 10; ++s) {
+		REQUIRE(!mfd_slot_is_fx_bank(s));
+	}
+	for (int s = 10; s < 18; ++s) {
+		REQUIRE(mfd_slot_is_fx_bank(s));
+	}
+	REQUIRE(!mfd_slot_is_fx_bank(18));
+
+	/* Verify APC40 mkII exact CCs (backward-compatible mfd_apc40_get_default_slots, 10 faders + 8 Device Knobs) */
+	const struct mfd_controller_profile_def *apc40 = mfd_profile_get_def(MFD_PROFILE_APC40_MK2);
+	REQUIRE(apc40->fx_knob_count == 8);
 	struct mfd_apc40_default_slot slots[MFD_APC40_DEFAULT_SLOT_COUNT];
 	size_t n = mfd_apc40_get_default_slots(slots, MFD_APC40_DEFAULT_SLOT_COUNT);
 	REQUIRE(n == MFD_APC40_DEFAULT_SLOT_COUNT);
@@ -113,60 +128,103 @@ int main(void)
 		REQUIRE(slots[1U + ch].default_target == MFD_TARGET_UNASSIGNED);
 	}
 	REQUIRE(slots[9].addr.type == MFD_MIDI_CC && slots[9].addr.channel == 0U && slots[9].addr.number == 14U);
+	for (uint8_t k = 0; k < 8U; ++k) {
+		REQUIRE(strcmp(slots[10U + k].kind, "fx") == 0);
+		REQUIRE(slots[10U + k].addr.type == MFD_MIDI_CC);
+		REQUIRE(slots[10U + k].addr.channel == 0U);
+		REQUIRE(slots[10U + k].addr.number == (uint8_t)(16U + k));
+		REQUIRE(slots[10U + k].default_target == MFD_TARGET_UNASSIGNED);
+		REQUIRE(mfd_profile_has_physical_slot(MFD_PROFILE_APC40_MK2, (int)(10U + k)));
+	}
 
-	/* Verify Beta Profile 1: Akai APC mini mk2 (Ch 1 CC 48..55 + Master CC 56, no crossfader) */
+	/* Verify Beta Profile 1: Akai APC mini mk2 (Ch 1 CC 48..55 + Master CC 56, no crossfader, 0 knobs) */
 	const struct mfd_controller_profile_def *apc_mini = mfd_profile_get_def(MFD_PROFILE_APC_MINI_MK2);
 	REQUIRE(!apc_mini->has_crossfader && apc_mini->has_master_fader && apc_mini->track_fader_count == 8);
+	REQUIRE(apc_mini->fx_knob_count == 0);
 	REQUIRE(apc_mini->slots[0].addr.type == MFD_MIDI_NONE);
 	for (uint8_t i = 0; i < 8U; ++i) {
 		REQUIRE(apc_mini->slots[1U + i].addr.type == MFD_MIDI_CC);
 		REQUIRE(apc_mini->slots[1U + i].addr.channel == 0U);
 		REQUIRE(apc_mini->slots[1U + i].addr.number == (uint8_t)(48U + i));
+		REQUIRE(apc_mini->slots[10U + i].addr.type == MFD_MIDI_NONE);
+		REQUIRE(!mfd_profile_has_physical_slot(MFD_PROFILE_APC_MINI_MK2, (int)(10U + i)));
 	}
 	REQUIRE(apc_mini->slots[9].addr.type == MFD_MIDI_CC && apc_mini->slots[9].addr.number == 56U);
 
-	/* Verify Beta Profile 2: Akai MIDImix (Ch 1 CC 19,23,27,31,49,53,57,61 + Master CC 62, no crossfader) */
+	/* Verify Beta Profile 2: Akai MIDImix (faders + Row-3 knobs CC 18,22,26,30,48,52,56,60) */
 	const struct mfd_controller_profile_def *midimix = mfd_profile_get_def(MFD_PROFILE_AKAI_MIDIMIX);
 	const uint8_t expected_midimix_ccs[8] = {19U, 23U, 27U, 31U, 49U, 53U, 57U, 61U};
-	REQUIRE(!midimix->has_crossfader && midimix->has_master_fader);
+	const uint8_t expected_midimix_knobs[8] = {18U, 22U, 26U, 30U, 48U, 52U, 56U, 60U};
+	REQUIRE(!midimix->has_crossfader && midimix->has_master_fader && midimix->fx_knob_count == 8);
 	REQUIRE(midimix->slots[0].addr.type == MFD_MIDI_NONE);
 	for (uint8_t i = 0; i < 8U; ++i) {
 		REQUIRE(midimix->slots[1U + i].addr.type == MFD_MIDI_CC);
 		REQUIRE(midimix->slots[1U + i].addr.channel == 0U);
 		REQUIRE(midimix->slots[1U + i].addr.number == expected_midimix_ccs[i]);
+		REQUIRE(midimix->slots[10U + i].addr.type == MFD_MIDI_CC);
+		REQUIRE(midimix->slots[10U + i].addr.channel == 0U);
+		REQUIRE(midimix->slots[10U + i].addr.number == expected_midimix_knobs[i]);
 	}
 	REQUIRE(midimix->slots[9].addr.type == MFD_MIDI_CC && midimix->slots[9].addr.number == 62U);
 
-	/* Verify Beta Profile 3: Korg nanoKONTROL2 (Ch 1 CC 0..7, no crossfader, no master) */
+	/* Verify Beta Profile 3: Korg nanoKONTROL2 (sliders CC 0..7 + knobs CC 16..23) */
 	const struct mfd_controller_profile_def *nano = mfd_profile_get_def(MFD_PROFILE_KORG_NANOKONTROL2);
-	REQUIRE(!nano->has_crossfader && !nano->has_master_fader);
+	REQUIRE(!nano->has_crossfader && !nano->has_master_fader && nano->fx_knob_count == 8);
 	REQUIRE(nano->slots[0].addr.type == MFD_MIDI_NONE);
 	for (uint8_t i = 0; i < 8U; ++i) {
 		REQUIRE(nano->slots[1U + i].addr.type == MFD_MIDI_CC);
 		REQUIRE(nano->slots[1U + i].addr.channel == 0U);
 		REQUIRE(nano->slots[1U + i].addr.number == i);
+		REQUIRE(nano->slots[10U + i].addr.type == MFD_MIDI_CC);
+		REQUIRE(nano->slots[10U + i].addr.channel == 0U);
+		REQUIRE(nano->slots[10U + i].addr.number == (uint8_t)(16U + i));
 	}
 	REQUIRE(nano->slots[9].addr.type == MFD_MIDI_NONE);
 
-	/* Verify Beta Profile 4: Novation Launch Control XL (Ch 1 CC 77..84, no crossfader, no master) */
+	/* Verify Beta Profile 4: Novation Launch Control XL (faders CC 77..84 + Pan/Device Row 3 knobs CC 49..56) */
 	const struct mfd_controller_profile_def *lcxl = mfd_profile_get_def(MFD_PROFILE_LAUNCH_CONTROL_XL);
-	REQUIRE(!lcxl->has_crossfader && !lcxl->has_master_fader);
+	REQUIRE(!lcxl->has_crossfader && !lcxl->has_master_fader && lcxl->fx_knob_count == 8);
 	REQUIRE(lcxl->slots[0].addr.type == MFD_MIDI_NONE);
 	for (uint8_t i = 0; i < 8U; ++i) {
 		REQUIRE(lcxl->slots[1U + i].addr.type == MFD_MIDI_CC);
 		REQUIRE(lcxl->slots[1U + i].addr.channel == 0U);
 		REQUIRE(lcxl->slots[1U + i].addr.number == (uint8_t)(77U + i));
+		REQUIRE(lcxl->slots[10U + i].addr.type == MFD_MIDI_CC);
+		REQUIRE(lcxl->slots[10U + i].addr.channel == 0U);
+		REQUIRE(lcxl->slots[10U + i].addr.number == (uint8_t)(49U + i));
 	}
 	REQUIRE(lcxl->slots[9].addr.type == MFD_MIDI_NONE);
 
-	/* Slot ID lookup */
+	/* Verify Generic / Custom profile has 0 pre-mapped FX knobs */
+	const struct mfd_controller_profile_def *gen = mfd_profile_get_def(MFD_PROFILE_GENERIC);
+	REQUIRE(gen->fx_knob_count == 0);
+	for (uint8_t i = 0; i < 8U; ++i) {
+		REQUIRE(gen->slots[10U + i].addr.type == MFD_MIDI_NONE);
+		REQUIRE(!mfd_profile_has_physical_slot(MFD_PROFILE_GENERIC, (int)(10U + i)));
+	}
+
+	/* Slot ID & kind lookup + filter_param mode string round-trip */
 	REQUIRE(mfd_slot_index_for_id("crossfader") == 0);
 	REQUIRE(mfd_slot_index_for_id("fader_1") == 1);
 	REQUIRE(mfd_slot_index_for_id("fader_8") == 8);
 	REQUIRE(mfd_slot_index_for_id("master") == 9);
 	REQUIRE(mfd_slot_index_for_id("fader_9") == -1);
+	REQUIRE(mfd_slot_index_for_id("fx_0") == -1);
+	REQUIRE(mfd_slot_index_for_id("fx_1") == 10);
+	REQUIRE(mfd_slot_index_for_id("fx_8") == 17);
+	REQUIRE(mfd_slot_index_for_id("fx_9") == -1);
+	REQUIRE(strcmp(mfd_slot_kind_for_index(0), "crossfader") == 0);
+	REQUIRE(strcmp(mfd_slot_kind_for_index(1), "fader") == 0);
+	REQUIRE(strcmp(mfd_slot_kind_for_index(9), "master") == 0);
+	REQUIRE(strcmp(mfd_slot_kind_for_index(10), "fx") == 0);
+	REQUIRE(strcmp(mfd_slot_kind_for_index(17), "fx") == 0);
 
-	/* Row control visibility per Target Mode (Item 5) */
+	enum mfd_target_type parsed_target = MFD_TARGET_UNASSIGNED;
+	REQUIRE(strcmp(mfd_target_mode_to_string(MFD_TARGET_FILTER_PARAM), "filter_param") == 0);
+	REQUIRE(mfd_target_mode_from_string("filter_param", &parsed_target) &&
+		parsed_target == MFD_TARGET_FILTER_PARAM);
+
+	/* Row control visibility per Target Mode (Item 5 + R-FADE-4) */
 	bool show_a = true;
 	bool show_b = true;
 	bool show_curve = true;
@@ -186,6 +244,9 @@ int main(void)
 
 	mfd_row_controls_for_target(MFD_TARGET_TWO_SOURCE_MIX, &show_a, &show_b, &show_curve, &show_afv);
 	REQUIRE(show_a && show_b && show_curve && show_afv);
+
+	mfd_row_controls_for_target(MFD_TARGET_FILTER_PARAM, &show_a, &show_b, &show_curve, &show_afv);
+	REQUIRE(show_a && !show_b && !show_curve && !show_afv);
 
 	printf("test-apc40-profile: PASS\n");
 	return 0;

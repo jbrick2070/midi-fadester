@@ -113,6 +113,19 @@ QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
 			"<text x='90' y='38' fill='#ede9fe' font-family='Segoe UI, sans-serif' font-size='10' font-weight='bold' text-anchor='middle'>Layer 0-100%</text>"
 			"</svg>");
 
+	case MFD_TARGET_FILTER_PARAM:
+		return QByteArrayLiteral(
+			"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 68'>"
+			"<rect width='180' height='68' rx='8' fill='#0f172a'/>"
+			"<circle cx='54' cy='34' r='20' fill='#083344' stroke='#06b6d4' stroke-width='2.2'/>"
+			"<path d='M54 34 L67 21' stroke='#22d3ee' stroke-width='2.4' stroke-linecap='round'/>"
+			"<rect x='90' y='17' width='68' height='8' rx='4' fill='#1e293b'/>"
+			"<rect x='90' y='17' width='48' height='8' rx='4' fill='#06b6d4'/>"
+			"<rect x='90' y='31' width='68' height='8' rx='4' fill='#1e293b'/>"
+			"<rect x='90' y='31' width='32' height='8' rx='4' fill='#f59e0b'/>"
+			"<text x='124' y='54' fill='#cffafe' font-family='Segoe UI, sans-serif' font-size='9.5' font-weight='bold' text-anchor='middle'>FX / Filter</text>"
+			"</svg>");
+
 	case MFD_TARGET_AUDIO_VOLUME:
 	default:
 		return QByteArrayLiteral(
@@ -345,6 +358,8 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 
 	auto build_strip_pres = [&](int idx, struct mfd_ui_strip_presentation *out) {
 		const struct mfd_fader_slot &s = snap.slots[idx];
+		char disp_buf[64] = {0};
+		mfd_engine_format_slot_display_value(&s, s.last_applied_val, disp_buf, sizeof(disp_buf));
 		struct mfd_ui_strip_input in;
 		std::memset(&in, 0, sizeof(in));
 		in.slot_index = idx;
@@ -356,6 +371,10 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
 		in.source_a_name = s.source_a_name;
 		in.source_b_name = s.source_b_name;
+		in.filter_name = s.filter_name;
+		in.filter_prop = s.filter_prop;
+		in.filter_prop_label = s.filter_prop_label;
+		in.display_value = disp_buf;
 		in.available = s.cached_available;
 		in.reason = s.cached_reason;
 		in.raw_norm = s.last_raw_norm;

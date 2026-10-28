@@ -130,6 +130,27 @@ static bool get_slot_parked_via_get_state(struct mfd_engine *eng, int slot_idx)
 #define FAKE_MAX_SOURCES 16
 #define FAKE_MAX_SCENES 8
 #define FAKE_MAX_SCENE_ITEMS 8
+#define FAKE_MAX_FILTERS 24
+
+enum fake_filter_schema {
+	FAKE_SCHEMA_BLUR_GROUPED = 0,
+	FAKE_SCHEMA_AUDIO_MOD = 1,
+	FAKE_SCHEMA_INTERNAL = 2,
+};
+
+struct fake_sg_filter {
+	bool in_use;
+	char host_name[64];
+	char filter_name[64];
+	char type_id[64];
+	bool enabled;
+	enum fake_filter_schema schema_kind;
+	double float_max_override;
+	bool omit_radius_prop;
+	int settings_writes;
+	int enable_writes;
+	obs_data_t *settings;
+};
 
 struct fake_sg_source {
 	bool in_use;
@@ -151,8 +172,11 @@ struct fake_sg_scene {
 struct fake_scene_graph {
 	struct fake_sg_source sources[FAKE_MAX_SOURCES];
 	struct fake_sg_scene scenes[FAKE_MAX_SCENES];
+	struct fake_sg_filter filters[FAKE_MAX_FILTERS];
 	int total_opacity_writes;
 	int total_volume_writes;
+	int total_filter_settings_writes;
+	int total_filter_enable_writes;
 	struct mfd_engine *owner_eng;
 };
 
@@ -247,11 +271,107 @@ static void fake_sg_scene_remove_item(struct fake_scene_graph *sg, const char *s
 	}
 }
 
+static struct fake_sg_filter *fake_sg_find_filter(struct fake_scene_graph *sg, const char *host_name,
+						  const char *filter_name)
+{
+	if (!sg || !host_name || !host_name[0] || !filter_name || !filter_name[0]) {
+		return NULL;
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (sg->filters[i].in_use && strcmp(sg->filters[i].host_name, host_name) == 0 &&
+		    strcmp(sg->filters[i].filter_name, filter_name) == 0) {
+			return &sg->filters[i];
+		}
+	}
+	return NULL;
+}
+
+static struct fake_sg_filter *fake_sg_add_filter(struct fake_scene_graph *sg, const char *host_name,
+						 const char *filter_name, const char *type_id, bool enabled,
+						 enum fake_filter_schema schema_kind)
+{
+	struct fake_sg_filter *existing = fake_sg_find_filter(sg, host_name, filter_name);
+	if (existing) {
+		existing->enabled = enabled;
+		existing->schema_kind = schema_kind;
+		return existing;
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (!sg->filters[i].in_use) {
+			memset(&sg->filters[i], 0, sizeof(sg->filters[i]));
+			sg->filters[i].in_use = true;
+			snprintf(sg->filters[i].host_name, sizeof(sg->filters[i].host_name), "%s", host_name);
+			snprintf(sg->filters[i].filter_name, sizeof(sg->filters[i].filter_name), "%s", filter_name);
+			snprintf(sg->filters[i].type_id, sizeof(sg->filters[i].type_id), "%s",
+				 type_id ? type_id : "mock_filter");
+			sg->filters[i].enabled = enabled;
+			sg->filters[i].schema_kind = schema_kind;
+			sg->filters[i].float_max_override = 50.0;
+			sg->filters[i].omit_radius_prop = false;
+			sg->filters[i].settings = obs_data_create();
+			if (schema_kind == FAKE_SCHEMA_BLUR_GROUPED) {
+				obs_data_set_default_double(sg->filters[i].settings, "radius", 10.0);
+				obs_data_set_default_int(sg->filters[i].settings, "passes", 2);
+				obs_data_set_default_int(sg->filters[i].settings, "mode", 1);
+				obs_data_set_default_bool(sg->filters[i].settings, "clamp_edges", true);
+			} else if (schema_kind == FAKE_SCHEMA_AUDIO_MOD) {
+				obs_data_set_default_double(sg->filters[i].settings, "slot_1_amount_pct", 0.0);
+				obs_data_set_default_double(sg->filters[i].settings, "slot_2_amount_pct", 25.0);
+			}
+			return &sg->filters[i];
+		}
+	}
+	return NULL;
+}
+
+static void fake_sg_remove_filter(struct fake_scene_graph *sg, const char *host_name, const char *filter_name)
+{
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, host_name, filter_name);
+	if (f) {
+		if (f->settings) {
+			obs_data_release(f->settings);
+			f->settings = NULL;
+		}
+		memset(f, 0, sizeof(*f));
+	}
+}
+
+static void fake_sg_rename_filter(struct fake_scene_graph *sg, const char *host_name, const char *prev_name,
+				  const char *new_name)
+{
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, host_name, prev_name);
+	if (f) {
+		snprintf(f->filter_name, sizeof(f->filter_name), "%s", new_name);
+	}
+}
+
+static void fake_sg_cleanup_filters(struct fake_scene_graph *sg)
+{
+	if (!sg) {
+		return;
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (sg->filters[i].in_use && sg->filters[i].settings) {
+			obs_data_release(sg->filters[i].settings);
+			sg->filters[i].settings = NULL;
+		}
+		sg->filters[i].in_use = false;
+	}
+}
+
 static void fake_sg_remove_source(struct fake_scene_graph *sg, const char *name)
 {
 	struct fake_sg_source *src = fake_sg_find_source(sg, name);
 	if (src) {
 		memset(src, 0, sizeof(*src));
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (sg->filters[i].in_use && strcmp(sg->filters[i].host_name, name) == 0) {
+			if (sg->filters[i].settings) {
+				obs_data_release(sg->filters[i].settings);
+			}
+			memset(&sg->filters[i], 0, sizeof(sg->filters[i]));
+		}
 	}
 	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
 		if (sg->scenes[i].in_use) {
@@ -269,6 +389,11 @@ static void fake_sg_rename(struct fake_scene_graph *sg, const char *prev_name, c
 	struct fake_sg_scene *sc = fake_sg_find_scene(sg, prev_name);
 	if (sc) {
 		snprintf(sc->name, sizeof(sc->name), "%s", new_name);
+	}
+	for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+		if (sg->filters[i].in_use && strcmp(sg->filters[i].host_name, prev_name) == 0) {
+			snprintf(sg->filters[i].host_name, sizeof(sg->filters[i].host_name), "%s", new_name);
+		}
 	}
 	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
 		if (!sg->scenes[i].in_use) {
@@ -459,11 +584,173 @@ static void fake_op_set_studio_mode(bool enabled, void *user_data)
 	}
 }
 
+static void fake_op_enum_filter_hosts(mfd_filter_host_cb cb, void *cb_param, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!sg || !cb) {
+		return;
+	}
+	for (int i = 0; i < FAKE_MAX_SOURCES; ++i) {
+		if (sg->sources[i].in_use) {
+			cb(sg->sources[i].name, false, cb_param);
+		}
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (sg->scenes[i].in_use) {
+			cb(sg->scenes[i].name, true, cb_param);
+		}
+	}
+}
+
+static bool fake_op_enum_source_filters(const char *source_name, bool *out_is_scene, mfd_source_filter_cb cb,
+					void *cb_param, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!sg || !source_name || !fake_op_source_exists(source_name, sg)) {
+		return false;
+	}
+	if (out_is_scene) {
+		*out_is_scene = fake_op_scene_exists(source_name, sg);
+	}
+	if (cb) {
+		for (int i = 0; i < FAKE_MAX_FILTERS; ++i) {
+			if (sg->filters[i].in_use && strcmp(sg->filters[i].host_name, source_name) == 0) {
+				cb(sg->filters[i].filter_name, sg->filters[i].type_id, sg->filters[i].enabled,
+				   cb_param);
+			}
+		}
+	}
+	return true;
+}
+
+static obs_properties_t *fake_op_create_filter_properties(const char *source_name, const char *filter_name,
+							  void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!f) {
+		return NULL;
+	}
+	obs_properties_t *props = obs_properties_create();
+	if (!props) {
+		return NULL;
+	}
+	if (f->schema_kind == FAKE_SCHEMA_BLUR_GROUPED) {
+		/* Non-numeric list & bool must be excluded from numeric property catalog */
+		obs_property_t *lst =
+			obs_properties_add_list(props, "mode", "Blur Mode", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(lst, "Box", 0);
+		obs_property_list_add_int(lst, "Gaussian", 1);
+		obs_properties_add_bool(props, "clamp_edges", "Clamp Edges");
+
+		obs_properties_t *grp = obs_properties_create();
+		if (!f->omit_radius_prop) {
+			obs_property_t *rad = obs_properties_add_float_slider(grp, "radius", "Radius", 0.0,
+									      f->float_max_override, 0.5);
+			obs_property_float_set_suffix(rad, " px");
+		}
+		obs_properties_t *inner = obs_properties_create();
+		obs_properties_add_int_slider(inner, "passes", "Passes", 1, 8, 1);
+		obs_properties_add_group(grp, "inner_group", "Quality", OBS_GROUP_NORMAL, inner);
+		obs_properties_add_group(props, "blur_group", "Blur Settings", OBS_GROUP_NORMAL, grp);
+	} else if (f->schema_kind == FAKE_SCHEMA_AUDIO_MOD) {
+		obs_property_t *s1 = obs_properties_add_float_slider(props, "slot_1_amount_pct", "Slot 1 Amount",
+								     -100.0, 100.0, 1.0);
+		obs_property_float_set_suffix(s1, "%");
+		obs_property_t *s2 =
+			obs_properties_add_float_slider(props, "slot_2_amount_pct", "Slot 2 Amount", 0.0, 100.0, 1.0);
+		obs_property_float_set_suffix(s2, "%");
+	} else {
+		obs_properties_add_float_slider(props, "opacity", "Opacity", 0.0, 1.0, 0.01);
+	}
+	return props;
+}
+
+static obs_data_t *fake_op_get_filter_settings(const char *source_name, const char *filter_name, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!f || !f->settings) {
+		return NULL;
+	}
+	obs_data_t *copy = obs_data_create();
+	if (copy) {
+		obs_data_set_default_double(copy, "radius", obs_data_get_default_double(f->settings, "radius"));
+		obs_data_set_default_int(copy, "passes", obs_data_get_default_int(f->settings, "passes"));
+		obs_data_set_default_double(copy, "slot_1_amount_pct",
+					    obs_data_get_default_double(f->settings, "slot_1_amount_pct"));
+		obs_data_set_default_double(copy, "slot_2_amount_pct",
+					    obs_data_get_default_double(f->settings, "slot_2_amount_pct"));
+		obs_data_apply(copy, f->settings);
+	}
+	return copy;
+}
+
+static void fake_op_update_filter_settings(const char *source_name, const char *filter_name, obs_data_t *settings,
+					   void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!f || !f->settings || !settings) {
+		return;
+	}
+	obs_data_apply(f->settings, settings);
+	++f->settings_writes;
+	++sg->total_filter_settings_writes;
+	if (sg->owner_eng) {
+		/* Simulate OBS synchronous "update" signal inside obs_source_update */
+		mfd_engine_handle_filter_settings_updated(sg->owner_eng, source_name, filter_name);
+	}
+}
+
+static bool fake_op_get_filter_enabled(const char *source_name, const char *filter_name, bool *out_enabled,
+				       void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!f) {
+		return false;
+	}
+	if (out_enabled) {
+		*out_enabled = f->enabled;
+	}
+	return true;
+}
+
+static void fake_op_set_filter_enabled(const char *source_name, const char *filter_name, bool enabled, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
+	if (!f) {
+		return;
+	}
+	f->enabled = enabled;
+	++f->enable_writes;
+	++sg->total_filter_enable_writes;
+	if (sg->owner_eng) {
+		/* Simulate OBS synchronous "enable" signal inside obs_source_set_enabled */
+		mfd_engine_handle_filter_enable(sg->owner_eng, source_name, filter_name, enabled);
+	}
+}
+
 static const struct mfd_scene_graph_ops g_fake_sg_ops = {
-	fake_op_source_exists,          fake_op_scene_exists,          fake_op_source_has_audio,
-	fake_op_scene_item_stack_index, fake_op_find_scene_with_layer, fake_op_find_scene_with_pair,
-	fake_op_apply_opacity,          fake_op_apply_volume,          fake_op_fill_catalog,
+	fake_op_source_exists,
+	fake_op_scene_exists,
+	fake_op_source_has_audio,
+	fake_op_scene_item_stack_index,
+	fake_op_find_scene_with_layer,
+	fake_op_find_scene_with_pair,
+	fake_op_apply_opacity,
+	fake_op_apply_volume,
+	fake_op_fill_catalog,
 	fake_op_set_studio_mode,
+	fake_op_enum_filter_hosts,
+	fake_op_enum_source_filters,
+	fake_op_create_filter_properties,
+	fake_op_get_filter_settings,
+	fake_op_update_filter_settings,
+	fake_op_get_filter_enabled,
+	fake_op_set_filter_enabled,
 };
 
 struct mt_stress_ctx {
@@ -488,6 +775,7 @@ static void *mt_tick_worker(void *arg)
 	for (int iter = 0; iter < 400; ++iter) {
 		push_midi_cc(ctx->eng, (uint8_t)(iter % 4), 7, (uint8_t)(iter & 0x7F));
 		push_midi_cc(ctx->eng, 0, 15, (uint8_t)((iter * 3) & 0x7F));
+		push_midi_cc(ctx->eng, 0, 16, (uint8_t)((iter * 5) & 0x7F)); /* FX 1 Device Knob 1 */
 		mfd_engine_tick(ctx->eng, 0.008f);
 	}
 	return NULL;
@@ -511,6 +799,14 @@ static void *mt_vendor_worker(void *arg)
 		obs_data_release(req);
 		obs_data_release(res);
 
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_double(req, "value", (double)((iter * 7) % 100) / 100.0);
+		mfd_vendor_handle_set_fader_value(req, res, ctx->eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
 		if ((iter % 25) == 0) {
 			req = obs_data_create();
 			res = obs_data_create();
@@ -518,6 +814,20 @@ static void *mt_vendor_worker(void *arg)
 			obs_data_set_string(req, "target_mode", "audio_volume");
 			obs_data_set_string(req, "source_a", "Mic/Aux");
 			mfd_vendor_handle_set_slot(req, res, ctx->eng);
+			obs_data_release(req);
+			obs_data_release(res);
+
+			req = obs_data_create();
+			res = obs_data_create();
+			mfd_vendor_handle_get_catalog(req, res, ctx->eng);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+		if ((iter % 50) == 0) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_int(req, "ms", 0);
+			mfd_vendor_handle_reset_fx(req, res, ctx->eng);
 			obs_data_release(req);
 			obs_data_release(res);
 		}
@@ -530,23 +840,28 @@ static void *mt_ui_worker(void *arg)
 	struct mt_stress_ctx *ctx = (struct mt_stress_ctx *)arg;
 	struct mfd_ui_snapshot *snap = (struct mfd_ui_snapshot *)calloc(1U, sizeof(*snap));
 	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
-	if (!snap || !cat) {
+	struct mfd_source_filter_catalog *fcat = mfd_source_filter_catalog_create();
+	if (!snap || !cat || !fcat) {
 		ctx->bad_snapshot = true;
 		free(snap);
 		mfd_ui_catalog_destroy(cat);
+		mfd_source_filter_catalog_destroy(fcat);
 		return NULL;
 	}
 	for (int iter = 0; iter < 250; ++iter) {
 		mfd_engine_get_ui_snapshot(ctx->eng, snap);
-		if (snap->slots[0].id[0] == '\0' || snap->slots[9].id[0] == '\0') {
+		if (snap->slots[0].id[0] == '\0' || snap->slots[9].id[0] == '\0' || snap->slots[17].id[0] == '\0') {
 			ctx->bad_snapshot = true;
 		}
 		mfd_engine_get_ui_catalog(ctx->eng, cat);
 		if (cat->scene_count == 0U || cat->audio_count == 0U) {
 			ctx->bad_snapshot = true;
 		}
+		if ((iter % 15) == 0) {
+			mfd_engine_get_source_filter_catalog(ctx->eng, "Color", fcat);
+		}
 		if ((iter % 20) == 0) {
-			mfd_engine_begin_setup_session(ctx->eng, 1);
+			mfd_engine_begin_setup_session(ctx->eng, 10);
 			mfd_engine_set_setup_invert(ctx->eng, (iter % 40) == 0);
 			mfd_engine_cancel_setup_session(ctx->eng);
 		}
@@ -554,6 +869,7 @@ static void *mt_ui_worker(void *arg)
 	}
 	free(snap);
 	mfd_ui_catalog_destroy(cat);
+	mfd_source_filter_catalog_destroy(fcat);
 	return NULL;
 }
 
@@ -562,6 +878,7 @@ struct fake_ws_log {
 	int state_changed_count;
 	char last_fader_slot[32];
 	double last_fader_value;
+	char last_fader_display_value[64];
 	char last_fader_origin[32];
 };
 
@@ -575,8 +892,10 @@ static void on_fake_ws_event(const char *event_name, obs_data_t *event_data, voi
 		++log->fader_changed_count;
 		const char *s = obs_data_get_string(event_data, "slot");
 		const char *o = obs_data_get_string(event_data, "origin");
+		const char *dv = obs_data_get_string(event_data, "display_value");
 		snprintf(log->last_fader_slot, sizeof(log->last_fader_slot), "%s", s ? s : "");
 		snprintf(log->last_fader_origin, sizeof(log->last_fader_origin), "%s", o ? o : "");
+		snprintf(log->last_fader_display_value, sizeof(log->last_fader_display_value), "%s", dv ? dv : "");
 		log->last_fader_value = obs_data_get_double(event_data, "value");
 	} else if (strcmp(event_name, "state_changed") == 0) {
 		++log->state_changed_count;
@@ -587,6 +906,7 @@ struct fake_signal_log {
 	int count;
 	char slot[32];
 	float value;
+	char display_value[64];
 	char origin[32];
 };
 
@@ -599,8 +919,10 @@ static void on_fake_signal(void *data, calldata_t *cd)
 	++sig->count;
 	const char *s = calldata_string(cd, "slot");
 	const char *o = calldata_string(cd, "origin");
+	const char *dv = calldata_string(cd, "display_value");
 	snprintf(sig->slot, sizeof(sig->slot), "%s", s ? s : "");
 	snprintf(sig->origin, sizeof(sig->origin), "%s", o ? o : "");
+	snprintf(sig->display_value, sizeof(sig->display_value), "%s", dv ? dv : "");
 	sig->value = (float)calldata_float(cd, "value");
 }
 
@@ -736,7 +1058,8 @@ int main(void)
 	obs_data_set_string(req, "slot", "fader_9");
 	mfd_vendor_handle_set_slot(req, res, &eng);
 	REQUIRE(strcmp(obs_data_get_string(res, "comment"),
-		       "Slot 'fader_9' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.") == 0);
+		       "Slot 'fader_9' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master, fx_1 .. fx_8.") ==
+		0);
 	obs_data_release(req);
 	obs_data_release(res);
 
@@ -913,7 +1236,8 @@ int main(void)
 	REQUIRE(proc_handler_call(fake_ph, "midi_fadester_set_fader_value", &cd));
 	REQUIRE(!calldata_bool(&cd, "ok"));
 	REQUIRE(strcmp(calldata_string(&cd, "reason"),
-		       "Slot 'fader_9' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.") == 0);
+		       "Slot 'fader_9' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master, fx_1 .. fx_8.") ==
+		0);
 	calldata_free(&cd);
 
 	/* 9b. Valid midi_fadester_set_fader_value emits midi_fadester_fader_changed signal */
@@ -2547,6 +2871,576 @@ int main(void)
 	free(snap);
 	mfd_ui_catalog_destroy(cat);
 
+	/* 16h: 0.4.0 FX Bank (fx_1..fx_8), filter_param (R-FADE-4), get_catalog, reset_fx,
+	 *      single-writer uniqueness, bypass_at_zero lease aggregation & crash recovery,
+	 *      external OBS "update" / "update_properties" sync, and profile switch preservation */
+	{
+		fake_sg_cleanup_filters(&fake_sg);
+		fake_sg.owner_eng = &eng;
+		mfd_engine_load_apc40_defaults(&eng);
+
+		/* Attach grouped Blur + internal opacity filter to Color, and AudioModulator to scene Blue */
+		struct fake_sg_filter *flt_blur =
+			fake_sg_add_filter(&fake_sg, "Color", "Blur", "blur_filter_v2", true, FAKE_SCHEMA_BLUR_GROUPED);
+		REQUIRE(flt_blur != NULL);
+		obs_data_set_double(flt_blur->settings, "radius", 12.5);
+		obs_data_set_int(flt_blur->settings, "passes", 3);
+
+		REQUIRE(fake_sg_add_filter(&fake_sg, "Color", "__midi_fadester_opacity__",
+					   "midi_fadester_opacity_filter", true, FAKE_SCHEMA_INTERNAL) != NULL);
+
+		struct fake_sg_filter *flt_amod = fake_sg_add_filter(
+			&fake_sg, "Blue", "AudioMod", "visual_sidechain_audio_mod", true, FAKE_SCHEMA_AUDIO_MOD);
+		REQUIRE(flt_amod != NULL);
+		obs_data_set_double(flt_amod->settings, "slot_1_amount_pct", 50.0);
+
+		/* 1. get_state returns 18 slots; fx_1..fx_8 have kind == "fx" and enabled == true */
+		req = obs_data_create();
+		res = obs_data_create();
+		mfd_vendor_handle_get_state(req, res, &eng);
+		obs_data_array_t *slots18 = obs_data_get_array(res, "slots");
+		REQUIRE(slots18 != NULL && obs_data_array_count(slots18) == 18U);
+		obs_data_t *fx1_obj = obs_data_array_item(slots18, 10U);
+		REQUIRE(strcmp(obs_data_get_string(fx1_obj, "id"), "fx_1") == 0);
+		REQUIRE(strcmp(obs_data_get_string(fx1_obj, "kind"), "fx") == 0);
+		REQUIRE(obs_data_get_bool(fx1_obj, "enabled"));
+		obs_data_release(fx1_obj);
+		obs_data_array_release(slots18);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* 2. get_catalog (source omitted vs source provided vs missing source) */
+		req = obs_data_create();
+		res = obs_data_create();
+		mfd_vendor_handle_get_catalog(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_array_t *cat_hosts = obs_data_get_array(res, "filter_hosts");
+		REQUIRE(cat_hosts != NULL && obs_data_array_count(cat_hosts) >= 2U);
+		bool saw_color_host = false;
+		bool saw_blue_host = false;
+		for (size_t hi = 0U; hi < obs_data_array_count(cat_hosts); ++hi) {
+			obs_data_t *ho = obs_data_array_item(cat_hosts, hi);
+			const char *hsrc = obs_data_get_string(ho, "source");
+			if (strcmp(hsrc, "Color") == 0) {
+				saw_color_host = true;
+				REQUIRE(!obs_data_get_bool(ho, "is_scene"));
+				/* Internal __midi_fadester_opacity__ excluded -> filter_count == 1 (Blur only) */
+				REQUIRE(obs_data_get_int(ho, "filter_count") == 1);
+			} else if (strcmp(hsrc, "Blue") == 0) {
+				saw_blue_host = true;
+				REQUIRE(obs_data_get_bool(ho, "is_scene"));
+				REQUIRE(obs_data_get_int(ho, "filter_count") == 1);
+			}
+			obs_data_release(ho);
+		}
+		REQUIRE(saw_color_host && saw_blue_host);
+		obs_data_array_release(cat_hosts);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Source-specific get_catalog recurses nested OBS_PROPERTY_GROUPs & excludes LIST/BOOL/internal */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "source", "Color");
+		mfd_vendor_handle_get_catalog(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(strcmp(obs_data_get_string(res, "source"), "Color") == 0);
+		REQUIRE(!obs_data_get_bool(res, "is_scene"));
+		obs_data_array_t *c_flts = obs_data_get_array(res, "filters");
+		REQUIRE(c_flts != NULL && obs_data_array_count(c_flts) == 1U);
+		obs_data_t *c_f0 = obs_data_array_item(c_flts, 0U);
+		REQUIRE(strcmp(obs_data_get_string(c_f0, "name"), "Blur") == 0);
+		obs_data_array_t *c_props = obs_data_get_array(c_f0, "properties");
+		REQUIRE(c_props != NULL && obs_data_array_count(c_props) == 2U);
+		obs_data_t *p0 = obs_data_array_item(c_props, 0U);
+		obs_data_t *p1 = obs_data_array_item(c_props, 1U);
+		REQUIRE(strcmp(obs_data_get_string(p0, "name"), "radius") == 0);
+		REQUIRE(strcmp(obs_data_get_string(p0, "type"), "float") == 0);
+		REQUIRE(fabs(obs_data_get_double(p0, "max") - 50.0) < 1e-6);
+		REQUIRE(strcmp(obs_data_get_string(p0, "suffix"), " px") == 0);
+		REQUIRE(fabs(obs_data_get_double(p0, "current") - 12.5) < 1e-6);
+		REQUIRE(strcmp(obs_data_get_string(p1, "name"), "passes") == 0);
+		REQUIRE(strcmp(obs_data_get_string(p1, "type"), "int") == 0);
+		REQUIRE(obs_data_get_int(p1, "current") == 3);
+		obs_data_release(p0);
+		obs_data_release(p1);
+		obs_data_array_release(c_props);
+		obs_data_release(c_f0);
+		obs_data_array_release(c_flts);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Missing source in get_catalog returns explicit error + comment sentence */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "source", "NoSuchLayer");
+		mfd_vendor_handle_get_catalog(req, res, &eng);
+		REQUIRE(obs_data_has_user_value(res, "error"));
+		REQUIRE(strcmp(obs_data_get_string(res, "error"), obs_data_get_string(res, "comment")) == 0);
+		REQUIRE(strstr(obs_data_get_string(res, "comment"), "NoSuchLayer") != NULL);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* 3. set_slot(filter_param): reject internal filter, reject non-numeric LIST prop, accept default & inverted ranges */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "__midi_fadester_opacity__");
+		obs_data_set_string(req, "filter_prop", "opacity");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(obs_data_has_user_value(res, "error"));
+		REQUIRE(strcmp(obs_data_get_string(res, "error"), obs_data_get_string(res, "comment")) == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "mode"); /* OBS_PROPERTY_LIST */
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(obs_data_has_user_value(res, "error"));
+		REQUIRE(strstr(obs_data_get_string(res, "comment"), "not a numeric") != NULL);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Bind fx_1 to (Color, Blur, radius) with omitted from_val/to_val -> defaults to [0, 50], live 12.5 -> value 0.25 */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		obs_data_set_bool(req, "bypass_at_zero", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(obs_data_get_bool(res, "available"));
+		REQUIRE(fabs(obs_data_get_double(res, "from_val") - 0.0) < 1e-6);
+		REQUIRE(fabs(obs_data_get_double(res, "to_val") - 50.0) < 1e-6);
+		REQUIRE(fabs(obs_data_get_double(res, "value") - 0.25) < 1e-4);
+		REQUIRE(strcmp(obs_data_get_string(res, "display_value"), "12.5 px") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Re-bind fx_1 with inverted sub-range [40.0, 10.0] and verify display_value + signal bridge */
+		proc_handler_t *fx_ph = proc_handler_create();
+		signal_handler_t *fx_sh = signal_handler_create();
+		struct fake_signal_log fx_sig;
+		memset(&fx_sig, 0, sizeof(fx_sig));
+		REQUIRE(mfd_bridge_register_with_handlers(fx_ph, fx_sh, &eng));
+		signal_handler_connect(fx_sh, "midi_fadester_fader_changed", on_fake_signal, &fx_sig);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		obs_data_set_double(req, "from_val", 40.0);
+		obs_data_set_double(req, "to_val", 10.0);
+		obs_data_set_bool(req, "bypass_at_zero", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+
+		eng.fader_slots[10].sec_since_last_fader_event = 1.0f;
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_double(req, "value", 0.5); /* mapped = 25.0 px */
+		mfd_vendor_handle_set_fader_value(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(fabs(obs_data_get_double(flt_blur->settings, "radius") - 25.0) < 1e-6);
+		REQUIRE(strcmp(ws_log.last_fader_slot, "fx_1") == 0);
+		REQUIRE(strcmp(ws_log.last_fader_display_value, "25.0 px") == 0);
+		REQUIRE(strcmp(fx_sig.slot, "fx_1") == 0);
+		REQUIRE(strcmp(fx_sig.display_value, "25.0 px") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* 4. Universal single-writer conflict rejection across set_slot, Set up, Advanced (disabled->enabled!), and JSON import */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(obs_data_has_user_value(res, "error"));
+		REQUIRE(strstr(obs_data_get_string(res, "comment"), "already controlled") != NULL);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		struct mfd_setup_candidate dup_cand;
+		memset(&dup_cand, 0, sizeof(dup_cand));
+		dup_cand.slot_index = 11; /* fx_2 */
+		dup_cand.enabled = true;
+		dup_cand.target_type = MFD_TARGET_FILTER_PARAM;
+		snprintf(dup_cand.source_a_name, sizeof(dup_cand.source_a_name), "Color");
+		snprintf(dup_cand.filter_name, sizeof(dup_cand.filter_name), "Blur");
+		snprintf(dup_cand.filter_prop, sizeof(dup_cand.filter_prop), "radius");
+		dup_cand.filter_from_val = 0.0;
+		dup_cand.filter_to_val = 50.0;
+		char dup_err[192] = {0};
+		REQUIRE(!mfd_engine_validate_setup_candidate(&eng, &dup_cand, dup_err, sizeof(dup_err)));
+		REQUIRE(strstr(dup_err, "already controlled") != NULL);
+		mfd_engine_begin_setup_session(&eng, 11);
+		REQUIRE(!mfd_engine_commit_setup_session(&eng, &dup_cand, dup_err, sizeof(dup_err)));
+		mfd_engine_cancel_setup_session(&eng);
+
+		/* Disabled slot configured with duplicate binding cannot be toggled enabled while fx_1 owns it */
+		struct mfd_slot_config_edit adv_dup;
+		memset(&adv_dup, 0, sizeof(adv_dup));
+		adv_dup.enabled = false;
+		adv_dup.target_type = MFD_TARGET_FILTER_PARAM;
+		snprintf(adv_dup.source_a_name, sizeof(adv_dup.source_a_name), "Color");
+		snprintf(adv_dup.filter_name, sizeof(adv_dup.filter_name), "Blur");
+		snprintf(adv_dup.filter_prop, sizeof(adv_dup.filter_prop), "radius");
+		adv_dup.has_filter_range = true;
+		adv_dup.filter_from_val = 0.0;
+		adv_dup.filter_to_val = 50.0;
+		REQUIRE(mfd_engine_update_slot_config_ex(&eng, 11, &adv_dup, dup_err, sizeof(dup_err)));
+		adv_dup.enabled = true;
+		REQUIRE(!mfd_engine_update_slot_config_ex(&eng, 11, &adv_dup, dup_err, sizeof(dup_err)));
+		REQUIRE(strstr(dup_err, "already controlled") != NULL);
+		/* Reset fx_2 back to enabled + unassigned */
+		memset(&adv_dup, 0, sizeof(adv_dup));
+		adv_dup.enabled = true;
+		adv_dup.target_type = MFD_TARGET_UNASSIGNED;
+		REQUIRE(mfd_engine_update_slot_config_ex(&eng, 11, &adv_dup, dup_err, sizeof(dup_err)));
+
+		/* Hand-edited JSON with fx_2 listed BEFORE fx_1 for the same (Color, Blur, radius):
+		 * canonical 0..17 order guarantees fx_1 (10) wins and fx_2 (11) downgrades to unassigned! */
+		const char *tmp_dup_json = "test-mfd-dup-filter-import.json";
+		FILE *jf = fopen(tmp_dup_json, "wb");
+		REQUIRE(jf != NULL);
+		fputs("{\n"
+		      "  \"active_profile\": \"apc40mk2\",\n"
+		      "  \"slots\": [\n"
+		      "    {\"id\": \"fx_2\", \"enabled\": true, \"target_mode\": \"filter_param\", "
+		      "\"source_a\": \"Color\", \"filter_name\": \"Blur\", \"filter_prop\": \"radius\", "
+		      "\"from_val\": 0.0, \"to_val\": 50.0, \"bypass_at_zero\": true},\n"
+		      "    {\"id\": \"fx_1\", \"enabled\": true, \"target_mode\": \"filter_param\", "
+		      "\"source_a\": \"Color\", \"filter_name\": \"Blur\", \"filter_prop\": \"radius\", "
+		      "\"from_val\": 0.0, \"to_val\": 50.0, \"bypass_at_zero\": true}\n"
+		      "  ]\n"
+		      "}\n",
+		      jf);
+		fclose(jf);
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_dup_json));
+		remove(tmp_dup_json);
+		REQUIRE(eng.fader_slots[10].target_type == MFD_TARGET_FILTER_PARAM);
+		REQUIRE(eng.fader_slots[10].cached_available);
+		REQUIRE(eng.fader_slots[11].target_type == MFD_TARGET_UNASSIGNED);
+
+		/* 5. Integer quantization gating + shared-filter bypass_at_zero lease aggregation */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "passes"); /* int 1..8 */
+		obs_data_set_double(req, "from_val", 1.0);
+		obs_data_set_double(req, "to_val", 5.0);
+		obs_data_set_bool(req, "bypass_at_zero", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Tiny sub-integer deflections on fx_2 around 0.50 (passes == 3) do NOT spam obs_source_update */
+		char sval_err[128] = {0};
+		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.50f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(obs_data_get_int(flt_blur->settings, "passes") == 3);
+		int writes_before_substep = flt_blur->settings_writes;
+		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.52f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.48f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(flt_blur->settings_writes == writes_before_substep);
+
+		/* Multi-slot shared-filter bypass aggregation:
+		 * fx_1 -> 0.0 while fx_2 == 0.48 -> Blur stays enabled!
+		 * fx_2 -> 0.0 -> both at 0.0 -> Blur becomes disabled! */
+		REQUIRE(flt_blur->enabled);
+		REQUIRE(mfd_engine_set_slot_value(&eng, 10, 0.0f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(flt_blur->enabled);
+		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.0f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(!flt_blur->enabled);
+
+		/* Persisted filter_pre_bypass_enabled crash-recovery check while Blur is bypassed (enabled == false): */
+		const char *tmp_crash_json = "test-mfd-bypass-crash-recovery.json";
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_crash_json));
+		{
+			struct mfd_engine rec_eng;
+			memset(&rec_eng, 0, sizeof(rec_eng));
+			REQUIRE(mfd_engine_init_mutex(&rec_eng));
+			mfd_midi_queue_init(&rec_eng.midi_queue);
+			mfd_midi_parser_init(&rec_eng.midi_parser);
+			rec_eng.scene_graph_ops = &g_fake_sg_ops;
+			rec_eng.scene_graph_user_data = &fake_sg;
+			fake_sg.owner_eng = NULL;
+			/* Simulate OBS restarting after crash with Blur still saved as enabled == false */
+			REQUIRE(!flt_blur->enabled);
+			REQUIRE(mfd_engine_import_config_file(&rec_eng, tmp_crash_json));
+			/* Graceful shutdown on recovered engine restores pre-MFD enabled == true! */
+			mfd_engine_restore_all_bypass_leases(&rec_eng);
+			REQUIRE(flt_blur->enabled);
+			mfd_engine_destroy_mutex(&rec_eng);
+			/* Put Blur back to bypassed false for main engine continuation */
+			flt_blur->enabled = false;
+			fake_sg.owner_eng = &eng;
+		}
+		remove(tmp_crash_json);
+
+		/* Unbinding fx_2 alone keeps lease owned by fx_1 (still at 0.0 -> Blur stays false);
+		 * unbinding fx_1 releases last owner -> Blur restores to pre_mfd_enabled == true! */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "target_mode", "unassigned");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+		REQUIRE(!flt_blur->enabled);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "unassigned");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+		REQUIRE(flt_blur->enabled);
+
+		/* Filter initially DISABLED in OBS before Midi Fadester binds -> unbind restores false! */
+		flt_blur->enabled = false;
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		obs_data_set_double(req, "from_val", 0.0);
+		obs_data_set_double(req, "to_val", 50.0);
+		obs_data_set_bool(req, "bypass_at_zero", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		REQUIRE(mfd_engine_set_slot_value(&eng, 10, 0.6f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(flt_blur->enabled); /* Driven above 0% turns filter ON */
+
+		/* Rename host source + rename filter while lease active, then unbind -> still restores initial false! */
+		fake_sg_rename(&fake_sg, "Color", "Color Hero");
+		mfd_engine_handle_source_rename(&eng, "Color", "Color Hero");
+		REQUIRE(strcmp(eng.fader_slots[10].source_a_name, "Color Hero") == 0);
+		REQUIRE(eng.fader_slots[10].cached_available);
+
+		fake_sg_rename_filter(&fake_sg, "Color Hero", "Blur", "Hero Blur");
+		mfd_engine_handle_filter_rename(&eng, "Color Hero", "Blur", "Hero Blur");
+		REQUIRE(strcmp(eng.fader_slots[10].filter_name, "Hero Blur") == 0);
+		REQUIRE(eng.fader_slots[10].cached_available);
+
+		REQUIRE(mfd_engine_unassign_slot_preserve_addr(&eng, 10));
+		REQUIRE(!flt_blur->enabled); /* Restored to pre-MFD false despite both renames! */
+
+		/* Rename back to Color / Blur and set enabled = true */
+		fake_sg_rename_filter(&fake_sg, "Color Hero", "Hero Blur", "Blur");
+		mfd_engine_handle_filter_rename(&eng, "Color Hero", "Hero Blur", "Blur");
+		fake_sg_rename(&fake_sg, "Color Hero", "Color");
+		mfd_engine_handle_source_rename(&eng, "Color Hero", "Color");
+		flt_blur->enabled = true;
+
+		/* 6. External OBS "update" syncs t_ext + Soft Takeover + origin="obs" without perturbing sibling property */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		obs_data_set_double(req, "from_val", 0.0);
+		obs_data_set_double(req, "to_val", 50.0);
+		obs_data_set_bool(req, "bypass_at_zero", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "passes");
+		obs_data_set_double(req, "from_val", 1.0);
+		obs_data_set_double(req, "to_val", 5.0);
+		obs_data_set_bool(req, "bypass_at_zero", false);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Engage physical knob CC 16 at 127 (1.0 -> 50.0 px) on fx_1, set fx_2 to 0.5 (passes = 3) */
+		eng.fader_slots[10].takeover.state = MFD_TAKEOVER_ENGAGED;
+		push_midi_cc(&eng, 0, 16, 127);
+		for (int t = 0; t < 20; ++t) {
+			mfd_engine_tick(&eng, 0.016f);
+		}
+		REQUIRE(fabs(obs_data_get_double(flt_blur->settings, "radius") - 50.0) < 0.5);
+		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.5f, false, "api", sval_err, sizeof(sval_err)));
+
+		/* User drags Radius slider inside OBS Filters dialog to 20.0 px (t_ext = 0.40) */
+		obs_data_set_double(flt_blur->settings, "radius", 20.0);
+		mfd_engine_handle_filter_settings_updated(&eng, "Color", "Blur");
+		REQUIRE(fabsf(eng.fader_slots[10].last_applied_val - 0.40f) < 1e-4f);
+		REQUIRE(eng.fader_slots[10].takeover.state == MFD_TAKEOVER_WAITING);
+		REQUIRE(strcmp(ws_log.last_fader_slot, "fx_1") == 0);
+		REQUIRE(strcmp(ws_log.last_fader_origin, "obs") == 0);
+		REQUIRE(strcmp(ws_log.last_fader_display_value, "20.0 px") == 0);
+		REQUIRE(fabsf(eng.fader_slots[11].last_applied_val - 0.50f) < 1e-4f); /* Sibling passes untouched! */
+
+		/* 7. Dynamic "update_properties" range drift and missing-property invalidation */
+		flt_blur->float_max_override = 30.0; /* fx_1 to_val=50.0 now exceeds max=30.0! */
+		mfd_engine_handle_filter_properties_updated(&eng, "Color", "Blur");
+		REQUIRE(!eng.fader_slots[10].cached_available);
+		REQUIRE(strstr(eng.fader_slots[10].cached_reason, "outside") != NULL);
+
+		flt_blur->omit_radius_prop = true;
+		mfd_engine_handle_filter_properties_updated(&eng, "Color", "Blur");
+		REQUIRE(!eng.fader_slots[10].cached_available);
+		REQUIRE(strstr(eng.fader_slots[10].cached_reason, "no longer available") != NULL);
+
+		flt_blur->omit_radius_prop = false;
+		flt_blur->float_max_override = 50.0;
+		mfd_engine_handle_filter_properties_updated(&eng, "Color", "Blur");
+		REQUIRE(eng.fader_slots[10].cached_available);
+
+		/* 8. Profile switch apc40mk2 -> apcminimk2 -> apc40mk2 preserves fx_1..fx_8 enabled & bindings */
+		REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC_MINI_MK2, false));
+		REQUIRE(eng.fader_slots[10].enabled);
+		REQUIRE(eng.fader_slots[10].addr.type == MFD_MIDI_NONE);
+		REQUIRE(eng.fader_slots[10].target_type == MFD_TARGET_FILTER_PARAM);
+		REQUIRE(eng.fader_slots[10].cached_available);
+		REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC40_MK2, false));
+		REQUIRE(eng.fader_slots[10].addr.type == MFD_MIDI_CC && eng.fader_slots[10].addr.number == 16U);
+
+		/* 9. reset_fx: ms validation, channel layer_opacity isolation, instant snap, timed ramp, and unavailable queue recovery */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_1");
+		obs_data_set_string(req, "target_mode", "layer_opacity");
+		obs_data_set_string(req, "scene", "Blue");
+		obs_data_set_string(req, "source_a", "Color");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		obs_data_release(req);
+		obs_data_release(res);
+		REQUIRE(mfd_engine_set_slot_value(&eng, 1, 0.75f, false, "api", sval_err, sizeof(sval_err)));
+
+		/* Also bind fader_4 (channel fader) to AudioMod slot_1_amount_pct on scene Blue */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Blue");
+		obs_data_set_string(req, "filter_name", "AudioMod");
+		obs_data_set_string(req, "filter_prop", "slot_1_amount_pct");
+		obs_data_set_double(req, "from_val", 0.0);
+		obs_data_set_double(req, "to_val", 100.0);
+		obs_data_set_bool(req, "bypass_at_zero", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+		REQUIRE(mfd_engine_set_slot_value(&eng, 4, 0.80f, false, "api", sval_err, sizeof(sval_err)));
+
+		/* Reject ms = 10 */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_int(req, "ms", 10);
+		mfd_vendor_handle_reset_fx(req, res, &eng);
+		REQUIRE(obs_data_has_user_value(res, "error"));
+		REQUIRE(strcmp(obs_data_get_string(res, "error"), obs_data_get_string(res, "comment")) == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Instant reset_fx ({ ms: 0 }) zeroes fx_1, fx_2, and fader_4 (filter_param), leaving fader_1 at 0.75! */
+		REQUIRE(mfd_engine_set_slot_value(&eng, 10, 0.60f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.50f, false, "api", sval_err, sizeof(sval_err)));
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_int(req, "ms", 0);
+		mfd_vendor_handle_reset_fx(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(obs_data_get_int(res, "eligible_count") == 3);
+		REQUIRE(obs_data_get_int(res, "reset_count") == 3);
+		REQUIRE(obs_data_get_int(res, "queued_unavailable_count") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 0.75f) <
+			1e-5f); /* fader_1 layer_opacity untouched! */
+		REQUIRE(fabsf(eng.fader_slots[10].last_applied_val) < 1e-6f);
+		REQUIRE(fabsf(eng.fader_slots[11].last_applied_val) < 1e-6f);
+		REQUIRE(fabsf(eng.fader_slots[4].last_applied_val) < 1e-6f);
+		REQUIRE(fabs(obs_data_get_double(flt_blur->settings, "radius") - 0.0) < 1e-6);
+		REQUIRE(obs_data_get_int(flt_blur->settings, "passes") == 1);
+		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 0.0) < 1e-6);
+		REQUIRE(!flt_amod->enabled);
+
+		/* Timed reset_fx ({ ms: 400 }) + unavailable-slot recovery via pending_clean_apply_on_avail */
+		REQUIRE(mfd_engine_set_slot_value(&eng, 10, 1.0f, false, "api", sval_err, sizeof(sval_err)));
+		REQUIRE(mfd_engine_set_slot_value(&eng, 4, 1.0f, false, "api", sval_err, sizeof(sval_err)));
+		/* Temporarily remove AudioMod filter before reset_fx */
+		fake_sg_remove_filter(&fake_sg, "Blue", "AudioMod");
+		mfd_engine_handle_filter_removed(&eng, "Blue", "AudioMod");
+		REQUIRE(!eng.fader_slots[4].cached_available);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_int(req, "ms", 400);
+		mfd_vendor_handle_reset_fx(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(obs_data_get_int(res, "eligible_count") == 3);
+		REQUIRE(obs_data_get_int(res, "reset_count") == 2); /* fx_1 + fx_2 writable; fader_4 queued */
+		REQUIRE(obs_data_get_int(res, "queued_unavailable_count") == 1); /* fader_4 queued for clean on avail */
+		obs_data_release(req);
+		obs_data_release(res);
+
+		mfd_engine_tick(&eng, 0.20f);
+		REQUIRE(eng.fader_slots[10].last_applied_val > 0.35f && eng.fader_slots[10].last_applied_val < 0.65f);
+		mfd_engine_tick(&eng, 0.25f);
+		REQUIRE(fabsf(eng.fader_slots[10].last_applied_val) < 1e-6f);
+
+		/* Re-add AudioMod with non-zero 77% setting -> pending_clean_apply_on_avail immediately zeroes it! */
+		flt_amod = fake_sg_add_filter(&fake_sg, "Blue", "AudioMod", "visual_sidechain_audio_mod", true,
+					      FAKE_SCHEMA_AUDIO_MOD);
+		obs_data_set_double(flt_amod->settings, "slot_1_amount_pct", 77.0);
+		mfd_engine_reevaluate_slots(&eng, true);
+		REQUIRE(eng.fader_slots[4].cached_available);
+		REQUIRE(fabsf(eng.fader_slots[4].last_applied_val) < 1e-6f);
+		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 0.0) < 1e-6);
+		REQUIRE(!flt_amod->enabled);
+
+		mfd_engine_restore_all_bypass_leases(&eng);
+		REQUIRE(flt_blur->enabled && flt_amod->enabled);
+
+		mfd_bridge_register_with_handlers(NULL, NULL, NULL);
+		signal_handler_destroy(fx_sh);
+		proc_handler_destroy(fx_ph);
+		fake_sg.owner_eng = NULL;
+	}
+
+	mfd_vendor_set_event_sink(NULL, NULL);
+
 	/* 16g: Multi-threaded recursive state_mutex concurrency stress test + mfd_vendor_api_shutdown fencing */
 	{
 		struct mfd_engine *mt_eng = (struct mfd_engine *)calloc(1U, sizeof(*mt_eng));
@@ -2560,6 +3454,7 @@ int main(void)
 		mt_eng->studio_mode_override = true;
 		mt_eng->tbar_driver = mock_tbar_driver;
 		mt_eng->tbar_unlatch = mock_tbar_unlatch;
+		fake_sg.owner_eng = mt_eng;
 		mfd_engine_load_apc40_defaults(mt_eng);
 
 		req = obs_data_create();
@@ -2569,6 +3464,20 @@ int main(void)
 		obs_data_set_string(req, "scene", "Blue");
 		obs_data_set_string(req, "source_a", "Color");
 		obs_data_set_string(req, "source_b", "Color 2");
+		mfd_vendor_handle_set_slot(req, res, mt_eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_1");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		obs_data_set_double(req, "from_val", 0.0);
+		obs_data_set_double(req, "to_val", 50.0);
+		obs_data_set_bool(req, "bypass_at_zero", true);
 		mfd_vendor_handle_set_slot(req, res, mt_eng);
 		obs_data_release(req);
 		obs_data_release(res);
@@ -2615,10 +3524,12 @@ int main(void)
 		signal_handler_destroy(mt_sh);
 		proc_handler_destroy(mt_ph);
 		mfd_engine_set_ui_notify_fn(mt_eng, NULL, NULL);
+		fake_sg.owner_eng = NULL;
 		mfd_engine_destroy_mutex(mt_eng);
 		free(mt_eng);
 	}
 
+	fake_sg_cleanup_filters(&fake_sg);
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");
 	return 0;

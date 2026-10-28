@@ -9,6 +9,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <obs-data.h>
+#include <obs-properties.h>
 #include <util/threading.h>
 #include "core/midi-types.h"
 #include "core/midi-queue.h"
@@ -16,6 +18,7 @@
 #include "core/smoother.h"
 #include "core/takeover.h"
 #include "core/tbar-logic.h"
+#include "core/filter-math.h"
 #include "core/apc40-profile.h"
 #include "midi/winmm-device.h"
 
@@ -23,18 +26,22 @@
 extern "C" {
 #endif
 
-#define MFD_MAX_FADER_SLOTS 10
+#define MFD_MAX_FADER_SLOTS 18
 #define MFD_MAX_CAL_ENTRIES 64
 #define MFD_PROFILE_NAME_MAX 32
 #define MFD_SOURCE_NAME_MAX 256
 #define MFD_SLOT_LABEL_MAX 64
 #define MFD_SLOT_ID_MAX 32
 #define MFD_SLOT_KIND_MAX 16
+#define MFD_FILTER_PROP_NAME_MAX 128
 #define MFD_FADER_EVENT_MIN_INTERVAL_SEC (1.0f / 30.0f)
 
 #define MFD_CATALOG_MAX_SCENES 48
 #define MFD_CATALOG_MAX_SCENE_LAYERS 48
 #define MFD_CATALOG_MAX_AUDIO_SOURCES 64
+#define MFD_CATALOG_MAX_FILTER_HOSTS 128
+#define MFD_HOST_MAX_FILTERS 32
+#define MFD_FILTER_MAX_PROPS 64
 
 struct mfd_persisted_cal_entry {
 	bool in_use;
@@ -54,9 +61,33 @@ struct mfd_fader_slot {
 	char scene_name[MFD_SOURCE_NAME_MAX];
 	char source_a_name[MFD_SOURCE_NAME_MAX];
 	char source_b_name[MFD_SOURCE_NAME_MAX];
+	char filter_name[MFD_SOURCE_NAME_MAX];
+	char filter_prop[MFD_FILTER_PROP_NAME_MAX];
+	double filter_from_val;
+	double filter_to_val;
+	bool filter_bypass_at_zero;
+	bool filter_pre_bypass_enabled;
+	bool restore_persisted_pre_bypass;
 	enum mfd_crossfade_curve curve;
 	bool audio_follows_video;
 	bool invert;
+
+	/* Cached filter property metadata (refreshed on signals, never on video tick) */
+	bool filter_prop_valid;
+	bool filter_prop_is_int;
+	double filter_prop_min;
+	double filter_prop_max;
+	double filter_prop_step;
+	char filter_prop_suffix[32];
+	char filter_prop_label[MFD_FILTER_PROP_NAME_MAX];
+
+	/* Runtime filter write & reset tracking */
+	bool has_last_written_mapped;
+	int64_t last_written_int;
+	double last_written_float;
+	bool writing_filter_settings;
+	bool auto_fade_is_reset_fx;
+	bool pending_clean_apply_on_avail;
 
 	/* Runtime state */
 	struct mfd_smoother smoother;
@@ -102,19 +133,57 @@ struct mfd_ui_audio_entry {
 	float db; /* finite dB or -INFINITY via mfd_mul_to_db */
 };
 
+struct mfd_ui_filter_host_summary {
+	char name[MFD_SOURCE_NAME_MAX];
+	bool is_scene;
+	uint32_t filter_count;
+};
+
 struct mfd_ui_catalog {
 	uint64_t config_topology_rev;
 	bool scenes_truncated;
 	bool audio_truncated;
+	bool filter_hosts_truncated;
 	size_t scene_count;
 	struct mfd_ui_scene_entry scenes[MFD_CATALOG_MAX_SCENES];
 	size_t audio_count;
 	struct mfd_ui_audio_entry audio_sources[MFD_CATALOG_MAX_AUDIO_SOURCES];
+	size_t filter_host_count;
+	struct mfd_ui_filter_host_summary filter_hosts[MFD_CATALOG_MAX_FILTER_HOSTS];
+};
+
+struct mfd_filter_prop_info {
+	char name[MFD_FILTER_PROP_NAME_MAX];
+	char label[MFD_FILTER_PROP_NAME_MAX];
+	bool is_int;
+	double min_val;
+	double max_val;
+	double step;
+	char suffix[32];
+	double current_val;
+};
+
+struct mfd_filter_entry_info {
+	char name[MFD_SOURCE_NAME_MAX];
+	char type_id[128];
+	bool enabled;
+	bool props_truncated;
+	size_t prop_count;
+	struct mfd_filter_prop_info props[MFD_FILTER_MAX_PROPS];
+};
+
+struct mfd_source_filter_catalog {
+	char source_name[MFD_SOURCE_NAME_MAX];
+	bool source_exists;
+	bool is_scene;
+	bool filters_truncated;
+	size_t filter_count;
+	struct mfd_filter_entry_info filters[MFD_HOST_MAX_FILTERS];
 };
 
 struct mfd_setup_session {
 	bool active;
-	int slot_index;         /* 0..9 */
+	int slot_index;         /* 0..17 */
 	uint64_t base_slot_rev; /* captured from eng->slot_config_rev[slot_index] */
 	struct mfd_midi_addr candidate_addr;
 	struct mfd_control_calibration candidate_cal;
@@ -131,6 +200,11 @@ struct mfd_setup_candidate {
 	char scene_name[MFD_SOURCE_NAME_MAX];
 	char source_a_name[MFD_SOURCE_NAME_MAX];
 	char source_b_name[MFD_SOURCE_NAME_MAX];
+	char filter_name[MFD_SOURCE_NAME_MAX];
+	char filter_prop[MFD_FILTER_PROP_NAME_MAX];
+	double filter_from_val;
+	double filter_to_val;
+	bool filter_bypass_at_zero;
 	enum mfd_crossfade_curve curve;
 	bool audio_follows_video;
 	bool apply_tbar_bidir;
@@ -144,6 +218,12 @@ struct mfd_slot_config_edit {
 	char scene_name[MFD_SOURCE_NAME_MAX];
 	char source_a_name[MFD_SOURCE_NAME_MAX];
 	char source_b_name[MFD_SOURCE_NAME_MAX];
+	char filter_name[MFD_SOURCE_NAME_MAX];
+	char filter_prop[MFD_FILTER_PROP_NAME_MAX];
+	bool has_filter_range;
+	double filter_from_val;
+	double filter_to_val;
+	bool filter_bypass_at_zero;
 	enum mfd_crossfade_curve curve;
 	bool audio_follows_video;
 	bool invert;
@@ -181,8 +261,21 @@ struct mfd_pending_fader_emit {
 	bool pending;
 	char slot_id[MFD_SLOT_ID_MAX];
 	float value;
+	char display_value[64];
 	char origin[16];
 };
+
+struct mfd_filter_bypass_lease {
+	bool in_use;
+	char source_name[MFD_SOURCE_NAME_MAX];
+	char filter_name[MFD_SOURCE_NAME_MAX];
+	bool pre_mfd_enabled;
+	bool last_mfd_enabled;
+	bool has_written_enable;
+	bool writing_enable;
+};
+
+struct mfd_tracked_signal_entry;
 
 typedef void (*mfd_ui_notify_fn)(void *user_data);
 
@@ -192,6 +285,9 @@ typedef bool (*mfd_tbar_apply_fn)(enum mfd_tbar_state state, float t_norm, bool 
 				  bool *out_aborted_throw, char *out_err, size_t err_size);
 typedef void (*mfd_tbar_unlatch_fn)(void);
 typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
+typedef void (*mfd_filter_host_cb)(const char *source_name, bool is_scene, void *param);
+typedef void (*mfd_source_filter_cb)(const char *filter_name, const char *type_id, bool enabled, void *param);
+typedef void (*mfd_numeric_prop_cb)(const struct mfd_filter_prop_info *info, void *param);
 
 struct mfd_scene_graph_ops {
 	bool (*source_exists)(const char *source_name, void *user_data);
@@ -206,6 +302,19 @@ struct mfd_scene_graph_ops {
 	void (*apply_volume)(const char *source_name, float mul, void *user_data);
 	void (*fill_catalog)(struct mfd_ui_catalog *out, void *user_data);
 	void (*set_studio_mode)(bool enabled, void *user_data);
+
+	/* Optional filter callbacks for headless filter_param & get_catalog testing */
+	void (*enum_filter_hosts)(mfd_filter_host_cb cb, void *cb_param, void *user_data);
+	bool (*enum_source_filters)(const char *source_name, bool *out_is_scene, mfd_source_filter_cb cb,
+				    void *cb_param, void *user_data);
+	obs_properties_t *(*create_filter_properties)(const char *source_name, const char *filter_name,
+						      void *user_data);
+	obs_data_t *(*get_filter_settings)(const char *source_name, const char *filter_name, void *user_data);
+	void (*update_filter_settings)(const char *source_name, const char *filter_name, obs_data_t *settings,
+				       void *user_data);
+	bool (*get_filter_enabled)(const char *source_name, const char *filter_name, bool *out_enabled,
+				   void *user_data);
+	void (*set_filter_enabled)(const char *source_name, const char *filter_name, bool enabled, void *user_data);
 };
 
 struct mfd_engine {
@@ -239,6 +348,10 @@ struct mfd_engine {
 
 	struct mfd_persisted_cal_entry cal_entries[MFD_MAX_CAL_ENTRIES];
 	struct mfd_fader_slot fader_slots[MFD_MAX_FADER_SLOTS];
+	struct mfd_filter_bypass_lease filter_leases[MFD_MAX_FADER_SLOTS];
+	struct mfd_tracked_signal_entry *tracked_signals_head;
+	const char *removing_filter_host;
+	const char *removing_filter_name;
 	struct mfd_setup_session setup_session;
 	int learning_slot_index; /* -1 when not learning */
 	bool has_last_midi;
@@ -285,6 +398,35 @@ void mfd_ui_catalog_destroy(struct mfd_ui_catalog *cat);
 void mfd_engine_get_ui_catalog(struct mfd_engine *eng, struct mfd_ui_catalog *out);
 void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *out);
 
+struct mfd_source_filter_catalog *mfd_source_filter_catalog_create(void);
+void mfd_source_filter_catalog_destroy(struct mfd_source_filter_catalog *cat);
+bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *source_name,
+					  struct mfd_source_filter_catalog *out);
+bool mfd_engine_fill_vendor_catalog_locked(struct mfd_engine *eng, const char *source_name, obs_data_t *response_data,
+					   char *out_err, size_t err_size);
+bool mfd_is_internal_filter(const char *filter_name, const char *type_id);
+void mfd_collect_filter_numeric_props(obs_properties_t *props, obs_data_t *settings, mfd_numeric_prop_cb cb,
+				      void *param);
+void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, float norm_01, char *out, size_t out_size);
+bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
+						     const char *source_a, const char *filter_name,
+						     const char *filter_prop, bool has_from_to, double *inout_from_val,
+						     double *inout_to_val, struct mfd_filter_prop_info *out_prop_info,
+						     char *out_err, size_t err_size);
+void mfd_engine_detach_filter_binding_locked(struct mfd_engine *eng, int slot_index);
+void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng);
+void mfd_engine_handle_filter_rename(struct mfd_engine *eng, const char *parent_source_name, const char *prev_name,
+				     const char *new_name);
+void mfd_engine_handle_filter_removed(struct mfd_engine *eng, const char *parent_source_name, const char *filter_name);
+void mfd_engine_handle_filter_enable(struct mfd_engine *eng, const char *parent_source_name, const char *filter_name,
+				     bool enabled);
+void mfd_engine_handle_filter_settings_updated(struct mfd_engine *eng, const char *parent_source_name,
+					       const char *filter_name);
+void mfd_engine_handle_filter_properties_updated(struct mfd_engine *eng, const char *parent_source_name,
+						 const char *filter_name);
+bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
+			 int *out_queued_unavailable_count, char *out_err, size_t err_size);
+
 void mfd_engine_set_test_frontend_state(struct mfd_engine *eng, bool finished_loading, bool studio_mode,
 					const char *preview_scene, const char *program_scene, bool apc40_detected);
 void mfd_engine_request_studio_mode(struct mfd_engine *eng, bool enabled);
@@ -306,6 +448,8 @@ void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng);
 
 bool mfd_engine_update_slot_config(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit);
+bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit,
+				      char *out_err, size_t err_size);
 void mfd_engine_set_slot_label(struct mfd_engine *eng, int slot_index, const char *label);
 void mfd_engine_clear_slot_binding(struct mfd_engine *eng, int slot_index);
 bool mfd_engine_set_slot_value(struct mfd_engine *eng, int slot_index, float value_01, bool release, const char *origin,

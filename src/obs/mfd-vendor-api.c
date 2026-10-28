@@ -48,15 +48,17 @@ static int resolve_slot_or_error(obs_data_t *request_data, obs_data_t *response_
 {
 	const char *slot_id = request_data ? obs_data_get_string(request_data, "slot") : NULL;
 	if (!slot_id || !*slot_id) {
-		set_error_comment(response_data,
-				  "Missing required 'slot' id. Valid slots: crossfader, fader_1 .. fader_8, master.");
+		set_error_comment(
+			response_data,
+			"Missing required 'slot' id. Valid slots: crossfader, fader_1 .. fader_8, master, fx_1 .. fx_8.");
 		return -1;
 	}
 	int idx = mfd_slot_index_for_id(slot_id);
 	if (idx < 0 || idx >= MFD_MAX_FADER_SLOTS) {
-		char msg[192];
+		char msg[224];
 		snprintf(msg, sizeof(msg),
-			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.", slot_id);
+			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master, fx_1 .. fx_8.",
+			 slot_id);
 		set_error_comment(response_data, msg);
 		return -1;
 	}
@@ -82,18 +84,27 @@ static void populate_slot_data(const struct mfd_engine *eng, const struct mfd_fa
 	char dyn_label[128] = {0};
 	bool available = false;
 	char reason[160] = {0};
+	char disp_val[64] = {0};
 	mfd_engine_get_slot_status(eng, s, dyn_label, sizeof(dyn_label), &available, reason, sizeof(reason));
+	mfd_engine_format_slot_display_value(s, s->last_applied_val, disp_val, sizeof(disp_val));
 
 	obs_data_set_string(out, "id", s->id);
 	obs_data_set_string(out, "name", s->label);
 	obs_data_set_string(out, "kind", s->kind);
+	obs_data_set_bool(out, "enabled", s->enabled);
 	obs_data_set_string(out, "target_mode", mfd_target_mode_to_string(s->target_type));
 	obs_data_set_string(out, "scene", (s->scene_name[0] != '\0') ? s->scene_name : s->resolved_scene_name);
 	obs_data_set_string(out, "source_a", s->source_a_name);
 	obs_data_set_string(out, "source_b", s->source_b_name);
+	obs_data_set_string(out, "filter_name", s->filter_name);
+	obs_data_set_string(out, "filter_prop", s->filter_prop);
+	obs_data_set_double(out, "from_val", s->filter_from_val);
+	obs_data_set_double(out, "to_val", s->filter_to_val);
+	obs_data_set_bool(out, "bypass_at_zero", s->filter_bypass_at_zero);
 	obs_data_set_string(out, "curve", mfd_curve_to_string(s->curve));
 	obs_data_set_bool(out, "afv", s->audio_follows_video);
 	obs_data_set_double(out, "value", (double)s->last_applied_val);
+	obs_data_set_string(out, "display_value", disp_val);
 	obs_data_set_int(out, "cal_min", s->cal.cal_min);
 	obs_data_set_int(out, "cal_max", s->cal.cal_max);
 	obs_data_set_string(out, "takeover_pending", takeover_pending_str(&s->takeover));
@@ -123,13 +134,18 @@ static void emit_vendor_event(const char *event_name, obs_data_t *event_data)
 	}
 }
 
-void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char *origin)
+void mfd_vendor_emit_fader_changed_ex(const char *slot_id, float value, const char *display_value, const char *origin)
 {
 	if (!slot_id || !*slot_id || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 	float clamped = clamp01(value);
 	const char *orig = (origin && *origin) ? origin : "api";
+	char fallback_disp[32] = {0};
+	const char *disp = (display_value && *display_value) ? display_value : fallback_disp;
+	if (!display_value || !*display_value) {
+		snprintf(fallback_disp, sizeof(fallback_disp), "%d%%", (int)lroundf(clamped * 100.0f));
+	}
 
 	/* 1. Emit in-process signal `midi_fadester_fader_changed` */
 	if (g_bridge_sh) {
@@ -138,6 +154,7 @@ void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char 
 		calldata_set_string(&cd, "slot", slot_id);
 		calldata_set_float(&cd, "value", (double)clamped);
 		calldata_set_string(&cd, "origin", orig);
+		calldata_set_string(&cd, "display_value", disp);
 		signal_handler_signal(g_bridge_sh, "midi_fadester_fader_changed", &cd);
 		calldata_free(&cd);
 	}
@@ -156,9 +173,15 @@ void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char 
 	obs_data_t *ev = obs_data_create();
 	obs_data_set_string(ev, "slot", slot_id);
 	obs_data_set_double(ev, "value", (double)clamped);
+	obs_data_set_string(ev, "display_value", disp);
 	obs_data_set_string(ev, "origin", orig);
 	emit_vendor_event("fader_changed", ev);
 	obs_data_release(ev);
+}
+
+void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char *origin)
+{
+	mfd_vendor_emit_fader_changed_ex(slot_id, value, NULL, origin);
 }
 
 void mfd_vendor_emit_state_changed(struct mfd_engine *eng)
@@ -195,9 +218,9 @@ static void proc_get_slot_value(void *data, calldata_t *cd)
 	}
 	int idx = mfd_slot_index_for_id(slot_id);
 	if (idx < 0 || idx >= MFD_MAX_FADER_SLOTS) {
-		char msg[192];
+		char msg[224];
 		snprintf(msg, sizeof(msg),
-			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.",
+			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master, fx_1 .. fx_8.",
 			 (slot_id && *slot_id) ? slot_id : "");
 		calldata_set_float(cd, "value", 0.0);
 		calldata_set_bool(cd, "ok", false);
@@ -249,9 +272,9 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 	const char *slot_id = calldata_string(cd, "slot");
 	int idx = mfd_slot_index_for_id(slot_id);
 	if (idx < 0 || idx >= MFD_MAX_FADER_SLOTS) {
-		char msg[192];
+		char msg[224];
 		snprintf(msg, sizeof(msg),
-			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master.",
+			 "Slot '%s' does not exist. Valid slots: crossfader, fader_1 .. fader_8, master, fx_1 .. fx_8.",
 			 (slot_id && *slot_id) ? slot_id : "");
 		calldata_set_bool(cd, "ok", false);
 		calldata_set_bool(cd, "success", false);
@@ -290,6 +313,8 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
 	slot->auto_fade_active = false;
+	slot->auto_fade_is_reset_fx = false;
+	slot->pending_clean_apply_on_avail = false;
 	slot->tbar_midi_active = false;
 	slot->tbar_from_idle_band = false;
 	slot->takeover.dial_reversed = false;
@@ -372,7 +397,9 @@ bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh,
 	}
 
 	if (sh) {
-		signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+		signal_handler_add(
+			sh,
+			"void midi_fadester_fader_changed(string slot, float value, string origin, string display_value)");
 	}
 
 	return (ph != NULL) && (sh != NULL);
@@ -473,6 +500,8 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	bool prev_upper = slot->takeover.parked_at_upper_rail;
 
 	slot->auto_fade_active = false;
+	slot->auto_fade_is_reset_fx = false;
+	slot->pending_clean_apply_on_avail = false;
 	slot->tbar_midi_active = false;
 	slot->tbar_from_idle_band = false;
 	slot->takeover.dial_reversed = false;
@@ -583,6 +612,8 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
 	slot->auto_fade_active = false;
+	slot->auto_fade_is_reset_fx = false;
+	slot->pending_clean_apply_on_avail = false;
 	slot->tbar_midi_active = false;
 	slot->tbar_from_idle_band = false;
 
@@ -716,6 +747,8 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	slot->auto_fade_duration_sec = (float)ms / 1000.0f;
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
+	slot->auto_fade_is_reset_fx = false;
+	slot->pending_clean_apply_on_avail = false;
 	slot->tbar_midi_active = false;
 	slot->tbar_from_idle_band = false;
 	if (was_parked) {
@@ -761,6 +794,11 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	bool has_scene = obs_data_has_user_value(request_data, "scene");
 	bool has_sa = obs_data_has_user_value(request_data, "source_a");
 	bool has_sb = obs_data_has_user_value(request_data, "source_b");
+	bool has_fn = obs_data_has_user_value(request_data, "filter_name");
+	bool has_fp = obs_data_has_user_value(request_data, "filter_prop");
+	bool has_from = obs_data_has_user_value(request_data, "from_val");
+	bool has_to = obs_data_has_user_value(request_data, "to_val");
+	bool has_bypass = obs_data_has_user_value(request_data, "bypass_at_zero");
 	bool has_cal_min = obs_data_has_user_value(request_data, "cal_min");
 	bool has_cal_max = obs_data_has_user_value(request_data, "cal_max");
 	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
@@ -776,10 +814,10 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (has_target) {
 		const char *tm = obs_data_get_string(request_data, "target_mode");
 		if (!mfd_target_mode_from_string(tm, &new_target)) {
-			char msg[192];
+			char msg[224];
 			snprintf(
 				msg, sizeof(msg),
-				"Invalid target_mode '%s'. Valid modes: unassigned, tbar, crossfade_ab, layer_opacity, audio_volume.",
+				"Invalid target_mode '%s'. Valid modes: unassigned, tbar, crossfade_ab, layer_opacity, audio_volume, filter_param.",
 				tm ? tm : "");
 			set_error_comment(response_data, msg);
 			mfd_engine_unlock(eng);
@@ -830,10 +868,63 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		return;
 	}
 
-	if (has_target) {
-		s->enabled = true;
-		mfd_engine_reset_slot_mode_state(eng, s, new_target);
+	const char *fn = has_fn ? obs_data_get_string(request_data, "filter_name") : NULL;
+	const char *fp = has_fp ? obs_data_get_string(request_data, "filter_prop") : NULL;
+	const char *cand_sa = has_sa ? (sa ? sa : "") : s->source_a_name;
+	const char *cand_fn = has_fn ? (fn ? fn : "") : s->filter_name;
+	const char *cand_fp = has_fp ? (fp ? fp : "") : s->filter_prop;
+	bool same_filter_binding = (s->target_type == MFD_TARGET_FILTER_PARAM &&
+				    strcmp(s->source_a_name, cand_sa) == 0 && strcmp(s->filter_name, cand_fn) == 0 &&
+				    strcmp(s->filter_prop, cand_fp) == 0);
+	double cand_from = s->filter_from_val;
+	double cand_to = s->filter_to_val;
+	bool new_enabled = has_target ? true : s->enabled;
+
+	if (new_target == MFD_TARGET_FILTER_PARAM) {
+		char err_msg[256] = {0};
+		struct mfd_filter_prop_info prop_info;
+		memset(&prop_info, 0, sizeof(prop_info));
+		if (!same_filter_binding && !(has_from && has_to)) {
+			if (!mfd_engine_validate_filter_param_binding_locked(eng, idx, new_enabled, cand_sa, cand_fn,
+									     cand_fp, false, &cand_from, &cand_to,
+									     &prop_info, err_msg, sizeof(err_msg))) {
+				set_error_comment(response_data, err_msg);
+				mfd_engine_unlock(eng);
+				return;
+			}
+			if (has_from) {
+				cand_from = obs_data_get_double(request_data, "from_val");
+			}
+			if (has_to) {
+				cand_to = obs_data_get_double(request_data, "to_val");
+			}
+			if ((has_from || has_to) &&
+			    !mfd_engine_validate_filter_param_binding_locked(eng, idx, new_enabled, cand_sa, cand_fn,
+									     cand_fp, true, &cand_from, &cand_to,
+									     &prop_info, err_msg, sizeof(err_msg))) {
+				set_error_comment(response_data, err_msg);
+				mfd_engine_unlock(eng);
+				return;
+			}
+		} else {
+			if (has_from) {
+				cand_from = obs_data_get_double(request_data, "from_val");
+			}
+			if (has_to) {
+				cand_to = obs_data_get_double(request_data, "to_val");
+			}
+			if (!mfd_engine_validate_filter_param_binding_locked(eng, idx, new_enabled, cand_sa, cand_fn,
+									     cand_fp, true, &cand_from, &cand_to,
+									     &prop_info, err_msg, sizeof(err_msg))) {
+				set_error_comment(response_data, err_msg);
+				mfd_engine_unlock(eng);
+				return;
+			}
+		}
 	}
+
+	mfd_engine_detach_filter_binding_locked(eng, idx);
+
 	if (has_cal_min || has_cal_max) {
 		mfd_engine_set_slot_calibration(eng, idx, new_cal_min, new_cal_max);
 	}
@@ -854,6 +945,36 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	}
 	if (obs_data_has_user_value(request_data, "afv")) {
 		s->audio_follows_video = obs_data_get_bool(request_data, "afv");
+	}
+	if (new_target == MFD_TARGET_FILTER_PARAM) {
+		snprintf(s->filter_name, sizeof(s->filter_name), "%s", cand_fn);
+		snprintf(s->filter_prop, sizeof(s->filter_prop), "%s", cand_fp);
+		s->filter_from_val = cand_from;
+		s->filter_to_val = cand_to;
+		if (has_bypass) {
+			s->filter_bypass_at_zero = obs_data_get_bool(request_data, "bypass_at_zero");
+		}
+		s->restore_persisted_pre_bypass = false;
+	} else if (has_target) {
+		s->filter_name[0] = '\0';
+		s->filter_prop[0] = '\0';
+		s->filter_from_val = 0.0;
+		s->filter_to_val = 0.0;
+		s->filter_bypass_at_zero = false;
+		s->filter_prop_valid = false;
+		s->restore_persisted_pre_bypass = false;
+	}
+
+	if (has_target) {
+		s->enabled = true;
+		if (new_target == MFD_TARGET_FILTER_PARAM &&
+		    (!same_filter_binding || has_from || has_to || s->target_type == MFD_TARGET_FILTER_PARAM)) {
+			s->target_type = MFD_TARGET_UNASSIGNED;
+		}
+		mfd_engine_reset_slot_mode_state(eng, s, new_target);
+	} else if (new_target == MFD_TARGET_FILTER_PARAM && (!same_filter_binding || has_from || has_to)) {
+		s->target_type = MFD_TARGET_UNASSIGNED;
+		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_FILTER_PARAM);
 	}
 
 	mfd_engine_bump_slot_rev(eng, idx);
@@ -903,6 +1024,74 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 	mfd_engine_unlock(eng);
 }
 
+void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)priv_data;
+	if (!eng) {
+		eng = mfd_engine_get();
+	}
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
+		return;
+	}
+
+	const char *source = (request_data && obs_data_has_user_value(request_data, "source"))
+				     ? obs_data_get_string(request_data, "source")
+				     : NULL;
+
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+
+	char err_msg[256] = {0};
+	if (!mfd_engine_fill_vendor_catalog_locked(eng, source, response_data, err_msg, sizeof(err_msg))) {
+		set_error_comment(response_data, err_msg);
+	}
+	mfd_engine_unlock(eng);
+}
+
+void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)priv_data;
+	if (!eng) {
+		eng = mfd_engine_get();
+	}
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
+		return;
+	}
+
+	long long raw_ms = (request_data && obs_data_has_user_value(request_data, "ms"))
+				   ? obs_data_get_int(request_data, "ms")
+				   : 0LL;
+	if (raw_ms != 0LL && (raw_ms < 50LL || raw_ms > 20000LL)) {
+		set_error_comment(response_data, "Duration 'ms' must be 0 (instant) or between 50 and 20000 ms.");
+		return;
+	}
+
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+
+	int eligible_count = 0;
+	int reset_count = 0;
+	int queued_count = 0;
+	char err_msg[192] = {0};
+	if (!mfd_engine_reset_fx(eng, (int)raw_ms, &eligible_count, &reset_count, &queued_count, err_msg,
+				 sizeof(err_msg))) {
+		set_error_comment(response_data, err_msg);
+		mfd_engine_unlock(eng);
+		return;
+	}
+	obs_data_set_int(response_data, "eligible_count", eligible_count);
+	obs_data_set_int(response_data, "reset_count", reset_count);
+	obs_data_set_int(response_data, "queued_unavailable_count", queued_count);
+	obs_data_set_int(response_data, "ms", (int)raw_ms);
+	mfd_engine_unlock(eng);
+}
+
 bool mfd_vendor_api_register(struct mfd_engine *eng)
 {
 	os_atomic_store_bool(&g_vendor_shutting_down, false);
@@ -933,11 +1122,13 @@ bool mfd_vendor_api_register(struct mfd_engine *eng)
 	bool r4 = obs_websocket_vendor_register_request(g_vendor, "auto_fade", mfd_vendor_handle_auto_fade, eng);
 	bool r5 = obs_websocket_vendor_register_request(g_vendor, "set_slot", mfd_vendor_handle_set_slot, eng);
 	bool r6 = obs_websocket_vendor_register_request(g_vendor, "load_profile", mfd_vendor_handle_load_profile, eng);
+	bool r7 = obs_websocket_vendor_register_request(g_vendor, "get_catalog", mfd_vendor_handle_get_catalog, eng);
+	bool r8 = obs_websocket_vendor_register_request(g_vendor, "reset_fx", mfd_vendor_handle_reset_fx, eng);
 
 	obs_log(LOG_INFO,
-		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d)",
-		MFD_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6);
-	return r1 && r2 && r3 && r4 && r5 && r6;
+		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d, get_catalog=%d, reset_fx=%d)",
+		MFD_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8);
+	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8;
 }
 
 void mfd_vendor_api_shutdown(struct mfd_engine *eng)
@@ -950,6 +1141,8 @@ void mfd_vendor_api_shutdown(struct mfd_engine *eng)
 		obs_websocket_vendor_unregister_request(g_vendor, "auto_fade");
 		obs_websocket_vendor_unregister_request(g_vendor, "set_slot");
 		obs_websocket_vendor_unregister_request(g_vendor, "load_profile");
+		obs_websocket_vendor_unregister_request(g_vendor, "get_catalog");
+		obs_websocket_vendor_unregister_request(g_vendor, "reset_fx");
 	}
 	if (!eng) {
 		eng = mfd_engine_get();

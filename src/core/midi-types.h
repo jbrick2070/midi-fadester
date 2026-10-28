@@ -46,6 +46,7 @@ enum mfd_target_type {
 	MFD_TARGET_TWO_SOURCE_MIX = 2,
 	MFD_TARGET_SINGLE_LAYER = 3,
 	MFD_TARGET_AUDIO_VOLUME = 4,
+	MFD_TARGET_FILTER_PARAM = 5,
 };
 
 enum mfd_crossfade_curve {

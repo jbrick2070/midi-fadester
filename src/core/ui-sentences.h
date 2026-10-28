@@ -54,6 +54,10 @@ struct mfd_ui_strip_input {
 	const char *scene_name;
 	const char *source_a_name;
 	const char *source_b_name;
+	const char *filter_name;
+	const char *filter_prop;
+	const char *filter_prop_label;
+	const char *display_value;
 	bool available;
 	const char *reason;
 	float raw_norm;
@@ -98,6 +102,11 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 void mfd_ui_format_finished_sentence(int slot_index, const char *slot_label, enum mfd_target_type target_type,
 				     const char *scene_name, const char *source_a_name, const char *source_b_name,
 				     char *out, size_t out_size);
+
+void mfd_ui_format_finished_sentence_ex(int slot_index, const char *slot_label, enum mfd_target_type target_type,
+					const char *scene_name, const char *source_a_name, const char *source_b_name,
+					const char *filter_name, const char *filter_prop_label, char *out,
+					size_t out_size);
 
 void mfd_ui_format_live_scene_note(const char *scene_name, char *out, size_t out_size);
 

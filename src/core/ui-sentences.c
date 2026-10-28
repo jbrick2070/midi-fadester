@@ -50,6 +50,21 @@ void mfd_ui_strip_title(int slot_index, const char *slot_label, char *out, size_
 		return;
 	}
 
+	if (slot_index >= 10 && slot_index <= 17) {
+		int fx_num = slot_index - 9;
+		char def_fx[32];
+		char def_fader[32];
+		snprintf(def_fx, sizeof(def_fx), "FX %d", fx_num);
+		snprintf(def_fader, sizeof(def_fader), "Fader %d", slot_index + 1);
+		if (!slot_label || slot_label[0] == '\0' || strcmp(slot_label, def_fx) == 0 ||
+		    strcmp(slot_label, def_fader) == 0) {
+			snprintf(out, out_size, "FX %d", fx_num);
+		} else {
+			snprintf(out, out_size, "%s", slot_label);
+		}
+		return;
+	}
+
 	if (slot_label && slot_label[0] != '\0') {
 		snprintf(out, out_size, "%s", slot_label);
 	} else {
@@ -159,6 +174,20 @@ static void format_mode_active_readout(const struct mfd_ui_strip_input *in, char
 		}
 		break;
 
+	case MFD_TARGET_FILTER_PARAM:
+		if (in->auto_fade_active) {
+			if (in->display_value && in->display_value[0] != '\0') {
+				snprintf(out, out_size, "Fading %s", in->display_value);
+			} else {
+				snprintf(out, out_size, "Fading %d%%", mfd_calibrated_percent(in->applied_val));
+			}
+		} else if (in->display_value && in->display_value[0] != '\0') {
+			snprintf(out, out_size, "%s", in->display_value);
+		} else {
+			snprintf(out, out_size, "%d%%", mfd_calibrated_percent(in->applied_val));
+		}
+		break;
+
 	case MFD_TARGET_UNASSIGNED:
 	default:
 		break;
@@ -175,14 +204,24 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 		return;
 	}
 
+	const bool is_fx_bank = (in->slot_index >= 10 && in->slot_index < 18);
 	mfd_ui_strip_title(in->slot_index, in->slot_label, out->title, sizeof(out->title));
-	out->bar_percent = mfd_calibrated_percent(in->raw_norm);
+	if (is_fx_bank && (in->addr_type == MFD_MIDI_NONE || !in->has_last_fader) &&
+	    in->target_type != MFD_TARGET_UNASSIGNED) {
+		out->bar_percent = mfd_calibrated_percent(in->applied_val);
+	} else {
+		out->bar_percent = mfd_calibrated_percent(in->raw_norm);
+	}
 	out->bottom_action = MFD_UI_ACTION_SETUP;
 	snprintf(out->bottom_button_text, sizeof(out->bottom_button_text), "Set up");
 
 	const char *sc = (in->scene_name && in->scene_name[0] != '\0') ? in->scene_name : "";
 	const char *sa = (in->source_a_name && in->source_a_name[0] != '\0') ? in->source_a_name : "";
 	const char *sb = (in->source_b_name && in->source_b_name[0] != '\0') ? in->source_b_name : "";
+	const char *fn = (in->filter_name && in->filter_name[0] != '\0') ? in->filter_name : "Filter";
+	const char *fp = (in->filter_prop_label && in->filter_prop_label[0] != '\0')
+				 ? in->filter_prop_label
+				 : ((in->filter_prop && in->filter_prop[0] != '\0') ? in->filter_prop : "Setting");
 
 	/* Assignment sentence + SVG short label */
 	if (!in->enabled || in->target_type == MFD_TARGET_UNASSIGNED) {
@@ -220,6 +259,15 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 				 sa[0] ? sa : "Audio");
 			snprintf(out->svg_short_label, sizeof(out->svg_short_label), "Vol: %s", sa[0] ? sa : "Audio");
 			break;
+		case MFD_TARGET_FILTER_PARAM:
+			if (sa[0] != '\0') {
+				snprintf(out->assignment_sentence, sizeof(out->assignment_sentence), "%s: %s (%s)", sa,
+					 fn, fp);
+			} else {
+				snprintf(out->assignment_sentence, sizeof(out->assignment_sentence), "%s (%s)", fn, fp);
+			}
+			snprintf(out->svg_short_label, sizeof(out->svg_short_label), "FX: %s", fn);
+			break;
 		default:
 			snprintf(out->assignment_sentence, sizeof(out->assignment_sentence),
 				 "Not used. Click to set up.");
@@ -244,14 +292,14 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 		return;
 	}
 
-	/* Priority 3: Any other unmet precondition or unbound MIDI hardware control */
+	/* Priority 3: Any other unmet precondition or unbound MIDI hardware control (fader strips 0..9) */
 	if (!in->available) {
 		snprintf(out->status_sentence, sizeof(out->status_sentence), "%s",
 			 (in->reason && in->reason[0] != '\0') ? in->reason : "Not used. Click to set up.");
 		out->severity = MFD_UI_SEVERITY_RED;
 		return;
 	}
-	if (in->addr_type == MFD_MIDI_NONE) {
+	if (in->addr_type == MFD_MIDI_NONE && !is_fx_bank) {
 		snprintf(out->status_sentence, sizeof(out->status_sentence), "No MIDI control bound.");
 		out->severity = MFD_UI_SEVERITY_RED;
 		return;
@@ -299,9 +347,10 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 	format_mode_active_readout(in, out->state_readout, sizeof(out->state_readout));
 }
 
-void mfd_ui_format_finished_sentence(int slot_index, const char *slot_label, enum mfd_target_type target_type,
-				     const char *scene_name, const char *source_a_name, const char *source_b_name,
-				     char *out, size_t out_size)
+void mfd_ui_format_finished_sentence_ex(int slot_index, const char *slot_label, enum mfd_target_type target_type,
+					const char *scene_name, const char *source_a_name, const char *source_b_name,
+					const char *filter_name, const char *filter_prop_label, char *out,
+					size_t out_size)
 {
 	if (!out || out_size == 0U) {
 		return;
@@ -311,6 +360,8 @@ void mfd_ui_format_finished_sentence(int slot_index, const char *slot_label, enu
 	const char *sc = (scene_name && scene_name[0] != '\0') ? scene_name : "";
 	const char *sa = (source_a_name && source_a_name[0] != '\0') ? source_a_name : "";
 	const char *sb = (source_b_name && source_b_name[0] != '\0') ? source_b_name : "";
+	const char *fn = (filter_name && filter_name[0] != '\0') ? filter_name : "Filter";
+	const char *fp = (filter_prop_label && filter_prop_label[0] != '\0') ? filter_prop_label : "Setting";
 
 	switch (target_type) {
 	case MFD_TARGET_TBAR:
@@ -334,11 +385,22 @@ void mfd_ui_format_finished_sentence(int slot_index, const char *slot_label, enu
 	case MFD_TARGET_AUDIO_VOLUME:
 		snprintf(out, out_size, "%s controls %s volume", title, sa[0] ? sa : "audio");
 		break;
+	case MFD_TARGET_FILTER_PARAM:
+		snprintf(out, out_size, "%s controls %s (%s) on %s", title, fn, fp, sa[0] ? sa : "source");
+		break;
 	case MFD_TARGET_UNASSIGNED:
 	default:
 		snprintf(out, out_size, "%s is not used", title);
 		break;
 	}
+}
+
+void mfd_ui_format_finished_sentence(int slot_index, const char *slot_label, enum mfd_target_type target_type,
+				     const char *scene_name, const char *source_a_name, const char *source_b_name,
+				     char *out, size_t out_size)
+{
+	mfd_ui_format_finished_sentence_ex(slot_index, slot_label, target_type, scene_name, source_a_name,
+					   source_b_name, NULL, NULL, out, out_size);
 }
 
 void mfd_ui_format_live_scene_note(const char *scene_name, char *out, size_t out_size)
@@ -380,7 +442,7 @@ void mfd_ui_format_last_move(int last_moved_slot_index, const char *slot_label, 
 	if (!out || out_size == 0U) {
 		return;
 	}
-	if (last_moved_slot_index >= 0 && last_moved_slot_index < 10) {
+	if (last_moved_slot_index >= 0 && last_moved_slot_index < 18) {
 		char title[64] = {0};
 		mfd_ui_strip_title(last_moved_slot_index, slot_label, title, sizeof(title));
 		snprintf(out, out_size, "Last move: %s", title);
@@ -440,6 +502,8 @@ const char *mfd_ui_target_plain_name(enum mfd_target_type target_type)
 		return "Show or hide a layer";
 	case MFD_TARGET_AUDIO_VOLUME:
 		return "Volume";
+	case MFD_TARGET_FILTER_PARAM:
+		return "Filter or effect setting";
 	case MFD_TARGET_UNASSIGNED:
 	default:
 		return "Not used";

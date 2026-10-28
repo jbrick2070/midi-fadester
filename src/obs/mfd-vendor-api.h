@@ -24,7 +24,7 @@ typedef void (*mfd_vendor_event_sink_fn)(const char *event_name, obs_data_t *eve
  * Registers the in-process proc_handler / signal_handler bridge on the provided handlers:
  *   - proc `midi_fadester_get_slot_value` (in: string slot -> out: float value, bool ok, string reason)
  *   - proc `midi_fadester_set_fader_value` (in: string slot, float value -> out: bool ok, string reason)
- *   - signal `midi_fadester_fader_changed` (string slot, float value, string origin)
+ *   - signal `midi_fadester_fader_changed` (string slot, float value, string origin, string display_value)
  */
 bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh, struct mfd_engine *eng);
 
@@ -50,6 +50,7 @@ void mfd_vendor_set_event_sink(mfd_vendor_event_sink_fn fn, void *user_data);
  * Vendor event emitters called by the engine when slot values or state change.
  */
 void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char *origin);
+void mfd_vendor_emit_fader_changed_ex(const char *slot_id, float value, const char *display_value, const char *origin);
 void mfd_vendor_emit_state_changed(struct mfd_engine *eng);
 
 /*
@@ -61,6 +62,8 @@ void mfd_vendor_emit_state_changed(struct mfd_engine *eng);
  *   - auto_fade
  *   - set_slot
  *   - load_profile
+ *   - get_catalog
+ *   - reset_fx
  */
 void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
@@ -68,6 +71,8 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 
 #ifdef __cplusplus
 }

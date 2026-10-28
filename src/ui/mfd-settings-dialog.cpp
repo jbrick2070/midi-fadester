@@ -152,6 +152,9 @@ static QString output_bar_stylesheet(const QString &chunk_hex, const QString &bo
 static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_slot &s,
 					       struct mfd_ui_strip_presentation *out)
 {
+	char disp_buf[64] = {0};
+	mfd_engine_format_slot_display_value(&s, s.last_applied_val, disp_buf, sizeof(disp_buf));
+
 	struct mfd_ui_strip_input in;
 	std::memset(&in, 0, sizeof(in));
 	in.slot_index = idx;
@@ -163,6 +166,10 @@ static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_s
 	in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
 	in.source_a_name = s.source_a_name;
 	in.source_b_name = s.source_b_name;
+	in.filter_name = s.filter_name;
+	in.filter_prop = s.filter_prop;
+	in.filter_prop_label = s.filter_prop_label;
+	in.display_value = disp_buf;
 	in.available = s.cached_available;
 	in.reason = s.cached_reason;
 	in.raw_norm = s.last_raw_norm;
@@ -1199,9 +1206,11 @@ private:
 
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 			const struct mfd_fader_slot &s = snap_.slots[i];
-			const bool show_strip =
-				mfd_profile_has_physical_slot(snap_.active_profile, i) ||
-				(s.enabled && (s.addr.type != MFD_MIDI_NONE || s.target_type != MFD_TARGET_UNASSIGNED));
+			const bool show_strip = mfd_slot_is_fx_bank(i)
+							? false
+							: (mfd_profile_has_physical_slot(snap_.active_profile, i) ||
+							   (s.enabled && (s.addr.type != MFD_MIDI_NONE ||
+									  s.target_type != MFD_TARGET_UNASSIGNED)));
 			strip_cards_[i]->setVisible(show_strip);
 
 			struct mfd_ui_strip_presentation sp;
@@ -1421,6 +1430,12 @@ private:
 		std::snprintf(edit.scene_name, sizeof(edit.scene_name), "%s", s.scene_name);
 		std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s", s.source_a_name);
 		std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s", s.source_b_name);
+		std::snprintf(edit.filter_name, sizeof(edit.filter_name), "%s", s.filter_name);
+		std::snprintf(edit.filter_prop, sizeof(edit.filter_prop), "%s", s.filter_prop);
+		edit.has_filter_range = (s.target_type == MFD_TARGET_FILTER_PARAM);
+		edit.filter_from_val = s.filter_from_val;
+		edit.filter_to_val = s.filter_to_val;
+		edit.filter_bypass_at_zero = s.filter_bypass_at_zero;
 		edit.curve = s.curve;
 		edit.audio_follows_video = s.audio_follows_video;
 		edit.invert = s.invert;
@@ -1911,7 +1926,7 @@ private:
 	struct mfd_engine *eng_ = nullptr;
 	bool owns_engine_notify_ = false;
 	std::atomic<bool> local_refresh_queued_{false};
-	struct mfd_ui_snapshot snap_ {};
+	struct mfd_ui_snapshot snap_{};
 	struct mfd_ui_catalog *adv_catalog_ = nullptr;
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
@@ -1942,7 +1957,7 @@ private:
 	QLabel *strip_assign_labels_[MFD_MAX_FADER_SLOTS]{};
 	QLabel *strip_status_labels_[MFD_MAX_FADER_SLOTS]{};
 	QPushButton *strip_action_btns_[MFD_MAX_FADER_SLOTS]{};
-	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS] {};
+	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS]{};
 
 	QLabel *z3_status_label_ = nullptr;
 
