@@ -67,7 +67,12 @@ add_test(NAME test-midi-send COMMAND midi-send --self-test)
 set_tests_properties(test-midi-send PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
 add_executable(test-shader-syntax test-shader-syntax.c)
-add_test(NAME test-shader-syntax COMMAND test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect")
+add_test(
+  NAME test-shader-syntax
+  COMMAND
+    test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect"
+    "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
+)
 set_tests_properties(test-shader-syntax PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
 add_test(

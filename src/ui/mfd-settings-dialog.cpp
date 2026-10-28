@@ -647,8 +647,8 @@ private:
 			target_combo->addItem(QStringLiteral("Audio Volume (Cubic dB)"),
 					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
 			target_combo->setToolTip(QStringLiteral(
-				"Studio Mode T-Bar: drives Preview \xE2\x86\x92 Program linearly 0\xE2\x80\x93"
-				"100% and swaps Preview on deck at the 3% rail zone (or after 150 ms idle above 90%); live Program output stays smooth.\n"
+				"Studio Mode T-Bar: starts above the 6% origin band, drives Preview \xE2\x86\x92 Program linearly 0\xE2\x80\x93"
+				"100%, completes at the 3% target rail zone, and cancels if returned to the 3% origin rail zone (zero timers).\n"
 				"Two-Source Crossfade (A \xE2\x86\x94 B): DJ/video-mixer mode inside one scene \xE2\x80\x94 Left (0%) is always Source A, Right (100%) is always Source B, dip-free with no Preview swap.\n"
 				"Single Layer Opacity: fades one video source or nested scene 0\xE2\x80\x93"
 				"100%.\n"

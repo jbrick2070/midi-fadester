@@ -53,6 +53,26 @@ int main(int argc, char **argv)
 	ASSERT_TRUE(strstr(buf, "pixel_shader  = PSAlpha(v_in);") != NULL);
 
 	free(buf);
+
+	/* Verify UI dialog source has no UTF-8 BOM and no stale 150 ms timer-fallback tooltip copy */
+	const char *ui_path = (argc > 2) ? argv[2] : "src/ui/mfd-settings-dialog.cpp";
+	FILE *ui_fp = fopen(ui_path, "rb");
+	ASSERT_TRUE(ui_fp != NULL);
+	fseek(ui_fp, 0, SEEK_END);
+	long ui_len = ftell(ui_fp);
+	fseek(ui_fp, 0, SEEK_SET);
+	ASSERT_TRUE(ui_len > 64L && ui_len < 524288L);
+	char *ui_buf = (char *)malloc((size_t)ui_len + 1U);
+	ASSERT_TRUE(ui_buf != NULL);
+	size_t ui_read = fread(ui_buf, 1U, (size_t)ui_len, ui_fp);
+	fclose(ui_fp);
+	ASSERT_TRUE(ui_read == (size_t)ui_len);
+	ui_buf[ui_len] = '\0';
+	ASSERT_TRUE(!((unsigned char)ui_buf[0] == 0xEFU && (unsigned char)ui_buf[1] == 0xBBU &&
+		      (unsigned char)ui_buf[2] == 0xBFU));
+	ASSERT_TRUE(strstr(ui_buf, "150 ms") == NULL);
+	free(ui_buf);
+
 	printf("test-shader-syntax: PASS\n");
 	return 0;
 }
