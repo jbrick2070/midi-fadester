@@ -66,7 +66,8 @@ midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
 midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
 midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c")
 midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
-midi_fadester_add_test(test-ui-sentences test-ui-sentences.c "${_core}/ui-sentences.c" "${_core}/takeover.c")
+midi_fadester_add_test(test-filter-mod test-filter-mod.c "${_core}/filter-math.c")
+midi_fadester_add_test(test-ui-sentences test-ui-sentences.c "${_core}/ui-sentences.c" "${_core}/takeover.c" "${_core}/filter-math.c")
 
 add_executable(
   test-vendor-api
@@ -82,6 +83,8 @@ add_executable(
   "${_core}/mixer-math.c"
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.c"
+  "${_core}/filter-math.c"
+  "${_core}/ui-sentences.c"
 )
 target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support winmm)
@@ -109,6 +112,7 @@ add_executable(
   "${_core}/mixer-math.c"
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.c"
+  "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
 )
 set_target_properties(test-ui-dialog PROPERTIES AUTOMOC ON)
@@ -144,6 +148,8 @@ set(
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.h"
   "${_core}/tbar-logic.c"
+  "${_core}/filter-math.h"
+  "${_core}/filter-math.c"
   "${_core}/ui-sentences.h"
   "${_core}/ui-sentences.c"
   "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.h"
