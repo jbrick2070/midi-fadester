@@ -9,6 +9,7 @@
 #include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <util/bmem.h>
+#include <util/threading.h>
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -21,6 +22,7 @@ static proc_handler_t *g_bridge_ph = NULL;
 static signal_handler_t *g_bridge_sh = NULL;
 static mfd_vendor_event_sink_fn g_event_sink = NULL;
 static void *g_event_sink_user_data = NULL;
+static volatile bool g_vendor_shutting_down = false;
 
 static float clamp01(float v)
 {
@@ -103,13 +105,14 @@ static void populate_slot_data(const struct mfd_engine *eng, const struct mfd_fa
 
 void mfd_vendor_set_event_sink(mfd_vendor_event_sink_fn fn, void *user_data)
 {
+	os_atomic_store_bool(&g_vendor_shutting_down, false);
 	g_event_sink = fn;
 	g_event_sink_user_data = user_data;
 }
 
 static void emit_vendor_event(const char *event_name, obs_data_t *event_data)
 {
-	if (!event_name || !event_data) {
+	if (!event_name || !event_data || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 	if (g_event_sink) {
@@ -122,7 +125,7 @@ static void emit_vendor_event(const char *event_name, obs_data_t *event_data)
 
 void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char *origin)
 {
-	if (!slot_id || !*slot_id) {
+	if (!slot_id || !*slot_id || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 	float clamped = clamp01(value);
@@ -160,7 +163,7 @@ void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char 
 
 void mfd_vendor_emit_state_changed(struct mfd_engine *eng)
 {
-	if (!eng) {
+	if (!eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 	obs_data_t *ev = obs_data_create();
@@ -176,6 +179,13 @@ static void proc_get_slot_value(void *data, calldata_t *cd)
 		eng = mfd_engine_get();
 	}
 	if (!cd || !eng) {
+		return;
+	}
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		calldata_set_float(cd, "value", 0.0);
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", "Midi Fadester is shutting down.");
 		return;
 	}
 
@@ -196,13 +206,25 @@ static void proc_get_slot_value(void *data, calldata_t *cd)
 		return;
 	}
 
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		calldata_set_float(cd, "value", 0.0);
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", "Midi Fadester is shutting down.");
+		return;
+	}
+
 	const struct mfd_fader_slot *s = &eng->fader_slots[idx];
+	double val = (double)s->last_applied_val;
 	bool available = false;
 	char reason[160] = {0};
 	mfd_engine_get_slot_status(eng, s, NULL, 0, &available, reason, sizeof(reason));
 	UNUSED_PARAMETER(available);
+	mfd_engine_unlock(eng);
 
-	calldata_set_float(cd, "value", (double)s->last_applied_val);
+	calldata_set_float(cd, "value", val);
 	calldata_set_bool(cd, "ok", true);
 	calldata_set_bool(cd, "success", true);
 	calldata_set_string(cd, "reason", reason);
@@ -215,6 +237,12 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		eng = mfd_engine_get();
 	}
 	if (!cd || !eng) {
+		return;
+	}
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", "Midi Fadester is shutting down.");
 		return;
 	}
 
@@ -232,11 +260,27 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 	}
 
 	float val = clamp01((float)calldata_float(cd, "value"));
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", "Midi Fadester is shutting down.");
+		return;
+	}
+	if (eng->setup_session.active && eng->setup_session.slot_index == idx) {
+		mfd_engine_unlock(eng);
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", "Strip is currently paused while Set up is open.");
+		return;
+	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
 	if (!mfd_engine_is_slot_writable(eng, slot)) {
 		bool avail = false;
 		char reason[160] = {0};
 		mfd_engine_get_slot_status(eng, slot, NULL, 0U, &avail, reason, sizeof(reason));
+		mfd_engine_unlock(eng);
 		calldata_set_bool(cd, "ok", false);
 		calldata_set_bool(cd, "success", false);
 		calldata_set_string(cd, "reason", reason);
@@ -302,6 +346,9 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		}
 	}
 
+	mfd_engine_mark_ui_dirty(eng, false);
+	mfd_engine_unlock(eng);
+
 	calldata_set_bool(cd, "ok", true);
 	calldata_set_bool(cd, "success", true);
 	calldata_set_string(cd, "reason", "");
@@ -309,6 +356,7 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh, struct mfd_engine *eng)
 {
+	os_atomic_store_bool(&g_vendor_shutting_down, false);
 	g_bridge_ph = ph;
 	g_bridge_sh = sh;
 
@@ -337,7 +385,13 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	if (!eng) {
 		eng = mfd_engine_get();
 	}
-	if (!response_data || !eng) {
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
+		return;
+	}
+
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
 		return;
 	}
 
@@ -369,6 +423,8 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	}
 	obs_data_set_array(response_data, "slots", arr);
 	obs_data_array_release(arr);
+
+	mfd_engine_unlock(eng);
 }
 
 void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -377,7 +433,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	if (!eng) {
 		eng = mfd_engine_get();
 	}
-	if (!response_data || !eng) {
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 
@@ -392,10 +448,18 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 
 	float val = clamp01((float)obs_data_get_double(request_data, "value"));
 	bool release = obs_data_get_bool(request_data, "release");
+
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		return;
+	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if (!mfd_engine_is_slot_writable(eng, slot)) {
+	if ((eng->setup_session.active && eng->setup_session.slot_index == idx) ||
+	    !mfd_engine_is_slot_writable(eng, slot)) {
 		obs_data_set_string(response_data, "slot", slot->id);
 		obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+		mfd_engine_unlock(eng);
 		return;
 	}
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
@@ -470,8 +534,10 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 		}
 	}
 
+	mfd_engine_mark_ui_dirty(eng, false);
 	obs_data_set_string(response_data, "slot", slot->id);
 	obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -480,7 +546,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 	if (!eng) {
 		eng = mfd_engine_get();
 	}
-	if (!response_data || !eng) {
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 
@@ -493,10 +559,17 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 		return;
 	}
 
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		return;
+	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if (!mfd_engine_is_slot_writable(eng, slot)) {
+	if ((eng->setup_session.active && eng->setup_session.slot_index == idx) ||
+	    !mfd_engine_is_slot_writable(eng, slot)) {
 		obs_data_set_string(response_data, "slot", slot->id);
 		obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+		mfd_engine_unlock(eng);
 		return;
 	}
 	float delta = (float)obs_data_get_double(request_data, "delta");
@@ -564,8 +637,10 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 		}
 	}
 
+	mfd_engine_mark_ui_dirty(eng, false);
 	obs_data_set_string(response_data, "slot", slot->id);
 	obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -574,7 +649,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	if (!eng) {
 		eng = mfd_engine_get();
 	}
-	if (!response_data || !eng) {
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 
@@ -594,9 +669,16 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 		return;
 	}
 
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		return;
+	}
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if (!mfd_engine_is_slot_writable(eng, slot)) {
+	if ((eng->setup_session.active && eng->setup_session.slot_index == idx) ||
+	    !mfd_engine_is_slot_writable(eng, slot)) {
 		obs_data_set_string(response_data, "slot", slot->id);
+		mfd_engine_unlock(eng);
 		return;
 	}
 	float to_val = clamp01((float)obs_data_get_double(request_data, "to"));
@@ -608,6 +690,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 			slot->auto_fade_active = false;
 			slot->tbar_midi_active = false;
 			obs_data_set_string(response_data, "slot", slot->id);
+			mfd_engine_unlock(eng);
 			return;
 		}
 		if (slot->target_type != MFD_TARGET_TBAR &&
@@ -617,6 +700,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 			slot->auto_fade_active = false;
 			slot->tbar_midi_active = false;
 			obs_data_set_string(response_data, "slot", slot->id);
+			mfd_engine_unlock(eng);
 			return;
 		}
 	}
@@ -637,7 +721,9 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 		mfd_engine_notify_state_changed(eng);
 	}
 
+	mfd_engine_mark_ui_dirty(eng, false);
 	obs_data_set_string(response_data, "slot", slot->id);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -646,12 +732,18 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (!eng) {
 		eng = mfd_engine_get();
 	}
-	if (!response_data || !eng) {
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 
 	int idx = resolve_slot_or_error(request_data, response_data);
 	if (idx < 0) {
+		return;
+	}
+
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
 		return;
 	}
 
@@ -671,6 +763,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if ((has_cal_min || has_cal_max) && (new_cal_min < 0 || new_cal_max <= new_cal_min)) {
 		set_error_comment(response_data,
 				  "Invalid calibration range: 'cal_max' must be greater than 'cal_min' (>= 0).");
+		mfd_engine_unlock(eng);
 		return;
 	}
 
@@ -683,6 +776,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 				"Invalid target_mode '%s'. Valid modes: unassigned, tbar, crossfade_ab, layer_opacity, audio_volume.",
 				tm ? tm : "");
 			set_error_comment(response_data, msg);
+			mfd_engine_unlock(eng);
 			return;
 		}
 	}
@@ -695,6 +789,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 				 "Invalid curve '%s'. Valid curves: dip_free, full_center, equal_power, linear, cut.",
 				 cv ? cv : "");
 			set_error_comment(response_data, msg);
+			mfd_engine_unlock(eng);
 			return;
 		}
 	}
@@ -705,6 +800,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		snprintf(msg, sizeof(msg), "Scene '%s' not found. Create the scene in OBS first or check its spelling.",
 			 sc);
 		set_error_comment(response_data, msg);
+		mfd_engine_unlock(eng);
 		return;
 	}
 
@@ -714,6 +810,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		snprintf(msg, sizeof(msg),
 			 "Source '%s' not found. Create the source in OBS first or check its spelling.", sa);
 		set_error_comment(response_data, msg);
+		mfd_engine_unlock(eng);
 		return;
 	}
 
@@ -723,6 +820,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		snprintf(msg, sizeof(msg),
 			 "Source '%s' not found. Create the source in OBS first or check its spelling.", sb);
 		set_error_comment(response_data, msg);
+		mfd_engine_unlock(eng);
 		return;
 	}
 
@@ -752,9 +850,14 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		s->audio_follows_video = obs_data_get_bool(request_data, "afv");
 	}
 
+	mfd_engine_bump_slot_rev(eng, idx);
 	mfd_engine_reevaluate_slots(eng, false);
+	if (obs_initialized()) {
+		eng->pending_config_save = true;
+	}
 	mfd_engine_notify_state_changed(eng);
 	populate_slot_data(eng, s, response_data);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -763,7 +866,7 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 	if (!eng) {
 		eng = mfd_engine_get();
 	}
-	if (!response_data || !eng) {
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
 
@@ -775,13 +878,23 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 		return;
 	}
 
+	mfd_engine_lock(eng);
+	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
+		mfd_engine_unlock(eng);
+		return;
+	}
 	mfd_engine_load_apc40_defaults(eng);
+	if (obs_initialized()) {
+		eng->pending_config_save = true;
+	}
 	mfd_engine_notify_state_changed(eng);
 	obs_data_set_string(response_data, "loaded", "apc40mk2");
+	mfd_engine_unlock(eng);
 }
 
 bool mfd_vendor_api_register(struct mfd_engine *eng)
 {
+	os_atomic_store_bool(&g_vendor_shutting_down, false);
 	proc_handler_t *global_ph = obs_get_proc_handler();
 	signal_handler_t *global_sh = obs_get_signal_handler();
 
@@ -814,4 +927,29 @@ bool mfd_vendor_api_register(struct mfd_engine *eng)
 		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d)",
 		MFD_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6);
 	return r1 && r2 && r3 && r4 && r5 && r6;
+}
+
+void mfd_vendor_api_shutdown(struct mfd_engine *eng)
+{
+	os_atomic_store_bool(&g_vendor_shutting_down, true);
+	if (g_vendor && obs_get_proc_handler()) {
+		obs_websocket_vendor_unregister_request(g_vendor, "get_state");
+		obs_websocket_vendor_unregister_request(g_vendor, "set_fader_value");
+		obs_websocket_vendor_unregister_request(g_vendor, "nudge_fader");
+		obs_websocket_vendor_unregister_request(g_vendor, "auto_fade");
+		obs_websocket_vendor_unregister_request(g_vendor, "set_slot");
+		obs_websocket_vendor_unregister_request(g_vendor, "load_profile");
+	}
+	if (!eng) {
+		eng = mfd_engine_get();
+	}
+	if (eng) {
+		mfd_engine_lock(eng);
+		mfd_engine_unlock(eng);
+	}
+	g_vendor = NULL;
+	g_bridge_ph = NULL;
+	g_bridge_sh = NULL;
+	g_event_sink = NULL;
+	g_event_sink_user_data = NULL;
 }

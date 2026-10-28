@@ -36,6 +36,12 @@ bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh,
 bool mfd_vendor_api_register(struct mfd_engine *eng);
 
 /*
+ * Unregisters obs-websocket vendor requests and fences in-flight vendor/bridge calls.
+ * Must be called first in obs_module_unload().
+ */
+void mfd_vendor_api_shutdown(struct mfd_engine *eng);
+
+/*
  * Optional fake-websocket event sink for headless tests (test-vendor-api).
  */
 void mfd_vendor_set_event_sink(mfd_vendor_event_sink_fn fn, void *user_data);

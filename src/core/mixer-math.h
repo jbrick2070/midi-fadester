@@ -20,6 +20,7 @@ float mfd_porter_duff_over_coverage(float alpha_bottom, float alpha_top);
 float mfd_deflection_to_mul(float def);
 float mfd_mul_to_deflection(float mul);
 float mfd_deflection_to_db(float def);
+float mfd_mul_to_db(float mul);
 
 #ifdef __cplusplus
 }

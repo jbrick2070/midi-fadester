@@ -143,3 +143,14 @@ float mfd_deflection_to_db(float def)
 	}
 	return 60.0f * log10f(d);
 }
+
+float mfd_mul_to_db(float mul)
+{
+	if (!isfinite(mul) || mul <= 0.0f) {
+		return -INFINITY;
+	}
+	if (fabsf(mul - 1.0f) < 1e-6f) {
+		return 0.0f;
+	}
+	return 20.0f * log10f(mul);
+}

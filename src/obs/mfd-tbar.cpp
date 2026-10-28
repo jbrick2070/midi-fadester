@@ -24,6 +24,8 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QColor>
+#include <QCoreApplication>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QImage>
 #include <QMetaObject>
@@ -43,6 +45,7 @@
 #include <cstdlib>
 #include <thread>
 
+static QPointer<QWidget> g_main_win;
 static QPointer<QSlider> g_tbar_slider;
 static std::atomic<bool> g_studio_mode_active{false};
 static std::atomic<bool> g_slider_tbar_found{false};
@@ -103,7 +106,10 @@ static const char *takeover_state_str(enum mfd_takeover_state st)
 
 static QSlider *locate_slider_tbar_on_ui_thread(void)
 {
-	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+	if (!g_main_win) {
+		g_main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+	}
+	QWidget *main_win = g_main_win.data();
 	if (!main_win) {
 		return nullptr;
 	}
@@ -160,6 +166,9 @@ static QPushButton *locate_studio_transition_button_on_ui_thread(void)
 
 static void refresh_studio_mode_state_on_ui_thread(void)
 {
+	if (!g_main_win) {
+		g_main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+	}
 	bool active = obs_frontend_preview_program_mode_active();
 	g_studio_mode_active.store(active, std::memory_order_relaxed);
 
@@ -272,11 +281,20 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 			 qEnvironmentVariableIsSet("MFD_TBAR_DEBUG");
 	if (dbg && (do_set || do_release)) {
 		struct mfd_engine *eng_dbg = mfd_engine_get();
-		int raw_cc = (eng_dbg && eng_dbg->has_last_midi) ? (int)eng_dbg->last_midi_decoded.raw_value : -1;
-		float raw_norm = eng_dbg ? eng_dbg->fader_slots[0].last_raw_norm : -1.0f;
-		const char *st_str = eng_dbg ? takeover_state_str(eng_dbg->fader_slots[0].takeover.state) : "NO_ENGINE";
-		float peak = eng_dbg ? eng_dbg->fader_slots[0].takeover.parked_peak : -1.0f;
-		int pol_rev = eng_dbg ? (int)eng_dbg->fader_slots[0].takeover.polarity_reversed : 0;
+		int raw_cc = -1;
+		float raw_norm = -1.0f;
+		const char *st_str = "NO_ENGINE";
+		float peak = -1.0f;
+		int pol_rev = 0;
+		if (eng_dbg) {
+			mfd_engine_lock(eng_dbg);
+			raw_cc = eng_dbg->has_last_midi ? (int)eng_dbg->last_midi_decoded.raw_value : -1;
+			raw_norm = eng_dbg->fader_slots[0].last_raw_norm;
+			st_str = takeover_state_str(eng_dbg->fader_slots[0].takeover.state);
+			peak = eng_dbg->fader_slots[0].takeover.parked_peak;
+			pol_rev = (int)eng_dbg->fader_slots[0].takeover.polarity_reversed;
+			mfd_engine_unlock(eng_dbg);
+		}
 		obs_source_t *tr_dbg = obs_get_output_source(0);
 		float tr_t = tr_dbg ? obs_transition_get_time(tr_dbg) : -1.0f;
 		if (tr_dbg) {
@@ -2371,12 +2389,27 @@ static void run_live_selftest_worker(void)
 		sig_cap.slot, vs_fader2_val);
 }
 
+static std::thread g_selftest_thread;
+static std::atomic<bool> g_selftest_running{false};
+
+static void run_live_selftest_entry(void)
+{
+	run_live_selftest_worker();
+	g_selftest_running.store(false, std::memory_order_release);
+}
+
 static void run_live_selftest_if_requested(void)
 {
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
 		return;
 	}
-	std::thread(run_live_selftest_worker).detach();
+	if (g_selftest_running.exchange(true, std::memory_order_acq_rel)) {
+		return;
+	}
+	if (g_selftest_thread.joinable()) {
+		g_selftest_thread.join();
+	}
+	g_selftest_thread = std::thread(run_live_selftest_entry);
 }
 #endif
 
@@ -2406,7 +2439,10 @@ static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 			mfd_engine_on_external_tbar_reset(mfd_engine_get());
 		}
 		if (g_pending_deferred_tbar.active) {
-			QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+			if (!g_main_win) {
+				g_main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+			}
+			QWidget *main_win = g_main_win.data();
 			if (main_win) {
 				/*
 				 * Queue on the Qt event loop (zero timers) so OBSBasic::TransitionStopped()
@@ -2426,7 +2462,7 @@ static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 
 bool mfd_tbar_is_studio_mode_active(void)
 {
-	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+	QWidget *main_win = g_main_win.data();
 	if (main_win && QThread::currentThread() == main_win->thread()) {
 		bool active = obs_frontend_preview_program_mode_active();
 		g_studio_mode_active.store(active, std::memory_order_relaxed);
@@ -2551,7 +2587,7 @@ bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_c
 		g_tbar_awaiting_unpark.store(true, std::memory_order_relaxed);
 	}
 
-	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
+	QWidget *main_win = g_main_win.data();
 	if (!main_win) {
 		return true;
 	}
@@ -2574,6 +2610,7 @@ bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_c
 
 void mfd_tbar_init(void)
 {
+	g_main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
 	g_studio_mode_active.store(false, std::memory_order_relaxed);
 	g_slider_tbar_found.store(false, std::memory_order_relaxed);
 	g_logged_missing_error.store(false, std::memory_order_relaxed);
@@ -2595,9 +2632,19 @@ void mfd_tbar_init(void)
 
 void mfd_tbar_shutdown(void)
 {
+#ifdef MFD_ENABLE_SELF_TEST
+	while (g_selftest_running.load(std::memory_order_acquire)) {
+		QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	if (g_selftest_thread.joinable()) {
+		g_selftest_thread.join();
+	}
+#endif
 	obs_frontend_remove_event_callback(on_tbar_frontend_event, nullptr);
 	mfd_engine_set_tbar_unlatch_fn(nullptr);
 	mfd_engine_set_tbar_driver(nullptr);
 	g_pending_deferred_tbar.active = false;
 	g_tbar_slider.clear();
+	g_main_win.clear();
 }

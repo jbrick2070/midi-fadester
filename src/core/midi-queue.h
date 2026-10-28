@@ -17,9 +17,9 @@ extern "C" {
 
 struct mfd_midi_queue {
 	struct mfd_midi_raw_event buffer[MFD_MIDI_QUEUE_CAPACITY];
-	volatile uint32_t write_idx;
-	volatile uint32_t read_idx;
-	volatile uint32_t dropped_count;
+	volatile long write_idx;
+	volatile long read_idx;
+	volatile long dropped_count;
 };
 
 void mfd_midi_queue_init(struct mfd_midi_queue *q);

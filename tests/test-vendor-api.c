@@ -9,8 +9,11 @@
 #include "core/tbar-logic.h"
 #include "plugin-support.h"
 #include <obs-module.h>
+#include <util/platform.h>
+#include <util/threading.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 OBS_DECLARE_MODULE()
@@ -150,6 +153,7 @@ struct fake_scene_graph {
 	struct fake_sg_scene scenes[FAKE_MAX_SCENES];
 	int total_opacity_writes;
 	int total_volume_writes;
+	struct mfd_engine *owner_eng;
 };
 
 static struct fake_sg_source *fake_sg_find_source(struct fake_scene_graph *sg, const char *name)
@@ -239,6 +243,19 @@ static void fake_sg_scene_remove_item(struct fake_scene_graph *sg, const char *s
 			sc->items[sc->item_count - 1][0] = '\0';
 			--sc->item_count;
 			return;
+		}
+	}
+}
+
+static void fake_sg_remove_source(struct fake_scene_graph *sg, const char *name)
+{
+	struct fake_sg_source *src = fake_sg_find_source(sg, name);
+	if (src) {
+		memset(src, 0, sizeof(*src));
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (sg->scenes[i].in_use) {
+			fake_sg_scene_remove_item(sg, sg->scenes[i].name, name);
 		}
 	}
 }
@@ -381,11 +398,164 @@ static void fake_op_apply_volume(const char *source_name, float mul, void *user_
 	}
 }
 
+static void fake_op_fill_catalog(struct mfd_ui_catalog *out, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!out || !sg) {
+		return;
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (!sg->scenes[i].in_use) {
+			continue;
+		}
+		if (out->scene_count >= MFD_CATALOG_MAX_SCENES) {
+			out->scenes_truncated = true;
+			break;
+		}
+		struct mfd_ui_scene_entry *se = &out->scenes[out->scene_count++];
+		memset(se, 0, sizeof(*se));
+		snprintf(se->name, sizeof(se->name), "%s", sg->scenes[i].name);
+		for (int j = 0; j < sg->scenes[i].item_count; ++j) {
+			const char *lnm = sg->scenes[i].items[j];
+			bool dup = false;
+			for (size_t k = 0U; k < se->layer_count; ++k) {
+				if (strcmp(se->layers[k], lnm) == 0) {
+					dup = true;
+					break;
+				}
+			}
+			if (dup) {
+				continue;
+			}
+			if (se->layer_count >= MFD_CATALOG_MAX_SCENE_LAYERS) {
+				se->layers_truncated = true;
+				break;
+			}
+			snprintf(se->layers[se->layer_count], sizeof(se->layers[se->layer_count]), "%s", lnm);
+			se->layer_has_audio[se->layer_count] = fake_op_source_has_audio(lnm, sg);
+			++se->layer_count;
+		}
+	}
+	for (int i = 0; i < FAKE_MAX_SOURCES; ++i) {
+		if (!sg->sources[i].in_use || !sg->sources[i].has_audio) {
+			continue;
+		}
+		if (out->audio_count >= MFD_CATALOG_MAX_AUDIO_SOURCES) {
+			out->audio_truncated = true;
+			break;
+		}
+		struct mfd_ui_audio_entry *ae = &out->audio_sources[out->audio_count++];
+		snprintf(ae->name, sizeof(ae->name), "%s", sg->sources[i].name);
+		ae->db = mfd_mul_to_db(sg->sources[i].last_volume_mul);
+	}
+}
+
+static void fake_op_set_studio_mode(bool enabled, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (sg && sg->owner_eng) {
+		sg->owner_eng->studio_mode_override_set = true;
+		sg->owner_eng->studio_mode_override = enabled;
+	}
+}
+
 static const struct mfd_scene_graph_ops g_fake_sg_ops = {
 	fake_op_source_exists,          fake_op_scene_exists,          fake_op_source_has_audio,
 	fake_op_scene_item_stack_index, fake_op_find_scene_with_layer, fake_op_find_scene_with_pair,
-	fake_op_apply_opacity,          fake_op_apply_volume,
+	fake_op_apply_opacity,          fake_op_apply_volume,          fake_op_fill_catalog,
+	fake_op_set_studio_mode,
 };
+
+struct mt_stress_ctx {
+	struct mfd_engine *eng;
+	volatile long ui_notify_calls;
+	bool bad_snapshot;
+};
+
+static void on_mt_ui_notify(void *user_data)
+{
+	struct mt_stress_ctx *ctx = (struct mt_stress_ctx *)user_data;
+	if (!ctx || !ctx->eng) {
+		return;
+	}
+	/* Verify ui_notify_fn runs strictly outside state_mutex (no deadlock, lock_depth == 0 on fresh lock) */
+	os_atomic_inc_long(&ctx->ui_notify_calls);
+}
+
+static void *mt_tick_worker(void *arg)
+{
+	struct mt_stress_ctx *ctx = (struct mt_stress_ctx *)arg;
+	for (int iter = 0; iter < 400; ++iter) {
+		push_midi_cc(ctx->eng, (uint8_t)(iter % 4), 7, (uint8_t)(iter & 0x7F));
+		push_midi_cc(ctx->eng, 0, 15, (uint8_t)((iter * 3) & 0x7F));
+		mfd_engine_tick(ctx->eng, 0.008f);
+	}
+	return NULL;
+}
+
+static void *mt_vendor_worker(void *arg)
+{
+	struct mt_stress_ctx *ctx = (struct mt_stress_ctx *)arg;
+	for (int iter = 0; iter < 250; ++iter) {
+		obs_data_t *req = obs_data_create();
+		obs_data_t *res = obs_data_create();
+		mfd_vendor_handle_get_state(req, res, ctx->eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_2");
+		obs_data_set_double(req, "value", (double)(iter % 100) / 100.0);
+		mfd_vendor_handle_set_fader_value(req, res, ctx->eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		if ((iter % 25) == 0) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "fader_3");
+			obs_data_set_string(req, "target_mode", "audio_volume");
+			obs_data_set_string(req, "source_a", "Mic/Aux");
+			mfd_vendor_handle_set_slot(req, res, ctx->eng);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+	}
+	return NULL;
+}
+
+static void *mt_ui_worker(void *arg)
+{
+	struct mt_stress_ctx *ctx = (struct mt_stress_ctx *)arg;
+	struct mfd_ui_snapshot *snap = (struct mfd_ui_snapshot *)calloc(1U, sizeof(*snap));
+	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
+	if (!snap || !cat) {
+		ctx->bad_snapshot = true;
+		free(snap);
+		mfd_ui_catalog_destroy(cat);
+		return NULL;
+	}
+	for (int iter = 0; iter < 250; ++iter) {
+		mfd_engine_get_ui_snapshot(ctx->eng, snap);
+		if (snap->slots[0].id[0] == '\0' || snap->slots[9].id[0] == '\0') {
+			ctx->bad_snapshot = true;
+		}
+		mfd_engine_get_ui_catalog(ctx->eng, cat);
+		if (cat->scene_count == 0U || cat->audio_count == 0U) {
+			ctx->bad_snapshot = true;
+		}
+		if ((iter % 20) == 0) {
+			mfd_engine_begin_setup_session(ctx->eng, 1);
+			mfd_engine_set_setup_invert(ctx->eng, (iter % 40) == 0);
+			mfd_engine_cancel_setup_session(ctx->eng);
+		}
+		mfd_engine_flush_pending_ui_work(ctx->eng);
+	}
+	free(snap);
+	mfd_ui_catalog_destroy(cat);
+	return NULL;
+}
 
 struct fake_ws_log {
 	int fader_changed_count;
@@ -1821,6 +1991,597 @@ int main(void)
 	REQUIRE(fabsf(eng.fader_slots[0].last_applied_val - (51.0f / 127.0f)) < 1e-6f);
 	REQUIRE(mfd_calibrated_percent(eng.fader_slots[0].last_raw_norm) == 40);
 	REQUIRE(mfd_calibrated_percent(eng.fader_slots[0].last_applied_val) == 40);
+
+	/*
+	 * 16. 0.2.0 Step 1 Engine Contracts:
+	 *     - 16a: Deleted audio source ("Mic/Aux was deleted.") vs silent source ("Silent Card has no audio.")
+	 *     - 16b: Heap-allocated atomic UI catalog & snapshot sorting/stacking/dB units
+	 *     - 16c: Setup session broadcast isolation, candidate_invert, [Not used] address preservation,
+	 *            Learn mutual exclusion & multi-slot collision transfer
+	 *     - 16d: slot_config_rev concurrent-edit conflict detection (set_slot, rename, import, load_profile)
+	 *            & mid-setup precondition invalidation on commit
+	 *     - 16e: First-Run Offer discriminator (clean vs 0.1.3 upgrade JSON) + [Yes] / [I'll set it up]
+	 *     - 16f: Bounded 4-mode candidate-validator equivalence matrix (validate == true iff committed available == true)
+	 *     - 16g: Multi-threaded recursive state_mutex stress test + mfd_vendor_api_shutdown in-flight barrier
+	 */
+	fake_sg.owner_eng = &eng;
+
+	/* 16a: Deleted audio source vs silent source */
+	fake_sg_add_source(&fake_sg, "Mic/Aux", true);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_3");
+	obs_data_set_string(req, "target_mode", "audio_volume");
+	obs_data_set_string(req, "source_a", "Mic/Aux");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(obs_data_get_bool(res, "available"));
+	REQUIRE(strcmp(obs_data_get_string(res, "reason"), "") == 0);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	fake_sg_remove_source(&fake_sg, "Mic/Aux");
+	mfd_engine_reevaluate_slots(&eng, true);
+	{
+		bool avail_del = true;
+		char rsn_del[160] = {0};
+		mfd_engine_get_slot_status(&eng, &eng.fader_slots[3], NULL, 0U, &avail_del, rsn_del, sizeof(rsn_del));
+		REQUIRE(!avail_del);
+		REQUIRE(strcmp(rsn_del, "Mic/Aux was deleted.") == 0);
+	}
+	vol_writes_before = fake_sg.total_volume_writes;
+	push_midi_cc(&eng, 2, 7, 77);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_raw_norm - (77.0f / 127.0f)) < 1e-5f);
+	REQUIRE(fake_sg.total_volume_writes == vol_writes_before);
+
+	/* 16b: Heap-allocated atomic UI catalog & snapshot */
+	fake_sg_add_source(&fake_sg, "Mic/Aux", true);
+	fake_sg_add_source(&fake_sg, "desktop audio", true);
+	fake_sg_find_source(&fake_sg, "desktop audio")->last_volume_mul = 0.125f; /* d=0.5 -> -18.06 dB */
+	fake_sg_add_scene(&fake_sg, "alpha Scene");
+	fake_sg_scene_add_item(&fake_sg, "alpha Scene", "Color 2"); /* bottom in alpha Scene */
+	fake_sg_scene_add_item(&fake_sg, "alpha Scene", "Mic/Aux"); /* top in alpha Scene (has audio) */
+	fake_sg_scene_add_item(&fake_sg, "alpha Scene", "Color 2"); /* duplicate scene item -> deduplicated */
+
+	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
+	REQUIRE(cat != NULL);
+	mfd_engine_get_ui_catalog(&eng, cat);
+	REQUIRE(!cat->scenes_truncated);
+	REQUIRE(!cat->audio_truncated);
+	REQUIRE(cat->scene_count >= 2U);
+	/* Case-insensitive sort: "alpha Scene" comes before "Blue" */
+	REQUIRE(strcmp(cat->scenes[0].name, "alpha Scene") == 0);
+	REQUIRE(cat->scenes[0].layer_count == 2U);
+	REQUIRE(strcmp(cat->scenes[0].layers[0], "Color 2") == 0);
+	REQUIRE(!cat->scenes[0].layer_has_audio[0]);
+	REQUIRE(strcmp(cat->scenes[0].layers[1], "Mic/Aux") == 0);
+	REQUIRE(cat->scenes[0].layer_has_audio[1]);
+	/* Audio catalog contains only audio-capable sources, sorted case-insensitively, in dB */
+	bool saw_silent_in_audio = false;
+	bool saw_desktop_db = false;
+	for (size_t ai = 0U; ai < cat->audio_count; ++ai) {
+		if (strcmp(cat->audio_sources[ai].name, "Silent Card") == 0) {
+			saw_silent_in_audio = true;
+		}
+		if (strcmp(cat->audio_sources[ai].name, "desktop audio") == 0) {
+			REQUIRE(fabsf(cat->audio_sources[ai].db - mfd_deflection_to_db(0.5f)) < 0.05f);
+			saw_desktop_db = true;
+		}
+	}
+	REQUIRE(!saw_silent_in_audio);
+	REQUIRE(saw_desktop_db);
+
+	/* 16c: Setup session broadcast isolation, candidate_invert, [Not used] address preservation,
+	 *      Learn mutual exclusion & multi-slot collision transfer */
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "scene", "Blue");
+	obs_data_set_string(req, "source_a", "Color");
+	obs_data_set_string(req, "source_b", "Color 2");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(obs_data_get_bool(res, "available"));
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_2");
+	obs_data_set_string(req, "target_mode", "audio_volume");
+	obs_data_set_string(req, "source_a", "Mic/Aux");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(obs_data_get_bool(res, "available"));
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* Start an auto-fade on fader_1, then open Set up on fader_1 -> auto_fade stops and live writes freeze */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "to", 1.0);
+	obs_data_set_int(req, "ms", 500);
+	mfd_vendor_handle_auto_fade(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(eng.fader_slots[1].auto_fade_active);
+
+	mfd_engine_begin_setup_session(&eng, 1);
+	REQUIRE(eng.setup_session.active);
+	REQUIRE(eng.setup_session.slot_index == 1);
+	REQUIRE(!eng.fader_slots[1].auto_fade_active);
+
+	int op_before_setup = fake_sg.total_opacity_writes;
+	int vol_before_setup = fake_sg.total_volume_writes;
+	/* Move fader_1 CC (Ch 1 idx 0 -> Ch 0 CC 7 for fader_1 in 0-based APC40 profile) */
+	push_midi_cc(&eng, eng.fader_slots[1].addr.channel, eng.fader_slots[1].addr.number, 100);
+	/* Move fader_2 CC simultaneously -> fader_2 MUST continue driving live audio! */
+	push_midi_cc(&eng, eng.fader_slots[2].addr.channel, eng.fader_slots[2].addr.number, 127);
+	push_midi_cc(&eng, eng.fader_slots[2].addr.channel, eng.fader_slots[2].addr.number, 64);
+	mfd_engine_tick(&eng, 0.050f);
+
+	REQUIRE(fake_sg.total_opacity_writes == op_before_setup);
+	REQUIRE(fake_sg.total_volume_writes > vol_before_setup);
+	REQUIRE(eng.setup_session.has_candidate_input);
+	REQUIRE(fabsf(eng.setup_session.candidate_raw_norm - (100.0f / 127.0f)) < 1e-5f);
+
+	/* Flipping candidate_invert flips Step 3 live meter immediately without writing to OBS */
+	mfd_engine_set_setup_invert(&eng, true);
+	REQUIRE(eng.setup_session.candidate_invert);
+	REQUIRE(fabsf(eng.setup_session.candidate_raw_norm - (1.0f - (100.0f / 127.0f))) < 1e-5f);
+	REQUIRE(fake_sg.total_opacity_writes == op_before_setup);
+
+	/* Vendor set_fader_value / nudge_fader / auto_fade and bridge proc_set_fader_value also respect broadcast pause */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.75);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(fake_sg.total_opacity_writes == op_before_setup);
+
+	{
+		proc_handler_t *s16_ph = proc_handler_create();
+		signal_handler_t *s16_sh = signal_handler_create();
+		REQUIRE(s16_ph != NULL && s16_sh != NULL);
+		REQUIRE(mfd_bridge_register_with_handlers(s16_ph, s16_sh, &eng));
+		struct calldata pause_cd;
+		calldata_init(&pause_cd);
+		calldata_set_string(&pause_cd, "slot", "fader_1");
+		calldata_set_float(&pause_cd, "value", 0.5);
+		REQUIRE(proc_handler_call(s16_ph, "midi_fadester_set_fader_value", &pause_cd));
+		REQUIRE(!calldata_bool(&pause_cd, "ok"));
+		calldata_free(&pause_cd);
+		mfd_bridge_register_with_handlers(NULL, NULL, NULL);
+		signal_handler_destroy(s16_sh);
+		proc_handler_destroy(s16_ph);
+		REQUIRE(fake_sg.total_opacity_writes == op_before_setup);
+	}
+
+	/* Step 1 [Not used] preserves APC40 hardware CC binding while clearing assignment */
+	struct mfd_midi_addr f1_orig_addr = eng.fader_slots[1].addr;
+	REQUIRE(f1_orig_addr.type == MFD_MIDI_CC);
+	REQUIRE(mfd_engine_unassign_slot_preserve_addr(&eng, 1));
+	REQUIRE(!eng.setup_session.active);
+	REQUIRE(eng.fader_slots[1].enabled);
+	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_UNASSIGNED);
+	REQUIRE(eng.fader_slots[1].addr.type == f1_orig_addr.type);
+	REQUIRE(eng.fader_slots[1].addr.channel == f1_orig_addr.channel);
+	REQUIRE(eng.fader_slots[1].addr.number == f1_orig_addr.number);
+	push_midi_cc(&eng, f1_orig_addr.channel, f1_orig_addr.number, 32);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_raw_norm - (32.0f / 127.0f)) < 1e-5f);
+
+	/* Learn mutual exclusion + multi-slot collision transfer on Done */
+	eng.fader_slots[4].addr.type = MFD_MIDI_CC;
+	eng.fader_slots[4].addr.channel = 1;
+	eng.fader_slots[4].addr.number = 77;
+	eng.fader_slots[4].addr.is_14bit = false;
+	eng.fader_slots[5].addr = eng.fader_slots[4].addr;
+	uint64_t rev4_before = eng.slot_config_rev[4];
+	uint64_t rev5_before = eng.slot_config_rev[5];
+
+	mfd_engine_start_learn(&eng, 7);
+	REQUIRE(eng.learning_slot_index == 7);
+	mfd_engine_begin_setup_session(&eng, 1);
+	REQUIRE(eng.learning_slot_index == -1);
+	mfd_engine_start_setup_learn(&eng);
+	REQUIRE(eng.setup_session.learning);
+
+	push_midi_cc(&eng, 1, 77, 90);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!eng.setup_session.learning);
+	REQUIRE(eng.setup_session.candidate_addr.type == MFD_MIDI_CC);
+	REQUIRE(eng.setup_session.candidate_addr.channel == 1);
+	REQUIRE(eng.setup_session.candidate_addr.number == 77);
+
+	int owners[MFD_MAX_FADER_SLOTS] = {0};
+	size_t owner_cnt = mfd_engine_find_addr_owners(&eng, &eng.setup_session.candidate_addr, 1, owners,
+						       MFD_MAX_FADER_SLOTS);
+	REQUIRE(owner_cnt == 2U);
+	REQUIRE(owners[0] == 4 && owners[1] == 5);
+
+	struct mfd_setup_candidate cand;
+	memset(&cand, 0, sizeof(cand));
+	cand.slot_index = 1;
+	cand.enabled = true;
+	cand.target_type = MFD_TARGET_TWO_SOURCE_MIX;
+	snprintf(cand.scene_name, sizeof(cand.scene_name), "Blue");
+	snprintf(cand.source_a_name, sizeof(cand.source_a_name), "Color");
+	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color 2");
+	cand.curve = MFD_CURVE_DIP_FREE;
+	char commit_err[192] = {0};
+	REQUIRE(mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
+	REQUIRE(!eng.setup_session.active);
+	REQUIRE(eng.fader_slots[1].addr.channel == 1 && eng.fader_slots[1].addr.number == 77);
+	REQUIRE(eng.fader_slots[4].addr.type == MFD_MIDI_NONE);
+	REQUIRE(eng.fader_slots[5].addr.type == MFD_MIDI_NONE);
+	REQUIRE(eng.slot_config_rev[4] > rev4_before);
+	REQUIRE(eng.slot_config_rev[5] > rev5_before);
+
+	/* 16d: slot_config_rev conflict detection (set_slot, rename, import, load_profile)
+	 *      & mid-setup precondition invalidation on commit */
+	mfd_engine_begin_setup_session(&eng, 1);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "curve", "linear");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
+	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	/* base_slot_rev refreshed on first conflict notice, so pressing Done a second time succeeds */
+	REQUIRE(mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
+
+	/* Rename bumps slot_config_rev on affected slot */
+	mfd_engine_begin_setup_session(&eng, 1);
+	fake_sg_rename(&fake_sg, "Color 2", "Color Two");
+	mfd_engine_handle_source_rename(&eng, "Color 2", "Color Two");
+	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color Two");
+	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
+	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	fake_sg_rename(&fake_sg, "Color Two", "Color 2");
+	mfd_engine_handle_source_rename(&eng, "Color Two", "Color 2");
+	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color 2");
+	mfd_engine_cancel_setup_session(&eng);
+
+	/* load_profile bumps slot_config_rev on all slots */
+	mfd_engine_begin_setup_session(&eng, 1);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "name", "apc40mk2");
+	mfd_vendor_handle_load_profile(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
+	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	mfd_engine_cancel_setup_session(&eng);
+
+	/* Mid-setup precondition invalidation: layer removed from scene before pressing Done */
+	mfd_engine_begin_setup_session(&eng, 2);
+	cand.slot_index = 2;
+	REQUIRE(mfd_engine_validate_setup_candidate(&eng, &cand, commit_err, sizeof(commit_err)));
+	fake_sg_scene_remove_item(&fake_sg, "Blue", "Color 2");
+	mfd_engine_reevaluate_slots(&eng, true);
+	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
+	REQUIRE(strcmp(commit_err, "Color 2 is no longer in scene Blue.") == 0);
+	mfd_engine_cancel_setup_session(&eng);
+	fake_sg_scene_add_item(&fake_sg, "Blue", "Color 2");
+	mfd_engine_reevaluate_slots(&eng, true);
+
+	/* 16e: First-Run Offer discriminator (clean vs 0.1.3 upgrade JSON) + [Yes] / [I'll set it up] */
+	mfd_engine_load_apc40_defaults(&eng);
+	eng.first_run_offer_dismissed = false;
+	mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", true);
+
+	struct mfd_ui_snapshot *snap = (struct mfd_ui_snapshot *)calloc(1U, sizeof(*snap));
+	REQUIRE(snap != NULL);
+	mfd_engine_get_ui_snapshot(&eng, snap);
+	REQUIRE(snap->first_run_offer_pending);
+
+	/* [Yes]: Crossfader = Switch scenes (T-bar), Master = Volume on "desktop audio" (case-preserved) */
+	mfd_engine_accept_first_run_usual_layout(&eng);
+	mfd_engine_get_ui_snapshot(&eng, snap);
+	REQUIRE(!snap->first_run_offer_pending);
+	REQUIRE(snap->slots[0].target_type == MFD_TARGET_TBAR);
+	REQUIRE(snap->slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	REQUIRE(strcmp(snap->slots[9].source_a_name, "desktop audio") == 0);
+	for (int fi = 1; fi <= 8; ++fi) {
+		REQUIRE(snap->slots[fi].enabled);
+		REQUIRE(snap->slots[fi].addr.type == MFD_MIDI_CC);
+		REQUIRE(snap->slots[fi].target_type == MFD_TARGET_UNASSIGNED);
+	}
+
+	/* [I'll set it up]: all 10 APC40 addresses stay bound & live, all 10 modes = MFD_TARGET_UNASSIGNED */
+	eng.first_run_offer_dismissed = false;
+	mfd_engine_decline_first_run_usual_layout(&eng);
+	mfd_engine_get_ui_snapshot(&eng, snap);
+	REQUIRE(!snap->first_run_offer_pending);
+	for (int fi = 0; fi < MFD_MAX_FADER_SLOTS; ++fi) {
+		REQUIRE(snap->slots[fi].enabled);
+		REQUIRE(snap->slots[fi].addr.type == MFD_MIDI_CC);
+		REQUIRE(snap->slots[fi].target_type == MFD_TARGET_UNASSIGNED);
+	}
+
+	/* 0.1.3 upgrade global.json (missing "first_run_offer_dismissed") vs 0.2.0 clean config */
+	{
+		const char *tmp_v013_json = "test_upgrade_013_global.json";
+		const char *tmp_v020_json = "test_clean_020_global.json";
+		FILE *fp = fopen(tmp_v013_json, "wb");
+		REQUIRE(fp != NULL);
+		fputs("{\"device_name\":\"APC40 mkII\",\"active_profile\":\"apc40mk2\",\"smooth_tau_ms\":16.0}\n", fp);
+		fclose(fp);
+
+		eng.first_run_offer_dismissed = false;
+		mfd_engine_load_apc40_defaults(&eng);
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v013_json));
+		REQUIRE(eng.first_run_offer_dismissed);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(!snap->first_run_offer_pending);
+		os_unlink(tmp_v013_json);
+
+		eng.first_run_offer_dismissed = false;
+		mfd_engine_load_apc40_defaults(&eng);
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+		eng.first_run_offer_dismissed = true;
+		/* Also verify import bumps slot_config_rev on an active setup session */
+		mfd_engine_begin_setup_session(&eng, 0);
+		uint64_t rev0_pre_imp = eng.slot_config_rev[0];
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+		REQUIRE(eng.slot_config_rev[0] > rev0_pre_imp);
+		REQUIRE(!eng.first_run_offer_dismissed);
+		mfd_engine_cancel_setup_session(&eng);
+		os_unlink(tmp_v020_json);
+	}
+
+	/* 16f: Bounded 4-mode candidate-validator equivalence matrix (MIDI-FADESTER-UI.md Property Test)
+	 *      Across Studio Mode {off, on}, scenes (0 layers, 1 layer, 2 layers, missing scene),
+	 *      layer pairs (same, distinct, missing), and sources (audio, silent, missing):
+	 *      1) mfd_engine_validate_setup_candidate(cand) == true IFF committing cand yields available == true & reason == "".
+	 *      2) Every picker-filtered catalog choice yields validate == true and available == true. */
+	fake_sg_add_scene(&fake_sg, "EmptyScene");
+	fake_sg_add_scene(&fake_sg, "OneLayerScene");
+	fake_sg_scene_add_item(&fake_sg, "OneLayerScene", "Color");
+
+	const char *test_scenes[] = {"", "EmptyScene", "OneLayerScene", "Blue", "GhostScene"};
+	const char *test_sources[] = {"", "Color", "Color 2", "Mic/Aux", "Silent Card", "GhostSource"};
+
+	for (int sm = 0; sm <= 1; ++sm) {
+		eng.studio_mode_override_set = true;
+		eng.studio_mode_override = (sm != 0);
+		mfd_engine_reevaluate_slots(&eng, false);
+
+		/* Mode 1: Switch scenes (T-bar) */
+		{
+			struct mfd_setup_candidate c;
+			memset(&c, 0, sizeof(c));
+			c.slot_index = 1;
+			c.enabled = true;
+			c.target_type = MFD_TARGET_TBAR;
+			char rsn[160] = {0};
+			bool valid = mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn));
+			REQUIRE(valid == (sm != 0));
+			if (valid) {
+				mfd_engine_begin_setup_session(&eng, 1);
+				REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+				REQUIRE(eng.fader_slots[1].cached_available);
+				REQUIRE(eng.fader_slots[1].cached_reason[0] == '\0');
+			} else {
+				REQUIRE(strcmp(rsn, "Studio Mode is off.") == 0);
+			}
+		}
+
+		/* Mode 2: Mix two layers */
+		for (size_t si = 0U; si < sizeof(test_scenes) / sizeof(test_scenes[0]); ++si) {
+			for (size_t ai = 0U; ai < sizeof(test_sources) / sizeof(test_sources[0]); ++ai) {
+				for (size_t bi = 0U; bi < sizeof(test_sources) / sizeof(test_sources[0]); ++bi) {
+					struct mfd_setup_candidate c;
+					memset(&c, 0, sizeof(c));
+					c.slot_index = 1;
+					c.enabled = true;
+					c.target_type = MFD_TARGET_TWO_SOURCE_MIX;
+					c.curve = MFD_CURVE_DIP_FREE;
+					snprintf(c.scene_name, sizeof(c.scene_name), "%s", test_scenes[si]);
+					snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", test_sources[ai]);
+					snprintf(c.source_b_name, sizeof(c.source_b_name), "%s", test_sources[bi]);
+					char rsn[160] = {0};
+					bool valid = mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn));
+					if (valid) {
+						mfd_engine_begin_setup_session(&eng, 1);
+						REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+						REQUIRE(eng.fader_slots[1].cached_available);
+						REQUIRE(eng.fader_slots[1].cached_reason[0] == '\0');
+					} else {
+						REQUIRE(rsn[0] != '\0');
+						mfd_engine_begin_setup_session(&eng, 1);
+						REQUIRE(!mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+						mfd_engine_cancel_setup_session(&eng);
+					}
+				}
+			}
+		}
+
+		/* Mode 3: Show or hide a layer */
+		for (size_t si = 0U; si < sizeof(test_scenes) / sizeof(test_scenes[0]); ++si) {
+			for (size_t ai = 0U; ai < sizeof(test_sources) / sizeof(test_sources[0]); ++ai) {
+				struct mfd_setup_candidate c;
+				memset(&c, 0, sizeof(c));
+				c.slot_index = 1;
+				c.enabled = true;
+				c.target_type = MFD_TARGET_SINGLE_LAYER;
+				snprintf(c.scene_name, sizeof(c.scene_name), "%s", test_scenes[si]);
+				snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", test_sources[ai]);
+				char rsn[160] = {0};
+				bool valid = mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn));
+				if (valid) {
+					mfd_engine_begin_setup_session(&eng, 1);
+					REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+					REQUIRE(eng.fader_slots[1].cached_available);
+					REQUIRE(eng.fader_slots[1].cached_reason[0] == '\0');
+				} else {
+					REQUIRE(rsn[0] != '\0');
+				}
+			}
+		}
+
+		/* Mode 4: Volume */
+		for (size_t ai = 0U; ai < sizeof(test_sources) / sizeof(test_sources[0]); ++ai) {
+			struct mfd_setup_candidate c;
+			memset(&c, 0, sizeof(c));
+			c.slot_index = 1;
+			c.enabled = true;
+			c.target_type = MFD_TARGET_AUDIO_VOLUME;
+			snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", test_sources[ai]);
+			char rsn[160] = {0};
+			bool valid = mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn));
+			if (valid) {
+				mfd_engine_begin_setup_session(&eng, 1);
+				REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+				REQUIRE(eng.fader_slots[1].cached_available);
+				REQUIRE(eng.fader_slots[1].cached_reason[0] == '\0');
+			} else {
+				REQUIRE(rsn[0] != '\0');
+			}
+		}
+
+		/* Exhaustive picker-filtered catalog traversal: every catalog-allowed combination MUST validate & commit! */
+		mfd_engine_get_ui_catalog(&eng, cat);
+		for (size_t ci = 0U; ci < cat->scene_count; ++ci) {
+			const struct mfd_ui_scene_entry *se = &cat->scenes[ci];
+			if (se->layer_count >= 1U) {
+				for (size_t la = 0U; la < se->layer_count; ++la) {
+					struct mfd_setup_candidate c;
+					memset(&c, 0, sizeof(c));
+					c.slot_index = 1;
+					c.enabled = true;
+					c.target_type = MFD_TARGET_SINGLE_LAYER;
+					snprintf(c.scene_name, sizeof(c.scene_name), "%s", se->name);
+					snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", se->layers[la]);
+					char rsn[160] = {0};
+					REQUIRE(mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn)));
+					mfd_engine_begin_setup_session(&eng, 1);
+					REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+					REQUIRE(eng.fader_slots[1].cached_available);
+				}
+			}
+			if (se->layer_count >= 2U) {
+				for (size_t la = 0U; la < se->layer_count; ++la) {
+					for (size_t lb = 0U; lb < se->layer_count; ++lb) {
+						if (la == lb) {
+							continue;
+						}
+						struct mfd_setup_candidate c;
+						memset(&c, 0, sizeof(c));
+						c.slot_index = 1;
+						c.enabled = true;
+						c.target_type = MFD_TARGET_TWO_SOURCE_MIX;
+						c.curve = MFD_CURVE_DIP_FREE;
+						snprintf(c.scene_name, sizeof(c.scene_name), "%s", se->name);
+						snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", se->layers[la]);
+						snprintf(c.source_b_name, sizeof(c.source_b_name), "%s", se->layers[lb]);
+						char rsn[160] = {0};
+						REQUIRE(mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn)));
+						mfd_engine_begin_setup_session(&eng, 1);
+						REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+						REQUIRE(eng.fader_slots[1].cached_available);
+					}
+				}
+			}
+		}
+		for (size_t ai = 0U; ai < cat->audio_count; ++ai) {
+			struct mfd_setup_candidate c;
+			memset(&c, 0, sizeof(c));
+			c.slot_index = 1;
+			c.enabled = true;
+			c.target_type = MFD_TARGET_AUDIO_VOLUME;
+			snprintf(c.source_a_name, sizeof(c.source_a_name), "%s", cat->audio_sources[ai].name);
+			char rsn[160] = {0};
+			REQUIRE(mfd_engine_validate_setup_candidate(&eng, &c, rsn, sizeof(rsn)));
+			mfd_engine_begin_setup_session(&eng, 1);
+			REQUIRE(mfd_engine_commit_setup_session(&eng, &c, rsn, sizeof(rsn)));
+			REQUIRE(eng.fader_slots[1].cached_available);
+		}
+	}
+
+	free(snap);
+	mfd_ui_catalog_destroy(cat);
+
+	/* 16g: Multi-threaded recursive state_mutex concurrency stress test + mfd_vendor_api_shutdown fencing */
+	{
+		struct mfd_engine *mt_eng = (struct mfd_engine *)calloc(1U, sizeof(*mt_eng));
+		REQUIRE(mt_eng != NULL);
+		REQUIRE(mfd_engine_init_mutex(mt_eng));
+		mfd_midi_queue_init(&mt_eng->midi_queue);
+		mfd_midi_parser_init(&mt_eng->midi_parser);
+		mt_eng->scene_graph_ops = &g_fake_sg_ops;
+		mt_eng->scene_graph_user_data = &fake_sg;
+		mt_eng->studio_mode_override_set = true;
+		mt_eng->studio_mode_override = true;
+		mt_eng->tbar_driver = mock_tbar_driver;
+		mt_eng->tbar_unlatch = mock_tbar_unlatch;
+		mfd_engine_load_apc40_defaults(mt_eng);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_2");
+		obs_data_set_string(req, "target_mode", "crossfade_ab");
+		obs_data_set_string(req, "scene", "Blue");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "source_b", "Color 2");
+		mfd_vendor_handle_set_slot(req, res, mt_eng);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		struct mt_stress_ctx mt_ctx;
+		memset(&mt_ctx, 0, sizeof(mt_ctx));
+		mt_ctx.eng = mt_eng;
+		mfd_engine_set_ui_notify_fn(mt_eng, on_mt_ui_notify, &mt_ctx);
+
+		pthread_t th_tick;
+		pthread_t th_vendor;
+		pthread_t th_ui;
+		REQUIRE(pthread_create(&th_tick, NULL, mt_tick_worker, &mt_ctx) == 0);
+		REQUIRE(pthread_create(&th_vendor, NULL, mt_vendor_worker, &mt_ctx) == 0);
+		REQUIRE(pthread_create(&th_ui, NULL, mt_ui_worker, &mt_ctx) == 0);
+		REQUIRE(pthread_join(th_tick, NULL) == 0);
+		REQUIRE(pthread_join(th_vendor, NULL) == 0);
+		REQUIRE(pthread_join(th_ui, NULL) == 0);
+
+		REQUIRE(!mt_ctx.bad_snapshot);
+		REQUIRE(os_atomic_load_long(&mt_ctx.ui_notify_calls) > 0L);
+
+		/* Verify mfd_vendor_api_shutdown blocks subsequent vendor & proc calls */
+		proc_handler_t *mt_ph = proc_handler_create();
+		signal_handler_t *mt_sh = signal_handler_create();
+		REQUIRE(mt_ph != NULL && mt_sh != NULL);
+		REQUIRE(mfd_bridge_register_with_handlers(mt_ph, mt_sh, mt_eng));
+
+		mfd_vendor_api_shutdown(mt_eng);
+		req = obs_data_create();
+		res = obs_data_create();
+		mfd_vendor_handle_get_state(req, res, mt_eng);
+		REQUIRE(!obs_data_has_user_value(res, "version"));
+		obs_data_release(req);
+		obs_data_release(res);
+
+		struct calldata shut_cd;
+		calldata_init(&shut_cd);
+		calldata_set_string(&shut_cd, "slot", "crossfader");
+		REQUIRE(proc_handler_call(mt_ph, "midi_fadester_get_slot_value", &shut_cd));
+		REQUIRE(!calldata_bool(&shut_cd, "ok"));
+		calldata_free(&shut_cd);
+
+		signal_handler_destroy(mt_sh);
+		proc_handler_destroy(mt_ph);
+		mfd_engine_set_ui_notify_fn(mt_eng, NULL, NULL);
+		mfd_engine_destroy_mutex(mt_eng);
+		free(mt_eng);
+	}
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");

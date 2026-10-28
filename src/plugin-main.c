@@ -24,7 +24,10 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	mfd_register_layer_filter();
-	mfd_engine_init();
+	if (!mfd_engine_init()) {
+		obs_log(LOG_ERROR, "Midi Fadester failed to initialize engine state mutex");
+		return false;
+	}
 	mfd_tbar_init();
 	mfd_ui_init();
 
@@ -40,8 +43,9 @@ void obs_module_post_load(void)
 
 void obs_module_unload(void)
 {
+	mfd_vendor_api_shutdown(mfd_engine_get());
 	mfd_ui_shutdown();
-	mfd_engine_shutdown();
 	mfd_tbar_shutdown();
+	mfd_engine_shutdown();
 	obs_log(LOG_INFO, "plugin unloaded");
 }
