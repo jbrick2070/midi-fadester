@@ -18,6 +18,9 @@
 !README.md
 !REQUIREMENTS.md
 !PLAN.md
+!PLAN-UI.md
+!TESTING.md
+!/docs
 
 # Exclude lock files
 *.lock.json
