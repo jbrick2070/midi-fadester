@@ -8,8 +8,6 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCO
 
 project(${_name} VERSION ${_version})
 
-option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
-option(ENABLE_QT "Use Qt functionality" ON)
 option(MIDI_FADESTER_BUILD_TESTS "Build the CTest suite" ON)
 
 include(compilerconfig)
@@ -19,21 +17,20 @@ include(helpers)
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs winmm)
+find_package(obs-frontend-api REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Core Gui Svg REQUIRED)
 
-if(ENABLE_FRONTEND_API)
-  find_package(obs-frontend-api REQUIRED)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
-endif()
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}
+  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg winmm
+)
 
-if(ENABLE_QT)
-  find_package(Qt6 COMPONENTS Widgets Core REQUIRED)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE Qt6::Core Qt6::Widgets)
-  set_target_properties(
-    ${CMAKE_PROJECT_NAME}
-    PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
-  )
-endif()
+set_target_properties(
+  ${CMAKE_PROJECT_NAME}
+  PROPERTIES AUTOMOC ON AUTOUIC ON AUTORCC ON
+)
+
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE QT_NO_KEYWORDS)
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
@@ -67,6 +64,11 @@ target_sources(
     src/obs/obs-websocket-api.h
     src/obs/mfd-vendor-api.h
     src/obs/mfd-vendor-api.c
+    src/ui/mfd-svg-canvas.hpp
+    src/ui/mfd-controller-svg.hpp
+    src/ui/mfd-controller-svg.cpp
+    src/ui/mfd-setup-sheet.hpp
+    src/ui/mfd-setup-sheet.cpp
     src/ui/mfd-settings-dialog.hpp
     src/ui/mfd-settings-dialog.cpp
 )

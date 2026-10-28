@@ -67,12 +67,47 @@ target_link_libraries(midi-send PRIVATE winmm)
 add_test(NAME test-midi-send COMMAND midi-send --self-test)
 set_tests_properties(test-midi-send PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
+set(
+  _production_guard_files
+  "${CMAKE_SOURCE_DIR}/src/plugin-main.c"
+  "${_core}/midi-types.h"
+  "${_core}/midi-queue.h"
+  "${_core}/midi-queue.c"
+  "${_core}/midi-parser.h"
+  "${_core}/midi-parser.c"
+  "${_core}/smoother.h"
+  "${_core}/smoother.c"
+  "${_core}/takeover.h"
+  "${_core}/takeover.c"
+  "${_core}/mixer-math.h"
+  "${_core}/mixer-math.c"
+  "${_core}/apc40-profile.h"
+  "${_core}/apc40-profile.c"
+  "${_core}/tbar-logic.h"
+  "${_core}/tbar-logic.c"
+  "${_core}/ui-sentences.h"
+  "${_core}/ui-sentences.c"
+  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.h"
+  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.h"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.h"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.h"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-svg-canvas.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
+)
+
 add_executable(test-shader-syntax test-shader-syntax.c)
 add_test(
   NAME test-shader-syntax
-  COMMAND
-    test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect"
-    "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
+  COMMAND test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect" ${_production_guard_files}
 )
 set_tests_properties(test-shader-syntax PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
