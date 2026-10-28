@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - Pure-C Shader Include Expander, Annotation Parser & Effect Builder
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +21,7 @@ extern "C" {
 
 #define VS_SHADER_MAX_INCLUDE_DEPTH 16u
 #define VS_SHADER_MAX_UNIFORMS 64u
+#define VS_SHADER_MAX_OPTIONS 8u
 
 enum vs_shader_error {
 	VS_SHADER_OK = 0,
@@ -55,6 +57,9 @@ struct vs_shader_param_info {
 	double max_val;
 	double step_val;
 	double default_val[4];
+	char option_labels[VS_SHADER_MAX_OPTIONS][64];
+	int option_values[VS_SHADER_MAX_OPTIONS];
+	size_t option_count;
 };
 
 struct vs_shader_parse_result {

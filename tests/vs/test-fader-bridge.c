@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - Fader Slot Modulation Source & In-Process Bridge Tests
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -360,6 +361,92 @@ static void test_panic_and_restore_hotkeys_logic(void)
 	assert(fabs(slots[3].current_value - 0.30) < 1e-6);
 }
 
+static void test_multi_instance_frame_deduplication_and_track1_priority(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph != NULL && sh != NULL);
+
+	struct fake_fadester_ctx fake_fadester;
+	memset(&fake_fadester, 0, sizeof(fake_fadester));
+	fake_fadester.slots[VS_FADER_CROSSFADER] = 0.25f;
+	fake_fadester.slots[VS_FADER_1] = 0.50f;
+	fake_fadester.slots[VS_FADER_2] = 0.75f;
+
+	proc_handler_add(
+		ph,
+		"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+		fake_midi_fadester_get_slot_value, &fake_fadester);
+	signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+
+	vs_fader_bridge_attach(ph, sh);
+	assert(fake_fadester.poll_calls == 1); /* 1 initial probe on attach */
+
+	struct signal_capture_ctx sig_cap;
+	memset(&sig_cap, 0, sizeof(sig_cap));
+	signal_handler_connect(sh, "visual_sidechain_signals", on_visual_sidechain_signals_captured, &sig_cap);
+
+	struct vs_audio_frame secondary_a;
+	struct vs_audio_frame primary_t1;
+	struct vs_audio_frame secondary_c;
+	memset(&secondary_a, 0, sizeof(secondary_a));
+	memset(&primary_t1, 0, sizeof(primary_t1));
+	memset(&secondary_c, 0, sizeof(secondary_c));
+	secondary_a.kick = 0.11f;
+	primary_t1.kick = 0.94f;
+	secondary_c.kick = 0.22f;
+
+	/* Video Frame 1 (ts = 100 ms): 3 filters tick in the same OBS frame (secondary, Track 1, secondary).
+	 * Must poll midi_fadester_get_slot_value ONLY ONCE for the frame, and Track 1 must own g_latest_signals. */
+	const uint64_t ts1 = 100000000ULL;
+	vs_fader_bridge_on_frame_tick(ts1, 0.01667f, &secondary_a, false);
+	vs_fader_bridge_on_frame_tick(ts1, 0.01667f, &primary_t1, true);
+	vs_fader_bridge_on_frame_tick(ts1, 0.01667f, &secondary_c, false);
+
+	assert(fake_fadester.poll_calls == 2); /* 1 attach + 1 for Frame 1 (NOT 1 + 3 = 4) */
+	assert(sig_cap.emit_count == 1);
+
+	struct vs_audio_frame snap;
+	vs_fader_bridge_get_signals(&snap);
+	assert(float_near(snap.kick, 0.94f, 1e-6f));
+
+	/* Video Frame 2 (ts = 116.67 ms, +16.67 ms < 33.33 ms): all 3 filters tick again.
+	 * dt_sec must NOT be summed 3x (which would prematurely cross 33.33 ms!), poll_calls must advance by 1,
+	 * and secondary_a ticking before primary_t1 must NOT clobber g_latest_signals with 0.11f! */
+	const uint64_t ts2 = 116666667ULL;
+	primary_t1.kick = 0.85f;
+	assert(!vs_fader_bridge_on_frame_tick(ts2, 0.01667f, &secondary_a, false));
+	vs_fader_bridge_get_signals(&snap);
+	assert(float_near(snap.kick, 0.94f, 1e-6f)); /* Not clobbered by secondary_a! */
+
+	assert(!vs_fader_bridge_on_frame_tick(ts2, 0.01667f, &primary_t1, true));
+	assert(!vs_fader_bridge_on_frame_tick(ts2, 0.01667f, &secondary_c, false));
+	assert(fake_fadester.poll_calls == 3); /* +1 for Frame 2 */
+	assert(sig_cap.emit_count == 1);       /* Still 1 because 16.67 ms < 33.33 ms */
+	vs_fader_bridge_get_signals(&snap);
+	assert(float_near(snap.kick, 0.85f, 1e-6f));
+
+	/* Video Frame 3 (ts = 133.67 ms, +17.0 ms => 33.67 ms >= 33.33 ms): Track 1 emits cleanly at <= 30 Hz */
+	const uint64_t ts3 = 133666667ULL;
+	primary_t1.kick = 0.77f;
+	assert(!vs_fader_bridge_on_frame_tick(ts3, 0.01700f, &secondary_a, false));
+	assert(vs_fader_bridge_on_frame_tick(ts3, 0.01700f, &primary_t1, true));
+	assert(!vs_fader_bridge_on_frame_tick(ts3, 0.01700f, &secondary_c, false));
+	assert(fake_fadester.poll_calls == 4); /* +1 for Frame 3 across 9 total filter ticks */
+	assert(sig_cap.emit_count == 2);
+	assert(float_near(sig_cap.kick, 0.77f, 1e-6f));
+
+	/* Fallback: if the Track 1 filter is removed/disabled, secondary_a takes over within 2 frames */
+	vs_fader_bridge_on_frame_tick(150333334ULL, 0.01667f, &secondary_a, false);
+	vs_fader_bridge_on_frame_tick(167333334ULL, 0.01700f, &secondary_a, false);
+	vs_fader_bridge_get_signals(&snap);
+	assert(float_near(snap.kick, 0.11f, 1e-6f));
+
+	vs_fader_bridge_detach();
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -371,6 +458,7 @@ int main(void)
 	test_in_process_bridge_missing_midi_fadester();
 	test_in_process_bridge_fake_proc_and_signal();
 	test_panic_and_restore_hotkeys_logic();
+	test_multi_instance_frame_deduplication_and_track1_priority();
 	printf("test-fader-bridge: all assertions passed\n");
 	return 0;
 }

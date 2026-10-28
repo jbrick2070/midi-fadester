@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - Pure-C Modulation Slot Math & Rate/Epsilon Gate
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -135,4 +136,46 @@ void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_s
 	state->last_written_float = mapped;
 	state->has_last_written = true;
 	out_res->should_write = true;
+}
+
+size_t vs_mod_eval_and_batch_slots(const struct vs_mod_slot_config *cfgs, struct vs_mod_slot_state *states,
+				   const float *signals_01, size_t slot_count,
+				   struct vs_mod_target_batch out_batches[VS_MOD_MAX_SLOTS])
+{
+	if (!cfgs || !states || !signals_01 || !out_batches)
+		return 0u;
+
+	if (slot_count > VS_MOD_MAX_SLOTS)
+		slot_count = VS_MOD_MAX_SLOTS;
+
+	size_t batch_count = 0u;
+	memset(out_batches, 0, sizeof(struct vs_mod_target_batch) * VS_MOD_MAX_SLOTS);
+
+	for (size_t i = 0u; i < slot_count; i++) {
+		struct vs_mod_eval_result eval;
+		vs_mod_slot_eval(&cfgs[i], &states[i], signals_01[i], &eval);
+		if (!eval.should_write)
+			continue;
+
+		size_t b = 0u;
+		while (b < batch_count) {
+			if (strcmp(out_batches[b].target_filter, cfgs[i].target_filter) == 0)
+				break;
+			b++;
+		}
+		if (b == batch_count) {
+			out_batches[b].target_filter = cfgs[i].target_filter;
+			out_batches[b].write_count = 0u;
+			batch_count++;
+		}
+
+		struct vs_mod_target_write *w = &out_batches[b].writes[out_batches[b].write_count++];
+		w->slot_index = (uint32_t)i;
+		w->target_setting = cfgs[i].target_setting;
+		w->prop_type = cfgs[i].prop_type;
+		w->float_val = eval.float_val;
+		w->int_val = eval.int_val;
+	}
+
+	return batch_count;
 }

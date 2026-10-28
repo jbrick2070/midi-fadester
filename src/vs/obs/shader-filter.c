@@ -1,11 +1,11 @@
 /*
  * Visual Sidechain - OBS 33 FFT-Reactive GPU Shader Filter
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Adapted from obs-shaderfilter (GPLv2+):
- *   Copyright (C) 2016-2017 nleseul
- *   Copyright (C) 2017-2022 Charles Fettinger (https://github.com/Oncorporation)
- *   Copyright (C) 2022-2026 Exeldro (https://github.com/exeldro)
+ * Clean-room OBS 33 shader filter host supporting `.shader` uniform annotation
+ * conventions compatible with obs-shaderfilter (GPL-2.0-only, Copyright
+ * 2016-2017 nleseul, 2017-2022 Charles Fettinger, 2022-2026 Exeldro).
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -66,6 +66,8 @@ struct vs_shader_filter {
 	char *shader_text;
 	bool override_entire_effect;
 	char last_compiled_signature[1024];
+	bool in_create;
+	bool rebuilding_props;
 
 	float custom_low_hz;
 	float custom_high_hz;
@@ -133,6 +135,22 @@ static float next_unit_rand(void)
 	return (float)rand() / (float)RAND_MAX;
 }
 
+static uint64_t fnv1a_64(const char *s, size_t *out_len)
+{
+	uint64_t hash = 14695981039346656037ULL;
+	size_t len = 0u;
+	if (s) {
+		for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+			hash ^= (uint64_t)(*p);
+			hash *= 1099511628211ULL;
+			len++;
+		}
+	}
+	if (out_len)
+		*out_len = len;
+	return hash;
+}
+
 static uint32_t vec4_to_abgr_u32(const double rgba[4])
 {
 	const uint32_t r = (uint32_t)(fmin(fmax(rgba[0], 0.0), 1.0) * 255.0 + 0.5);
@@ -142,9 +160,9 @@ static uint32_t vec4_to_abgr_u32(const double rgba[4])
 	return (a << 24) | (b << 16) | (g << 8) | r;
 }
 
-static void free_user_texture_bindings(struct vs_shader_filter *sf)
+/* Caller must hold obs_enter_graphics(). */
+static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 {
-	obs_enter_graphics();
 	for (size_t i = 0; i < VS_SHADER_MAX_UNIFORMS; i++) {
 		if (sf->user_bindings[i].image_loaded) {
 			gs_image_file_ex_free(&sf->user_bindings[i].image_file);
@@ -152,21 +170,21 @@ static void free_user_texture_bindings(struct vs_shader_filter *sf)
 			sf->user_bindings[i].image_path[0] = '\0';
 		}
 	}
-	obs_leave_graphics();
-}
-
-static void destroy_shader_effect(struct vs_shader_filter *sf)
-{
-	free_user_texture_bindings(sf);
-	obs_enter_graphics();
 	if (sf->effect) {
 		gs_effect_destroy(sf->effect);
 		sf->effect = NULL;
 	}
-	obs_leave_graphics();
 	vs_shader_parse_result_free(&sf->parsed);
 	memset(sf->user_bindings, 0, sizeof(sf->user_bindings));
 	memset(sf->panic_slots, 0, sizeof(sf->panic_slots));
+	sf->p_audio_custom_band = NULL;
+}
+
+static void destroy_shader_effect(struct vs_shader_filter *sf)
+{
+	obs_enter_graphics();
+	destroy_shader_effect_locked(sf);
+	obs_leave_graphics();
 }
 
 static char *read_text_file_utf8(const char *path)
@@ -212,8 +230,12 @@ static void resolve_shader_path_and_base_dir(const struct vs_shader_filter *sf, 
 	}
 }
 
-static void update_user_uniform_values_from_settings(struct vs_shader_filter *sf, obs_data_t *settings)
+/* Caller must hold obs_enter_graphics(). */
+static void update_user_uniform_values_locked(struct vs_shader_filter *sf, obs_data_t *settings)
 {
+	if (!settings)
+		return;
+
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
 		struct vs_user_uniform_binding *b = &sf->user_bindings[i];
@@ -242,7 +264,6 @@ static void update_user_uniform_values_from_settings(struct vs_shader_filter *sf
 			if (!path)
 				path = "";
 			if (strcmp(b->image_path, path) != 0) {
-				obs_enter_graphics();
 				if (b->image_loaded) {
 					gs_image_file_ex_free(&b->image_file);
 					b->image_loaded = false;
@@ -253,7 +274,6 @@ static void update_user_uniform_values_from_settings(struct vs_shader_filter *sf
 					gs_image_file_ex_init_texture(&b->image_file);
 					b->image_loaded = true;
 				}
-				obs_leave_graphics();
 			}
 		}
 	}
@@ -261,11 +281,6 @@ static void update_user_uniform_values_from_settings(struct vs_shader_filter *sf
 
 static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 {
-	destroy_shader_effect(sf);
-	sf->compile_error[0] = '\0';
-	sf->uses_feedback = false;
-	sf->feedback_seeded = false;
-
 	char file_path[512];
 	char base_dir[512];
 	resolve_shader_path_and_base_dir(sf, file_path, sizeof(file_path), base_dir, sizeof(base_dir));
@@ -278,15 +293,25 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		shader_label = "inline shader";
 	} else {
 		if (file_path[0] == '\0') {
+			obs_enter_graphics();
+			destroy_shader_effect_locked(sf);
+			sf->uses_feedback = false;
+			sf->feedback_seeded = false;
 			snprintf(sf->compile_error, sizeof(sf->compile_error), "No shader file path specified.");
-			blog(LOG_WARNING, "[visual-sidechain] %s", sf->compile_error);
+			obs_leave_graphics();
+			blog(LOG_WARNING, "[visual-sidechain] No shader file path specified.");
 			return;
 		}
 		raw_source = read_text_file_utf8(file_path);
 		shader_label = file_path;
 		if (!raw_source) {
+			obs_enter_graphics();
+			destroy_shader_effect_locked(sf);
+			sf->uses_feedback = false;
+			sf->feedback_seeded = false;
 			snprintf(sf->compile_error, sizeof(sf->compile_error), "Shader file not found: %s", file_path);
-			blog(LOG_WARNING, "[visual-sidechain] %s", sf->compile_error);
+			obs_leave_graphics();
+			blog(LOG_WARNING, "[visual-sidechain] Shader file not found: %s", file_path);
 			return;
 		}
 	}
@@ -296,24 +321,37 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 					    ? sf->override_entire_effect
 					    : false;
 
+	struct vs_shader_parse_result local_parsed;
 	const enum vs_shader_error perr =
-		vs_shader_ExpandAndParse(raw_source, base_dir, is_full_effect, NULL, NULL, &sf->parsed);
+		vs_shader_ExpandAndParse(raw_source, base_dir, is_full_effect, NULL, NULL, &local_parsed);
 	bfree(raw_source);
 
 	if (perr != VS_SHADER_OK) {
+		obs_enter_graphics();
+		destroy_shader_effect_locked(sf);
+		sf->uses_feedback = false;
+		sf->feedback_seeded = false;
 		snprintf(sf->compile_error, sizeof(sf->compile_error), "Shader parse error (%s): %s", shader_label,
-			 sf->parsed.error_msg);
-		blog(LOG_WARNING, "[visual-sidechain] %s", sf->compile_error);
+			 local_parsed.error_msg);
+		obs_leave_graphics();
+		blog(LOG_WARNING, "[visual-sidechain] Shader parse error (%s): %s", shader_label,
+		     local_parsed.error_msg);
+		vs_shader_parse_result_free(&local_parsed);
 		return;
 	}
 
-	if (sf->parsed.expanded_source && (strstr(sf->parsed.expanded_source, "previous_output") != NULL ||
-					   strstr(sf->parsed.expanded_source, "previous_image") != NULL)) {
-		sf->uses_feedback = true;
-	}
+	const bool uses_fb =
+		(local_parsed.expanded_source && (strstr(local_parsed.expanded_source, "previous_output") != NULL ||
+						  strstr(local_parsed.expanded_source, "previous_image") != NULL));
 
 	char *gs_err = NULL;
 	obs_enter_graphics();
+	destroy_shader_effect_locked(sf);
+	sf->compile_error[0] = '\0';
+	sf->uses_feedback = uses_fb;
+	sf->feedback_seeded = false;
+	sf->parsed = local_parsed;
+
 	sf->effect = gs_effect_create(sf->parsed.full_effect_source, shader_label, &gs_err);
 	if (sf->effect) {
 		sf->p_image = gs_effect_get_param_by_name(sf->effect, "image");
@@ -361,24 +399,35 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 			snprintf(sf->panic_slots[i].name, sizeof(sf->panic_slots[i].name), "%s",
 				 sf->parsed.params[i].name);
 		}
-	}
-	obs_leave_graphics();
 
-	if (!sf->effect) {
+		if (settings)
+			update_user_uniform_values_locked(sf, settings);
+
+		if (vs_fader_bridge_is_panic_active()) {
+			for (size_t i = 0; i < sf->parsed.param_count; i++)
+				sf->panic_slots[i].current_value = (double)sf->user_bindings[i].f_val;
+			vs_fader_bridge_apply_panic_to_shader(&sf->panic_passthrough, sf->panic_slots,
+							      sf->parsed.param_count);
+		}
+	} else {
 		snprintf(sf->compile_error, sizeof(sf->compile_error), "HLSL compiler error (%s): %s", shader_label,
 			 gs_err ? gs_err : "unknown error");
-		blog(LOG_WARNING, "[visual-sidechain] %s", sf->compile_error);
+	}
+
+	const bool ok = (sf->effect != NULL);
+	const size_t compiled_params = sf->parsed.param_count;
+	obs_leave_graphics();
+
+	if (!ok) {
+		blog(LOG_WARNING, "[visual-sidechain] HLSL compiler error (%s): %s", shader_label,
+		     gs_err ? gs_err : "unknown error");
 		bfree(gs_err);
 		return;
 	}
 	bfree(gs_err);
 
-	if (settings) {
-		update_user_uniform_values_from_settings(sf, settings);
-	}
-
 	blog(LOG_INFO, "[visual-sidechain] Compiled shader '%s' (%zu user uniforms, feedback=%d)", sf->preset_shader,
-	     sf->parsed.param_count, sf->uses_feedback ? 1 : 0);
+	     compiled_params, uses_fb ? 1 : 0);
 }
 
 static const char *shader_filter_get_name(void *unused)
@@ -410,6 +459,12 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	sf->custom_high_hz = (float)obs_data_get_double(settings, S_CUSTOM_HIGH_HZ);
 	sf->custom_mode = (enum vs_hz_band_mode)obs_data_get_int(settings, S_CUSTOM_MODE);
 
+	char prev_preset[128];
+	char prev_file_path[512];
+	snprintf(prev_preset, sizeof(prev_preset), "%s", sf->preset_shader);
+	snprintf(prev_file_path, sizeof(prev_file_path), "%s", sf->shader_file_path);
+	const bool prev_override = sf->override_entire_effect;
+
 	const char *preset = obs_data_get_string(settings, S_PRESET_SHADER);
 	if (!preset || preset[0] == '\0')
 		preset = "fft-spectral-aura.shader";
@@ -424,17 +479,56 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	bfree(sf->shader_text);
 	sf->shader_text = bstrdup(stext ? stext : "");
 
-	char sig[1024];
-	snprintf(sig, sizeof(sig), "%s|%s|%d|%s", sf->preset_shader, sf->shader_file_path,
-		 sf->override_entire_effect ? 1 : 0,
-		 (strcmp(sf->preset_shader, PRESET_CUSTOM_TEXT) == 0) ? sf->shader_text : "");
+	size_t text_len = 0u;
+	const uint64_t text_hash =
+		(strcmp(sf->preset_shader, PRESET_CUSTOM_TEXT) == 0) ? fnv1a_64(sf->shader_text, &text_len) : 0ULL;
 
-	if (strcmp(sig, sf->last_compiled_signature) != 0 || (!sf->effect && sf->compile_error[0] == '\0')) {
+	char sig[1024];
+	snprintf(sig, sizeof(sig), "%s|%s|%d|%zu|%016llx", sf->preset_shader, sf->shader_file_path,
+		 sf->override_entire_effect ? 1 : 0, text_len, (unsigned long long)text_hash);
+
+	obs_enter_graphics();
+	const bool needs_compile = (strcmp(sig, sf->last_compiled_signature) != 0) ||
+				   (!sf->effect && sf->compile_error[0] == '\0');
+	obs_leave_graphics();
+
+	if (needs_compile) {
 		snprintf(sf->last_compiled_signature, sizeof(sf->last_compiled_signature), "%s", sig);
 		compile_shader(sf, settings);
+
+		/* Rebuild Properties immediately when switching presets, selecting a file, toggling full-effect mode,
+		 * or clicking Defaults. Avoid rebuilding on every keystroke inside the inline HLSL multiline editor
+		 * so Qt text cursor focus is preserved while typing (Reload & Recompile rebuilds inline uniforms). */
+		const bool ui_source_switched = (strcmp(prev_preset, sf->preset_shader) != 0) ||
+						(strcmp(prev_file_path, sf->shader_file_path) != 0) ||
+						(prev_override != sf->override_entire_effect);
+		if (!sf->in_create && !sf->rebuilding_props && ui_source_switched && sf->context) {
+			sf->rebuilding_props = true;
+			obs_source_update_properties(sf->context);
+			sf->rebuilding_props = false;
+		}
 	} else {
-		update_user_uniform_values_from_settings(sf, settings);
+		obs_enter_graphics();
+		update_user_uniform_values_locked(sf, settings);
+		obs_leave_graphics();
 	}
+}
+
+static void shader_filter_save(void *data, obs_data_t *settings)
+{
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+	if (!sf || !settings)
+		return;
+
+	/* If OBS saves the scene collection while Panic is active, write pre-panic uniform values into settings
+	 * for serialization while keeping runtime panic_passthrough active on live video output. */
+	obs_enter_graphics();
+	for (size_t i = 0; i < sf->parsed.param_count; i++) {
+		if (sf->panic_slots[i].saved_valid && sf->parsed.params[i].type == VS_SHADER_PARAM_FLOAT) {
+			obs_data_set_double(settings, sf->parsed.params[i].name, sf->panic_slots[i].saved_value);
+		}
+	}
+	obs_leave_graphics();
 }
 
 static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
@@ -443,6 +537,7 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 	sf->context = source;
 	sf->rand_instance_f = next_unit_rand();
 	sf->rand_activation_f = next_unit_rand();
+	sf->panic_passthrough = vs_fader_bridge_is_panic_active();
 
 	vs_audio_tap_init(&sf->tap, true);
 
@@ -453,7 +548,9 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 	}
 	obs_leave_graphics();
 
+	sf->in_create = true;
 	shader_filter_update(sf, settings);
+	sf->in_create = false;
 	return sf;
 }
 
@@ -483,6 +580,20 @@ static void shader_filter_activate(void *data)
 {
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
 	sf->rand_activation_f = next_unit_rand();
+}
+
+static void shader_filter_add(void *data, obs_source_t *parent)
+{
+	UNUSED_PARAMETER(parent);
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+	if (!sf || !sf->context)
+		return;
+
+	obs_data_t *s = obs_source_get_settings(sf->context);
+	if (s) {
+		vs_audio_tap_update_from_settings(&sf->tap, sf->context, s);
+		obs_data_release(s);
+	}
 }
 
 static void shader_filter_video_tick(void *data, float seconds)
@@ -778,7 +889,9 @@ static bool on_reload_shader_clicked(obs_properties_t *props, obs_property_t *pr
 	sf->last_compiled_signature[0] = '\0';
 	compile_shader(sf, settings);
 	obs_data_release(settings);
+	sf->rebuilding_props = true;
 	obs_source_update_properties(sf->context);
+	sf->rebuilding_props = false;
 	return true;
 }
 
@@ -788,7 +901,32 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 
 	/* 1. Audio Sidechain & Analysis group (defaulting to Track 1) */
-	vs_audio_tap_add_properties(props);
+	vs_audio_tap_add_properties(props, sf ? sf->context : NULL);
+
+	/* Snapshot shader compiler state under graphics lock without holding the lock across OBS property creation */
+	char compile_err_snap[1024] = {0};
+	char preset_snap[128] = {0};
+	bool has_effect = false;
+	bool uses_custom_band = true;
+	size_t param_count = 0u;
+	struct vs_shader_param_info *params_snap = NULL;
+
+	if (sf) {
+		obs_enter_graphics();
+		snprintf(compile_err_snap, sizeof(compile_err_snap), "%s", sf->compile_error);
+		snprintf(preset_snap, sizeof(preset_snap), "%s", sf->preset_shader);
+		has_effect = (sf->effect != NULL);
+		uses_custom_band = (sf->p_audio_custom_band != NULL);
+		param_count = sf->parsed.param_count;
+		if (param_count > 0u) {
+			params_snap = (struct vs_shader_param_info *)bzalloc(sizeof(*params_snap) * param_count);
+			if (params_snap)
+				memcpy(params_snap, sf->parsed.params, sizeof(*params_snap) * param_count);
+			else
+				param_count = 0u;
+		}
+		obs_leave_graphics();
+	}
 
 	/* 2. Shader selection & Custom Hz Window group */
 	obs_properties_t *sh_grp = obs_properties_create();
@@ -813,29 +951,45 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.CustomText"), PRESET_CUSTOM_TEXT);
 	obs_property_set_modified_callback(p_preset, on_preset_changed);
 
-	obs_properties_add_path(sh_grp, S_SHADER_FILE_PATH, obs_module_text("Shader.FilePath"), OBS_PATH_FILE,
-				"Shader Files (*.shader *.effect *.hlsl);;All Files (*.*)", NULL);
-	obs_properties_add_text(sh_grp, S_SHADER_TEXT, obs_module_text("Shader.Text"), OBS_TEXT_MULTILINE);
-	obs_properties_add_bool(sh_grp, S_OVERRIDE_EFFECT, obs_module_text("Shader.OverrideEffect"));
+	const bool is_file = (strcmp(preset_snap, PRESET_CUSTOM_FILE) == 0);
+	const bool is_text = (strcmp(preset_snap, PRESET_CUSTOM_TEXT) == 0);
+
+	obs_property_t *p_path =
+		obs_properties_add_path(sh_grp, S_SHADER_FILE_PATH, obs_module_text("Shader.FilePath"), OBS_PATH_FILE,
+					"Shader Files (*.shader *.effect *.hlsl);;All Files (*.*)", NULL);
+	obs_property_set_visible(p_path, is_file);
+
+	obs_property_t *p_text =
+		obs_properties_add_text(sh_grp, S_SHADER_TEXT, obs_module_text("Shader.Text"), OBS_TEXT_MULTILINE);
+	obs_property_set_visible(p_text, is_text);
+
+	obs_property_t *p_ov =
+		obs_properties_add_bool(sh_grp, S_OVERRIDE_EFFECT, obs_module_text("Shader.OverrideEffect"));
+	obs_property_set_visible(p_ov, is_file || is_text);
+
 	obs_properties_add_button2(sh_grp, S_RELOAD_SHADER, obs_module_text("Shader.Reload"), on_reload_shader_clicked,
 				   sf);
 
-	if (sf && sf->compile_error[0] != '\0') {
+	if (sf && compile_err_snap[0] != '\0') {
 		obs_property_t *err_prop = obs_properties_add_text(
 			sh_grp, S_COMPILE_STATUS, obs_module_text("Shader.CompileStatus"), OBS_TEXT_INFO);
 		obs_property_text_set_info_type(err_prop, OBS_TEXT_INFO_ERROR);
 		obs_data_t *settings = obs_source_get_settings(sf->context);
-		obs_data_set_string(settings, S_COMPILE_STATUS, sf->compile_error);
+		obs_data_set_string(settings, S_COMPILE_STATUS, compile_err_snap);
 		obs_data_release(settings);
 	}
+
+	const bool show_custom_band = (!has_effect || uses_custom_band);
 
 	obs_property_t *p_low = obs_properties_add_float_slider(
 		sh_grp, S_CUSTOM_LOW_HZ, obs_module_text("Shader.CustomLowHz"), 20.0, 20000.0, 5.0);
 	obs_property_float_set_suffix(p_low, " Hz");
+	obs_property_set_visible(p_low, show_custom_band);
 
 	obs_property_t *p_high = obs_properties_add_float_slider(
 		sh_grp, S_CUSTOM_HIGH_HZ, obs_module_text("Shader.CustomHighHz"), 20.0, 20000.0, 5.0);
 	obs_property_float_set_suffix(p_high, " Hz");
+	obs_property_set_visible(p_high, show_custom_band);
 
 	obs_property_t *p_cmode = obs_properties_add_list(sh_grp, S_CUSTOM_MODE, obs_module_text("Shader.CustomMode"),
 							  OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -843,23 +997,50 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 				  (long long)VS_HZ_MODE_AVERAGE);
 	obs_property_list_add_int(p_cmode, obs_module_text("Modulator.CustomMode.Peak"), (long long)VS_HZ_MODE_PEAK);
 	obs_property_list_add_int(p_cmode, obs_module_text("Modulator.CustomMode.Flux"), (long long)VS_HZ_MODE_FLUX);
+	obs_property_set_visible(p_cmode, show_custom_band);
 
 	obs_properties_add_group(props, "vs_shader_source_group", obs_module_text("Shader.Group"), OBS_GROUP_NORMAL,
 				 sh_grp);
 
 	/* 3. Dynamic User Uniform Parameters (R-UP-4) */
-	if (sf && sf->parsed.param_count > 0) {
+	if (param_count > 0u && params_snap) {
 		obs_properties_t *u_grp = obs_properties_create();
-		for (size_t i = 0; i < sf->parsed.param_count; i++) {
-			const struct vs_shader_param_info *info = &sf->parsed.params[i];
+		for (size_t i = 0; i < param_count; i++) {
+			const struct vs_shader_param_info *info = &params_snap[i];
+			const bool is_scroller = (strcmp(info->widget_type, "scroller") == 0 ||
+						  strcmp(info->widget_type, "spinbox") == 0);
+			const bool is_select = (info->option_count > 0u) && (strcmp(info->widget_type, "select") == 0 ||
+									     strcmp(info->widget_type, "list") == 0);
 			obs_property_t *up = NULL;
 			if (info->type == VS_SHADER_PARAM_FLOAT) {
-				up = obs_properties_add_float_slider(u_grp, info->name, info->label, info->min_val,
-								     info->max_val, info->step_val);
+				if (is_scroller) {
+					up = obs_properties_add_float(u_grp, info->name, info->label, info->min_val,
+								      info->max_val, info->step_val);
+				} else {
+					up = obs_properties_add_float_slider(u_grp, info->name, info->label,
+									     info->min_val, info->max_val,
+									     info->step_val);
+				}
 			} else if (info->type == VS_SHADER_PARAM_INT) {
-				up = obs_properties_add_int_slider(u_grp, info->name, info->label, (int)info->min_val,
-								   (int)info->max_val,
-								   info->step_val >= 1.0 ? (int)info->step_val : 1);
+				const int step = info->step_val >= 1.0 ? (int)info->step_val : 1;
+				if (is_select) {
+					up = obs_properties_add_list(u_grp, info->name, info->label,
+								     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+					for (size_t opt_i = 0; opt_i < info->option_count; opt_i++) {
+						const char *lbl = info->option_labels[opt_i][0] != '\0'
+									  ? info->option_labels[opt_i]
+									  : info->name;
+						obs_property_list_add_int(up, lbl,
+									  (long long)info->option_values[opt_i]);
+					}
+				} else if (is_scroller) {
+					up = obs_properties_add_int(u_grp, info->name, info->label, (int)info->min_val,
+								    (int)info->max_val, step);
+				} else {
+					up = obs_properties_add_int_slider(u_grp, info->name, info->label,
+									   (int)info->min_val, (int)info->max_val,
+									   step);
+				}
 			} else if (info->type == VS_SHADER_PARAM_BOOL) {
 				up = obs_properties_add_bool(u_grp, info->name, info->label);
 			} else if (info->type == VS_SHADER_PARAM_COLOR) {
@@ -876,6 +1057,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 		obs_properties_add_group(props, "vs_shader_params_group", obs_module_text("Shader.ParamsGroup"),
 					 OBS_GROUP_NORMAL, u_grp);
 	}
+	bfree(params_snap);
 
 	return props;
 }
@@ -891,11 +1073,13 @@ void vs_register_shader_filter(void)
 	info.destroy = shader_filter_destroy;
 	info.get_defaults = shader_filter_get_defaults;
 	info.update = shader_filter_update;
+	info.save = shader_filter_save;
 	info.activate = shader_filter_activate;
 	info.video_tick = shader_filter_video_tick;
 	info.video_render = shader_filter_video_render;
 	info.video_get_color_space = shader_filter_get_color_space;
 	info.get_properties = shader_filter_get_properties;
+	info.filter_add = shader_filter_add;
 
 	obs_register_source(&info);
 }
@@ -908,13 +1092,15 @@ void vs_shader_filter_apply_panic(obs_source_t *source)
 	if (!sf)
 		return;
 
+	obs_data_t *settings = obs_source_get_settings(source);
+
+	obs_enter_graphics();
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		sf->panic_slots[i].current_value = (double)sf->user_bindings[i].f_val;
 	}
 	vs_fader_bridge_apply_panic_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count);
 	sf->feedback_seeded = false;
 
-	obs_data_t *settings = obs_source_get_settings(source);
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
 		if (info->type == VS_SHADER_PARAM_FLOAT) {
@@ -923,6 +1109,8 @@ void vs_shader_filter_apply_panic(obs_source_t *source)
 				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
 		}
 	}
+	obs_leave_graphics();
+
 	if (settings)
 		obs_data_release(settings);
 	obs_source_update_properties(source);
@@ -936,9 +1124,11 @@ void vs_shader_filter_apply_restore(obs_source_t *source)
 	if (!sf)
 		return;
 
+	obs_data_t *settings = obs_source_get_settings(source);
+
+	obs_enter_graphics();
 	vs_fader_bridge_apply_restore_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count);
 
-	obs_data_t *settings = obs_source_get_settings(source);
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
 		if (info->type == VS_SHADER_PARAM_FLOAT) {
@@ -947,6 +1137,8 @@ void vs_shader_filter_apply_restore(obs_source_t *source)
 				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
 		}
 	}
+	obs_leave_graphics();
+
 	if (settings)
 		obs_data_release(settings);
 	obs_source_update_properties(source);

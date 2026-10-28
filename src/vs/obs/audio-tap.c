@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - OBS 33 Audio Tap Manager & Shared GPU FFT Textures
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +15,8 @@
 
 #include <media-io/audio-io.h>
 #include <string.h>
+
+#define S_TAP_STATUS_WARNING "tap_status_warning"
 
 static void raw_audio_callback(void *param, size_t mix_idx, struct audio_data *frames)
 {
@@ -72,6 +75,7 @@ static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *fil
 		obs_add_raw_audio_callback(mix_idx, NULL, raw_audio_callback, tap);
 		tap->active_mix_idx = mix_idx;
 		tap->raw_cb_active = true;
+		tap->warned_attachment_failure = false;
 		obs_log(LOG_INFO, "Attached audio tap to Track %u (mix_idx=%zu)", (unsigned)(mix_idx + 1u), mix_idx);
 		return true;
 	}
@@ -85,14 +89,18 @@ static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *fil
 
 		const uint32_t flags = obs_source_get_output_flags(parent);
 		if ((flags & OBS_SOURCE_AUDIO) == 0) {
-			obs_log(LOG_WARNING, "Parent source '%s' has no audio output capability",
-				obs_source_get_name(parent));
+			if (!tap->warned_attachment_failure) {
+				obs_log(LOG_WARNING, "Parent source '%s' has no audio output capability",
+					obs_source_get_name(parent));
+				tap->warned_attachment_failure = true;
+			}
 			return false;
 		}
 
 		tap->weak_capture_source = obs_source_get_weak_source(parent);
 		obs_source_add_audio_capture_callback(parent, source_audio_capture_callback, tap);
 		tap->source_cb_active = true;
+		tap->warned_attachment_failure = false;
 		obs_log(LOG_INFO, "Attached audio tap to parent source '%s'", obs_source_get_name(parent));
 		return true;
 	}
@@ -101,12 +109,23 @@ static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *fil
 		if (tap->source_name[0] == '\0')
 			return false;
 		obs_source_t *src = obs_get_source_by_name(tap->source_name);
-		if (!src)
+		if (!src) {
+			if (!tap->warned_attachment_failure) {
+				obs_log(LOG_WARNING,
+					"Named audio source '%s' not found; waiting for source to become available",
+					tap->source_name);
+				tap->warned_attachment_failure = true;
+			}
 			return false;
+		}
 
 		const uint32_t flags = obs_source_get_output_flags(src);
 		if ((flags & OBS_SOURCE_AUDIO) == 0) {
-			obs_log(LOG_WARNING, "Named source '%s' has no audio output capability", tap->source_name);
+			if (!tap->warned_attachment_failure) {
+				obs_log(LOG_WARNING, "Named source '%s' has no audio output capability",
+					tap->source_name);
+				tap->warned_attachment_failure = true;
+			}
 			obs_source_release(src);
 			return false;
 		}
@@ -114,6 +133,7 @@ static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *fil
 		tap->weak_capture_source = obs_source_get_weak_source(src);
 		obs_source_add_audio_capture_callback(src, source_audio_capture_callback, tap);
 		tap->source_cb_active = true;
+		tap->warned_attachment_failure = false;
 		obs_log(LOG_INFO, "Attached audio tap to named source '%s'", tap->source_name);
 		obs_source_release(src);
 		return true;
@@ -185,13 +205,16 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 		return;
 
 	const char *safe_name = source_name ? source_name : "";
-	const bool target_changed = (tap->mode != mode) ||
-				    (strncmp(tap->source_name, safe_name, sizeof(tap->source_name) - 1u) != 0) ||
-				    (!tap->raw_cb_active && !tap->source_cb_active);
+	const bool selection_changed = (tap->mode != mode) ||
+				       (strncmp(tap->source_name, safe_name, sizeof(tap->source_name) - 1u) != 0);
+	const bool target_changed = selection_changed || (!tap->raw_cb_active && !tap->source_cb_active);
 
 	tap->react_when_muted = react_when_muted;
 	if (ana_cfg)
 		vs_analyzer_update_config(&tap->analyzer, ana_cfg);
+
+	if (selection_changed)
+		tap->warned_attachment_failure = false;
 
 	if (target_changed) {
 		detach_tap_callbacks(tap);
@@ -251,7 +274,7 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 	tap->last_video_frame_ts = video_ts;
 
 	vs_analyzer_step(&tap->analyzer, seconds, &tap->current_frame);
-	vs_vendor_api_on_tick(seconds, &tap->current_frame);
+	vs_vendor_api_on_tick(video_ts, seconds, &tap->current_frame, tap->mode == VS_TAP_TRACK_1);
 	upload_tap_textures(tap);
 }
 
@@ -316,9 +339,43 @@ static bool enum_audio_sources_cb(void *data, obs_source_t *source)
 	return true;
 }
 
-static bool tap_mode_modified_cb(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+static const char *evaluate_tap_warning_text(obs_source_t *filter_source, obs_data_t *settings)
+{
+	if (!settings)
+		return NULL;
+
+	const int mode = (int)obs_data_get_int(settings, "tap_mode");
+	if (mode == (int)VS_TAP_PARENT_SOURCE) {
+		if (!filter_source)
+			return NULL;
+		obs_source_t *parent = obs_filter_get_parent(filter_source);
+		if (parent && (obs_source_get_output_flags(parent) & OBS_SOURCE_AUDIO) == 0)
+			return obs_module_text("AudioTap.Warning.ParentNoAudio");
+		return NULL;
+	}
+
+	if (mode == (int)VS_TAP_NAMED_SOURCE) {
+		const char *src_name = obs_data_get_string(settings, "tap_source_name");
+		if (!src_name || src_name[0] == '\0')
+			return obs_module_text("AudioTap.Warning.NamedEmpty");
+
+		obs_source_t *src = obs_get_source_by_name(src_name);
+		if (!src)
+			return obs_module_text("AudioTap.Warning.NamedMissing");
+
+		const uint32_t flags = obs_source_get_output_flags(src);
+		obs_source_release(src);
+		if ((flags & OBS_SOURCE_AUDIO) == 0)
+			return obs_module_text("AudioTap.Warning.NamedNoAudio");
+	}
+
+	return NULL;
+}
+
+static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(property);
+	obs_source_t *filter_source = (obs_source_t *)priv;
 	if (!props || !settings)
 		return false;
 
@@ -326,14 +383,20 @@ static bool tap_mode_modified_cb(obs_properties_t *props, obs_property_t *proper
 	const bool is_named = (mode == (int)VS_TAP_NAMED_SOURCE);
 	const bool is_source = (mode == (int)VS_TAP_NAMED_SOURCE || mode == (int)VS_TAP_PARENT_SOURCE);
 	const bool auto_gain = obs_data_get_bool(settings, "auto_gain");
+	const char *warn_text = evaluate_tap_warning_text(filter_source, settings);
 
 	obs_property_t *p_src = obs_properties_get(props, "tap_source_name");
+	obs_property_t *p_warn = obs_properties_get(props, S_TAP_STATUS_WARNING);
 	obs_property_t *p_mute = obs_properties_get(props, "react_when_muted");
 	obs_property_t *p_floor = obs_properties_get(props, "floor_db");
 	obs_property_t *p_ceil = obs_properties_get(props, "ceiling_db");
 
 	if (p_src)
 		obs_property_set_visible(p_src, is_named);
+	if (p_warn) {
+		obs_data_set_string(settings, S_TAP_STATUS_WARNING, warn_text ? warn_text : "");
+		obs_property_set_visible(p_warn, warn_text != NULL);
+	}
 	if (p_mute)
 		obs_property_set_visible(p_mute, is_source);
 	if (p_floor)
@@ -344,7 +407,7 @@ static bool tap_mode_modified_cb(obs_properties_t *props, obs_property_t *proper
 	return true;
 }
 
-void vs_audio_tap_add_properties(obs_properties_t *props)
+void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source)
 {
 	if (!props)
 		return;
@@ -361,21 +424,30 @@ void vs_audio_tap_add_properties(obs_properties_t *props)
 	obs_property_list_add_int(mode_list, obs_module_text("AudioTap.Mode.Track6"), (int)VS_TAP_TRACK_6);
 	obs_property_list_add_int(mode_list, obs_module_text("AudioTap.Mode.ParentSource"), (int)VS_TAP_PARENT_SOURCE);
 	obs_property_list_add_int(mode_list, obs_module_text("AudioTap.Mode.NamedSource"), (int)VS_TAP_NAMED_SOURCE);
-	obs_property_set_modified_callback(mode_list, tap_mode_modified_cb);
+	obs_property_set_modified_callback2(mode_list, tap_mode_modified_cb, filter_source);
 
 	obs_property_t *src_list = obs_properties_add_list(grp, "tap_source_name", obs_module_text("AudioTap.Source"),
 							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(src_list, obs_module_text("AudioTap.Source.None"), "");
 	obs_enum_sources(enum_audio_sources_cb, src_list);
+	obs_property_set_modified_callback2(src_list, tap_mode_modified_cb, filter_source);
 
-	obs_properties_add_bool(grp, "react_when_muted", obs_module_text("AudioTap.ReactWhenMuted"));
+	obs_property_t *p_warn =
+		obs_properties_add_text(grp, S_TAP_STATUS_WARNING, obs_module_text("AudioTap.Status"), OBS_TEXT_INFO);
+	obs_property_text_set_info_type(p_warn, OBS_TEXT_INFO_WARNING);
+	obs_property_set_visible(p_warn, false);
+
+	obs_property_t *p_mute =
+		obs_properties_add_bool(grp, "react_when_muted", obs_module_text("AudioTap.ReactWhenMuted"));
+	obs_property_set_long_description(p_mute, obs_module_text("AudioTap.ReactWhenMuted.Tooltip"));
 
 	obs_property_t *p_sync = obs_properties_add_float_slider(
 		grp, "sync_offset_ms", obs_module_text("AudioTap.SyncOffsetMs"), -200.0, 500.0, 1.0);
 	obs_property_float_set_suffix(p_sync, " ms");
+	obs_property_set_long_description(p_sync, obs_module_text("AudioTap.SyncOffsetMs.Tooltip"));
 
 	obs_property_t *p_ag = obs_properties_add_bool(grp, "auto_gain", obs_module_text("AudioTap.AutoGain"));
-	obs_property_set_modified_callback(p_ag, tap_mode_modified_cb);
+	obs_property_set_modified_callback2(p_ag, tap_mode_modified_cb, filter_source);
 
 	obs_property_t *p_gate =
 		obs_properties_add_float_slider(grp, "gate_db", obs_module_text("AudioTap.GateDb"), -80.0, -20.0, 1.0);
@@ -403,4 +475,12 @@ void vs_audio_tap_add_properties(obs_properties_t *props)
 					1.0, 0.01);
 
 	obs_properties_add_group(props, "audio_tap_group", obs_module_text("AudioTap.Group"), OBS_GROUP_NORMAL, grp);
+
+	if (filter_source) {
+		obs_data_t *settings = obs_source_get_settings(filter_source);
+		if (settings) {
+			tap_mode_modified_cb(filter_source, props, NULL, settings);
+			obs_data_release(settings);
+		}
+	}
 }

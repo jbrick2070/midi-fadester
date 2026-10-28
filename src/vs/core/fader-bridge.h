@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - Pure-C Fader Slot & In-Process Signal Bridge
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,6 +17,7 @@
 #include <callback/signal.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -65,9 +67,14 @@ bool vs_fader_bridge_should_emit_signals(float dt_sec, const struct vs_audio_fra
 /*
  * Runs once per video tick: publishes the latest audio frame, performs at most
  * one round-robin poll of `midi_fadester_get_slot_value` on the attached
- * proc_handler, and emits the coalesced `visual_sidechain_signals` signal on
- * the attached signal_handler (returning true when a 30 Hz emission occurred).
+ * proc_handler per distinct non-zero `video_frame_ts`, prioritizes Track 1
+ * publishers over secondary taps, and emits the coalesced
+ * `visual_sidechain_signals` signal at <= 30 Hz (returning true when an
+ * emission occurred). Passing `video_frame_ts == 0` treats every call as a
+ * distinct frame for standalone unit tests.
  */
+bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
+				   bool is_primary_track);
 bool vs_fader_bridge_on_tick(float dt_sec, const struct vs_audio_frame *frame);
 
 /*

@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - OBS 33 Audio Tap Manager & Shared GPU FFT Textures
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -40,6 +41,7 @@ struct vs_audio_tap {
 	size_t active_mix_idx;
 	obs_weak_source_t *weak_capture_source;
 	bool source_cb_active;
+	bool warned_attachment_failure;
 	float retry_accum_sec;
 
 	uint32_t sample_rate;
@@ -65,7 +67,7 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 /* Shared OBS settings & properties helpers used by both Shader Filter and Audio Modulator. */
 void vs_audio_tap_get_defaults(obs_data_t *settings);
 void vs_audio_tap_update_from_settings(struct vs_audio_tap *tap, obs_source_t *filter_source, obs_data_t *settings);
-void vs_audio_tap_add_properties(obs_properties_t *props);
+void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source);
 
 #ifdef __cplusplus
 }

@@ -9,8 +9,11 @@
  */
 
 uniform int overlay_mode <
-	string label = "Visualizer Mode (0=Bars+Scope, 1=Polar Ring, 2=Bars Only)";
-	string widget_type = "slider";
+	string label = "Visualizer Mode";
+	string widget_type = "select";
+	string option_0 = "Bars + Oscilloscope";
+	string option_1 = "Polar Spectrum Ring";
+	string option_2 = "Spectrum Bars Only";
 	int minimum = 0;
 	int maximum = 2;
 	int step = 1;

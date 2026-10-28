@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - Pure-C Modulation Slot Math & Rate/Epsilon Gate
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,6 +14,7 @@
 #include "analyzer.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -69,6 +71,30 @@ void vs_mod_slot_reset_state(struct vs_mod_slot_state *state);
  */
 void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state, float signal_01,
 		      struct vs_mod_eval_result *out_res);
+
+struct vs_mod_target_write {
+	uint32_t slot_index;
+	const char *target_setting;
+	enum vs_prop_type prop_type;
+	double float_val;
+	int64_t int_val;
+};
+
+struct vs_mod_target_batch {
+	const char *target_filter;
+	struct vs_mod_target_write writes[VS_MOD_MAX_SLOTS];
+	size_t write_count;
+};
+
+/*
+ * Evaluates up to `slot_count` (<= VS_MOD_MAX_SLOTS) modulation slots for one
+ * video tick and groups all dirty writes targeting the same `target_filter`
+ * into a single `vs_mod_target_batch` so the host filter performs at most one
+ * `obs_source_update` per distinct target filter per frame (R-MOD-4).
+ */
+size_t vs_mod_eval_and_batch_slots(const struct vs_mod_slot_config *cfgs, struct vs_mod_slot_state *states,
+				   const float *signals_01, size_t slot_count,
+				   struct vs_mod_target_batch out_batches[VS_MOD_MAX_SLOTS]);
 
 #ifdef __cplusplus
 }

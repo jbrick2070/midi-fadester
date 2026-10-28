@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - obs-websocket 5 Vendor API & In-Process Signal Bridge
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -72,19 +73,23 @@ void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response
 	fill_signals_data(response_data, &frame);
 }
 
-void vs_vendor_api_on_tick(float dt_sec, const struct vs_audio_frame *frame)
+void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
+			   bool is_primary_track)
 {
 	if (!frame)
 		return;
 
-	if (!vs_fader_bridge_on_tick(dt_sec, frame))
+	if (!vs_fader_bridge_on_frame_tick(video_frame_ts, dt_sec, frame, is_primary_track))
 		return;
 
 	if (!g_ws_ph || !g_vendor)
 		return;
 
+	struct vs_audio_frame snap;
+	vs_fader_bridge_get_signals(&snap);
+
 	obs_data_t *event_data = obs_data_create();
-	fill_signals_data(event_data, frame);
+	fill_signals_data(event_data, &snap);
 
 	struct calldata cd;
 	calldata_init(&cd);

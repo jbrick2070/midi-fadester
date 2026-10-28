@@ -9,8 +9,12 @@
  */
 
 uniform int mirror_mode <
-	string label = "Mirror Mode (0=Horizontal, 1=Quad, 2=Diagonal, 3=FFT Slices)";
-	string widget_type = "slider";
+	string label = "Mirror Mode";
+	string widget_type = "select";
+	string option_0 = "Horizontal 2-Way";
+	string option_1 = "4-Way Quad";
+	string option_2 = "Beat-Flipped Diagonal";
+	string option_3 = "FFT Displaced Slices";
 	int minimum = 0;
 	int maximum = 3;
 	int step = 1;

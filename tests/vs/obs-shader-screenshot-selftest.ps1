@@ -6,6 +6,12 @@
 
 $ErrorActionPreference = "Stop"
 
+$existingObs = Get-Process -Name "obs64" -ErrorAction SilentlyContinue
+if ($existingObs) {
+    Write-Error "ABORT_OBS_ALREADY_RUNNING: obs64.exe is already running (PID=$($existingObs.Id -join ',')). Stopping per operator lock rule."
+    exit 42
+}
+
 $obsRoot = "C:\Users\jeffr\OBS-Studio-33-Portable"
 $obsBin  = "$obsRoot\bin\64bit"
 $wsCfg   = Get-Content "$obsRoot\config\obs-studio\plugin_config\obs-websocket\config.json" | ConvertFrom-Json
@@ -129,6 +135,7 @@ try {
         }
     }
 
+    $origScene = (Call-ObsReq "GetCurrentProgramScene" @{}).responseData.currentProgramSceneName
     $null = Call-ObsReq "CreateScene" @{ sceneName = "__vs_selftest_scene__" }
     $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = "__vs_selftest_scene__" }
     $null = Call-ObsReq "CreateInput" @{
@@ -183,7 +190,9 @@ try {
     $statusB = if ($passB) { "PASS" } else { "FAIL" }
     Write-Host ("[visual-sidechain] SCREENSHOT CHECK (b) 50% opacity  [{0}]: measured_lin=({1:F4}, {2:F4}, {3:F4}) srgb=({4:F4}, {5:F4}, {6:F4}) expected_lin=({7:F4}, 0.0000, 0.0000) err={8:F4} (<= 0.0100)" -f $statusB, $resB.lin_r, $resB.lin_g, $resB.lin_b, $resB.srgb_r, $resB.srgb_g, $resB.srgb_b, $expectedB, $errB)
 
-    $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = "Scene" }
+    if ($origScene -and $origScene -ne "__vs_selftest_scene__") {
+        $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = $origScene }
+    }
     $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_color__" }
     $null = Call-ObsReq "RemoveScene" @{ sceneName = "__vs_selftest_scene__" }
     $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "done", $ct).GetAwaiter().GetResult() | Out-Null

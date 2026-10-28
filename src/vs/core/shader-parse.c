@@ -1,6 +1,7 @@
 /*
  * Visual Sidechain - Pure-C Shader Include Expander, Annotation Parser & Effect Builder
- * Copyright (C) 2026
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -11,6 +12,7 @@
 #include "shader-parse.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -354,6 +356,16 @@ static void parse_annotation_block(const char *ann_start, const char *ann_end, s
 										  : sizeof(param->tooltip) - 1u;
 							memcpy(param->tooltip, v_start + 1, cp);
 							param->tooltip[cp] = '\0';
+						} else if (strncmp(key, "option_", 7) == 0 && key[7] >= '0' &&
+							   key[7] < (char)('0' + (int)VS_SHADER_MAX_OPTIONS) &&
+							   (key[8] == '\0' || strcmp(key + 8, "_label") == 0)) {
+							const size_t opt_idx = (size_t)(key[7] - '0');
+							const size_t cap = sizeof(param->option_labels[opt_idx]) - 1u;
+							const size_t cp = v_len < cap ? v_len : cap;
+							memcpy(param->option_labels[opt_idx], v_start + 1, cp);
+							param->option_labels[opt_idx][cp] = '\0';
+							if (opt_idx + 1u > param->option_count)
+								param->option_count = opt_idx + 1u;
 						}
 					}
 				} else {
@@ -367,6 +379,13 @@ static void parse_annotation_block(const char *ann_start, const char *ann_end, s
 					} else if (strcmp(key, "step") == 0) {
 						param->step_val = num;
 						param->has_step = true;
+					} else if (strncmp(key, "option_", 7) == 0 && key[7] >= '0' &&
+						   key[7] < (char)('0' + (int)VS_SHADER_MAX_OPTIONS) &&
+						   strcmp(key + 8, "_value") == 0) {
+						const size_t opt_idx = (size_t)(key[7] - '0');
+						param->option_values[opt_idx] = (int)llround(num);
+						if (opt_idx + 1u > param->option_count)
+							param->option_count = opt_idx + 1u;
 					}
 				}
 			}
@@ -455,6 +474,8 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 						struct vs_shader_param_info *info =
 							&out_res->params[out_res->param_count++];
 						memset(info, 0, sizeof(*info));
+						for (size_t opt_i = 0; opt_i < VS_SHADER_MAX_OPTIONS; opt_i++)
+							info->option_values[opt_i] = (int)opt_i;
 						strncpy(info->name, name_str, sizeof(info->name) - 1u);
 						strncpy(info->label, name_str, sizeof(info->label) - 1u);
 						strncpy(info->widget_type, "slider", sizeof(info->widget_type) - 1u);
