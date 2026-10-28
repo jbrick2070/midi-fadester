@@ -897,6 +897,106 @@ static void run_live_selftest_worker(void)
 			(int)bright_ok, (int)is_parked, (int)expected_parked);
 	}
 
+	/*
+	 * Check (2b): Live libobs "reorder", "item_remove", and "item_add" signal verification (zero timers):
+	 *   1. Move src_a (Left / Red) to OBS_ORDER_MOVE_TOP so Left is ABOVE Right (Blue) in test_scene.
+	 *   2. Set fader_1 = 0.25 and capture GetSourceScreenshot -> must render (0.75 Red, 0.25 Blue) with zero dip.
+	 *   3. Remove src_b from test_scene -> get_state immediately reports available=false and
+	 *      "<src_b> is no longer in scene <program_scene_name>." via libobs "item_remove" signal.
+	 *   4. Re-add src_b to test_scene -> get_state immediately reports available=true, reason="" via "item_add".
+	 */
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			obs_sceneitem_t *item_a = test_scene ? obs_scene_find_source(test_scene, src_a_actual_name)
+							     : nullptr;
+			if (item_a) {
+				obs_sceneitem_set_order(item_a, OBS_ORDER_MOVE_TOP);
+			}
+		},
+		Qt::BlockingQueuedConnection);
+
+	set_fader1_and_wait(0.25);
+	float inv_r = 0.0f, inv_g = 0.0f, inv_b = 0.0f, inv_srgb = 0.0f;
+	bool inv_cap_ok = capture_source_screenshot_avg_rgb(program_scene_name, &inv_r, &inv_g, &inv_b, &inv_srgb);
+	bool inv_order_ok = eng->fader_slots[1].a_is_above_b && inv_cap_ok && (std::fabs(inv_r - 0.75f) <= 0.02f) &&
+			    (std::fabs(inv_g - 0.0f) <= 0.02f) && (std::fabs(inv_b - 0.25f) <= 0.02f) &&
+			    ((inv_r + inv_g + inv_b) >= min_source_brightness - 0.008f);
+
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			obs_sceneitem_t *item_b = test_scene ? obs_scene_find_source(test_scene, src_b_actual_name)
+							     : nullptr;
+			if (item_b) {
+				obs_sceneitem_remove(item_b);
+			}
+		},
+		Qt::BlockingQueuedConnection);
+
+	bool rm_unavail_ok = false;
+	char expected_rm_reason[256] = {0};
+	std::snprintf(expected_rm_reason, sizeof(expected_rm_reason), "%s is no longer in scene %s.", src_b_actual_name,
+		      program_scene_name);
+	{
+		obs_data_t *gs_req = obs_data_create();
+		obs_data_t *gs_res = call_real_ws_vendor_request("get_state", gs_req);
+		if (gs_res) {
+			obs_data_array_t *arr = obs_data_get_array(gs_res, "slots");
+			obs_data_t *s1 = arr ? obs_data_array_item(arr, 1) : nullptr;
+			if (s1) {
+				const bool av = obs_data_get_bool(s1, "available");
+				const char *rsn = obs_data_get_string(s1, "reason");
+				rm_unavail_ok = (!av) && rsn && (std::strcmp(rsn, expected_rm_reason) == 0);
+				obs_data_release(s1);
+			}
+			if (arr) {
+				obs_data_array_release(arr);
+			}
+			obs_data_release(gs_res);
+		}
+		obs_data_release(gs_req);
+	}
+
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			if (test_scene && src_b) {
+				obs_scene_add(test_scene, src_b);
+			}
+		},
+		Qt::BlockingQueuedConnection);
+
+	bool readd_avail_ok = false;
+	{
+		obs_data_t *gs_req = obs_data_create();
+		obs_data_t *gs_res = call_real_ws_vendor_request("get_state", gs_req);
+		if (gs_res) {
+			obs_data_array_t *arr = obs_data_get_array(gs_res, "slots");
+			obs_data_t *s1 = arr ? obs_data_array_item(arr, 1) : nullptr;
+			if (s1) {
+				const bool av = obs_data_get_bool(s1, "available");
+				const char *rsn = obs_data_get_string(s1, "reason");
+				readd_avail_ok = av && rsn && (rsn[0] == '\0') && (!eng->fader_slots[1].a_is_above_b);
+				obs_data_release(s1);
+			}
+			if (arr) {
+				obs_data_array_release(arr);
+			}
+			obs_data_release(gs_res);
+		}
+		obs_data_release(gs_req);
+	}
+
+	const bool scene_signals_ok = inv_order_ok && rm_unavail_ok && readd_avail_ok;
+	if (!scene_signals_ok) {
+		screenshot_all_pass = false;
+	}
+	obs_log(scene_signals_ok ? LOG_INFO : LOG_ERROR,
+		"SCENE SIGNALS & STACK INVERSION CHECK [%s]: inv_order_ok=%d (avg_rgb=%.4f,%.4f,%.4f) rm_unavail_ok=%d ('%s') readd_avail_ok=%d",
+		scene_signals_ok ? "PASS" : "FAIL", (int)inv_order_ok, inv_r, inv_g, inv_b, (int)rm_unavail_ok,
+		expected_rm_reason, (int)readd_avail_ok);
+
 	if (reopen_midi_after_ss && prev_midi_for_ss[0] != '\0') {
 		QMetaObject::invokeMethod(
 			main_win, [&]() { mfd_engine_reconnect_midi(eng, prev_midi_for_ss); },

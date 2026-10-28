@@ -63,6 +63,44 @@ void mfd_crossfade_eval(enum mfd_crossfade_curve curve, float t, float *out_alph
 	}
 }
 
+void mfd_crossfade_eval_stacked(enum mfd_crossfade_curve curve, float t, bool a_is_above_b, float *out_alpha_a,
+				float *out_alpha_b)
+{
+	if (!out_alpha_a || !out_alpha_b) {
+		return;
+	}
+	if (!a_is_above_b) {
+		mfd_crossfade_eval(curve, t, out_alpha_a, out_alpha_b);
+		return;
+	}
+
+	float x = clamp01(t);
+	switch (curve) {
+	case MFD_CURVE_DIP_FREE:
+		/*
+		 * Left (source_a) is stacked ABOVE Right (source_b) in the scene (D-10):
+		 * Hold lower layer (source_b) at 1.0 across [0.0, 1.0] and fade upper layer
+		 * (source_a) as 1.0 - x so t = 0 shows Left (source_a = 1.0) and t = 1 shows
+		 * Right (source_a = 0.0 revealing source_b = 1.0) with 0% black dip.
+		 */
+		*out_alpha_a = 1.0f - x;
+		*out_alpha_b = 1.0f;
+		break;
+
+	case MFD_CURVE_CUT:
+		*out_alpha_a = (x >= 0.5f) ? 0.0f : 1.0f;
+		*out_alpha_b = 1.0f;
+		break;
+
+	case MFD_CURVE_FULL_CENTER:
+	case MFD_CURVE_COSINE:
+	case MFD_CURVE_LINEAR:
+	default:
+		mfd_crossfade_eval(curve, x, out_alpha_a, out_alpha_b);
+		break;
+	}
+}
+
 float mfd_porter_duff_over_coverage(float alpha_bottom, float alpha_top)
 {
 	float a = clamp01(alpha_bottom);

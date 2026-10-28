@@ -124,14 +124,268 @@ static bool get_slot_parked_via_get_state(struct mfd_engine *eng, int slot_idx)
 	return parked;
 }
 
-static bool mock_source_exists(const char *source_name, void *user_data)
+#define FAKE_MAX_SOURCES 16
+#define FAKE_MAX_SCENES 8
+#define FAKE_MAX_SCENE_ITEMS 8
+
+struct fake_sg_source {
+	bool in_use;
+	char name[64];
+	bool has_audio;
+	float last_opacity;
+	float last_volume_mul;
+	int opacity_writes;
+	int volume_writes;
+};
+
+struct fake_sg_scene {
+	bool in_use;
+	char name[64];
+	int item_count;
+	char items[FAKE_MAX_SCENE_ITEMS][64]; /* index 0 = bottom, index item_count-1 = top */
+};
+
+struct fake_scene_graph {
+	struct fake_sg_source sources[FAKE_MAX_SOURCES];
+	struct fake_sg_scene scenes[FAKE_MAX_SCENES];
+	int total_opacity_writes;
+	int total_volume_writes;
+};
+
+static struct fake_sg_source *fake_sg_find_source(struct fake_scene_graph *sg, const char *name)
 {
-	UNUSED_PARAMETER(user_data);
-	if (!source_name) {
+	if (!sg || !name || name[0] == '\0') {
+		return NULL;
+	}
+	for (int i = 0; i < FAKE_MAX_SOURCES; ++i) {
+		if (sg->sources[i].in_use && strcmp(sg->sources[i].name, name) == 0) {
+			return &sg->sources[i];
+		}
+	}
+	return NULL;
+}
+
+static struct fake_sg_scene *fake_sg_find_scene(struct fake_scene_graph *sg, const char *name)
+{
+	if (!sg || !name || name[0] == '\0') {
+		return NULL;
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (sg->scenes[i].in_use && strcmp(sg->scenes[i].name, name) == 0) {
+			return &sg->scenes[i];
+		}
+	}
+	return NULL;
+}
+
+static void fake_sg_add_source(struct fake_scene_graph *sg, const char *name, bool has_audio)
+{
+	struct fake_sg_source *existing = fake_sg_find_source(sg, name);
+	if (existing) {
+		existing->has_audio = has_audio;
+		return;
+	}
+	for (int i = 0; i < FAKE_MAX_SOURCES; ++i) {
+		if (!sg->sources[i].in_use) {
+			memset(&sg->sources[i], 0, sizeof(sg->sources[i]));
+			sg->sources[i].in_use = true;
+			snprintf(sg->sources[i].name, sizeof(sg->sources[i].name), "%s", name);
+			sg->sources[i].has_audio = has_audio;
+			sg->sources[i].last_opacity = 1.0f;
+			sg->sources[i].last_volume_mul = 1.0f;
+			return;
+		}
+	}
+}
+
+static struct fake_sg_scene *fake_sg_add_scene(struct fake_scene_graph *sg, const char *name)
+{
+	struct fake_sg_scene *existing = fake_sg_find_scene(sg, name);
+	if (existing) {
+		return existing;
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (!sg->scenes[i].in_use) {
+			memset(&sg->scenes[i], 0, sizeof(sg->scenes[i]));
+			sg->scenes[i].in_use = true;
+			snprintf(sg->scenes[i].name, sizeof(sg->scenes[i].name), "%s", name);
+			return &sg->scenes[i];
+		}
+	}
+	return NULL;
+}
+
+static void fake_sg_scene_add_item(struct fake_scene_graph *sg, const char *scene_name, const char *source_name)
+{
+	struct fake_sg_scene *sc = fake_sg_find_scene(sg, scene_name);
+	if (!sc || sc->item_count >= FAKE_MAX_SCENE_ITEMS) {
+		return;
+	}
+	snprintf(sc->items[sc->item_count], sizeof(sc->items[sc->item_count]), "%s", source_name);
+	++sc->item_count;
+}
+
+static void fake_sg_scene_remove_item(struct fake_scene_graph *sg, const char *scene_name, const char *source_name)
+{
+	struct fake_sg_scene *sc = fake_sg_find_scene(sg, scene_name);
+	if (!sc) {
+		return;
+	}
+	for (int i = 0; i < sc->item_count; ++i) {
+		if (strcmp(sc->items[i], source_name) == 0) {
+			for (int j = i; j + 1 < sc->item_count; ++j) {
+				snprintf(sc->items[j], sizeof(sc->items[j]), "%s", sc->items[j + 1]);
+			}
+			sc->items[sc->item_count - 1][0] = '\0';
+			--sc->item_count;
+			return;
+		}
+	}
+}
+
+static void fake_sg_rename(struct fake_scene_graph *sg, const char *prev_name, const char *new_name)
+{
+	struct fake_sg_source *src = fake_sg_find_source(sg, prev_name);
+	if (src) {
+		snprintf(src->name, sizeof(src->name), "%s", new_name);
+	}
+	struct fake_sg_scene *sc = fake_sg_find_scene(sg, prev_name);
+	if (sc) {
+		snprintf(sc->name, sizeof(sc->name), "%s", new_name);
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (!sg->scenes[i].in_use) {
+			continue;
+		}
+		for (int j = 0; j < sg->scenes[i].item_count; ++j) {
+			if (strcmp(sg->scenes[i].items[j], prev_name) == 0) {
+				snprintf(sg->scenes[i].items[j], sizeof(sg->scenes[i].items[j]), "%s", new_name);
+			}
+		}
+	}
+}
+
+static bool fake_op_source_exists(const char *source_name, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	return fake_sg_find_source(sg, source_name) != NULL || fake_sg_find_scene(sg, source_name) != NULL;
+}
+
+static bool fake_op_scene_exists(const char *scene_name, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	return fake_sg_find_scene(sg, scene_name) != NULL;
+}
+
+static bool fake_op_source_has_audio(const char *source_name, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_source *src = fake_sg_find_source(sg, source_name);
+	return src ? src->has_audio : false;
+}
+
+static int fake_op_scene_item_stack_index(const char *scene_name, const char *source_name, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_scene *sc = fake_sg_find_scene(sg, scene_name);
+	if (!sc || !source_name) {
+		return -1;
+	}
+	for (int i = 0; i < sc->item_count; ++i) {
+		if (strcmp(sc->items[i], source_name) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static bool fake_op_find_scene_with_layer(const char *source_name, const char *exclude_scene, char *out_scene,
+					  size_t out_size, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!sg || !source_name) {
 		return false;
 	}
-	return strcmp(source_name, "Cam 1") == 0 || strcmp(source_name, "Loop 3") == 0;
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (!sg->scenes[i].in_use) {
+			continue;
+		}
+		if (exclude_scene && exclude_scene[0] != '\0' && strcmp(sg->scenes[i].name, exclude_scene) == 0) {
+			continue;
+		}
+		if (fake_op_scene_item_stack_index(sg->scenes[i].name, source_name, sg) >= 0) {
+			if (out_scene && out_size > 0U) {
+				snprintf(out_scene, out_size, "%s", sg->scenes[i].name);
+			}
+			return true;
+		}
+	}
+	return false;
 }
+
+static bool fake_op_find_scene_with_pair(const char *source_a, const char *source_b, char *out_scene, size_t out_size,
+					 int *out_idx_a, int *out_idx_b, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!sg || !source_a || !source_b) {
+		return false;
+	}
+	for (int i = 0; i < FAKE_MAX_SCENES; ++i) {
+		if (!sg->scenes[i].in_use) {
+			continue;
+		}
+		int ia = fake_op_scene_item_stack_index(sg->scenes[i].name, source_a, sg);
+		int ib = fake_op_scene_item_stack_index(sg->scenes[i].name, source_b, sg);
+		if (ia >= 0 && ib >= 0) {
+			if (out_scene && out_size > 0U) {
+				snprintf(out_scene, out_size, "%s", sg->scenes[i].name);
+			}
+			if (out_idx_a) {
+				*out_idx_a = ia;
+			}
+			if (out_idx_b) {
+				*out_idx_b = ib;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+static void fake_op_apply_opacity(const char *source_name, float alpha_01, bool afv, void *user_data)
+{
+	UNUSED_PARAMETER(afv);
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!sg) {
+		return;
+	}
+	++sg->total_opacity_writes;
+	struct fake_sg_source *src = fake_sg_find_source(sg, source_name);
+	if (src) {
+		src->last_opacity = alpha_01;
+		++src->opacity_writes;
+	}
+}
+
+static void fake_op_apply_volume(const char *source_name, float mul, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (!sg) {
+		return;
+	}
+	++sg->total_volume_writes;
+	struct fake_sg_source *src = fake_sg_find_source(sg, source_name);
+	if (src) {
+		src->last_volume_mul = mul;
+		++src->volume_writes;
+	}
+}
+
+static const struct mfd_scene_graph_ops g_fake_sg_ops = {
+	fake_op_source_exists,          fake_op_scene_exists,          fake_op_source_has_audio,
+	fake_op_scene_item_stack_index, fake_op_find_scene_with_layer, fake_op_find_scene_with_pair,
+	fake_op_apply_opacity,          fake_op_apply_volume,
+};
 
 struct fake_ws_log {
 	int fader_changed_count;
@@ -182,13 +436,22 @@ static void on_fake_signal(void *data, calldata_t *cd)
 
 int main(void)
 {
+	struct fake_scene_graph fake_sg;
+	memset(&fake_sg, 0, sizeof(fake_sg));
+	fake_sg_add_source(&fake_sg, "Cam 1", true);
+	fake_sg_add_source(&fake_sg, "Loop 3", true);
+	fake_sg_add_scene(&fake_sg, "Main");
+	fake_sg_scene_add_item(&fake_sg, "Main", "Cam 1");  /* stack index 0 (bottom) */
+	fake_sg_scene_add_item(&fake_sg, "Main", "Loop 3"); /* stack index 1 (top) */
+
 	struct mfd_engine eng;
 	memset(&eng, 0, sizeof(eng));
 	eng.smooth_tau_ms = 12.0f;
 	eng.tbar_bidirectional_flip = true;
 	eng.tbar_driver = mock_tbar_driver;
 	eng.tbar_unlatch = mock_tbar_unlatch;
-	eng.source_exists_fn = mock_source_exists;
+	eng.scene_graph_ops = &g_fake_sg_ops;
+	eng.scene_graph_user_data = &fake_sg;
 	eng.studio_mode_override_set = true;
 	eng.studio_mode_override = false;
 
@@ -243,7 +506,7 @@ int main(void)
 	REQUIRE(strcmp(obs_data_get_string(s0, "id"), "crossfader") == 0);
 	REQUIRE(strcmp(obs_data_get_string(s0, "target_mode"), "tbar") == 0);
 	REQUIRE(!obs_data_get_bool(s0, "available"));
-	REQUIRE(strcmp(obs_data_get_string(s0, "reason"), "Studio Mode is off") == 0);
+	REQUIRE(strcmp(obs_data_get_string(s0, "reason"), "Studio Mode is off.") == 0);
 	obs_data_release(s0);
 	obs_data_array_release(arr);
 	obs_data_release(req);
@@ -1249,6 +1512,249 @@ int main(void)
 	REQUIRE(g_mock_tbar_set_writes == 2);
 	REQUIRE(g_mock_tbar_aborts == 1);
 	REQUIRE(g_mock_tbar_completions == 0);
+
+	/*
+	 * 14. 0.1.3 Per-Mode Preconditions, Canonical Status Sentences, Event-Driven Re-evaluation & Stack-Order Inversion:
+	 *     - 14a: Every canonical status sentence + zero OBS writes while !available with live last_raw_norm movement:
+	 *            "Not used. Click to set up.", "Studio Mode is off.", "<Layer> is no longer in scene <Scene>.",
+	 *            "Scene <Scene> was deleted.", "<A> and <B> are not in the same scene.",
+	 *            "Left and Right cannot be the same layer.", "<Layer> is not in any scene.", "<Source> has no audio."
+	 *     - 14b: source_rename follows both layer and scene renames with available == true, reason == "", no error.
+	 *     - 14c: Stack-order detection & inversion: Left ("Color") below Right ("Color 2") vs reordered ("Color" on top
+	 *            of "Color 2") both show 100% Left at 0.0 and 100% Right at 1.0, and live reorder immediately swaps
+	 *            applied opacities without moving the fader.
+	 */
+	memset(&fake_sg, 0, sizeof(fake_sg));
+	fake_sg_add_source(&fake_sg, "Color", false);
+	fake_sg_add_source(&fake_sg, "Color 2", false);
+	fake_sg_add_source(&fake_sg, "Mic/Aux", true);
+	fake_sg_add_source(&fake_sg, "Silent Card", false);
+	fake_sg_add_scene(&fake_sg, "Red");
+	fake_sg_scene_add_item(&fake_sg, "Red", "Color");   /* index 0 (bottom) */
+	fake_sg_scene_add_item(&fake_sg, "Red", "Color 2"); /* index 1 (top) */
+	fake_sg_add_scene(&fake_sg, "Blue");
+
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+
+	/* 14a-1: Unassigned slot -> "Not used. Click to set up." */
+	bool st_avail = true;
+	char st_reason[160] = {0};
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[1], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(!st_avail);
+	REQUIRE(strcmp(st_reason, "Not used. Click to set up.") == 0);
+
+	/* 14a-2: T-bar while Studio Mode is off -> "Studio Mode is off.", 0 T-bar writes on MIDI & API, live last_raw_norm */
+	eng.studio_mode_override = false;
+	mfd_engine_reevaluate_slots(&eng, true);
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[0], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(!st_avail);
+	REQUIRE(strcmp(st_reason, "Studio Mode is off.") == 0);
+	g_mock_tbar_calls = 0;
+	uint32_t tbar_writes_off = eng.fader_slots[0].output_write_count;
+	push_midi_cc(&eng, 0, 15, 64);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[0].last_raw_norm - (64.0f / 127.0f)) < 1e-5f);
+	REQUIRE(g_mock_tbar_calls == 0);
+	REQUIRE(eng.fader_slots[0].output_write_count == tbar_writes_off);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "crossfader");
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(g_mock_tbar_calls == 0);
+	REQUIRE(eng.fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+	eng.studio_mode_override = true;
+	mfd_engine_reevaluate_slots(&eng, true);
+
+	/* 14a-3 & 14c: crossfade_ab on fader_1 (scene "Red", Left = "Color" [0], Right = "Color 2" [1]) */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "scene", "Red");
+	obs_data_set_string(req, "source_a", "Color");
+	obs_data_set_string(req, "source_b", "Color 2");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(obs_data_get_bool(res, "available"));
+	REQUIRE(strcmp(obs_data_get_string(res, "reason"), "") == 0);
+	REQUIRE(!eng.fader_slots[1].a_is_above_b);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	struct fake_sg_source *src_color = fake_sg_find_source(&fake_sg, "Color");
+	struct fake_sg_source *src_color2 = fake_sg_find_source(&fake_sg, "Color 2");
+	REQUIRE(src_color != NULL && src_color2 != NULL);
+
+	/* Normal order ("Color" below "Color 2"): Left (0.0) -> Color=1, Color2=0; Right (1.0) -> Color=1, Color2=1; 0.25 -> Color=1, Color2=0.25 */
+	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
+	push_midi_cc(&eng, 0, 7, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(src_color->last_opacity - 1.0f) < 1e-5f);
+	REQUIRE(fabsf(src_color2->last_opacity - 0.0f) < 1e-5f);
+
+	push_midi_cc(&eng, 0, 7, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(src_color->last_opacity - 1.0f) < 1e-5f);
+	REQUIRE(fabsf(src_color2->last_opacity - 1.0f) < 1e-5f);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.25);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(fabsf(src_color->last_opacity - 1.0f) < 1e-5f);
+	REQUIRE(fabsf(src_color2->last_opacity - 0.25f) < 1e-5f);
+
+	/* 14c: Reorder scene "Red" so "Color" is ON TOP (index 1) and "Color 2" is BELOW (index 0) */
+	fake_sg_scene_remove_item(&fake_sg, "Red", "Color");
+	fake_sg_scene_add_item(&fake_sg, "Red", "Color"); /* now Color2=[0], Color=[1] */
+	int st_before_reorder = ws_log.state_changed_count;
+	mfd_engine_reevaluate_slots(&eng, true);
+	REQUIRE(ws_log.state_changed_count == st_before_reorder + 1);
+	REQUIRE(eng.fader_slots[1].a_is_above_b);
+	/* At t = 0.25 with "Color" on top: lower "Color 2" = 1.0, upper "Color" = 1 - 0.25 = 0.75 (75% Color / 25% Color 2!) */
+	REQUIRE(fabsf(src_color2->last_opacity - 1.0f) < 1e-5f);
+	REQUIRE(fabsf(src_color->last_opacity - 0.75f) < 1e-5f);
+
+	/* Sweep Left (0.0) with "Color" on top -> Color=1.0, Color2=1.0 (100% Color visible); Right (1.0) -> Color=0.0, Color2=1.0 (100% Color 2 visible) */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.0);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(fabsf(src_color->last_opacity - 1.0f) < 1e-5f);
+	REQUIRE(fabsf(src_color2->last_opacity - 1.0f) < 1e-5f);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 1.0);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(fabsf(src_color->last_opacity - 0.0f) < 1e-5f);
+	REQUIRE(fabsf(src_color2->last_opacity - 1.0f) < 1e-5f);
+
+	/* 14a-4: Remove "Color 2" from scene "Red" -> "Color 2 is no longer in scene Red.", 0 writes while bar moves */
+	fake_sg_scene_remove_item(&fake_sg, "Red", "Color 2");
+	int st_before_rm = ws_log.state_changed_count;
+	mfd_engine_reevaluate_slots(&eng, true);
+	REQUIRE(ws_log.state_changed_count == st_before_rm + 1);
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[1], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(!st_avail);
+	REQUIRE(strcmp(st_reason, "Color 2 is no longer in scene Red.") == 0);
+
+	int op_writes_before = fake_sg.total_opacity_writes;
+	uint32_t slot1_writes_before = eng.fader_slots[1].output_write_count;
+	push_midi_cc(&eng, 0, 7, 51); /* 51/127 = 0.40157 */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_raw_norm - (51.0f / 127.0f)) < 1e-5f);
+	REQUIRE(fake_sg.total_opacity_writes == op_writes_before);
+	REQUIRE(eng.fader_slots[1].output_write_count == slot1_writes_before);
+
+	/* Re-add "Color 2" to scene "Red" -> immediately available again with empty reason */
+	fake_sg_scene_add_item(&fake_sg, "Red", "Color 2");
+	mfd_engine_reevaluate_slots(&eng, true);
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[1], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(st_avail);
+	REQUIRE(strcmp(st_reason, "") == 0);
+
+	/* 14b: source_rename on layer ("Color 2" -> "Color 2 HD") and scene ("Red" -> "Red Live") -> follows with no error */
+	fake_sg_rename(&fake_sg, "Color 2", "Color 2 HD");
+	mfd_engine_handle_source_rename(&eng, "Color 2", "Color 2 HD");
+	REQUIRE(strcmp(eng.fader_slots[1].source_b_name, "Color 2 HD") == 0);
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[1], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(st_avail);
+	REQUIRE(strcmp(st_reason, "") == 0);
+
+	fake_sg_rename(&fake_sg, "Red", "Red Live");
+	mfd_engine_handle_source_rename(&eng, "Red", "Red Live");
+	REQUIRE(strcmp(eng.fader_slots[1].scene_name, "Red Live") == 0);
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[1], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(st_avail);
+	REQUIRE(strcmp(st_reason, "") == 0);
+
+	/* Rename back to "Red" & "Color 2" and test scene deletion -> "Scene Red was deleted." */
+	fake_sg_rename(&fake_sg, "Red Live", "Red");
+	mfd_engine_handle_source_rename(&eng, "Red Live", "Red");
+	fake_sg_rename(&fake_sg, "Color 2 HD", "Color 2");
+	mfd_engine_handle_source_rename(&eng, "Color 2 HD", "Color 2");
+	struct fake_sg_scene *sc_red = fake_sg_find_scene(&fake_sg, "Red");
+	REQUIRE(sc_red != NULL);
+	sc_red->in_use = false;
+	mfd_engine_reevaluate_slots(&eng, true);
+	mfd_engine_get_slot_status(&eng, &eng.fader_slots[1], NULL, 0U, &st_avail, st_reason, sizeof(st_reason));
+	REQUIRE(!st_avail);
+	REQUIRE(strcmp(st_reason, "Scene Red was deleted.") == 0);
+
+	/* 14a-5: Scene-agnostic crossfade_ab when layers are in different scenes -> "Color and Color 2 are not in the same scene." */
+	fake_sg_add_scene(&fake_sg, "Red");
+	fake_sg_scene_add_item(&fake_sg, "Red", "Color");
+	fake_sg_scene_add_item(&fake_sg, "Blue", "Color 2");
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "scene", "");
+	obs_data_set_string(req, "source_a", "Color");
+	obs_data_set_string(req, "source_b", "Color 2");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_get_bool(res, "available"));
+	REQUIRE(strcmp(obs_data_get_string(res, "reason"), "Color and Color 2 are not in the same scene.") == 0);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* Duplicate layer on Left and Right -> "Left and Right cannot be the same layer." */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "source_a", "Color");
+	obs_data_set_string(req, "source_b", "Color");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_get_bool(res, "available"));
+	REQUIRE(strcmp(obs_data_get_string(res, "reason"), "Left and Right cannot be the same layer.") == 0);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* 14a-6: layer_opacity when layer is removed from all scenes -> "Color is not in any scene." */
+	fake_sg_scene_remove_item(&fake_sg, "Red", "Color");
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_2");
+	obs_data_set_string(req, "target_mode", "layer_opacity");
+	obs_data_set_string(req, "source_a", "Color");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_get_bool(res, "available"));
+	REQUIRE(strcmp(obs_data_get_string(res, "reason"), "Color is not in any scene.") == 0);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	/* 14a-7: audio_volume on a source with no audio -> "Silent Card has no audio.", 0 volume writes while bar moves */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_3");
+	obs_data_set_string(req, "target_mode", "audio_volume");
+	obs_data_set_string(req, "source_a", "Silent Card");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_get_bool(res, "available"));
+	REQUIRE(strcmp(obs_data_get_string(res, "reason"), "Silent Card has no audio.") == 0);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	int vol_writes_before = fake_sg.total_volume_writes;
+	push_midi_cc(&eng, 2, 7, 100);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_raw_norm - (100.0f / 127.0f)) < 1e-5f);
+	REQUIRE(fake_sg.total_volume_writes == vol_writes_before);
 
 	mfd_vendor_set_event_sink(NULL, NULL);
 	printf("test-vendor-api: PASS\n");

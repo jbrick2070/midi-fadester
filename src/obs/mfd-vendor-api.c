@@ -86,6 +86,7 @@ static void populate_slot_data(const struct mfd_engine *eng, const struct mfd_fa
 	obs_data_set_string(out, "name", s->label);
 	obs_data_set_string(out, "kind", s->kind);
 	obs_data_set_string(out, "target_mode", mfd_target_mode_to_string(s->target_type));
+	obs_data_set_string(out, "scene", (s->scene_name[0] != '\0') ? s->scene_name : s->resolved_scene_name);
 	obs_data_set_string(out, "source_a", s->source_a_name);
 	obs_data_set_string(out, "source_b", s->source_b_name);
 	obs_data_set_string(out, "curve", mfd_curve_to_string(s->curve));
@@ -232,6 +233,15 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 	float val = clamp01((float)calldata_float(cd, "value"));
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	if (!mfd_engine_is_slot_writable(eng, slot)) {
+		bool avail = false;
+		char reason[160] = {0};
+		mfd_engine_get_slot_status(eng, slot, NULL, 0U, &avail, reason, sizeof(reason));
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		calldata_set_string(cd, "reason", reason);
+		return;
+	}
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
@@ -383,6 +393,11 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	float val = clamp01((float)obs_data_get_double(request_data, "value"));
 	bool release = obs_data_get_bool(request_data, "release");
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	if (!mfd_engine_is_slot_writable(eng, slot)) {
+		obs_data_set_string(response_data, "slot", slot->id);
+		obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+		return;
+	}
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 	bool prev_upper = slot->takeover.parked_at_upper_rail;
@@ -479,6 +494,11 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 	}
 
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	if (!mfd_engine_is_slot_writable(eng, slot)) {
+		obs_data_set_string(response_data, "slot", slot->id);
+		obs_data_set_double(response_data, "value", (double)slot->last_applied_val);
+		return;
+	}
 	float delta = (float)obs_data_get_double(request_data, "delta");
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
@@ -575,6 +595,10 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	}
 
 	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
+	if (!mfd_engine_is_slot_writable(eng, slot)) {
+		obs_data_set_string(response_data, "slot", slot->id);
+		return;
+	}
 	float to_val = clamp01((float)obs_data_get_double(request_data, "to"));
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
@@ -636,6 +660,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	enum mfd_crossfade_curve new_curve = s->curve;
 	bool has_target = obs_data_has_user_value(request_data, "target_mode");
 	bool has_curve = obs_data_has_user_value(request_data, "curve");
+	bool has_scene = obs_data_has_user_value(request_data, "scene");
 	bool has_sa = obs_data_has_user_value(request_data, "source_a");
 	bool has_sb = obs_data_has_user_value(request_data, "source_b");
 	bool has_cal_min = obs_data_has_user_value(request_data, "cal_min");
@@ -672,6 +697,15 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 			set_error_comment(response_data, msg);
 			return;
 		}
+	}
+
+	const char *sc = has_scene ? obs_data_get_string(request_data, "scene") : NULL;
+	if (has_scene && sc && sc[0] != '\0' && !mfd_engine_scene_exists(eng, sc)) {
+		char msg[256];
+		snprintf(msg, sizeof(msg), "Scene '%s' not found. Create the scene in OBS first or check its spelling.",
+			 sc);
+		set_error_comment(response_data, msg);
+		return;
 	}
 
 	const char *sa = has_sa ? obs_data_get_string(request_data, "source_a") : NULL;
@@ -725,6 +759,12 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (has_curve) {
 		s->curve = new_curve;
 	}
+	if (has_scene) {
+		snprintf(s->scene_name, sizeof(s->scene_name), "%s", sc ? sc : "");
+		if (!sc || sc[0] == '\0') {
+			s->resolved_scene_name[0] = '\0';
+		}
+	}
 	if (has_sa) {
 		snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", sa ? sa : "");
 	}
@@ -735,6 +775,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		s->audio_follows_video = obs_data_get_bool(request_data, "afv");
 	}
 
+	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
 	populate_slot_data(eng, s, response_data);
 }

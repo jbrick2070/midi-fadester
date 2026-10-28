@@ -564,6 +564,7 @@ private:
 			connect(chk_on, &QCheckBox::toggled, this, [this, row](bool on) {
 				struct mfd_engine *e = mfd_engine_get();
 				e->fader_slots[row].enabled = on;
+				mfd_engine_reevaluate_slots(e, false);
 				mfd_engine_save_global_config(e);
 				mfd_engine_notify_state_changed(e);
 				update_live_status();
@@ -762,6 +763,7 @@ private:
 					} else if (!is_tbar) {
 						s->tbar_state = MFD_TBAR_IDLE;
 					}
+					mfd_engine_reevaluate_slots(e, false);
 					mfd_engine_save_global_config(e);
 					mfd_engine_notify_state_changed(e);
 					rebuild_table_rows();
@@ -776,6 +778,7 @@ private:
 						std::snprintf(e->fader_slots[row].source_a_name,
 							      sizeof(e->fader_slots[row].source_a_name), "%s",
 							      utf8.constData());
+						mfd_engine_reevaluate_slots(e, false);
 						mfd_engine_save_global_config(e);
 						mfd_engine_notify_state_changed(e);
 						update_live_status();
@@ -790,6 +793,7 @@ private:
 						std::snprintf(e->fader_slots[row].source_b_name,
 							      sizeof(e->fader_slots[row].source_b_name), "%s",
 							      utf8.constData());
+						mfd_engine_reevaluate_slots(e, false);
 						mfd_engine_save_global_config(e);
 						mfd_engine_notify_state_changed(e);
 						update_live_status();

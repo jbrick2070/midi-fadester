@@ -224,12 +224,108 @@ void mfd_engine_load_apc40_defaults(struct mfd_engine *eng)
 					 : 1.0f;
 		init_slot_runtime(eng, s, init_val);
 	}
+	mfd_engine_reevaluate_slots(eng, false);
+}
+
+struct mfd_stack_find_ctx {
+	const char *target_a;
+	const char *target_b;
+	int idx;
+	int found_a;
+	int found_b;
+};
+
+static bool enum_scene_items_stack_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct mfd_stack_find_ctx *ctx = (struct mfd_stack_find_ctx *)param;
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (src && !obs_source_removed(src)) {
+		const char *nm = obs_source_get_name(src);
+		if (nm) {
+			if (ctx->target_a && strcmp(nm, ctx->target_a) == 0) {
+				ctx->found_a = ctx->idx;
+			}
+			if (ctx->target_b && strcmp(nm, ctx->target_b) == 0) {
+				ctx->found_b = ctx->idx;
+			}
+		}
+	}
+	++ctx->idx;
+	return true;
+}
+
+static int live_scene_item_stack_index_on_source(obs_source_t *scene_src, const char *source_name)
+{
+	if (!scene_src || obs_source_removed(scene_src) || !obs_source_is_scene(scene_src) || !source_name ||
+	    source_name[0] == '\0') {
+		return -1;
+	}
+	obs_scene_t *scene = obs_scene_from_source(scene_src);
+	if (!scene) {
+		return -1;
+	}
+	struct mfd_stack_find_ctx ctx = {source_name, NULL, 0, -1, -1};
+	obs_scene_enum_items(scene, enum_scene_items_stack_cb, &ctx);
+	return ctx.found_a;
+}
+
+struct mfd_enum_scene_layer_ctx {
+	const char *source_a;
+	const char *source_b;
+	const char *exclude_scene;
+	bool pair_mode;
+	bool found;
+	char scene_name[MFD_SOURCE_NAME_MAX];
+	int idx_a;
+	int idx_b;
+};
+
+static bool enum_scenes_find_cb(void *param, obs_source_t *scene_src)
+{
+	struct mfd_enum_scene_layer_ctx *ctx = (struct mfd_enum_scene_layer_ctx *)param;
+	if (!ctx || !scene_src || obs_source_removed(scene_src) || !obs_source_is_scene(scene_src)) {
+		return true;
+	}
+	const char *sc_name = obs_source_get_name(scene_src);
+	if (!sc_name || sc_name[0] == '\0') {
+		return true;
+	}
+	if (ctx->exclude_scene && ctx->exclude_scene[0] != '\0' && strcmp(sc_name, ctx->exclude_scene) == 0) {
+		return true;
+	}
+	obs_scene_t *scene = obs_scene_from_source(scene_src);
+	if (!scene) {
+		return true;
+	}
+	struct mfd_stack_find_ctx sctx = {ctx->source_a, ctx->pair_mode ? ctx->source_b : NULL, 0, -1, -1};
+	obs_scene_enum_items(scene, enum_scene_items_stack_cb, &sctx);
+	if (ctx->pair_mode) {
+		if (sctx.found_a >= 0 && sctx.found_b >= 0) {
+			ctx->found = true;
+			snprintf(ctx->scene_name, sizeof(ctx->scene_name), "%s", sc_name);
+			ctx->idx_a = sctx.found_a;
+			ctx->idx_b = sctx.found_b;
+			return false;
+		}
+	} else {
+		if (sctx.found_a >= 0) {
+			ctx->found = true;
+			snprintf(ctx->scene_name, sizeof(ctx->scene_name), "%s", sc_name);
+			ctx->idx_a = sctx.found_a;
+			return false;
+		}
+	}
+	return true;
 }
 
 bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_name)
 {
 	if (!source_name || source_name[0] == '\0') {
 		return false;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->source_exists) {
+		return eng->scene_graph_ops->source_exists(source_name, eng->scene_graph_user_data);
 	}
 	if (eng && eng->source_exists_fn) {
 		return eng->source_exists_fn(source_name, eng->source_exists_user_data);
@@ -241,8 +337,142 @@ bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_n
 	if (!src) {
 		return false;
 	}
+	bool alive = !obs_source_removed(src);
 	obs_source_release(src);
-	return true;
+	return alive;
+}
+
+bool mfd_engine_scene_exists(const struct mfd_engine *eng, const char *scene_name)
+{
+	if (!scene_name || scene_name[0] == '\0') {
+		return false;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->scene_exists) {
+		return eng->scene_graph_ops->scene_exists(scene_name, eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_source_by_name(scene_name);
+	if (!src) {
+		return false;
+	}
+	bool ok = !obs_source_removed(src) && obs_source_is_scene(src);
+	obs_source_release(src);
+	return ok;
+}
+
+bool mfd_engine_source_has_audio(const struct mfd_engine *eng, const char *source_name)
+{
+	if (!source_name || source_name[0] == '\0') {
+		return false;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->source_has_audio) {
+		return eng->scene_graph_ops->source_has_audio(source_name, eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_source_by_name(source_name);
+	if (!src) {
+		return false;
+	}
+	bool has_audio = !obs_source_removed(src) && ((obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) != 0U);
+	obs_source_release(src);
+	return has_audio;
+}
+
+static int sg_scene_item_stack_index(const struct mfd_engine *eng, const char *scene_name, const char *source_name)
+{
+	if (!scene_name || scene_name[0] == '\0' || !source_name || source_name[0] == '\0') {
+		return -1;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->scene_item_stack_index) {
+		return eng->scene_graph_ops->scene_item_stack_index(scene_name, source_name,
+								    eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return -1;
+	}
+	obs_source_t *scene_src = obs_get_source_by_name(scene_name);
+	if (!scene_src) {
+		return -1;
+	}
+	int idx = live_scene_item_stack_index_on_source(scene_src, source_name);
+	obs_source_release(scene_src);
+	return idx;
+}
+
+bool mfd_engine_find_other_scene_with_layer(const struct mfd_engine *eng, const char *source_name,
+					    const char *exclude_scene, char *out_scene, size_t out_size)
+{
+	if (out_scene && out_size > 0U) {
+		out_scene[0] = '\0';
+	}
+	if (!source_name || source_name[0] == '\0') {
+		return false;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->find_scene_with_layer) {
+		return eng->scene_graph_ops->find_scene_with_layer(source_name, exclude_scene, out_scene, out_size,
+								   eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	struct mfd_enum_scene_layer_ctx ctx;
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.source_a = source_name;
+	ctx.exclude_scene = exclude_scene;
+	ctx.pair_mode = false;
+	obs_enum_scenes(enum_scenes_find_cb, &ctx);
+	if (ctx.found && out_scene && out_size > 0U) {
+		snprintf(out_scene, out_size, "%s", ctx.scene_name);
+	}
+	return ctx.found;
+}
+
+static bool sg_find_scene_with_pair(const struct mfd_engine *eng, const char *source_a, const char *source_b,
+				    char *out_scene, size_t out_size, int *out_idx_a, int *out_idx_b)
+{
+	if (out_scene && out_size > 0U) {
+		out_scene[0] = '\0';
+	}
+	if (out_idx_a) {
+		*out_idx_a = -1;
+	}
+	if (out_idx_b) {
+		*out_idx_b = -1;
+	}
+	if (!source_a || source_a[0] == '\0' || !source_b || source_b[0] == '\0') {
+		return false;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->find_scene_with_pair) {
+		return eng->scene_graph_ops->find_scene_with_pair(source_a, source_b, out_scene, out_size, out_idx_a,
+								  out_idx_b, eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	struct mfd_enum_scene_layer_ctx ctx;
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.source_a = source_a;
+	ctx.source_b = source_b;
+	ctx.pair_mode = true;
+	ctx.idx_a = -1;
+	ctx.idx_b = -1;
+	obs_enum_scenes(enum_scenes_find_cb, &ctx);
+	if (ctx.found) {
+		if (out_scene && out_size > 0U) {
+			snprintf(out_scene, out_size, "%s", ctx.scene_name);
+		}
+		if (out_idx_a) {
+			*out_idx_a = ctx.idx_a;
+		}
+		if (out_idx_b) {
+			*out_idx_b = ctx.idx_b;
+		}
+	}
+	return ctx.found;
 }
 
 bool mfd_engine_is_studio_mode_active(const struct mfd_engine *eng)
@@ -256,31 +486,36 @@ bool mfd_engine_is_studio_mode_active(const struct mfd_engine *eng)
 	return obs_frontend_preview_program_mode_active();
 }
 
-void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
-				size_t label_size, bool *out_available, char *out_reason, size_t reason_size)
+static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, const struct mfd_fader_slot *slot,
+					      char *out_label, size_t label_size, bool *out_available, char *out_reason,
+					      size_t reason_size, char *out_resolved_scene, size_t resolved_size,
+					      bool *out_a_above_b)
 {
 	char lbl[128] = "Unassigned";
 	bool avail = false;
-	char rsn[160] = "Slot is unassigned";
+	char rsn[160] = "Not used. Click to set up.";
+	char res_scene[MFD_SOURCE_NAME_MAX] = {0};
+	bool a_above_b = slot ? slot->a_is_above_b : false;
 
 	if (slot) {
+		snprintf(res_scene, sizeof(res_scene), "%s", slot->resolved_scene_name);
 		if (!slot->enabled) {
 			snprintf(lbl, sizeof(lbl), "Disabled");
 			avail = false;
-			snprintf(rsn, sizeof(rsn), "Slot is disabled");
+			snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
 		} else {
 			switch (slot->target_type) {
 			case MFD_TARGET_UNASSIGNED:
 				snprintf(lbl, sizeof(lbl), "Unassigned");
 				avail = false;
-				snprintf(rsn, sizeof(rsn), "Slot is unassigned");
+				snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
 				break;
 
 			case MFD_TARGET_TBAR:
 				snprintf(lbl, sizeof(lbl), "Studio Mode T-Bar");
 				if (!mfd_engine_is_studio_mode_active(eng)) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Studio Mode is off");
+					snprintf(rsn, sizeof(rsn), "Studio Mode is off.");
 				} else if (eng && eng->tbar_error[0] != '\0') {
 					avail = false;
 					snprintf(rsn, sizeof(rsn), "%s", eng->tbar_error);
@@ -290,32 +525,78 @@ void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_f
 				}
 				break;
 
-			case MFD_TARGET_TWO_SOURCE_MIX:
+			case MFD_TARGET_TWO_SOURCE_MIX: {
 				if (slot->source_a_name[0] != '\0' && slot->source_b_name[0] != '\0') {
 					snprintf(lbl, sizeof(lbl), "%s -> %s", slot->source_a_name,
 						 slot->source_b_name);
 				} else {
 					snprintf(lbl, sizeof(lbl), "Crossfade A/B");
 				}
-				if (slot->source_a_name[0] == '\0') {
+				if (slot->source_a_name[0] == '\0' || slot->source_b_name[0] == '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source A is not set");
-				} else if (slot->source_b_name[0] == '\0') {
+					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+				} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source B is not set");
-				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
-					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_a_name);
-				} else if (!mfd_engine_source_exists(eng, slot->source_b_name)) {
-					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_b_name);
+					snprintf(rsn, sizeof(rsn), "Left and Right cannot be the same layer.");
+				} else if (slot->scene_name[0] != '\0') {
+					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
+						avail = false;
+						snprintf(rsn, sizeof(rsn), "Scene %s was deleted.", slot->scene_name);
+					} else {
+						int idx_a = sg_scene_item_stack_index(eng, slot->scene_name,
+										      slot->source_a_name);
+						int idx_b = sg_scene_item_stack_index(eng, slot->scene_name,
+										      slot->source_b_name);
+						if (idx_a < 0) {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
+								 slot->source_a_name, slot->scene_name);
+						} else if (idx_b < 0) {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
+								 slot->source_b_name, slot->scene_name);
+						} else {
+							avail = true;
+							rsn[0] = '\0';
+							a_above_b = (idx_a > idx_b);
+							snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
+						}
+					}
 				} else {
-					avail = true;
-					rsn[0] = '\0';
+					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
+					int idx_a = -1;
+					int idx_b = -1;
+					if (sg_find_scene_with_pair(eng, slot->source_a_name, slot->source_b_name,
+								    found_sc, sizeof(found_sc), &idx_a, &idx_b)) {
+						avail = true;
+						rsn[0] = '\0';
+						a_above_b = (idx_a > idx_b);
+						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
+					} else if (slot->resolved_scene_name[0] != '\0') {
+						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "Scene %s was deleted.",
+								 slot->resolved_scene_name);
+						} else if (sg_scene_item_stack_index(eng, slot->resolved_scene_name,
+										     slot->source_a_name) < 0) {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
+								 slot->source_a_name, slot->resolved_scene_name);
+						} else {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
+								 slot->source_b_name, slot->resolved_scene_name);
+						}
+					} else {
+						avail = false;
+						snprintf(rsn, sizeof(rsn), "%s and %s are not in the same scene.",
+							 slot->source_a_name, slot->source_b_name);
+					}
 				}
 				break;
+			}
 
-			case MFD_TARGET_SINGLE_LAYER:
+			case MFD_TARGET_SINGLE_LAYER: {
 				if (slot->source_a_name[0] != '\0') {
 					snprintf(lbl, sizeof(lbl), "%s (Opacity)", slot->source_a_name);
 				} else {
@@ -323,15 +604,46 @@ void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_f
 				}
 				if (slot->source_a_name[0] == '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source A is not set");
-				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
-					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_a_name);
+					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+				} else if (slot->scene_name[0] != '\0') {
+					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
+						avail = false;
+						snprintf(rsn, sizeof(rsn), "Scene %s was deleted.", slot->scene_name);
+					} else if (sg_scene_item_stack_index(eng, slot->scene_name,
+									     slot->source_a_name) < 0) {
+						avail = false;
+						snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
+							 slot->source_a_name, slot->scene_name);
+					} else {
+						avail = true;
+						rsn[0] = '\0';
+						snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
+					}
 				} else {
-					avail = true;
-					rsn[0] = '\0';
+					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
+					if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name, NULL,
+										   found_sc, sizeof(found_sc))) {
+						avail = true;
+						rsn[0] = '\0';
+						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
+					} else if (slot->resolved_scene_name[0] != '\0') {
+						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "Scene %s was deleted.",
+								 slot->resolved_scene_name);
+						} else {
+							avail = false;
+							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
+								 slot->source_a_name, slot->resolved_scene_name);
+						}
+					} else {
+						avail = false;
+						snprintf(rsn, sizeof(rsn), "%s is not in any scene.",
+							 slot->source_a_name);
+					}
 				}
 				break;
+			}
 
 			case MFD_TARGET_AUDIO_VOLUME:
 				if (slot->source_a_name[0] != '\0') {
@@ -341,10 +653,10 @@ void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_f
 				}
 				if (slot->source_a_name[0] == '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source A is not set");
-				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
+					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+				} else if (!mfd_engine_source_has_audio(eng, slot->source_a_name)) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Source '%s' not found", slot->source_a_name);
+					snprintf(rsn, sizeof(rsn), "%s has no audio.", slot->source_a_name);
 				} else {
 					avail = true;
 					rsn[0] = '\0';
@@ -363,6 +675,104 @@ void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_f
 	if (out_reason && reason_size > 0U) {
 		snprintf(out_reason, reason_size, "%s", rsn);
 	}
+	if (out_resolved_scene && resolved_size > 0U) {
+		snprintf(out_resolved_scene, resolved_size, "%s", res_scene);
+	}
+	if (out_a_above_b) {
+		*out_a_above_b = a_above_b;
+	}
+}
+
+void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
+{
+	if (!eng) {
+		return;
+	}
+	bool any_changed = false;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *slot = &eng->fader_slots[i];
+		bool prev_avail = slot->cached_available;
+		bool prev_a_above_b = slot->a_is_above_b;
+		char prev_reason[160];
+		snprintf(prev_reason, sizeof(prev_reason), "%s", slot->cached_reason);
+
+		bool new_avail = false;
+		char new_reason[160] = {0};
+		char new_resolved[MFD_SOURCE_NAME_MAX] = {0};
+		bool new_a_above_b = slot->a_is_above_b;
+		evaluate_slot_preconditions_const(eng, slot, NULL, 0U, &new_avail, new_reason, sizeof(new_reason),
+						  new_resolved, sizeof(new_resolved), &new_a_above_b);
+
+		slot->cached_available = new_avail;
+		snprintf(slot->cached_reason, sizeof(slot->cached_reason), "%s", new_reason);
+		snprintf(slot->resolved_scene_name, sizeof(slot->resolved_scene_name), "%s", new_resolved);
+		slot->a_is_above_b = new_a_above_b;
+
+		if (prev_avail && !new_avail) {
+			slot->auto_fade_active = false;
+			mfd_smoother_reset(&slot->smoother, slot->last_applied_val);
+			if (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_THROWING) {
+				slot->tbar_state = MFD_TBAR_IDLE;
+				slot->tbar_midi_active = false;
+				slot->tbar_from_idle_band = false;
+				slot->last_applied_val = 0.0f;
+				mfd_smoother_reset(&slot->smoother, 0.0f);
+			}
+		} else if (new_avail && slot->target_type == MFD_TARGET_TWO_SOURCE_MIX && prev_avail &&
+			   prev_a_above_b != new_a_above_b) {
+			mfd_engine_apply_slot_output(eng, slot, slot->last_applied_val);
+		}
+
+		if (prev_avail != new_avail || prev_a_above_b != new_a_above_b ||
+		    strcmp(prev_reason, new_reason) != 0) {
+			any_changed = true;
+		}
+	}
+	if (any_changed && emit_if_changed) {
+		mfd_engine_notify_state_changed(eng);
+	}
+}
+
+void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_name, const char *new_name)
+{
+	if (!eng || !prev_name || prev_name[0] == '\0' || !new_name || new_name[0] == '\0' ||
+	    strcmp(prev_name, new_name) == 0) {
+		return;
+	}
+	bool touched = false;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (strcmp(s->source_a_name, prev_name) == 0) {
+			snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", new_name);
+			touched = true;
+		}
+		if (strcmp(s->source_b_name, prev_name) == 0) {
+			snprintf(s->source_b_name, sizeof(s->source_b_name), "%s", new_name);
+			touched = true;
+		}
+		if (strcmp(s->scene_name, prev_name) == 0) {
+			snprintf(s->scene_name, sizeof(s->scene_name), "%s", new_name);
+			touched = true;
+		}
+		if (strcmp(s->resolved_scene_name, prev_name) == 0) {
+			snprintf(s->resolved_scene_name, sizeof(s->resolved_scene_name), "%s", new_name);
+			touched = true;
+		}
+	}
+	mfd_engine_reevaluate_slots(eng, false);
+	if (touched) {
+		if (obs_initialized()) {
+			mfd_engine_save_global_config(eng);
+		}
+		mfd_engine_notify_state_changed(eng);
+	}
+}
+
+void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
+				size_t label_size, bool *out_available, char *out_reason, size_t reason_size)
+{
+	evaluate_slot_preconditions_const(eng, slot, out_label, label_size, out_available, out_reason, reason_size,
+					  NULL, 0U, NULL);
 }
 
 void mfd_engine_notify_fader_changed(struct mfd_engine *eng, int slot_index, const char *origin)
@@ -391,9 +801,30 @@ void mfd_engine_notify_state_changed(struct mfd_engine *eng)
 	mfd_vendor_emit_state_changed(eng);
 }
 
-static void apply_source_opacity_and_afv(const char *source_name, float alpha_01, bool afv)
+bool mfd_engine_is_slot_writable(const struct mfd_engine *eng, const struct mfd_fader_slot *slot)
 {
-	if (!source_name || source_name[0] == '\0' || !obs_initialized()) {
+	if (!slot || !slot->enabled) {
+		return false;
+	}
+	if (slot->target_type == MFD_TARGET_UNASSIGNED) {
+		return true;
+	}
+	if (slot->target_type == MFD_TARGET_TBAR && eng && eng->studio_mode_override_set) {
+		return eng->studio_mode_override && (eng->tbar_error[0] == '\0');
+	}
+	return slot->cached_available;
+}
+
+static void apply_source_opacity_and_afv(const struct mfd_engine *eng, const char *source_name, float alpha_01,
+					 bool afv)
+{
+	if (!source_name || source_name[0] == '\0') {
+		return;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->apply_opacity) {
+		eng->scene_graph_ops->apply_opacity(source_name, alpha_01, afv, eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
 		return;
 	}
 
@@ -526,6 +957,9 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 	if (!eng || !slot || !slot->enabled) {
 		return;
 	}
+	if (!mfd_engine_is_slot_writable(eng, slot)) {
+		return;
+	}
 
 	float val = clamp01(norm_val);
 
@@ -543,19 +977,19 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		slot->last_alpha_a = val;
 		slot->last_alpha_b = 0.0f;
 		++slot->output_write_count;
-		apply_source_opacity_and_afv(slot->source_a_name, val, slot->audio_follows_video);
+		apply_source_opacity_and_afv(eng, slot->source_a_name, val, slot->audio_follows_video);
 		break;
 
 	case MFD_TARGET_TWO_SOURCE_MIX: {
 		float alpha_a = 1.0f;
 		float alpha_b = 0.0f;
-		mfd_crossfade_eval(slot->curve, val, &alpha_a, &alpha_b);
+		mfd_crossfade_eval_stacked(slot->curve, val, slot->a_is_above_b, &alpha_a, &alpha_b);
 		slot->last_applied_val = val;
 		slot->last_alpha_a = alpha_a;
 		slot->last_alpha_b = alpha_b;
 		++slot->output_write_count;
-		apply_source_opacity_and_afv(slot->source_a_name, alpha_a, slot->audio_follows_video);
-		apply_source_opacity_and_afv(slot->source_b_name, alpha_b, slot->audio_follows_video);
+		apply_source_opacity_and_afv(eng, slot->source_a_name, alpha_a, slot->audio_follows_video);
+		apply_source_opacity_and_afv(eng, slot->source_b_name, alpha_b, slot->audio_follows_video);
 		break;
 	}
 
@@ -564,6 +998,10 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		slot->last_audio_mul = mfd_deflection_to_mul(val);
 		slot->last_audio_db = mfd_deflection_to_db(val);
 		++slot->output_write_count;
+		if (eng->scene_graph_ops && eng->scene_graph_ops->apply_volume && slot->source_a_name[0] != '\0') {
+			eng->scene_graph_ops->apply_volume(slot->source_a_name, slot->last_audio_mul,
+							   eng->scene_graph_user_data);
+		}
 		if (slot->source_a_name[0] != '\0' && obs_initialized()) {
 			obs_source_t *src = obs_get_source_by_name(slot->source_a_name);
 			if (src) {
@@ -688,6 +1126,9 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				norm = slot->invert ? (1.0f - dec.normalized) : dec.normalized;
 			}
 			slot->last_raw_norm = norm;
+			if (!mfd_engine_is_slot_writable(eng, slot)) {
+				continue;
+			}
 
 			float effective = slot->last_applied_val;
 			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
@@ -791,7 +1232,10 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (!slot->enabled) {
 			continue;
 		}
-		if (slot->auto_fade_active) {
+		if (!mfd_engine_is_slot_writable(eng, slot)) {
+			slot->auto_fade_active = false;
+			mfd_smoother_reset(&slot->smoother, slot->last_applied_val);
+		} else if (slot->auto_fade_active) {
 			slot->auto_fade_elapsed_sec += seconds;
 			float progress = (slot->auto_fade_duration_sec > 0.0f)
 						 ? clamp01(slot->auto_fade_elapsed_sec / slot->auto_fade_duration_sec)
@@ -883,6 +1327,135 @@ static void mfd_engine_video_tick(void *param, float seconds)
 	mfd_engine_tick(eng, seconds);
 }
 
+static void on_obs_scene_signal(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	if (!eng || !eng->initialized) {
+		return;
+	}
+	mfd_engine_reevaluate_slots(eng, true);
+}
+
+static void connect_scene_source_signals(struct mfd_engine *eng, obs_source_t *scene_src)
+{
+	if (!eng || !scene_src || obs_source_removed(scene_src) || !obs_source_is_scene(scene_src)) {
+		return;
+	}
+	signal_handler_t *sh = obs_source_get_signal_handler(scene_src);
+	if (!sh) {
+		return;
+	}
+	signal_handler_connect(sh, "item_add", on_obs_scene_signal, eng);
+	signal_handler_connect(sh, "item_remove", on_obs_scene_signal, eng);
+	signal_handler_connect(sh, "reorder", on_obs_scene_signal, eng);
+}
+
+static void disconnect_scene_source_signals(struct mfd_engine *eng, obs_source_t *scene_src)
+{
+	if (!eng || !scene_src) {
+		return;
+	}
+	signal_handler_t *sh = obs_source_get_signal_handler(scene_src);
+	if (!sh) {
+		return;
+	}
+	signal_handler_disconnect(sh, "item_add", on_obs_scene_signal, eng);
+	signal_handler_disconnect(sh, "item_remove", on_obs_scene_signal, eng);
+	signal_handler_disconnect(sh, "reorder", on_obs_scene_signal, eng);
+}
+
+static bool enum_connect_scenes_cb(void *param, obs_source_t *scene_src)
+{
+	connect_scene_source_signals((struct mfd_engine *)param, scene_src);
+	return true;
+}
+
+static bool enum_disconnect_scenes_cb(void *param, obs_source_t *scene_src)
+{
+	disconnect_scene_source_signals((struct mfd_engine *)param, scene_src);
+	return true;
+}
+
+static void connect_all_live_scene_signals(struct mfd_engine *eng)
+{
+	if (!eng || !obs_initialized()) {
+		return;
+	}
+	obs_enum_scenes(enum_connect_scenes_cb, eng);
+}
+
+static void on_obs_source_create(void *data, calldata_t *cd)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	if (!eng || !eng->initialized) {
+		return;
+	}
+	obs_source_t *src = cd ? (obs_source_t *)calldata_ptr(cd, "source") : NULL;
+	if (src && obs_source_is_scene(src)) {
+		connect_scene_source_signals(eng, src);
+	}
+	mfd_engine_reevaluate_slots(eng, true);
+}
+
+static void on_obs_source_remove_or_destroy(void *data, calldata_t *cd)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	if (!eng || !eng->initialized) {
+		return;
+	}
+	obs_source_t *src = cd ? (obs_source_t *)calldata_ptr(cd, "source") : NULL;
+	if (src) {
+		disconnect_scene_source_signals(eng, src);
+	}
+	mfd_engine_reevaluate_slots(eng, true);
+}
+
+static void on_obs_source_rename(void *data, calldata_t *cd)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	if (!eng || !eng->initialized || !cd) {
+		return;
+	}
+	const char *prev_name = calldata_string(cd, "prev_name");
+	const char *new_name = calldata_string(cd, "new_name");
+	mfd_engine_handle_source_rename(eng, prev_name, new_name);
+}
+
+static void connect_obs_signals(struct mfd_engine *eng)
+{
+	if (!eng || eng->signals_connected || !obs_initialized()) {
+		return;
+	}
+	signal_handler_t *sh = obs_get_signal_handler();
+	if (sh) {
+		signal_handler_connect(sh, "source_create", on_obs_source_create, eng);
+		signal_handler_connect(sh, "source_remove", on_obs_source_remove_or_destroy, eng);
+		signal_handler_connect(sh, "source_destroy", on_obs_source_remove_or_destroy, eng);
+		signal_handler_connect(sh, "source_rename", on_obs_source_rename, eng);
+	}
+	connect_all_live_scene_signals(eng);
+	eng->signals_connected = true;
+}
+
+static void disconnect_obs_signals(struct mfd_engine *eng)
+{
+	if (!eng || !eng->signals_connected) {
+		return;
+	}
+	eng->signals_connected = false;
+	if (obs_initialized()) {
+		signal_handler_t *sh = obs_get_signal_handler();
+		if (sh) {
+			signal_handler_disconnect(sh, "source_create", on_obs_source_create, eng);
+			signal_handler_disconnect(sh, "source_remove", on_obs_source_remove_or_destroy, eng);
+			signal_handler_disconnect(sh, "source_destroy", on_obs_source_remove_or_destroy, eng);
+			signal_handler_disconnect(sh, "source_rename", on_obs_source_rename, eng);
+		}
+		obs_enum_scenes(enum_disconnect_scenes_cb, eng);
+	}
+}
+
 static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 {
 	if (!eng) {
@@ -901,6 +1474,7 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 				slot->auto_fade_active = false;
 				slot->tbar_state = MFD_TBAR_IDLE;
 				slot->tbar_midi_active = false;
+				slot->tbar_from_idle_band = false;
 				slot->last_applied_val = 0.0f;
 				mfd_smoother_reset(&slot->smoother, 0.0f);
 				mfd_takeover_sync_external(&slot->takeover, 0.0f);
@@ -915,6 +1489,7 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 			}
 		}
 	}
+	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
 }
 
@@ -926,6 +1501,12 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	}
 
 	switch (event) {
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+	case OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED:
+		connect_all_live_scene_signals(eng);
+		sync_slots_on_scene_change(eng, false);
+		break;
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
 	case OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED:
 		sync_slots_on_scene_change(eng, false);
@@ -933,6 +1514,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
 		sync_slots_on_scene_change(eng, true);
+		break;
+	case OBS_FRONTEND_EVENT_EXIT:
+		disconnect_obs_signals(eng);
 		break;
 	default:
 		break;
@@ -1007,6 +1591,7 @@ static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		obs_data_set_int(item, "cal_min", s->cal.cal_min);
 		obs_data_set_int(item, "cal_max", s->cal.cal_max);
 		obs_data_set_int(item, "target_type", (int)s->target_type);
+		obs_data_set_string(item, "scene", s->scene_name);
 		obs_data_set_string(item, "source_a", s->source_a_name);
 		obs_data_set_string(item, "source_b", s->source_b_name);
 		obs_data_set_int(item, "curve", (int)s->curve);
@@ -1055,8 +1640,10 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &s->addr, &s->cal);
 		}
 		s->target_type = (enum mfd_target_type)obs_data_get_int(item, "target_type");
+		const char *sc = obs_data_get_string(item, "scene");
 		const char *sa = obs_data_get_string(item, "source_a");
 		const char *sb = obs_data_get_string(item, "source_b");
+		snprintf(s->scene_name, sizeof(s->scene_name), "%s", sc ? sc : "");
 		snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", sa ? sa : "");
 		snprintf(s->source_b_name, sizeof(s->source_b_name), "%s", sb ? sb : "");
 		if (s->target_type != MFD_TARGET_TBAR && s->source_a_name[0] == '\0' && s->source_b_name[0] == '\0') {
@@ -1074,6 +1661,7 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		obs_data_release(item);
 	}
 	obs_data_array_release(arr);
+	mfd_engine_reevaluate_slots(eng, false);
 }
 
 static void on_save_callback(obs_data_t *save_data, bool saving, void *private_data)
@@ -1299,6 +1887,8 @@ bool mfd_engine_init(void)
 
 	mfd_winmm_open_by_name(&g_engine.midi_dev, g_engine.configured_device_name);
 
+	connect_obs_signals(&g_engine);
+	mfd_engine_reevaluate_slots(&g_engine, false);
 	obs_frontend_add_event_callback(on_frontend_event, &g_engine);
 	obs_frontend_add_save_callback(on_save_callback, &g_engine);
 	obs_add_tick_callback(mfd_engine_video_tick, &g_engine);
@@ -1314,6 +1904,7 @@ void mfd_engine_shutdown(void)
 	}
 	g_engine.initialized = false;
 
+	disconnect_obs_signals(&g_engine);
 	obs_remove_tick_callback(mfd_engine_video_tick, &g_engine);
 	obs_frontend_remove_save_callback(on_save_callback, &g_engine);
 	obs_frontend_remove_event_callback(on_frontend_event, &g_engine);

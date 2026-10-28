@@ -62,6 +62,44 @@ int main(void)
 		REQUIRE(fabsf(rt - def) < 1e-5f);
 	}
 
+	/*
+	 * 6. Stack-order-aware Dip-Free & Cut crossfade (R-MIX-1 / D-10):
+	 *    Whether Left (A) is below Right (B) (!a_is_above_b) or Left (A) is above Right (B) (a_is_above_b),
+	 *    Porter-Duff Source Over compositing yields:
+	 *      - t = 0.0 (left):  100% Left (A), 0% Right (B)
+	 *      - t = 0.5 (mid):   50% Left (A), 50% Right (B), 100% total coverage (0% black dip)
+	 *      - t = 1.0 (right): 0% Left (A), 100% Right (B)
+	 */
+	for (int order = 0; order <= 1; ++order) {
+		bool a_above_b = (order == 1);
+		for (int i = 0; i <= 20; ++i) {
+			float t = (float)i * 0.05f;
+			mfd_crossfade_eval_stacked(MFD_CURVE_DIP_FREE, t, a_above_b, &a, &b);
+			float alpha_bottom = a_above_b ? b : a;
+			float alpha_top = a_above_b ? a : b;
+			REQUIRE(fabsf(mfd_porter_duff_over_coverage(alpha_bottom, alpha_top) - 1.0f) < 1e-6f);
+
+			/* Visible weight of Left (A) and Right (B) in Porter-Duff Source Over */
+			float vis_a = a_above_b ? a : ((1.0f - b) * a);
+			float vis_b = a_above_b ? ((1.0f - a) * b) : b;
+			REQUIRE(fabsf(vis_a - (1.0f - t)) < 1e-6f);
+			REQUIRE(fabsf(vis_b - t) < 1e-6f);
+		}
+
+		mfd_crossfade_eval_stacked(MFD_CURVE_CUT, 0.25f, a_above_b, &a, &b);
+		float cut_left_a = a_above_b ? a : ((1.0f - b) * a);
+		REQUIRE(fabsf(cut_left_a - 1.0f) < 1e-6f);
+
+		mfd_crossfade_eval_stacked(MFD_CURVE_CUT, 0.50f, a_above_b, &a, &b);
+		float cut_right_b = a_above_b ? ((1.0f - a) * b) : b;
+		REQUIRE(fabsf(cut_right_b - 1.0f) < 1e-6f);
+	}
+
+	/* Mutation verification: un-inverted Dip-Free when A is above B leaves A at 100% even at t = 1.0! */
+	mfd_crossfade_eval(MFD_CURVE_DIP_FREE, 1.0f, &a, &b);
+	float uninverted_vis_b_when_a_on_top = (1.0f - a) * b;
+	REQUIRE(fabsf(uninverted_vis_b_when_a_on_top - 0.0f) < 1e-6f);
+
 	printf("test-mixer-math: PASS\n");
 	return 0;
 }

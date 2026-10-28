@@ -46,6 +46,7 @@ struct mfd_fader_slot {
 	struct mfd_midi_addr addr;
 	struct mfd_control_calibration cal;
 	enum mfd_target_type target_type;
+	char scene_name[MFD_SOURCE_NAME_MAX];
 	char source_a_name[MFD_SOURCE_NAME_MAX];
 	char source_b_name[MFD_SOURCE_NAME_MAX];
 	enum mfd_crossfade_curve curve;
@@ -58,6 +59,10 @@ struct mfd_fader_slot {
 	enum mfd_tbar_state tbar_state;
 	bool tbar_midi_active;
 	bool tbar_from_idle_band;
+	char resolved_scene_name[MFD_SOURCE_NAME_MAX];
+	bool a_is_above_b;
+	bool cached_available;
+	char cached_reason[160];
 	float last_raw_norm;
 	float last_applied_val;
 	float last_alpha_a;
@@ -86,6 +91,19 @@ typedef bool (*mfd_tbar_apply_fn)(enum mfd_tbar_state state, float t_norm, bool 
 typedef void (*mfd_tbar_unlatch_fn)(void);
 typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
 
+struct mfd_scene_graph_ops {
+	bool (*source_exists)(const char *source_name, void *user_data);
+	bool (*scene_exists)(const char *scene_name, void *user_data);
+	bool (*source_has_audio)(const char *source_name, void *user_data);
+	int (*scene_item_stack_index)(const char *scene_name, const char *source_name, void *user_data);
+	bool (*find_scene_with_layer)(const char *source_name, const char *exclude_scene, char *out_scene,
+				      size_t out_size, void *user_data);
+	bool (*find_scene_with_pair)(const char *source_a, const char *source_b, char *out_scene, size_t out_size,
+				     int *out_idx_a, int *out_idx_b, void *user_data);
+	void (*apply_opacity)(const char *source_name, float alpha_01, bool afv, void *user_data);
+	void (*apply_volume)(const char *source_name, float mul, void *user_data);
+};
+
 struct mfd_engine {
 	struct mfd_midi_queue midi_queue;
 	struct mfd_midi_parser midi_parser;
@@ -107,11 +125,14 @@ struct mfd_engine {
 	char tbar_error[256];
 
 	/* Optional test overrides when running outside live OBS */
+	const struct mfd_scene_graph_ops *scene_graph_ops;
+	void *scene_graph_user_data;
 	mfd_source_exists_fn source_exists_fn;
 	void *source_exists_user_data;
 	bool studio_mode_override_set;
 	bool studio_mode_override;
 
+	bool signals_connected;
 	float health_check_accum_sec;
 	bool initialized;
 };
@@ -144,7 +165,14 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath);
 
 bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_name);
+bool mfd_engine_scene_exists(const struct mfd_engine *eng, const char *scene_name);
+bool mfd_engine_source_has_audio(const struct mfd_engine *eng, const char *source_name);
+bool mfd_engine_find_other_scene_with_layer(const struct mfd_engine *eng, const char *source_name,
+					    const char *exclude_scene, char *out_scene, size_t out_size);
 bool mfd_engine_is_studio_mode_active(const struct mfd_engine *eng);
+bool mfd_engine_is_slot_writable(const struct mfd_engine *eng, const struct mfd_fader_slot *slot);
+void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed);
+void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_name, const char *new_name);
 void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
 				size_t label_size, bool *out_available, char *out_reason, size_t reason_size);
 
