@@ -33,11 +33,18 @@ static float compute_rescaled_effective(const struct mfd_takeover *t, float raw_
 		return raw_clamped;
 	}
 	if (t->two_rail_mode) {
+		if (raw_clamped <= t->lower_rescale_origin) {
+			return clamp01(t->lower_rescale_val);
+		}
+		if (raw_clamped >= t->upper_rescale_origin) {
+			return clamp01(t->upper_rescale_val);
+		}
 		float span = t->upper_rescale_origin - t->lower_rescale_origin;
 		if (span <= 1e-5f) {
 			return raw_clamped;
 		}
-		return clamp01((raw_clamped - t->lower_rescale_origin) / span);
+		float u = (raw_clamped - t->lower_rescale_origin) / span;
+		return clamp01(t->lower_rescale_val + u * (t->upper_rescale_val - t->lower_rescale_val));
 	}
 	if (!t->bidirectional_flip) {
 		return raw_clamped;
@@ -73,13 +80,15 @@ void mfd_takeover_init(struct mfd_takeover *t, float initial_obs_val, float pick
 	t->rescale_origin = 0.0f;
 	t->lower_rescale_origin = 0.0f;
 	t->upper_rescale_origin = 1.0f;
+	t->lower_rescale_val = 0.0f;
+	t->upper_rescale_val = 1.0f;
 	t->has_last_fader = false;
 	t->bidirectional_flip = bidirectional_flip;
 	t->two_rail_mode = false;
 	t->polarity_reversed = false;
 	t->parked_at_upper_rail = false;
-	t->armed_lower_rail = (t->target_obs > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
-	t->armed_upper_rail = (t->target_obs < MFD_THROW_COMPLETE_THRESHOLD);
+	t->armed_lower_rail = (t->target_obs > MFD_TWO_RAIL_LOWER_PARK_THRESHOLD);
+	t->armed_upper_rail = (t->target_obs < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD);
 	t->dial_reversed = false;
 	t->midi_at_rail_deadzone = false;
 }
@@ -95,8 +104,10 @@ void mfd_takeover_set_two_rail_mode(struct mfd_takeover *t, bool two_rail_mode)
 		t->polarity_reversed = false;
 		t->lower_rescale_origin = 0.0f;
 		t->upper_rescale_origin = 1.0f;
-		t->armed_lower_rail = (t->target_obs > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
-		t->armed_upper_rail = (t->target_obs < MFD_THROW_COMPLETE_THRESHOLD);
+		t->lower_rescale_val = 0.0f;
+		t->upper_rescale_val = 1.0f;
+		t->armed_lower_rail = (t->target_obs > MFD_TWO_RAIL_LOWER_PARK_THRESHOLD);
+		t->armed_upper_rail = (t->target_obs < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD);
 	}
 }
 
@@ -112,8 +123,10 @@ void mfd_takeover_sync_external(struct mfd_takeover *t, float new_obs_val)
 		t->rescale_origin = t->polarity_reversed ? 1.0f : 0.0f;
 		t->lower_rescale_origin = 0.0f;
 		t->upper_rescale_origin = 1.0f;
-		t->armed_lower_rail = (clamped > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
-		t->armed_upper_rail = (clamped < MFD_THROW_COMPLETE_THRESHOLD);
+		t->lower_rescale_val = 0.0f;
+		t->upper_rescale_val = 1.0f;
+		t->armed_lower_rail = (clamped > MFD_TWO_RAIL_LOWER_PARK_THRESHOLD);
+		t->armed_upper_rail = (clamped < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD);
 		t->midi_at_rail_deadzone = false;
 		if (t->has_last_fader) {
 			t->hint = compute_hint(t->last_fader, t->target_obs, t->pickup_threshold);
@@ -136,13 +149,28 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		if (t->parked_at_upper_rail) {
 			if (raw_clamped > t->parked_peak) {
 				t->parked_peak = raw_clamped;
+				if (t->two_rail_mode) {
+					if (raw_clamped > t->upper_rescale_origin) {
+						t->upper_rescale_origin = raw_clamped;
+					}
+					if (raw_clamped > t->upper_rescale_val) {
+						t->upper_rescale_val = raw_clamped;
+					}
+					float eff = compute_rescaled_effective(t, raw_clamped);
+					t->last_fader = eff;
+					t->target_obs = eff;
+					*out_effective_norm = eff;
+					return true;
+				}
 			}
 			if ((t->parked_peak - raw_clamped) > MFD_PARKED_UNPARK_HYSTERESIS) {
 				t->state = MFD_TAKEOVER_ENGAGED;
 				t->hint = MFD_HINT_NONE;
 				if (t->two_rail_mode) {
 					t->upper_rescale_origin = raw_clamped;
+					t->upper_rescale_val = t->target_obs;
 					t->lower_rescale_origin = 0.0f;
+					t->lower_rescale_val = 0.0f;
 					t->armed_upper_rail = false;
 					t->armed_lower_rail = true;
 				} else if (t->bidirectional_flip) {
@@ -160,13 +188,28 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		} else {
 			if (raw_clamped < t->parked_peak) {
 				t->parked_peak = raw_clamped;
+				if (t->two_rail_mode) {
+					if (raw_clamped < t->lower_rescale_origin) {
+						t->lower_rescale_origin = raw_clamped;
+					}
+					if (raw_clamped < t->lower_rescale_val) {
+						t->lower_rescale_val = raw_clamped;
+					}
+					float eff = compute_rescaled_effective(t, raw_clamped);
+					t->last_fader = eff;
+					t->target_obs = eff;
+					*out_effective_norm = eff;
+					return true;
+				}
 			}
 			if ((raw_clamped - t->parked_peak) > MFD_PARKED_UNPARK_HYSTERESIS) {
 				t->state = MFD_TAKEOVER_ENGAGED;
 				t->hint = MFD_HINT_NONE;
 				if (t->two_rail_mode) {
 					t->lower_rescale_origin = raw_clamped;
+					t->lower_rescale_val = t->target_obs;
 					t->upper_rescale_origin = 1.0f;
+					t->upper_rescale_val = 1.0f;
 					t->armed_lower_rail = false;
 					t->armed_upper_rail = true;
 				} else if (t->bidirectional_flip) {
@@ -211,10 +254,10 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 	}
 
 	if (t->two_rail_mode && !t->has_last_fader) {
-		if (raw_clamped <= MFD_LOWER_RAIL_COMPLETE_THRESHOLD) {
+		if (raw_clamped <= MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) {
 			t->armed_lower_rail = false;
 			t->armed_upper_rail = true;
-		} else if (raw_clamped >= MFD_THROW_COMPLETE_THRESHOLD) {
+		} else if (raw_clamped >= MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) {
 			t->armed_upper_rail = false;
 			t->armed_lower_rail = true;
 		} else {
@@ -223,22 +266,28 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		}
 	}
 
-	float effective = compute_rescaled_effective(t, raw_clamped);
-
-	if (t->two_rail_mode) {
-		if (effective > MFD_LOWER_RAIL_COMPLETE_THRESHOLD) {
-			t->armed_lower_rail = true;
+	if (t->two_rail_mode && t->state == MFD_TAKEOVER_ENGAGED) {
+		if (raw_clamped > t->upper_rescale_origin) {
+			t->upper_rescale_origin = raw_clamped;
+			if (raw_clamped > t->upper_rescale_val) {
+				t->upper_rescale_val = raw_clamped;
+			}
+			if (raw_clamped >= MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) {
+				t->armed_upper_rail = true;
+			}
 		}
-		if (effective < MFD_THROW_COMPLETE_THRESHOLD) {
-			t->armed_upper_rail = true;
-		}
-		if (t->upper_rescale_origin < 1.0f && raw_clamped > t->upper_rescale_origin + 1e-4f) {
-			t->armed_upper_rail = true;
-		}
-		if (t->lower_rescale_origin > 0.0f && raw_clamped < t->lower_rescale_origin - 1e-4f) {
-			t->armed_lower_rail = true;
+		if (raw_clamped < t->lower_rescale_origin) {
+			t->lower_rescale_origin = raw_clamped;
+			if (raw_clamped < t->lower_rescale_val) {
+				t->lower_rescale_val = raw_clamped;
+			}
+			if (raw_clamped <= MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) {
+				t->armed_lower_rail = true;
+			}
 		}
 	}
+
+	float effective = compute_rescaled_effective(t, raw_clamped);
 
 	if (t->state == MFD_TAKEOVER_WAITING) {
 		bool within = (fabsf(effective - t->target_obs) <= t->pickup_threshold);
@@ -252,17 +301,34 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		t->last_raw_fader = raw_clamped;
 		t->has_last_fader = true;
 
-		if (within || crossed) {
-			t->state = MFD_TAKEOVER_ENGAGED;
-			t->hint = MFD_HINT_NONE;
-			t->target_obs = effective;
-			*out_effective_norm = effective;
-			return true;
+		if (!within && !crossed) {
+			t->hint = compute_hint(effective, t->target_obs, t->pickup_threshold);
+			*out_effective_norm = t->target_obs;
+			return false;
 		}
+		t->state = MFD_TAKEOVER_ENGAGED;
+	}
 
-		t->hint = compute_hint(effective, t->target_obs, t->pickup_threshold);
-		*out_effective_norm = t->target_obs;
-		return false;
+	if (t->two_rail_mode) {
+		if (effective > MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) {
+			t->armed_lower_rail = true;
+		}
+		if (effective < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) {
+			t->armed_upper_rail = true;
+		}
+		if (t->armed_upper_rail && effective >= MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) {
+			t->state = MFD_TAKEOVER_PARKED;
+			t->parked_at_upper_rail = true;
+			t->parked_peak = raw_clamped;
+			t->armed_upper_rail = false;
+			t->armed_lower_rail = true;
+		} else if (t->armed_lower_rail && effective <= MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) {
+			t->state = MFD_TAKEOVER_PARKED;
+			t->parked_at_upper_rail = false;
+			t->parked_peak = raw_clamped;
+			t->armed_lower_rail = false;
+			t->armed_upper_rail = true;
+		}
 	}
 
 	t->last_fader = effective;
@@ -288,43 +354,16 @@ void mfd_takeover_notify_tbar_completed(struct mfd_takeover *t)
 	t->midi_at_rail_deadzone = false;
 }
 
-bool mfd_takeover_check_two_rail_completion(const struct mfd_takeover *t, float val, float *out_rail_val,
-					    bool *out_upper_rail)
-{
-	if (!t || !t->two_rail_mode || t->state != MFD_TAKEOVER_ENGAGED) {
-		return false;
-	}
-	if (t->armed_upper_rail && val >= MFD_THROW_COMPLETE_THRESHOLD - 1e-5f) {
-		if (out_rail_val) {
-			*out_rail_val = 1.0f;
-		}
-		if (out_upper_rail) {
-			*out_upper_rail = true;
-		}
-		return true;
-	}
-	if (t->armed_lower_rail && val <= MFD_LOWER_RAIL_COMPLETE_THRESHOLD + 1e-5f) {
-		if (out_rail_val) {
-			*out_rail_val = 0.0f;
-		}
-		if (out_upper_rail) {
-			*out_upper_rail = false;
-		}
-		return true;
-	}
-	return false;
-}
-
-void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail)
+void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail, float applied_val)
 {
 	if (!t) {
 		return;
 	}
-	float rail_val = upper_rail ? 1.0f : 0.0f;
+	float clamped = clamp01(applied_val);
 	t->parked_at_upper_rail = upper_rail;
-	t->parked_peak = t->has_last_fader ? t->last_raw_fader : rail_val;
-	t->target_obs = rail_val;
-	t->last_fader = rail_val;
+	t->parked_peak = t->has_last_fader ? t->last_raw_fader : clamped;
+	t->target_obs = clamped;
+	t->last_fader = clamped;
 	t->armed_upper_rail = !upper_rail;
 	t->armed_lower_rail = upper_rail;
 	t->state = MFD_TAKEOVER_PARKED;
@@ -346,14 +385,18 @@ void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val)
 	if (t->two_rail_mode) {
 		t->lower_rescale_origin = 0.0f;
 		t->upper_rescale_origin = 1.0f;
+		t->lower_rescale_val = 0.0f;
+		t->upper_rescale_val = 1.0f;
 		if (was_parked) {
-			t->armed_upper_rail = !t->parked_at_upper_rail || (clamped < MFD_THROW_COMPLETE_THRESHOLD);
-			t->armed_lower_rail = t->parked_at_upper_rail || (clamped > MFD_LOWER_RAIL_COMPLETE_THRESHOLD);
+			t->armed_upper_rail = !t->parked_at_upper_rail ||
+					      (clamped < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f);
+			t->armed_lower_rail = t->parked_at_upper_rail ||
+					      (clamped > MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f);
 		} else {
-			if (clamped > MFD_LOWER_RAIL_COMPLETE_THRESHOLD) {
+			if (clamped > MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) {
 				t->armed_lower_rail = true;
 			}
-			if (clamped < MFD_THROW_COMPLETE_THRESHOLD) {
+			if (clamped < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) {
 				t->armed_upper_rail = true;
 			}
 		}

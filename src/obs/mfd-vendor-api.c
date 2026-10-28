@@ -238,7 +238,7 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 
 	mfd_engine_apply_slot_output(eng, slot, val);
 	if (slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
-		mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f);
+		mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f, val);
 	}
 	mfd_engine_notify_fader_changed(eng, idx, "api");
 	if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
@@ -362,7 +362,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 			      fabsf(slot->last_applied_val - rail_val) < 1e-5f)) {
 				mfd_smoother_reset(&slot->smoother, rail_val);
 				mfd_engine_apply_slot_output_ex(eng, slot, rail_val, false);
-				mfd_takeover_notify_rail_completed(&slot->takeover, at_upper);
+				mfd_takeover_notify_rail_completed(&slot->takeover, at_upper, rail_val);
 				mfd_engine_notify_fader_changed(eng, idx, "api");
 				mfd_engine_notify_state_changed(eng);
 			}
@@ -429,7 +429,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 		mfd_smoother_reset(&slot->smoother, val);
 		mfd_engine_apply_slot_output(eng, slot, val);
 		if (!was_parked && slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
-			mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f);
+			mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f, val);
 		}
 		mfd_engine_notify_fader_changed(eng, idx, "api");
 		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {

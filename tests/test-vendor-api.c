@@ -447,10 +447,25 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 
-	/* 10a-1: Two-source crossfade (fader_1, Ch 0 CC 7) at 100 and 0 */
+	/* 10a-1: Two-source crossfade (fader_1, Ch 0 CC 7): linear to physical end (92%/95% linear & unparked, >= 97% parks linearly) */
 	push_midi_cc(&eng, 0, 7, 0);
 	push_midi_cc(&eng, 0, 7, 64);
-	push_midi_cc(&eng, 0, 7, 115); /* 115/127 = 0.9055 >= 0.90 -> snaps one-shot to 1.0 and parks */
+	push_midi_cc(&eng, 0, 7, 117); /* 117/127 = 0.9213 (< 0.97): must stay linear ~0.9213 and NOT park! */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (117.0f / 127.0f)) < 1e-5f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	push_midi_cc(&eng, 0, 7, 121); /* 121/127 = 0.9528 (< 0.97): fader at 95% means 95%, NOT parked! */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (121.0f / 127.0f)) < 1e-5f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	push_midi_cc(&eng, 0, 7, 124); /* 124/127 = 0.9764 (>= 0.97): parks at linear 0.9764 (no snap!) */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (124.0f / 127.0f)) < 1e-5f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
+
+	push_midi_cc(&eng, 0, 7, 127); /* physical end 127/127 = 1.0000 */
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
 	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_a - 1.0f) < 1e-6f);
@@ -458,8 +473,8 @@ int main(void)
 	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
 	uint32_t writes_xfade_top = eng.fader_slots[1].output_write_count;
 
-	/* Rail travel + jitter at 100% rail (CC 120, 127, 122, 126, 118, 127 — all within 8% of peak 127) */
-	push_midi_cc(&eng, 0, 7, 120);
+	/* Rail jitter at 100% rail (CC 126, 127, 122, 126, 118, 127 — all within 8% of peak 127) -> 0 writes */
+	push_midi_cc(&eng, 0, 7, 126);
 	push_midi_cc(&eng, 0, 7, 127);
 	push_midi_cc(&eng, 0, 7, 122);
 	push_midi_cc(&eng, 0, 7, 126);
@@ -470,21 +485,26 @@ int main(void)
 	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 1.0f) < 1e-6f);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
 
-	/* Retreat > 8% (CC 114 = 0.8976 < 1.0 - 0.08) unparks with zero jump, then sweep down to <= 10% (CC 11) */
+	/* Retreat > 8% (CC 114 = 0.8976 < 1.0 - 0.08) unparks with zero jump, stays linear at 10%, parks only <= 3% */
 	push_midi_cc(&eng, 0, 7, 114);
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
 
-	push_midi_cc(&eng, 0, 7, 57);
-	push_midi_cc(&eng, 0, 7, 11); /* 11/114 = 0.0965 <= 0.10 -> snaps one-shot to 0.0 and parks */
+	push_midi_cc(&eng, 0, 7, 11); /* 11/114 = 0.0965 (> 0.03): must stay linear and unparked! */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (11.0f / 114.0f)) < 1e-5f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	push_midi_cc(&eng, 0, 7, 3); /* 3/114 = 0.0263 (<= 0.03): parks linearly inside 3% rail zone */
+	push_midi_cc(&eng, 0, 7, 0); /* physical bottom stop 0.0000 */
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 0.0f) < 1e-6f);
 	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 0.0f) < 1e-6f);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
 	uint32_t writes_xfade_bot = eng.fader_slots[1].output_write_count;
 
-	/* Rail travel + jitter at 0% rail (CC 5, 0, 4, 1, 9, 0 — all within 8% of peak 0) -> 0 writes */
+	/* Rail jitter at 0% rail (CC 5, 0, 4, 1, 9, 0 — all within 8% of peak 0) -> 0 writes */
 	push_midi_cc(&eng, 0, 7, 5);
 	push_midi_cc(&eng, 0, 7, 0);
 	push_midi_cc(&eng, 0, 7, 4);
@@ -496,10 +516,15 @@ int main(void)
 	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 0.0f) < 1e-6f);
 	REQUIRE(get_slot_parked_via_get_state(&eng, 1));
 
-	/* 10a-2: Single-layer opacity (fader_2, Ch 1 CC 7, starts at 1.0) at 0 and 100 */
+	/* 10a-2: Single-layer opacity (fader_2, Ch 1 CC 7, starts at 1.0): linear down to <= 3% and up to >= 97% */
 	push_midi_cc(&eng, 1, 7, 127);
-	push_midi_cc(&eng, 1, 7, 64);
-	push_midi_cc(&eng, 1, 7, 12); /* 12/127 = 0.0945 <= 0.10 -> snaps one-shot to 0.0 and parks */
+	push_midi_cc(&eng, 1, 7, 12); /* 12/127 = 0.0945 (> 0.03): stays linear, NOT parked */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[2].last_applied_val - (12.0f / 127.0f)) < 1e-5f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 2));
+
+	push_midi_cc(&eng, 1, 7, 3); /* 3/127 = 0.0236 <= 0.03 -> parks linearly */
+	push_midi_cc(&eng, 1, 7, 0); /* 0.0000 */
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(fabsf(eng.fader_slots[2].last_applied_val - 0.0f) < 1e-6f);
 	REQUIRE(fabsf(eng.fader_slots[2].last_alpha_a - 0.0f) < 1e-6f);
@@ -514,10 +539,13 @@ int main(void)
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(eng.fader_slots[2].output_write_count == writes_layer_bot);
 
-	/* Unpark upward (> 8% from 0: CC 13) and sweep to top rail (CC 116) -> snaps one-shot to 1.0 and parks */
+	/* Unpark upward (> 8% from 0: CC 13) -> linear at 95% (CC 121), parks inside >= 97% (CC 124 -> 127) */
 	push_midi_cc(&eng, 1, 7, 13);
-	push_midi_cc(&eng, 1, 7, 64);
-	push_midi_cc(&eng, 1, 7, 116);
+	push_midi_cc(&eng, 1, 7, 121);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 2));
+	push_midi_cc(&eng, 1, 7, 125);
+	push_midi_cc(&eng, 1, 7, 127);
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(fabsf(eng.fader_slots[2].last_applied_val - 1.0f) < 1e-6f);
 	REQUIRE(fabsf(eng.fader_slots[2].last_alpha_a - 1.0f) < 1e-6f);
@@ -532,7 +560,7 @@ int main(void)
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(eng.fader_slots[2].output_write_count == writes_layer_top);
 
-	/* 10b: Audio volume (fader_3, Ch 2 CC 7) at the bottom rail (no flicker between silent and -60 dB) */
+	/* 10b: Audio volume (fader_3, Ch 2 CC 7): bottom rail at <= 3% (NOT 10%), linear to 0, zero jitter flicker */
 	req = obs_data_create();
 	res = obs_data_create();
 	obs_data_set_string(req, "slot", "fader_3");
@@ -543,12 +571,27 @@ int main(void)
 	obs_data_release(res);
 
 	push_midi_cc(&eng, 2, 7, 127);
-	push_midi_cc(&eng, 2, 7, 64);
-	push_midi_cc(&eng, 2, 7, 12); /* 12/127 = 0.0945 <= 0.10 (-60 dB threshold) -> snaps one-shot to silent 0.0 */
+	push_midi_cc(&eng, 2, 7, 12); /* 12/127 = 0.0945 (> 3%): stays linear (~ -61.5 dB), NOT parked! */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_applied_val - (12.0f / 127.0f)) < 1e-5f);
+	REQUIRE(isfinite(eng.fader_slots[3].last_audio_db));
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 3));
+
+	push_midi_cc(&eng, 2, 7, 6); /* 6/127 = 0.0472 (> 3%): still linear, NOT parked! */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_applied_val - (6.0f / 127.0f)) < 1e-5f);
+	REQUIRE(!get_slot_parked_via_get_state(&eng, 3));
+
+	push_midi_cc(&eng, 2, 7, 3); /* 3/127 = 0.0236 (<= 3%): enters parked inside 3% bottom rail zone */
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[3].last_applied_val - (3.0f / 127.0f)) < 1e-5f);
+	REQUIRE(get_slot_parked_via_get_state(&eng, 3));
+
+	push_midi_cc(&eng, 2, 7, 0); /* physical bottom stop 0.0 -> silent (-inf dB) */
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(fabsf(eng.fader_slots[3].last_applied_val - 0.0f) < 1e-6f);
 	REQUIRE(fabsf(eng.fader_slots[3].last_audio_mul - 0.0f) < 1e-6f);
-	REQUIRE(!isfinite(eng.fader_slots[3].last_audio_db)); /* -inf dB (silent), not -60 dB */
+	REQUIRE(!isfinite(eng.fader_slots[3].last_audio_db));
 	REQUIRE(get_slot_parked_via_get_state(&eng, 3));
 	uint32_t writes_audio_bot = eng.fader_slots[3].output_write_count;
 
@@ -683,6 +726,8 @@ int main(void)
 	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
 	eng.fader_slots[1].takeover.lower_rescale_origin = 0.0f;
 	eng.fader_slots[1].takeover.upper_rescale_origin = 1.0f;
+	eng.fader_slots[1].takeover.lower_rescale_val = 0.0f;
+	eng.fader_slots[1].takeover.upper_rescale_val = 1.0f;
 	eng.fader_slots[1].takeover.armed_upper_rail = true;
 	push_midi_cc(&eng, 0, 7, 0);
 	push_midi_cc(&eng, 0, 7, 115);

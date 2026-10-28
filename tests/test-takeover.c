@@ -156,8 +156,10 @@ int main(void)
 
 	/*
 	 * Case 3d: Directional two-rail mode (two-source crossfade, single-layer opacity, audio volume):
-	 * Both 0% (<= 0.10) and 100% (>= 0.90) rails snap one-shot, enter PARKED, track peak, absorb <= 8%
-	 * rail jitter, and unpark + rescale after > 8% retreat with zero jump.
+	 * Output stays strictly linear to the physical end (92% -> 92%, 95% -> 95%, 97% -> 97%, 100% -> 100%;
+	 * no 90%/10% snap!). Parking engages only inside the 3% rail zones (>= 97% or <= 3%), advances linearly
+	 * with new extremes toward 100%/0%, absorbs <= 8% rail jitter with zero writes, and unparks + rescales
+	 * after > 8% retreat with zero jump.
 	 */
 	struct mfd_takeover two_rail;
 	mfd_takeover_init(&two_rail, 0.0f, 0.015f, false);
@@ -168,63 +170,70 @@ int main(void)
 	REQUIRE(!two_rail.armed_lower_rail);
 	REQUIRE(two_rail.armed_upper_rail);
 
-	/* Sweep up to 0.90 -> triggers upper rail one-shot completion (1.0f) and parks */
+	/* 90%, 92%, 95% stay strictly linear and ENGAGED (no T-bar 90% snap!) */
 	REQUIRE(mfd_takeover_step(&two_rail, 0.50f, &out));
 	REQUIRE(two_rail.armed_lower_rail);
 	REQUIRE(mfd_takeover_step(&two_rail, 0.90f, &out));
-	float rail_val = -1.0f;
-	bool upper_rail = false;
-	REQUIRE(mfd_takeover_check_two_rail_completion(&two_rail, out, &rail_val, &upper_rail));
-	REQUIRE(upper_rail);
-	REQUIRE(fabsf(rail_val - 1.0f) < 1e-6f);
-	mfd_takeover_notify_rail_completed(&two_rail, upper_rail);
+	REQUIRE(fabsf(out - 0.90f) < 1e-6f);
+	REQUIRE(two_rail.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(mfd_takeover_step(&two_rail, 0.92f, &out));
+	REQUIRE(fabsf(out - 0.92f) < 1e-6f);
+	REQUIRE(two_rail.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(mfd_takeover_step(&two_rail, 0.95f, &out));
+	REQUIRE(fabsf(out - 0.95f) < 1e-6f);
+	REQUIRE(two_rail.state == MFD_TAKEOVER_ENGAGED);
+
+	/* Entering >= 97% (0.97) parks WITHOUT snapping (output is exact linear 0.97) */
+	REQUIRE(mfd_takeover_step(&two_rail, 0.97f, &out));
+	REQUIRE(fabsf(out - 0.97f) < 1e-6f);
 	REQUIRE(two_rail.state == MFD_TAKEOVER_PARKED);
 	REQUIRE(two_rail.parked_at_upper_rail);
 
-	/* Travel to physical stop 0.95 -> 1.00 and rail jitter within 8% (0.93) produce zero writes */
-	REQUIRE(!mfd_takeover_step(&two_rail, 0.95f, &out));
-	REQUIRE(!mfd_takeover_step(&two_rail, 1.00f, &out));
+	/* Continuing to physical stop 0.985 -> 1.00 advances linearly to 1.00; rail jitter <= 8% produces zero writes */
+	REQUIRE(mfd_takeover_step(&two_rail, 0.985f, &out));
+	REQUIRE(fabsf(out - 0.985f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&two_rail, 1.00f, &out));
+	REQUIRE(fabsf(out - 1.00f) < 1e-6f);
 	REQUIRE(fabsf(two_rail.parked_peak - 1.00f) < 1e-6f);
 	REQUIRE(!mfd_takeover_step(&two_rail, 0.96f, &out));
 	REQUIRE(!mfd_takeover_step(&two_rail, 0.99f, &out));
 	REQUIRE(!mfd_takeover_step(&two_rail, 0.93f, &out));
+	REQUIRE(!mfd_takeover_step(&two_rail, 1.00f, &out));
 	REQUIRE(two_rail.state == MFD_TAKEOVER_PARKED);
 
 	/* Retreat > 8% from peak (1.00 -> 0.90) unparks at 1.0f (zero jump!) and rescales [0.0, 0.90] -> [0.0, 1.0] */
 	REQUIRE(mfd_takeover_step(&two_rail, 0.90f, &out));
 	REQUIRE(two_rail.state == MFD_TAKEOVER_ENGAGED);
 	REQUIRE(fabsf(out - 1.0f) < 1e-6f);
-	REQUIRE(!mfd_takeover_check_two_rail_completion(&two_rail, out, &rail_val, &upper_rail));
 
-	/* Halfway down (raw = 0.45) -> effective = 0.50 */
+	/* Halfway down (raw = 0.45) -> effective = 0.50; 10% (raw = 0.09) -> effective = 0.10 (NOT parked!) */
 	REQUIRE(mfd_takeover_step(&two_rail, 0.45f, &out));
 	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
 	REQUIRE(two_rail.armed_upper_rail);
-
-	/* Reach lower rail threshold (raw = 0.09 -> eff = 0.10 <= 0.10) -> triggers lower rail (0.0f) and parks */
 	REQUIRE(mfd_takeover_step(&two_rail, 0.09f, &out));
 	REQUIRE(fabsf(out - 0.10f) < 1e-5f);
-	REQUIRE(mfd_takeover_check_two_rail_completion(&two_rail, out, &rail_val, &upper_rail));
-	REQUIRE(!upper_rail);
-	REQUIRE(fabsf(rail_val - 0.0f) < 1e-6f);
-	mfd_takeover_notify_rail_completed(&two_rail, upper_rail);
+	REQUIRE(two_rail.state == MFD_TAKEOVER_ENGAGED);
+
+	/* Enter <= 3% lower rail zone (raw = 0.027 -> eff = 0.03 <= 0.03) -> parks at linear 0.03, then reaches 0.00 */
+	REQUIRE(mfd_takeover_step(&two_rail, 0.027f, &out));
+	REQUIRE(fabsf(out - 0.03f) < 1e-5f);
 	REQUIRE(two_rail.state == MFD_TAKEOVER_PARKED);
 	REQUIRE(!two_rail.parked_at_upper_rail);
-
-	/* Travel to bottom stop 0.03 -> 0.00 and bottom-rail jitter within 8% (0.07) produce zero writes */
-	REQUIRE(!mfd_takeover_step(&two_rail, 0.03f, &out));
-	REQUIRE(!mfd_takeover_step(&two_rail, 0.00f, &out));
+	REQUIRE(mfd_takeover_step(&two_rail, 0.00f, &out));
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
 	REQUIRE(fabsf(two_rail.parked_peak - 0.00f) < 1e-6f);
+
+	/* Bottom-rail jitter within 8% (0.05, 0.01, 0.07, 0.00) produces zero writes */
 	REQUIRE(!mfd_takeover_step(&two_rail, 0.05f, &out));
 	REQUIRE(!mfd_takeover_step(&two_rail, 0.01f, &out));
 	REQUIRE(!mfd_takeover_step(&two_rail, 0.07f, &out));
+	REQUIRE(!mfd_takeover_step(&two_rail, 0.00f, &out));
 	REQUIRE(two_rail.state == MFD_TAKEOVER_PARKED);
 
 	/* Advance > 8% from bottom peak (0.00 -> 0.10) unparks at 0.0f (zero jump!) and rescales [0.10, 1.00] -> [0.0, 1.0] */
 	REQUIRE(mfd_takeover_step(&two_rail, 0.10f, &out));
 	REQUIRE(two_rail.state == MFD_TAKEOVER_ENGAGED);
 	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
-	REQUIRE(!mfd_takeover_check_two_rail_completion(&two_rail, out, &rail_val, &upper_rail));
 	REQUIRE(mfd_takeover_step(&two_rail, 0.55f, &out));
 	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
 

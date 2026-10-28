@@ -441,31 +441,72 @@ static void run_live_selftest_worker(void)
 		std::this_thread::sleep_for(std::chrono::milliseconds(80));
 	};
 
-	set_fader1_and_wait(0.0);
-	float r0 = 0.0f, g0 = 0.0f, b0 = 0.0f, srgb0 = 0.0f;
-	bool ss0_ok = capture_source_screenshot_avg_rgb(program_scene_name, &r0, &g0, &b0, &srgb0);
-	float bright_red = r0 + g0 + b0;
-
 	set_fader1_and_wait(1.0);
 	float r1 = 0.0f, g1 = 0.0f, b1 = 0.0f, srgb1 = 0.0f;
 	bool ss1_ok = capture_source_screenshot_avg_rgb(program_scene_name, &r1, &g1, &b1, &srgb1);
 	float bright_blue = r1 + g1 + b1;
-	float min_source_brightness = std::min(bright_red, bright_blue);
 
 	obs_source_t *flt_a = src_a ? obs_source_get_filter_by_name(src_a, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
 	obs_source_t *flt_b = src_b ? obs_source_get_filter_by_name(src_b, MFD_INTERNAL_OPACITY_FILTER_NAME) : nullptr;
 	float read_a_end = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
 	float read_b_end = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
 
-	/* Check (2): Program output GetSourceScreenshot at t = 0.25, 0.5, 0.75 */
-	const float test_ts[3] = {0.25f, 0.50f, 0.75f};
+	set_fader1_and_wait(0.0);
+	float r0 = 0.0f, g0 = 0.0f, b0 = 0.0f, srgb0 = 0.0f;
+	bool ss0_ok = capture_source_screenshot_avg_rgb(program_scene_name, &r0, &g0, &b0, &srgb0);
+	float bright_red = r0 + g0 + b0;
+	float min_source_brightness = std::min(bright_red, bright_blue);
+
+	/*
+	 * Check (2): Program output GetSourceScreenshot at t = 0.25, 0.50, 0.75, 0.92, 0.97
+	 * driven through the live MIDI queue + takeover + smoother + rail check on fader_1 (Ch 1, 14-bit CC 7/39).
+	 * Temporarily pause WinMM input so eng->midi_queue remains strictly single-producer.
+	 */
+	char prev_midi_for_ss[MFD_MIDI_DEV_NAME_MAX] = {0};
+	bool reopen_midi_after_ss = false;
+	QMetaObject::invokeMethod(
+		main_win,
+		[&]() {
+			if (eng->midi_dev.is_open) {
+				std::snprintf(prev_midi_for_ss, sizeof(prev_midi_for_ss), "%s",
+					      eng->midi_dev.opened_name);
+				mfd_winmm_close(&eng->midi_dev);
+				reopen_midi_after_ss = true;
+			}
+		},
+		Qt::BlockingQueuedConnection);
+	std::this_thread::sleep_for(std::chrono::milliseconds(40));
+
+	mfd_takeover_init(&eng->fader_slots[1].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	mfd_takeover_set_two_rail_mode(&eng->fader_slots[1].takeover, true);
+	eng->fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
+	mfd_smoother_reset(&eng->fader_slots[1].smoother, 0.0f);
+	eng->fader_slots[1].last_applied_val = 0.0f;
+
+	auto send_fader1_midi14_and_wait = [&](float t_norm) {
+		int v14 = static_cast<int>(std::ceil(static_cast<double>(t_norm) * 16383.0));
+		if (v14 < 0) {
+			v14 = 0;
+		} else if (v14 > 16383) {
+			v14 = 16383;
+		}
+		const uint32_t msb = static_cast<uint32_t>((v14 >> 7) & 0x7F);
+		const uint32_t lsb = static_cast<uint32_t>(v14 & 0x7F);
+		const uint32_t msg_msb = 0xB0U | (7U << 8U) | (msb << 16U);
+		const uint32_t msg_lsb = 0xB0U | (39U << 8U) | (lsb << 16U);
+		mfd_midi_queue_push(&eng->midi_queue, msg_msb, 0U);
+		mfd_midi_queue_push(&eng->midi_queue, msg_lsb, 0U);
+		std::this_thread::sleep_for(std::chrono::milliseconds(220));
+	};
+
+	const float test_ts[5] = {0.25f, 0.50f, 0.75f, 0.92f, 0.97f};
 	bool screenshot_all_pass = ss0_ok && ss1_ok;
 	float read_a_mid = -1.0f;
 	float read_b_mid = -1.0f;
 
-	for (int i = 0; i < 3; ++i) {
+	for (int i = 0; i < 5; ++i) {
 		const float t = test_ts[i];
-		set_fader1_and_wait(t);
+		send_fader1_midi14_and_wait(t);
 		if (i == 1) {
 			read_a_mid = flt_a ? mfd_layer_filter_get_opacity(flt_a) : -1.0f;
 			read_b_mid = flt_b ? mfd_layer_filter_get_opacity(flt_b) : -1.0f;
@@ -484,15 +525,24 @@ static void run_live_selftest_worker(void)
 		/* 8-bit sRGB integer quantization of 224/255 is 0.0044 (1 LSB = 0.0075); require no dip in both linear and sRGB */
 		const bool bright_ok = cap_ok && (brightness >= min_source_brightness - 0.008f) &&
 				       (srgb_bright >= srgb0 - 1e-4f) && (srgb_bright >= srgb1 - 1e-4f);
-		const bool step_ok = mix_ok && bright_ok;
+		const bool is_parked = (eng->fader_slots[1].takeover.state == MFD_TAKEOVER_PARKED);
+		const bool expected_parked = (t >= MFD_TWO_RAIL_UPPER_PARK_THRESHOLD);
+		const bool parked_ok = (is_parked == expected_parked);
+		const bool step_ok = mix_ok && bright_ok && parked_ok;
 		if (!step_ok) {
 			screenshot_all_pass = false;
 		}
 		obs_log(step_ok ? LOG_INFO : LOG_ERROR,
-			"SCREENSHOT CHECK t=%.2f [%s]: program='%s' avg_rgb=(%.4f, %.4f, %.4f) expected=(%.4f, %.4f, %.4f) max_err=%.4f brightness=%.4f srgb_brightness=%.4f (src_red=%.4f src_blue=%.4f) mix_within_2pct=%d bright_no_dip=%d",
+			"SCREENSHOT CHECK t=%.2f [%s]: program='%s' avg_rgb=(%.4f, %.4f, %.4f) expected=(%.4f, %.4f, %.4f) max_err=%.4f brightness=%.4f srgb_brightness=%.4f (src_red=%.4f src_blue=%.4f) mix_within_2pct=%d bright_no_dip=%d parked=%d(expected=%d)",
 			t, step_ok ? "PASS" : "FAIL", program_scene_name, avg_r, avg_g, avg_b, exp_r, exp_g, exp_b,
 			std::max({err_r, err_g, err_b}), brightness, srgb_bright, bright_red, bright_blue, (int)mix_ok,
-			(int)bright_ok);
+			(int)bright_ok, (int)is_parked, (int)expected_parked);
+	}
+
+	if (reopen_midi_after_ss && prev_midi_for_ss[0] != '\0') {
+		QMetaObject::invokeMethod(
+			main_win, [&]() { mfd_engine_reconnect_midi(eng, prev_midi_for_ss); },
+			Qt::BlockingQueuedConnection);
 	}
 
 	if (flt_a) {

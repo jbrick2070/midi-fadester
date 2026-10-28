@@ -452,25 +452,13 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 			if (mfd_takeover_step(&slot->takeover, norm, &effective)) {
 				slot->auto_fade_active = false;
-				if (was_parked && slot->takeover.state != MFD_TAKEOVER_PARKED) {
-					mfd_engine_notify_state_changed(eng);
-				}
 				mfd_smoother_set_target(&slot->smoother, effective);
 				if (!mfd_smoother_is_active(&slot->smoother)) {
-					float rail_val = 0.0f;
-					bool upper_rail = false;
-					if (mfd_takeover_check_two_rail_completion(
-						    &slot->takeover, slot->smoother.current, &rail_val, &upper_rail)) {
-						mfd_engine_apply_slot_output(eng, slot, rail_val);
-						mfd_takeover_notify_rail_completed(&slot->takeover, upper_rail);
-						mfd_smoother_reset(&slot->smoother, rail_val);
-					} else {
-						mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
-					}
-					if (slot->takeover.state == MFD_TAKEOVER_PARKED) {
-						mfd_engine_notify_state_changed(eng);
-					}
+					mfd_engine_apply_slot_output(eng, slot, slot->smoother.current);
 					mfd_engine_notify_fader_changed(eng, i, "midi");
+				}
+				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
+					mfd_engine_notify_state_changed(eng);
 				}
 			}
 		}
@@ -497,7 +485,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				} else if (progress >= 1.0f) {
 					slot->auto_fade_active = false;
 					if (slot->auto_fade_to <= 0.0f) {
-						mfd_takeover_notify_rail_completed(&slot->takeover, false);
+						mfd_takeover_notify_rail_completed(&slot->takeover, false, 0.0f);
 						mfd_engine_notify_state_changed(eng);
 					} else {
 						mfd_takeover_unpark_from_api(&slot->takeover, v);
@@ -506,15 +494,17 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			} else {
 				if (progress >= 1.0f) {
 					slot->auto_fade_active = false;
-					if (slot->auto_fade_to >= 1.0f) {
-						mfd_engine_apply_slot_output(eng, slot, 1.0f);
-						mfd_takeover_notify_rail_completed(&slot->takeover, true);
-						mfd_smoother_reset(&slot->smoother, 1.0f);
+					if (slot->auto_fade_to >= MFD_TWO_RAIL_UPPER_PARK_THRESHOLD) {
+						mfd_engine_apply_slot_output(eng, slot, slot->auto_fade_to);
+						mfd_takeover_notify_rail_completed(&slot->takeover, true,
+										   slot->auto_fade_to);
+						mfd_smoother_reset(&slot->smoother, slot->auto_fade_to);
 						mfd_engine_notify_state_changed(eng);
-					} else if (slot->auto_fade_to <= 0.0f) {
-						mfd_engine_apply_slot_output(eng, slot, 0.0f);
-						mfd_takeover_notify_rail_completed(&slot->takeover, false);
-						mfd_smoother_reset(&slot->smoother, 0.0f);
+					} else if (slot->auto_fade_to <= MFD_TWO_RAIL_LOWER_PARK_THRESHOLD) {
+						mfd_engine_apply_slot_output(eng, slot, slot->auto_fade_to);
+						mfd_takeover_notify_rail_completed(&slot->takeover, false,
+										   slot->auto_fade_to);
+						mfd_smoother_reset(&slot->smoother, slot->auto_fade_to);
 						mfd_engine_notify_state_changed(eng);
 					} else {
 						mfd_engine_apply_slot_output(eng, slot, v);
@@ -526,17 +516,10 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			}
 			mfd_engine_notify_fader_changed(eng, i, "auto_fade");
 		} else if (mfd_smoother_is_active(&slot->smoother)) {
+			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED);
 			float smoothed = mfd_smoother_tick(&slot->smoother, seconds);
-			float rail_val = 0.0f;
-			bool upper_rail = false;
-			if (mfd_takeover_check_two_rail_completion(&slot->takeover, smoothed, &rail_val, &upper_rail)) {
-				mfd_engine_apply_slot_output(eng, slot, rail_val);
-				mfd_takeover_notify_rail_completed(&slot->takeover, upper_rail);
-				mfd_smoother_reset(&slot->smoother, rail_val);
-			} else {
-				mfd_engine_apply_slot_output(eng, slot, smoothed);
-			}
-			if (slot->takeover.state == MFD_TAKEOVER_PARKED) {
+			mfd_engine_apply_slot_output(eng, slot, smoothed);
+			if (!was_parked && slot->takeover.state == MFD_TAKEOVER_PARKED) {
 				mfd_engine_notify_state_changed(eng);
 			}
 			mfd_engine_notify_fader_changed(eng, i, "midi");
