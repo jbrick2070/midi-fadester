@@ -1292,9 +1292,7 @@ private:
 			int active_fx = 0;
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 				const struct mfd_fader_slot &fs = snap_.slots[i];
-				if (fs.enabled && fs.target_type != MFD_TARGET_UNASSIGNED &&
-				    fs.target_type != MFD_TARGET_TBAR &&
-				    (mfd_slot_is_fx_bank(i) || fs.target_type == MFD_TARGET_FILTER_PARAM)) {
+				if (mfd_slot_is_reset_fx_eligible(&fs)) {
 					++eligible_fx;
 					if (fs.last_applied_val > MFD_FILTER_BYPASS_ZERO_THRESHOLD ||
 					    fs.auto_fade_active) {

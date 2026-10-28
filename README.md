@@ -2,6 +2,10 @@
 
 **Midi Fadester** is a continuous MIDI fader controller and video layer/filter mixer plugin for OBS Studio 33 on Windows x64, built for any class-compliant MIDI controller with plug-and-play support for the **Akai APC40 mkII** and full two-way `obs-websocket` sync with **Stream Deck + (`Fadester for OBS`)**. It provides an **18-slot control desk** (`crossfader`, `fader_1..fader_8`, `master`, plus 8 dedicated **`fx_1..fx_8`** filter/knob slots), channel-aware MIDI learn (`Ch 1–16` + `CC/Note`, 7-bit and 14-bit CC pairs), 30 ms slew smoothing, bidirectional Soft Takeover (including external OBS filter edits), Studio Mode T-bar crossfades (fixing OBS 33's Studio Mode off crash and `release_tbar` cancellation bug), single-layer and whole-scene opacity fades, two-source dip-free layer crossfades (`Source A ↔ Source B`), cubic-dB audio faders, **Filter & Effect Parameter Modulation (`filter_param`)** on any numeric float/int OBS filter setting (Blur, Color Correction, Chroma/Luma Key, Shaderfilter uniforms, Visual Sidechain reactivity) with shared-filter `bypass_at_zero` lease management, and one-click **`Clean / All FX Off` (`reset_fx`)** panic reset.
 
+**Clean / All FX Off** resets enabled filter-parameter bindings in either bank. Audio volume, A/B crossfades, layer opacity, and T-bars stay unchanged even when assigned to an FX slot. This corrects the earlier bank-based reset scope; the eligible count can decrease for repurposed FX slots.
+
+The vendor API's `set_slot.enabled` field accepts a boolean and preserves the binding when a slot is disabled. Explicit disable cancels active fades and pending cleans, so re-enabling cannot replay an old clean request. Re-enabled filter slots read their current value from OBS so the next adjustment continues from the live setting.
+
 > **Disclaimer:** Midi Fadester is an independent third-party plugin for OBS Studio. It is not made, endorsed, or supported by the OBS Project or by Akai Professional / inMusic Brands.
 
 ## Installation (OBS Studio 33, Windows x64)

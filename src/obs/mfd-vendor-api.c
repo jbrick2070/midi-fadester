@@ -787,9 +787,11 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	}
 
 	struct mfd_fader_slot *s = &eng->fader_slots[idx];
+	bool was_enabled = s->enabled;
 	enum mfd_target_type new_target = s->target_type;
 	enum mfd_crossfade_curve new_curve = s->curve;
 	bool has_target = obs_data_has_user_value(request_data, "target_mode");
+	bool has_enabled = obs_data_has_user_value(request_data, "enabled");
 	bool has_curve = obs_data_has_user_value(request_data, "curve");
 	bool has_scene = obs_data_has_user_value(request_data, "scene");
 	bool has_sa = obs_data_has_user_value(request_data, "source_a");
@@ -803,6 +805,17 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	bool has_cal_max = obs_data_has_user_value(request_data, "cal_max");
 	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
 	int new_cal_max = has_cal_max ? (int)obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
+
+	if (has_enabled) {
+		obs_data_item_t *item = obs_data_item_byname(request_data, "enabled");
+		bool is_boolean = item && obs_data_item_gettype(item) == OBS_DATA_BOOLEAN;
+		obs_data_item_release(&item);
+		if (!is_boolean) {
+			set_error_comment(response_data, "Parameter 'enabled' must be a boolean.");
+			mfd_engine_unlock(eng);
+			return;
+		}
+	}
 
 	if ((has_cal_min || has_cal_max) && (new_cal_min < 0 || new_cal_max <= new_cal_min)) {
 		set_error_comment(response_data,
@@ -878,9 +891,12 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 				    strcmp(s->filter_prop, cand_fp) == 0);
 	double cand_from = s->filter_from_val;
 	double cand_to = s->filter_to_val;
-	bool new_enabled = has_target ? true : s->enabled;
+	bool new_enabled = has_enabled ? obs_data_get_bool(request_data, "enabled") : (has_target ? true : s->enabled);
+	/* A pure disable must remain possible after the existing filter disappears. */
+	bool disable_unchanged_filter = has_enabled && !new_enabled && !has_target && !has_sa && !has_fn && !has_fp &&
+					!has_from && !has_to && !has_bypass;
 
-	if (new_target == MFD_TARGET_FILTER_PARAM) {
+	if (new_target == MFD_TARGET_FILTER_PARAM && !disable_unchanged_filter) {
 		char err_msg[256] = {0};
 		struct mfd_filter_prop_info prop_info;
 		memset(&prop_info, 0, sizeof(prop_info));
@@ -924,6 +940,16 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	}
 
 	mfd_engine_detach_filter_binding_locked(eng, idx);
+	s->enabled = new_enabled;
+	if (has_enabled && !new_enabled) {
+		/* Explicit disable cancels intent instead of queuing an old reset for reenable. */
+		s->auto_fade_active = false;
+		s->auto_fade_is_reset_fx = false;
+		s->pending_clean_apply_on_avail = false;
+		s->has_last_written_mapped = false;
+		mfd_smoother_reset(&s->smoother, s->last_applied_val);
+		mfd_takeover_sync_external(&s->takeover, s->last_applied_val);
+	}
 
 	if (has_cal_min || has_cal_max) {
 		mfd_engine_set_slot_calibration(eng, idx, new_cal_min, new_cal_max);
@@ -947,8 +973,12 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		s->audio_follows_video = obs_data_get_bool(request_data, "afv");
 	}
 	if (new_target == MFD_TARGET_FILTER_PARAM) {
-		snprintf(s->filter_name, sizeof(s->filter_name), "%s", cand_fn);
-		snprintf(s->filter_prop, sizeof(s->filter_prop), "%s", cand_fp);
+		if (has_fn) {
+			snprintf(s->filter_name, sizeof(s->filter_name), "%s", cand_fn);
+		}
+		if (has_fp) {
+			snprintf(s->filter_prop, sizeof(s->filter_prop), "%s", cand_fp);
+		}
 		s->filter_from_val = cand_from;
 		s->filter_to_val = cand_to;
 		if (has_bypass) {
@@ -966,7 +996,6 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	}
 
 	if (has_target) {
-		s->enabled = true;
 		if (new_target == MFD_TARGET_FILTER_PARAM &&
 		    (!same_filter_binding || has_from || has_to || s->target_type == MFD_TARGET_FILTER_PARAM)) {
 			s->target_type = MFD_TARGET_UNASSIGNED;
@@ -979,6 +1008,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 
 	mfd_engine_bump_slot_rev(eng, idx);
 	mfd_engine_reevaluate_slots(eng, false);
+	if (!was_enabled && new_enabled) {
+		mfd_engine_sync_filter_slot_from_live_locked(eng, idx);
+	}
 	if (obs_initialized()) {
 		eng->pending_config_save = true;
 	}

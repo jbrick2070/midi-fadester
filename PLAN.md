@@ -14,7 +14,7 @@ Phase 1 is scoped to deliver a complete, usable APC40 mkII fader controller in O
 | **OBS Prebuilt Deps & Qt6** | `C:\Users\jeffr\Documents\obs-playlister\.deps\obs-deps-2026-10-23-x64`<br>`C:\Users\jeffr\Documents\obs-playlister\.deps\obs-deps-qt6-2026-10-23-x64` | Shared read-only dependencies (zero modifications to `obs-playlister`). |
 | **Portable OBS 33.0.0** | `C:\Users\jeffr\OBS-Studio-33-Portable\bin\64bit\obs64.exe` | Target for live harness verification (`plugins\midi-fadester\`). |
 | **Compiler & SDK** | Visual Studio 2022 Build Tools 17.14 (`MSVC 14.44`, Windows SDK `10.0.26100.0`) | `Visual Studio 17 2022` generator, `x64,version=10.0.26100.0`, C17/C++17. |
-| **CMake & Formatter** | CMake `4.4.0`; `clang-format` `19.1.5` (VS 2022 LLVM); `gersemi` `0.21.0` | All `.c`/`.h`/`.cpp`/`.hpp` formatted before commit. |
+| **CMake & Formatter** | CMake `4.4.0`; CI requires `clang-format 17.0.3`; `gersemi` `0.21.0` | Use the isolated x64 clang-format 17.0.3 environment for all `.c`/`.h`/`.cpp`/`.hpp` changes. The installed VS LLVM 19.1.5 formatter produces incompatible output and is not used for this repo. |
 | **Windows MIDI API** | `winmm.dll` / `winmm.lib` (Windows SDK `10.0.26100.0`, `<mmsystem.h>`) | Zero external MIDI dependencies (`R-PLAT-4`). |
 
 ---

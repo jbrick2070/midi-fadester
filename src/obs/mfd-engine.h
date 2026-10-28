@@ -424,6 +424,10 @@ void mfd_engine_handle_filter_settings_updated(struct mfd_engine *eng, const cha
 					       const char *filter_name);
 void mfd_engine_handle_filter_properties_updated(struct mfd_engine *eng, const char *parent_source_name,
 						 const char *filter_name);
+/* Clean FX targets enabled filter bindings in any bank, never audio or layer controls. */
+bool mfd_slot_is_reset_fx_eligible(const struct mfd_fader_slot *slot);
+/* Caller holds the engine lock; refresh cached deflection without writing to the filter. */
+void mfd_engine_sync_filter_slot_from_live_locked(struct mfd_engine *eng, int slot_index);
 bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
 			 int *out_queued_unavailable_count, char *out_err, size_t err_size);
 

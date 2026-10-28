@@ -1507,6 +1507,7 @@ int main(int argc, char **argv)
 	}
 	const float strip1_val_before_clean = eng.fader_slots[1].last_applied_val;
 	REQUIRE(std::fabs(strip1_val_before_clean - 0.62f) < 1e-5f);
+	REQUIRE(btn_clean_fx->styleSheet().contains(QStringLiteral("#b45309")));
 	btn_clean_fx->click();
 	pump_ui();
 	REQUIRE(std::fabs(eng.fader_slots[10].last_applied_val) < 1e-5f);
@@ -1517,6 +1518,45 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_10"))->text() ==
 		QStringLiteral("0.0 px (Off)"));
 	REQUIRE(std::fabs(eng.fader_slots[1].last_applied_val - strip1_val_before_clean) < 1e-5f);
+
+	REQUIRE(btn_clean_fx->styleSheet().contains(QStringLiteral("#164e63")));
+
+	/* Active nonfilter assignments in the FX bank do not light up Clean FX or get reset. */
+	{
+		const enum mfd_target_type protected_modes[] = {MFD_TARGET_AUDIO_VOLUME, MFD_TARGET_TWO_SOURCE_MIX,
+								MFD_TARGET_SINGLE_LAYER};
+		uint32_t writes_before_clean[3] = {0};
+		for (int n = 0; n < 3; ++n) {
+			struct mfd_slot_config_edit edit {};
+			edit.enabled = true;
+			edit.target_type = protected_modes[n];
+			std::snprintf(edit.scene_name, sizeof(edit.scene_name), "Blue");
+			std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s", n == 0 ? "Mic/Aux" : "Cam");
+			if (n == 1) {
+				std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "Color 2");
+			}
+			edit.curve = MFD_CURVE_DIP_FREE;
+			REQUIRE(mfd_engine_update_slot_config(&eng, 12 + n, &edit));
+			char err[128] = {0};
+			REQUIRE(mfd_engine_set_slot_value(&eng, 12 + n, 0.65f, false, "api", err, sizeof(err)));
+			writes_before_clean[n] = eng.fader_slots[12 + n].output_write_count;
+		}
+		pump_ui();
+		REQUIRE(btn_clean_fx->styleSheet().contains(QStringLiteral("#164e63")));
+		REQUIRE(!btn_clean_fx->styleSheet().contains(QStringLiteral("#b45309")));
+		const int opacity_writes_before_clean = sg.total_opacity_writes;
+		const int volume_writes_before_clean = sg.total_volume_writes;
+		btn_clean_fx->click();
+		pump_ui();
+		for (int n = 0; n < 3; ++n) {
+			REQUIRE(std::fabs(eng.fader_slots[12 + n].last_applied_val - 0.65f) < 1e-5f);
+			REQUIRE(eng.fader_slots[12 + n].output_write_count == writes_before_clean[n]);
+			REQUIRE(!eng.fader_slots[12 + n].pending_clean_apply_on_avail);
+		}
+		REQUIRE(sg.total_opacity_writes == opacity_writes_before_clean);
+		REQUIRE(sg.total_volume_writes == volume_writes_before_clean);
+		REQUIRE(btn_clean_fx->styleSheet().contains(QStringLiteral("#164e63")));
+	}
 
 	/* Switch to Advanced tab -> verify 18 rows, <= 1380 px width, filter summary, Off at 0% toggle & conflict banner */
 	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnOpenAdvanced"))->click();

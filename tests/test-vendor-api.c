@@ -3096,6 +3096,62 @@ int main(void)
 		REQUIRE(!mfd_engine_commit_setup_session(&eng, &dup_cand, dup_err, sizeof(dup_err)));
 		mfd_engine_cancel_setup_session(&eng);
 
+		/* API enabled=false overrides target autoenable and permits an inactive duplicate binding. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_bool(req, "enabled", false);
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(!obs_data_get_bool(res, "enabled"));
+		REQUIRE(!eng.fader_slots[11].enabled && !eng.fader_slots[11].cached_available);
+		REQUIRE(strcmp(eng.fader_slots[11].filter_prop, "radius") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Enabling a duplicate is rejected before revision, binding, or lease mutation. */
+		uint64_t disabled_dup_rev = eng.slot_config_rev[11];
+		int dup_enable_writes = flt_blur->enable_writes;
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_bool(req, "enabled", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(strstr(obs_data_get_string(res, "error"), "already controlled") != NULL);
+		REQUIRE(strcmp(obs_data_get_string(res, "error"), obs_data_get_string(res, "comment")) == 0);
+		REQUIRE(!eng.fader_slots[11].enabled);
+		REQUIRE(eng.slot_config_rev[11] == disabled_dup_rev);
+		REQUIRE(flt_blur->enable_writes == dup_enable_writes);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Truthy strings are not booleans, and must not silently enable or disable a slot. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "enabled", "true");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(strcmp(obs_data_get_string(res, "error"), "Parameter 'enabled' must be a boolean.") == 0);
+		REQUIRE(strcmp(obs_data_get_string(res, "error"), obs_data_get_string(res, "comment")) == 0);
+		REQUIRE(!eng.fader_slots[11].enabled && eng.slot_config_rev[11] == disabled_dup_rev);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Legacy target-mode edits still autoenable when no enabled override is supplied. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_2");
+		obs_data_set_string(req, "target_mode", "unassigned");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(obs_data_get_bool(res, "enabled") && eng.fader_slots[11].enabled);
+		obs_data_release(req);
+		obs_data_release(res);
+
 		/* Disabled slot configured with duplicate binding cannot be toggled enabled while fx_1 owns it */
 		struct mfd_slot_config_edit adv_dup;
 		memset(&adv_dup, 0, sizeof(adv_dup));
@@ -3174,6 +3230,44 @@ int main(void)
 		REQUIRE(flt_blur->enabled);
 		REQUIRE(mfd_engine_set_slot_value(&eng, 11, 0.0f, false, "api", sval_err, sizeof(sval_err)));
 		REQUIRE(!flt_blur->enabled);
+
+		/* Disabling API owners preserves the sibling lease, then restores the last owner's original state. */
+		for (int owner = 11; owner >= 10; --owner) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", eng.fader_slots[owner].id);
+			obs_data_set_bool(req, "enabled", false);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(!obs_data_has_user_value(res, "error"));
+			REQUIRE(!obs_data_get_bool(res, "enabled") && !eng.fader_slots[owner].cached_available);
+			REQUIRE(flt_blur->enabled == (owner == 10));
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+		for (int owner = 10; owner <= 11; ++owner) {
+			const int writes_before_reenable = flt_blur->enable_writes;
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", eng.fader_slots[owner].id);
+			obs_data_set_bool(req, "enabled", true);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(!obs_data_has_user_value(res, "error"));
+			REQUIRE(obs_data_get_bool(res, "enabled") && eng.fader_slots[owner].cached_available);
+			/* Reacquiring ownership must not write the live enable state by itself. */
+			REQUIRE(flt_blur->enable_writes == writes_before_reenable);
+			REQUIRE(flt_blur->enabled == (owner == 10));
+			obs_data_release(req);
+			obs_data_release(res);
+			if (owner == 10) {
+				/* Leave the parked rail before a fresh gesture returns to bypass. */
+				REQUIRE(mfd_engine_set_slot_value(&eng, owner, 0.25f, false, "api", sval_err,
+								  sizeof(sval_err)));
+				REQUIRE(flt_blur->enabled);
+				REQUIRE(mfd_engine_set_slot_value(&eng, owner, 0.0f, false, "api", sval_err,
+								  sizeof(sval_err)));
+				REQUIRE(!flt_blur->enabled);
+			}
+		}
 
 		/* Persisted filter_pre_bypass_enabled crash-recovery check while Blur is bypassed (enabled == false): */
 		const char *tmp_crash_json = "test-mfd-bypass-crash-recovery.json";
@@ -3362,6 +3456,43 @@ int main(void)
 		obs_data_release(res);
 		REQUIRE(mfd_engine_set_slot_value(&eng, 4, 0.80f, false, "api", sval_err, sizeof(sval_err)));
 
+		/* Nonfilter controls stay protected even when assigned to the FX bank. */
+		const char *nonfilter_modes[] = {"audio_volume", "crossfade_ab", "layer_opacity"};
+		uint32_t nonfilter_writes[3];
+		for (int n = 0; n < 3; ++n) {
+			int slot_index = 12 + n; /* fx_3, fx_4, fx_5 */
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", eng.fader_slots[slot_index].id);
+			obs_data_set_string(req, "target_mode", nonfilter_modes[n]);
+			obs_data_set_string(req, "scene", "Blue");
+			obs_data_set_string(req, "source_a", n == 0 ? "Mic/Aux" : "Color");
+			if (n == 1) {
+				obs_data_set_string(req, "source_b", "Color 2");
+			}
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(!obs_data_has_user_value(res, "error"));
+			obs_data_release(req);
+			obs_data_release(res);
+			REQUIRE(mfd_engine_set_slot_value(&eng, slot_index, 0.65f, false, "api", sval_err,
+							  sizeof(sval_err)));
+			nonfilter_writes[n] = eng.fader_slots[slot_index].output_write_count;
+		}
+		/* A disabled filter is excluded even though its retained binding is otherwise valid. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_6");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_bool(req, "enabled", false);
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+		float disabled_filter_value = eng.fader_slots[15].last_applied_val;
+
 		/* Reject ms = 10 */
 		req = obs_data_create();
 		res = obs_data_create();
@@ -3396,6 +3527,15 @@ int main(void)
 		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 0.0) < 1e-6);
 		REQUIRE(!flt_amod->enabled);
 
+		for (int n = 0; n < 3; ++n) {
+			struct mfd_fader_slot *protected_slot = &eng.fader_slots[12 + n];
+			REQUIRE(fabsf(protected_slot->last_applied_val - 0.65f) < 1e-6f);
+			REQUIRE(protected_slot->output_write_count == nonfilter_writes[n]);
+			REQUIRE(!protected_slot->auto_fade_active && !protected_slot->pending_clean_apply_on_avail);
+		}
+		REQUIRE(eng.fader_slots[15].last_applied_val == disabled_filter_value);
+		REQUIRE(!eng.fader_slots[15].pending_clean_apply_on_avail);
+
 		/* Timed reset_fx ({ ms: 400 }) + unavailable-slot recovery via pending_clean_apply_on_avail */
 		REQUIRE(mfd_engine_set_slot_value(&eng, 10, 1.0f, false, "api", sval_err, sizeof(sval_err)));
 		REQUIRE(mfd_engine_set_slot_value(&eng, 4, 1.0f, false, "api", sval_err, sizeof(sval_err)));
@@ -3415,6 +3555,15 @@ int main(void)
 		obs_data_release(req);
 		obs_data_release(res);
 
+		for (int n = 0; n < 3; ++n) {
+			struct mfd_fader_slot *protected_slot = &eng.fader_slots[12 + n];
+			REQUIRE(fabsf(protected_slot->last_applied_val - 0.65f) < 1e-6f);
+			REQUIRE(protected_slot->output_write_count == nonfilter_writes[n]);
+			REQUIRE(!protected_slot->auto_fade_active && !protected_slot->pending_clean_apply_on_avail);
+		}
+		REQUIRE(eng.fader_slots[15].last_applied_val == disabled_filter_value);
+		REQUIRE(!eng.fader_slots[15].auto_fade_active && !eng.fader_slots[15].pending_clean_apply_on_avail);
+
 		mfd_engine_tick(&eng, 0.20f);
 		REQUIRE(eng.fader_slots[10].last_applied_val > 0.35f && eng.fader_slots[10].last_applied_val < 0.65f);
 		mfd_engine_tick(&eng, 0.25f);
@@ -3429,6 +3578,111 @@ int main(void)
 		REQUIRE(fabsf(eng.fader_slots[4].last_applied_val) < 1e-6f);
 		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 0.0) < 1e-6);
 		REQUIRE(!flt_amod->enabled);
+
+		/* Explicit disable cancels a running clean, rather than queuing it for a later reenable. */
+		REQUIRE(mfd_engine_set_slot_value(&eng, 4, 0.80f, false, "api", sval_err, sizeof(sval_err)));
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_int(req, "ms", 400);
+		mfd_vendor_handle_reset_fx(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(eng.fader_slots[4].auto_fade_active && eng.fader_slots[4].auto_fade_is_reset_fx);
+		obs_data_release(req);
+		obs_data_release(res);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_bool(req, "enabled", false);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(!eng.fader_slots[4].auto_fade_active && !eng.fader_slots[4].auto_fade_is_reset_fx);
+		REQUIRE(!eng.fader_slots[4].pending_clean_apply_on_avail);
+		obs_data_release(req);
+		obs_data_release(res);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_bool(req, "enabled", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error") && eng.fader_slots[4].cached_available);
+		obs_data_release(req);
+		obs_data_release(res);
+		mfd_engine_tick(&eng, 0.50f);
+		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 80.0) < 1e-5);
+
+		/* A missing binding can be disabled, and its queued clean must not replay after reenable. */
+		fake_sg_remove_filter(&fake_sg, "Blue", "AudioMod");
+		mfd_engine_handle_filter_removed(&eng, "Blue", "AudioMod");
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_int(req, "ms", 0);
+		mfd_vendor_handle_reset_fx(req, res, &eng);
+		REQUIRE(eng.fader_slots[4].pending_clean_apply_on_avail);
+		obs_data_release(req);
+		obs_data_release(res);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_bool(req, "enabled", false);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		REQUIRE(!obs_data_get_bool(res, "enabled") && !eng.fader_slots[4].pending_clean_apply_on_avail);
+		REQUIRE(strcmp(eng.fader_slots[4].filter_name, "AudioMod") == 0);
+		REQUIRE(strcmp(eng.fader_slots[4].filter_prop, "slot_1_amount_pct") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		uint64_t missing_disabled_rev = eng.slot_config_rev[4];
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_bool(req, "enabled", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(strstr(obs_data_get_string(res, "error"), "not found") != NULL);
+		REQUIRE(!eng.fader_slots[4].enabled && eng.slot_config_rev[4] == missing_disabled_rev);
+		obs_data_release(req);
+		obs_data_release(res);
+		/* A disable carrying a binding/range edit must still validate the requested edit. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_bool(req, "enabled", false);
+		obs_data_set_double(req, "to_val", 101.0);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(obs_data_has_user_value(res, "error"));
+		REQUIRE(eng.fader_slots[4].filter_to_val == 100.0 && eng.slot_config_rev[4] == missing_disabled_rev);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		flt_amod = fake_sg_add_filter(&fake_sg, "Blue", "AudioMod", "visual_sidechain_audio_mod", true,
+					      FAKE_SCHEMA_AUDIO_MOD);
+		obs_data_set_double(flt_amod->settings, "slot_1_amount_pct", 77.0);
+		mfd_engine_reevaluate_slots(&eng, true);
+		REQUIRE(!eng.fader_slots[4].cached_available);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_bool(req, "enabled", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error") && eng.fader_slots[4].cached_available);
+		REQUIRE(!eng.fader_slots[4].pending_clean_apply_on_avail);
+		REQUIRE(fabsf(eng.fader_slots[4].last_applied_val - 0.77f) < 1e-5f);
+		REQUIRE(fabsf(eng.fader_slots[4].takeover.target_obs - 0.77f) < 1e-5f);
+		REQUIRE(fabs(obs_data_get_double(res, "value") - 0.77) < 1e-5);
+		obs_data_release(req);
+		obs_data_release(res);
+		mfd_engine_tick(&eng, 0.50f);
+		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 77.0) < 1e-5);
+		/* The next relative command continues from the live value, not the cancelled clean. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_4");
+		obs_data_set_double(req, "delta", 0.02);
+		mfd_vendor_handle_nudge_fader(req, res, &eng);
+		REQUIRE(fabs(obs_data_get_double(res, "value") - 0.79) < 1e-5);
+		REQUIRE(fabs(obs_data_get_double(flt_amod->settings, "slot_1_amount_pct") - 79.0) < 1e-5);
+		obs_data_release(req);
+		obs_data_release(res);
 
 		mfd_engine_restore_all_bypass_leases(&eng);
 		REQUIRE(flt_blur->enabled && flt_amod->enabled);

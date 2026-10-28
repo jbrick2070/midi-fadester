@@ -4097,6 +4097,28 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 	mfd_engine_unlock(eng);
 }
 
+void mfd_engine_sync_filter_slot_from_live_locked(struct mfd_engine *eng, int slot_index)
+{
+	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
+		return;
+	}
+	struct mfd_fader_slot *slot = &eng->fader_slots[slot_index];
+	if (!slot->enabled || slot->target_type != MFD_TARGET_FILTER_PARAM || !slot->cached_available ||
+	    !slot->filter_prop_valid || slot->pending_clean_apply_on_avail) {
+		return;
+	}
+	float live_value = query_live_filter_unmapped_deflection_locked(eng, slot);
+	slot->last_applied_val = live_value;
+	slot->has_last_written_mapped = false;
+	mfd_smoother_reset(&slot->smoother, live_value);
+	mfd_takeover_sync_external(&slot->takeover, live_value);
+}
+
+bool mfd_slot_is_reset_fx_eligible(const struct mfd_fader_slot *slot)
+{
+	return slot && slot->enabled && slot->target_type == MFD_TARGET_FILTER_PARAM;
+}
+
 bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
 			 int *out_queued_unavailable_count, char *out_err, size_t err_size)
 {
@@ -4132,11 +4154,7 @@ bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count
 
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
-		if (!slot->enabled || slot->target_type == MFD_TARGET_UNASSIGNED ||
-		    slot->target_type == MFD_TARGET_TBAR) {
-			continue;
-		}
-		if (!mfd_slot_is_fx_bank(i) && slot->target_type != MFD_TARGET_FILTER_PARAM) {
+		if (!mfd_slot_is_reset_fx_eligible(slot)) {
 			continue;
 		}
 		++eligible;
