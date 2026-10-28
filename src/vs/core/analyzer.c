@@ -178,22 +178,32 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 {
 	if (!ana || !ana->initialized || !out_frame)
 		return;
+	if (!isfinite(dt_sec) || dt_sec < 0.0f)
+		dt_sec = 0.0f;
 
 	memset(out_frame, 0, sizeof(*out_frame));
 
 	size_t offset_samples = 0;
-	if (ana->cfg.sync_offset_ms > 0.0f) {
-		const float delay_s = ana->cfg.sync_offset_ms * 0.001f;
-		offset_samples = (size_t)(delay_s * (float)ana->cfg.sample_rate + 0.5f);
-		const size_t max_offset = VS_AUDIO_RING_CAPACITY - ana->cfg.fft_size_low;
-		if (offset_samples > max_offset)
-			offset_samples = max_offset;
+	const size_t low_size = ana->cfg.fft_size_low;
+	const size_t mid_size = ana->cfg.fft_size_mid;
+	const size_t window_size = low_size > mid_size ? low_size : mid_size;
+	if (isfinite(ana->cfg.sync_offset_ms) && ana->cfg.sync_offset_ms > 0.0f) {
+		const double delay_samples = (double)ana->cfg.sync_offset_ms * 0.001 * (double)ana->cfg.sample_rate;
+		const size_t max_offset = VS_AUDIO_RING_CAPACITY - window_size;
+		offset_samples = delay_samples >= (double)max_offset ? max_offset : (size_t)(delay_samples + 0.5);
 	}
 
 	uint64_t written = 0;
 	uint64_t ts = 0;
-	vs_audio_ring_read_window(&ana->ring, ana->cfg.fft_size_low, offset_samples, ana->win_low, &written, &ts);
-	vs_audio_ring_read_window(&ana->ring, ana->cfg.fft_size_mid, offset_samples, ana->win_mid, NULL, NULL);
+	/* One locked snapshot gives both FFTs the same audio endpoint and keeps the
+	 * capture callback from waiting for two separate ring copies per video tick. */
+	if (low_size >= mid_size) {
+		vs_audio_ring_read_window(&ana->ring, low_size, offset_samples, ana->win_low, &written, &ts);
+		memcpy(ana->win_mid, ana->win_low + low_size - mid_size, mid_size * sizeof(float));
+	} else {
+		vs_audio_ring_read_window(&ana->ring, mid_size, offset_samples, ana->win_mid, &written, &ts);
+		memcpy(ana->win_low, ana->win_mid + mid_size - low_size, low_size * sizeof(float));
+	}
 
 	if (written > ana->last_written_samples) {
 		ana->last_written_samples = written;
@@ -202,8 +212,9 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 		ana->time_since_audio_sec += dt_sec;
 	}
 
-	remove_dc_offset(ana->win_low, ana->cfg.fft_size_low, written);
-	remove_dc_offset(ana->win_mid, ana->cfg.fft_size_mid, written);
+	const uint64_t available = written > offset_samples ? written - offset_samples : 0u;
+	remove_dc_offset(ana->win_low, low_size, available);
+	remove_dc_offset(ana->win_mid, mid_size, available);
 
 	vs_fft_compute(&ana->fft_low, ana->win_low, ana->mag_low);
 	vs_fft_compute(&ana->fft_mid, ana->win_mid, ana->mag_mid);

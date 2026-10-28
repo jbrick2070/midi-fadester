@@ -15,6 +15,7 @@
 #include "core/fader-bridge.h"
 #include "core/modulation.h"
 #include "plugin-support.h"
+#include "property-status.h"
 
 #include <util/threading.h>
 
@@ -31,6 +32,8 @@ struct vs_modulator_filter {
 	bool has_saved_pre_panic[VS_MOD_MAX_SLOTS];
 	struct vs_baseline_table baselines;
 	bool pending_load_restore;
+	bool pending_target_refresh;
+	signal_handler_t *parent_signals;
 };
 
 static const char *modulator_get_name(void *unused)
@@ -75,6 +78,65 @@ static void apply_baseline_to_obs_filter(void *user_data, const char *filter_nam
 		obs_data_release(s);
 	}
 	obs_source_release(target);
+}
+
+static void apply_baseline_to_removed_filter(void *user_data, const char *filter_name, const char *setting_name,
+					     enum vs_prop_type prop_type, double float_val, int64_t int_val)
+{
+	UNUSED_PARAMETER(filter_name);
+	/* OBS emits filter_remove after unlinking it, but before releasing the still-valid filter. */
+	obs_source_t *target = (obs_source_t *)user_data;
+	obs_data_t *settings = obs_source_get_settings(target);
+	if (!settings)
+		return;
+	if (prop_type == VS_PROP_INT)
+		obs_data_set_int(settings, setting_name, (long long)int_val);
+	else
+		obs_data_set_double(settings, setting_name, float_val);
+	obs_source_update(target, settings);
+	obs_data_release(settings);
+}
+
+static void on_parent_filter_added(void *data, calldata_t *cd)
+{
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
+	obs_source_t *filter = calldata_ptr(cd, "filter");
+	if (!f || !filter || filter == f->context)
+		return;
+	const char *name = obs_source_get_name(filter);
+	pthread_mutex_lock(&f->mutex);
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		if (name && strcmp(f->slot_cfg[i].target_filter, name) == 0) {
+			vs_mod_slot_reset_state(&f->slot_state[i]);
+			f->pending_target_refresh = true;
+		}
+	}
+	pthread_mutex_unlock(&f->mutex);
+}
+
+static void on_parent_filter_removed(void *data, calldata_t *cd)
+{
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
+	obs_source_t *filter = calldata_ptr(cd, "filter");
+	if (!f || !filter || filter == f->context)
+		return;
+	const char *name = obs_source_get_name(filter);
+	pthread_mutex_lock(&f->mutex);
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		if (name && strcmp(f->slot_cfg[i].target_filter, name) == 0)
+			vs_mod_slot_reset_state(&f->slot_state[i]);
+	}
+	vs_baseline_restore_filter(&f->baselines, name, apply_baseline_to_removed_filter, filter);
+	pthread_mutex_unlock(&f->mutex);
+}
+
+static void disconnect_parent_filter_signals(struct vs_modulator_filter *f)
+{
+	if (!f->parent_signals)
+		return;
+	signal_handler_disconnect(f->parent_signals, "filter_add", on_parent_filter_added, f);
+	signal_handler_disconnect(f->parent_signals, "filter_remove", on_parent_filter_removed, f);
+	f->parent_signals = NULL;
 }
 
 static bool has_any_active_baseline(const struct vs_baseline_table *table)
@@ -184,16 +246,6 @@ static bool query_target_setting_info(struct vs_modulator_filter *f, const char 
 	return out_q->found;
 }
 
-static enum vs_prop_type resolve_target_prop_type(struct vs_modulator_filter *f, const char *filter_name,
-						  const char *setting_name, int64_t *out_step)
-{
-	struct prop_query_ctx q;
-	const bool found = query_target_setting_info(f, filter_name, setting_name, &q);
-	if (out_step)
-		*out_step = q.int_step;
-	return found ? q.prop_type : VS_PROP_FLOAT;
-}
-
 static void on_modulator_enable_signal(void *data, calldata_t *cd)
 {
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
@@ -247,6 +299,9 @@ static void modulator_get_defaults(obs_data_t *settings)
 		slot_key(key, sizeof(key), i, "amount_pct");
 		obs_data_set_default_double(settings, key, 100.0);
 
+		slot_key(key, sizeof(key), i, "depth_fader");
+		obs_data_set_default_int(settings, key, VS_FADER_SLOT_NONE);
+
 		slot_key(key, sizeof(key), i, "min_value");
 		obs_data_set_default_double(settings, key, 0.0);
 
@@ -293,32 +348,31 @@ static void modulator_update(void *data, obs_data_t *settings)
 			strncpy(next.target_setting, ts, sizeof(next.target_setting) - 1u);
 			next.target_setting[sizeof(next.target_setting) - 1u] = '\0';
 		}
+		/* One owner per setting avoids mistaking another slot's write for a manual baseline edit. */
+		if (vs_mod_slot_has_duplicate_target(f->slot_cfg, i, &next)) {
+			next.target_setting[0] = '\0';
+			obs_data_set_string(settings, key, "");
+		}
 
-		/* Auto-seed min_value / max_value once when a new (target_filter, target_setting) pair is selected,
-		 * including via obs-websocket SetSourceFilterSettings when min/max were not already seeded (R-MOD-2). */
+		/* Query once per settings update, including load. Defaults follow the target's range without
+		 * turning automatic bounds into user overrides that survive a later retarget (R-MOD-2). */
+		struct prop_query_ctx target_info;
+		const bool target_found =
+			query_target_setting_info(f, next.target_filter, next.target_setting, &target_info);
+		next.prop_type = target_found ? target_info.prop_type : VS_PROP_FLOAT;
+		next.int_step = target_info.int_step;
 		char seed_key[64];
 		slot_key(seed_key, sizeof(seed_key), i, "seeded_target");
-		if (next.target_filter[0] != '\0' && next.target_setting[0] != '\0') {
+		if (target_found) {
 			char seed_id[280];
 			char min_k[64];
 			char max_k[64];
 			snprintf(seed_id, sizeof(seed_id), "%s::%s", next.target_filter, next.target_setting);
 			slot_key(min_k, sizeof(min_k), i, "min_value");
 			slot_key(max_k, sizeof(max_k), i, "max_value");
-			const char *prev_seed = obs_data_get_string(settings, seed_key);
-			const bool has_explicit_bounds = (obs_data_has_user_value(settings, min_k) ||
-							  obs_data_has_user_value(settings, max_k)) &&
-							 strcmp(prev.target_filter, next.target_filter) == 0 &&
-							 strcmp(prev.target_setting, next.target_setting) == 0;
-			if ((!prev_seed || strcmp(prev_seed, seed_id) != 0) && !has_explicit_bounds &&
-			    !obs_data_has_user_value(settings, min_k) && !obs_data_has_user_value(settings, max_k)) {
-				struct prop_query_ctx q;
-				if (query_target_setting_info(f, next.target_filter, next.target_setting, &q)) {
-					obs_data_set_double(settings, min_k, q.min_val);
-					obs_data_set_double(settings, max_k, q.max_val);
-					obs_data_set_string(settings, seed_key, seed_id);
-				}
-			}
+			obs_data_set_default_double(settings, min_k, target_info.min_val);
+			obs_data_set_default_double(settings, max_k, target_info.max_val);
+			obs_data_set_string(settings, seed_key, seed_id);
 		}
 
 		slot_key(key, sizeof(key), i, "signal");
@@ -345,6 +399,11 @@ static void modulator_update(void *data, obs_data_t *settings)
 			next.amount = raw_amt_pct * 0.01;
 		}
 
+		slot_key(key, sizeof(key), i, "depth_fader");
+		const int df_slot = (int)obs_data_get_int(settings, key);
+		next.depth_fader_slot = (df_slot >= 0 && df_slot < VS_FADER_SLOT_COUNT) ? df_slot : VS_FADER_SLOT_NONE;
+		next.depth_scale = (double)vs_fader_bridge_resolve_scale(next.depth_fader_slot);
+
 		slot_key(key, sizeof(key), i, "min_value");
 		next.min_value = obs_data_get_double(settings, key);
 
@@ -358,16 +417,22 @@ static void modulator_update(void *data, obs_data_t *settings)
 		const int div = (int)obs_data_get_int(settings, key);
 		next.rate_divider = (div == 2 || div == 4) ? (uint32_t)div : 1u;
 
-		next.prop_type = resolve_target_prop_type(f, next.target_filter, next.target_setting, &next.int_step);
-
 		/* If the slot was disabled or retargeted, restore the old target's baseline (R-MOD-5). */
 		const bool had_prev = (prev.enabled && prev.target_filter[0] != '\0' && prev.target_setting[0] != '\0');
 		const bool target_changed = (!next.enabled || strcmp(prev.target_filter, next.target_filter) != 0 ||
 					     strcmp(prev.target_setting, next.target_setting) != 0);
 
 		if (had_prev && target_changed) {
-			vs_baseline_restore_entry(&f->baselines, prev.target_filter, prev.target_setting,
-						  apply_baseline_to_obs_filter, f);
+			bool still_owned = false;
+			for (uint32_t other = 0; other < VS_MOD_MAX_SLOTS; other++) {
+				if (other != i && vs_mod_slot_has_duplicate_target(&f->slot_cfg[other], 1, &prev)) {
+					still_owned = true;
+					break;
+				}
+			}
+			if (!still_owned)
+				vs_baseline_restore_entry(&f->baselines, prev.target_filter, prev.target_setting,
+							  apply_baseline_to_obs_filter, f);
 			vs_mod_slot_reset_state(&f->slot_state[i]);
 		}
 
@@ -497,10 +562,15 @@ static void *modulator_create(obs_data_t *settings, obs_source_t *source)
 
 static void modulator_filter_add(void *data, obs_source_t *parent)
 {
-	UNUSED_PARAMETER(parent);
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	if (!f || !f->context)
 		return;
+	disconnect_parent_filter_signals(f);
+	f->parent_signals = parent ? obs_source_get_signal_handler(parent) : NULL;
+	if (f->parent_signals) {
+		signal_handler_connect(f->parent_signals, "filter_add", on_parent_filter_added, f);
+		signal_handler_connect(f->parent_signals, "filter_remove", on_parent_filter_removed, f);
+	}
 
 	obs_data_t *s = obs_source_get_settings(f->context);
 	if (s) {
@@ -515,6 +585,7 @@ static void modulator_filter_remove(void *data, obs_source_t *parent)
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	if (!f)
 		return;
+	disconnect_parent_filter_signals(f);
 	pthread_mutex_lock(&f->mutex);
 	vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
 	pthread_mutex_unlock(&f->mutex);
@@ -525,6 +596,7 @@ static void modulator_destroy(void *data)
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	if (!f)
 		return;
+	disconnect_parent_filter_signals(f);
 
 	if (f->context) {
 		signal_handler_t *sh = obs_source_get_signal_handler(f->context);
@@ -549,6 +621,15 @@ static void modulator_video_tick(void *data, float seconds)
 		return;
 
 	pthread_mutex_lock(&f->mutex);
+
+	if (f->pending_target_refresh) {
+		obs_data_t *settings = obs_source_get_settings(f->context);
+		if (settings) {
+			modulator_update(f, settings);
+			obs_data_release(settings);
+		}
+		f->pending_target_refresh = false;
+	}
 
 	if (f->pending_load_restore) {
 		obs_source_t *parent = obs_filter_get_parent(f->context);
@@ -588,11 +669,12 @@ static void modulator_video_tick(void *data, float seconds)
 
 	float signals[VS_MOD_MAX_SLOTS];
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
-		const struct vs_mod_slot_config *cfg = &f->slot_cfg[i];
+		struct vs_mod_slot_config *cfg = &f->slot_cfg[i];
 		if (!cfg->enabled || cfg->target_filter[0] == '\0' || cfg->target_setting[0] == '\0') {
 			signals[i] = 0.0f;
 			continue;
 		}
+		cfg->depth_scale = (double)vs_fader_bridge_resolve_scale(cfg->depth_fader_slot);
 		signals[i] = vs_analyzer_get_signal(&f->tap.analyzer, &f->tap.current_frame, cfg->signal_id,
 						    cfg->custom_low_hz, cfg->custom_high_hz, cfg->custom_mode);
 	}
@@ -605,8 +687,11 @@ static void modulator_video_tick(void *data, float seconds)
 
 	for (size_t b = 0; b < batch_count; b++) {
 		obs_source_t *target = acquire_sibling_filter(f, batches[b].target_filter);
-		if (!target)
+		if (!target) {
+			for (size_t w = 0; w < batches[b].write_count; w++)
+				f->slot_state[batches[b].writes[w].slot_index].has_last_written = false;
 			continue;
+		}
 
 		obs_data_t *ts = obs_source_get_settings(target);
 		if (ts) {
@@ -626,6 +711,9 @@ static void modulator_video_tick(void *data, float seconds)
 			}
 			obs_source_update(target, ts);
 			obs_data_release(ts);
+		} else {
+			for (size_t w = 0; w < batches[b].write_count; w++)
+				f->slot_state[batches[b].writes[w].slot_index].has_last_written = false;
 		}
 		obs_source_release(target);
 	}
@@ -714,8 +802,8 @@ static void populate_target_setting_list(struct vs_modulator_filter *f, obs_prop
 static void set_slot_inner_controls_visible(obs_properties_t *props, uint32_t slot_idx, bool enabled, bool is_custom_hz)
 {
 	static const char *const k_always_when_enabled[] = {
-		"target_filter", "target_setting", "signal", "amount_pct",
-		"min_value",     "max_value",      "invert", "rate_divider",
+		"target_filter", "target_setting", "signal",       "amount_pct",     "depth_fader", "min_value",
+		"max_value",     "invert",         "rate_divider", "binding_status", "depth_reset",
 	};
 	char key[64];
 	for (size_t k = 0; k < sizeof(k_always_when_enabled) / sizeof(k_always_when_enabled[0]); k++) {
@@ -769,8 +857,8 @@ static void maybe_autoseed_slot_bounds(struct vs_modulator_filter *f, obs_data_t
 		char max_key[64];
 		slot_key(min_key, sizeof(min_key), slot_idx, "min_value");
 		slot_key(max_key, sizeof(max_key), slot_idx, "max_value");
-		obs_data_set_double(settings, min_key, q.min_val);
-		obs_data_set_double(settings, max_key, q.max_val);
+		obs_data_set_default_double(settings, min_key, q.min_val);
+		obs_data_set_default_double(settings, max_key, q.max_val);
 		obs_data_set_string(settings, seed_key, seed_id);
 	}
 }
@@ -821,6 +909,87 @@ static void refresh_modulator_properties_visibility(struct vs_modulator_filter *
 		const bool is_custom = (sig == (int)VS_SIG_CUSTOM_HZ);
 
 		set_slot_inner_controls_visible(props, i, enabled, is_custom);
+
+		char tf_key[64], ts_key[64], df_key[64];
+		slot_key(tf_key, sizeof(tf_key), i, "target_filter");
+		slot_key(ts_key, sizeof(ts_key), i, "target_setting");
+		slot_key(df_key, sizeof(df_key), i, "depth_fader");
+		const char *target_filter = obs_data_get_string(settings, tf_key);
+		const char *target_setting = obs_data_get_string(settings, ts_key);
+		obs_property_t *setting_list = obs_properties_get(props, ts_key);
+		for (size_t opt = 0; opt < obs_property_list_item_count(setting_list); opt++) {
+			const char *candidate = obs_property_list_item_string(setting_list, opt);
+			bool duplicate = false;
+			for (uint32_t prev = 0; enabled && candidate && candidate[0] && prev < i; prev++) {
+				char prev_key[64];
+				slot_key(prev_key, sizeof(prev_key), prev, "enabled");
+				if (!obs_data_get_bool(settings, prev_key))
+					continue;
+				slot_key(prev_key, sizeof(prev_key), prev, "target_filter");
+				if (strcmp(target_filter, obs_data_get_string(settings, prev_key)) != 0)
+					continue;
+				slot_key(prev_key, sizeof(prev_key), prev, "target_setting");
+				if (strcmp(candidate, obs_data_get_string(settings, prev_key)) == 0)
+					duplicate = true;
+			}
+			obs_property_list_item_disable(setting_list, opt, duplicate);
+		}
+
+		char summary[1024];
+		const char *filter_label =
+			vs_property_string_choice_name(obs_properties_get(props, tf_key), target_filter);
+		const char *setting_label = vs_property_string_choice_name(setting_list, target_setting);
+		const long long depth = obs_data_get_int(settings, df_key);
+		if (!target_filter[0] || !target_setting[0]) {
+			snprintf(summary, sizeof(summary), "%s", obs_module_text("Modulator.Binding.StatusEmpty"));
+		} else if (!filter_label || !setting_label) {
+			snprintf(summary, sizeof(summary), obs_module_text("Modulator.Binding.StatusMissing"),
+				 target_filter, target_setting);
+		} else {
+			slot_key(key, sizeof(key), i, "signal");
+			const char *signal_label = vs_property_int_choice_name(obs_properties_get(props, key), sig);
+			const char *depth_label = vs_property_int_choice_name(obs_properties_get(props, df_key), depth);
+			if (depth < 0 || depth >= VS_FADER_SLOT_COUNT || !depth_label)
+				depth_label = obs_module_text("Modulator.Binding.FixedDepth");
+			slot_key(key, sizeof(key), i, "amount_pct");
+			const double amount = obs_data_get_double(settings, key);
+			slot_key(key, sizeof(key), i, "min_value");
+			const double minimum = obs_data_get_double(settings, key);
+			slot_key(key, sizeof(key), i, "max_value");
+			const double maximum = obs_data_get_double(settings, key);
+			slot_key(key, sizeof(key), i, "invert");
+			const char *inverted =
+				obs_data_get_bool(settings, key) ? obs_module_text("Modulator.Binding.Inverted") : "";
+			snprintf(summary, sizeof(summary), obs_module_text("Modulator.Binding.StatusMapped"),
+				 signal_label ? signal_label : obs_module_text("Modulator.Binding.UnknownSignal"),
+				 inverted, filter_label, setting_label, minimum, maximum, amount, depth_label);
+		}
+		slot_key(key, sizeof(key), i, "binding_status");
+		vs_property_info_set_text(obs_properties_get(props, key), summary);
+		slot_key(key, sizeof(key), i, "depth_reset");
+		obs_property_set_enabled(obs_properties_get(props, key), depth != VS_FADER_SLOT_NONE);
+	}
+}
+
+static void normalize_modulator_targets_for_ui(obs_data_t *settings)
+{
+	/* Mirror the runtime rule before refreshing: obs_source_update defers VIDEO
+	 * updates, so waiting for it would leave a cleared duplicate displayed as active. */
+	struct vs_mod_slot_config slots[VS_MOD_MAX_SLOTS] = {0};
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		char key[64];
+		slot_key(key, sizeof(key), i, "enabled");
+		slots[i].enabled = obs_data_get_bool(settings, key);
+		slot_key(key, sizeof(key), i, "target_filter");
+		snprintf(slots[i].target_filter, sizeof(slots[i].target_filter), "%s",
+			 obs_data_get_string(settings, key));
+		slot_key(key, sizeof(key), i, "target_setting");
+		snprintf(slots[i].target_setting, sizeof(slots[i].target_setting), "%s",
+			 obs_data_get_string(settings, key));
+		if (vs_mod_slot_has_duplicate_target(slots, i, &slots[i])) {
+			slots[i].target_setting[0] = '\0';
+			obs_data_set_string(settings, key, "");
+		}
 	}
 }
 
@@ -832,20 +1001,71 @@ static bool slot_modified_cb(void *priv, obs_properties_t *props, obs_property_t
 
 	int repopulate_idx = -1;
 	const char *prop_name = property ? obs_property_name(property) : NULL;
-	unsigned one_based = 0u;
-	if (prop_name && sscanf(prop_name, "slot_%u_", &one_based) == 1 && one_based >= 1u &&
-	    one_based <= VS_MOD_MAX_SLOTS) {
-		const uint32_t slot_idx = one_based - 1u;
-		if (strstr(prop_name, "_target_filter") != NULL) {
+	for (uint32_t slot_idx = 0; prop_name && slot_idx < VS_MOD_MAX_SLOTS; slot_idx++) {
+		char filter_key[64], setting_key[64], enabled_key[64];
+		slot_key(filter_key, sizeof(filter_key), slot_idx, "target_filter");
+		slot_key(setting_key, sizeof(setting_key), slot_idx, "target_setting");
+		slot_key(enabled_key, sizeof(enabled_key), slot_idx, "enabled");
+		if (strcmp(prop_name, filter_key) == 0) {
+			normalize_modulator_targets_for_ui(settings);
 			repopulate_idx = (int)slot_idx;
 			maybe_autoseed_slot_bounds(f, settings, slot_idx);
-		} else if (strstr(prop_name, "_target_setting") != NULL) {
+		} else if (strcmp(prop_name, setting_key) == 0) {
+			normalize_modulator_targets_for_ui(settings);
 			maybe_autoseed_slot_bounds(f, settings, slot_idx);
+		} else if (strcmp(prop_name, enabled_key) == 0) {
+			normalize_modulator_targets_for_ui(settings);
 		}
 	}
 
 	refresh_modulator_properties_visibility(f, props, settings, repopulate_idx);
 	return true;
+}
+
+static bool depth_fader_reset_clicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
+	if (!f || !f->context || !property)
+		return false;
+	const char *name = obs_property_name(property);
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		char key[64];
+		slot_key(key, sizeof(key), i, "depth_reset");
+		if (strcmp(name, key) != 0)
+			continue;
+		obs_data_t *settings = obs_source_get_settings(f->context);
+		if (!settings)
+			return false;
+		slot_key(key, sizeof(key), i, "depth_fader");
+		obs_data_set_int(settings, key, VS_FADER_SLOT_NONE);
+		obs_source_update(f->context, settings);
+		refresh_modulator_properties_visibility(f, props, settings, -1);
+		obs_data_release(settings);
+		return true;
+	}
+	return false;
+}
+
+static void add_fader_slot_choices(obs_property_t *list, bool fadester_loaded, const char *none_label, int base_offset)
+{
+	if (none_label)
+		obs_property_list_add_int(list, none_label, VS_FADER_SLOT_NONE);
+
+	const char *not_loaded_text = obs_module_text("Modulator.MidiFadesterNotLoaded");
+	static const char *const k_fader_locale_keys[VS_FADER_SLOT_COUNT] = {
+		"Signal.FaderCrossfader", "Signal.Fader1", "Signal.Fader2", "Signal.Fader3", "Signal.Fader4",
+		"Signal.Fader5",          "Signal.Fader6", "Signal.Fader7", "Signal.Fader8", "Signal.FaderMaster",
+	};
+	char label[160];
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+		const char *base = obs_module_text(k_fader_locale_keys[i]);
+		if (fadester_loaded) {
+			obs_property_list_add_int(list, base, base_offset + i);
+		} else {
+			snprintf(label, sizeof(label), "%s - %s", base, not_loaded_text);
+			obs_property_list_add_int(list, label, base_offset + i);
+		}
+	}
 }
 
 static void add_signal_choices(obs_property_t *list, bool fadester_loaded)
@@ -868,21 +1088,7 @@ static void add_signal_choices(obs_property_t *list, bool fadester_loaded)
 		obs_property_list_add_int(list, label, (int)(VS_SIG_SPECTRUM_BAND_0 + b));
 	}
 
-	const char *not_loaded_text = obs_module_text("Modulator.MidiFadesterNotLoaded");
-
-	static const char *const k_fader_locale_keys[VS_FADER_SLOT_COUNT] = {
-		"Signal.FaderCrossfader", "Signal.Fader1", "Signal.Fader2", "Signal.Fader3", "Signal.Fader4",
-		"Signal.Fader5",          "Signal.Fader6", "Signal.Fader7", "Signal.Fader8", "Signal.FaderMaster",
-	};
-	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
-		const char *base = obs_module_text(k_fader_locale_keys[i]);
-		if (fadester_loaded) {
-			obs_property_list_add_int(list, base, (int)VS_SIG_FADER_CROSSFADER + i);
-		} else {
-			snprintf(label, sizeof(label), "%s - %s", base, not_loaded_text);
-			obs_property_list_add_int(list, label, (int)VS_SIG_FADER_CROSSFADER + i);
-		}
-	}
+	add_fader_slot_choices(list, fadester_loaded, NULL, (int)VS_SIG_FADER_CROSSFADER);
 }
 
 static obs_properties_t *modulator_get_properties(void *data)
@@ -890,7 +1096,9 @@ static obs_properties_t *modulator_get_properties(void *data)
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	obs_properties_t *props = obs_properties_create();
 
-	vs_audio_tap_add_properties(props, f ? f->context : NULL);
+	/* Panel order: tap status row, ownership note, slots, then the audio analysis group last. */
+	vs_audio_tap_add_status_property(props);
+	vs_properties_add_info(props, "vs_modulator_ownership", obs_module_text("Modulator.Binding.Ownership"));
 
 	/* Probe Midi Fadester once for the entire Properties build instead of 8x across slots */
 	vs_fader_bridge_poll_once();
@@ -963,15 +1171,31 @@ static obs_properties_t *modulator_get_properties(void *data)
 									-100.0, 100.0, 1.0);
 		obs_property_float_set_suffix(p_amt, "%");
 		obs_property_set_long_description(p_amt, obs_module_text("Modulator.Amount.Tooltip"));
+		obs_property_set_modified_callback2(p_amt, slot_modified_cb, f);
+
+		slot_key(key, sizeof(key), i, "depth_fader");
+		obs_property_t *p_df = obs_properties_add_list(grp, key, obs_module_text("Modulator.DepthFader"),
+							       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+		add_fader_slot_choices(p_df, fadester_loaded, obs_module_text("Modulator.DepthFader.None"), 0);
+		obs_property_set_long_description(p_df, obs_module_text("Modulator.DepthFader.Tooltip"));
+		obs_property_set_modified_callback2(p_df, slot_modified_cb, f);
+		slot_key(key, sizeof(key), i, "depth_reset");
+		obs_properties_add_button2(grp, key, obs_module_text("Modulator.DepthFader.Reset"),
+					   depth_fader_reset_clicked, f);
 
 		slot_key(key, sizeof(key), i, "min_value");
-		obs_properties_add_float(grp, key, obs_module_text("Modulator.MinValue"), -100000.0, 100000.0, 0.01);
+		obs_property_t *p_min = obs_properties_add_float(grp, key, obs_module_text("Modulator.MinValue"),
+								 -100000.0, 100000.0, 0.01);
+		obs_property_set_modified_callback2(p_min, slot_modified_cb, f);
 
 		slot_key(key, sizeof(key), i, "max_value");
-		obs_properties_add_float(grp, key, obs_module_text("Modulator.MaxValue"), -100000.0, 100000.0, 0.01);
+		obs_property_t *p_max = obs_properties_add_float(grp, key, obs_module_text("Modulator.MaxValue"),
+								 -100000.0, 100000.0, 0.01);
+		obs_property_set_modified_callback2(p_max, slot_modified_cb, f);
 
 		slot_key(key, sizeof(key), i, "invert");
-		obs_properties_add_bool(grp, key, obs_module_text("Modulator.Invert"));
+		obs_property_t *p_invert = obs_properties_add_bool(grp, key, obs_module_text("Modulator.Invert"));
+		obs_property_set_modified_callback2(p_invert, slot_modified_cb, f);
 
 		slot_key(key, sizeof(key), i, "rate_divider");
 		obs_property_t *p_div = obs_properties_add_list(grp, key, obs_module_text("Modulator.RateDivider"),
@@ -980,11 +1204,15 @@ static obs_properties_t *modulator_get_properties(void *data)
 		obs_property_list_add_int(p_div, obs_module_text("Modulator.RateDivider.2"), 2);
 		obs_property_list_add_int(p_div, obs_module_text("Modulator.RateDivider.4"), 4);
 		obs_property_set_long_description(p_div, obs_module_text("Modulator.RateDivider.Tooltip"));
+		slot_key(key, sizeof(key), i, "binding_status");
+		vs_properties_add_info(grp, key, "");
 
 		snprintf(grp_key, sizeof(grp_key), "mod_slot_group_%u", i + 1u);
 		snprintf(grp_title, sizeof(grp_title), "%s %u", obs_module_text("Modulator.SlotGroupPrefix"), i + 1u);
 		obs_properties_add_group(props, grp_key, grp_title, OBS_GROUP_NORMAL, grp);
 	}
+
+	vs_audio_tap_add_properties(props, f ? f->context : NULL);
 
 	if (cur_settings) {
 		refresh_modulator_properties_visibility(f, props, cur_settings, -1);

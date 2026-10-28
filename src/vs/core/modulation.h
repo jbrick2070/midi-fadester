@@ -39,10 +39,12 @@ struct vs_mod_slot_config {
 	float custom_low_hz;
 	float custom_high_hz;
 	enum vs_hz_band_mode custom_mode;
-	double amount;    /* [-1.0, +1.0], negative = ducking */
-	double min_value; /* lower bound of target range */
-	double max_value; /* upper bound of target range */
-	int64_t int_step; /* step size for VS_PROP_INT (>= 1) */
+	double amount;        /* [-1.0, +1.0], negative = ducking */
+	int depth_fader_slot; /* -1 = unbound (fixed 1.0 depth_scale), 0..9 = Fadester slot */
+	double depth_scale;   /* [0.0, 1.0], live fader depth multiplier (1.0 when unbound) */
+	double min_value;     /* lower bound of target range */
+	double max_value;     /* upper bound of target range */
+	int64_t int_step;     /* step size for VS_PROP_INT (>= 1) */
 	bool invert;
 	uint32_t rate_divider; /* 1, 2, or 4 video frames */
 };
@@ -63,6 +65,9 @@ struct vs_mod_eval_result {
 
 void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg);
 void vs_mod_slot_reset_state(struct vs_mod_slot_state *state);
+/* Earlier enabled slots own a target setting so one instance never fights itself. */
+bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, size_t earlier_count,
+				      const struct vs_mod_slot_config *candidate);
 
 /*
  * Evaluates one modulation slot for the current video tick.

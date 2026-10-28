@@ -74,6 +74,9 @@ bool vs_baseline_restore_entry(struct vs_baseline_table *table, const char *filt
  * the modulator filter is disabled, removed, or destroyed).
  */
 size_t vs_baseline_restore_all(struct vs_baseline_table *table, vs_baseline_apply_fn apply_cb, void *user_data);
+/* Restore and forget a removed filter without touching baselines belonging to other siblings. */
+size_t vs_baseline_restore_filter(struct vs_baseline_table *table, const char *filter_name,
+				  vs_baseline_apply_fn apply_cb, void *user_data);
 
 /*
  * Pre-save hook (R-MOD-6): restores all active targets to their original

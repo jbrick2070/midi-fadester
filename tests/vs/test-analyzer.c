@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifndef VS_TEST_FIXTURES_DIR
 #define VS_TEST_FIXTURES_DIR "."
@@ -203,12 +204,66 @@ static void test_wav_dynamic_range_and_silence(void)
 	vs_wav_free(&wav_sil);
 }
 
+static void test_custom_hz_flux_after_analyzer_step(void)
+{
+	struct vs_analyzer_config cfg;
+	struct vs_analyzer ana;
+	struct vs_audio_frame frame;
+	float samples[VS_FFT_LOW_SIZE] = {0};
+	vs_analyzer_default_config(&cfg);
+	assert(vs_analyzer_init(&ana, &cfg));
+	vs_analyzer_push_mono(&ana, samples, VS_FFT_LOW_SIZE, 1u);
+	vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	for (size_t i = 0; i < VS_FFT_LOW_SIZE; i++)
+		samples[i] = sinf(6.28318530717958647692f * 440.0f * (float)i / 48000.0f);
+	vs_analyzer_push_mono(&ana, samples, VS_FFT_LOW_SIZE, 2u);
+	vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_FLUX) > 0.8f);
+	/* Repeated queries on one frame are stable, and the next unchanged FFT has no flux. */
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_FLUX) > 0.8f);
+	vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_FLUX) == 0.0f);
+	vs_analyzer_free(&ana);
+}
+
+static void test_aligned_windows_with_delayed_startup(void)
+{
+	struct vs_analyzer_config cfg;
+	struct vs_analyzer ana;
+	struct vs_audio_frame frame;
+	float samples[100];
+	for (size_t i = 0; i < 100; i++)
+		samples[i] = 0.25f;
+	vs_analyzer_default_config(&cfg);
+	cfg.sync_offset_ms = 1.0f; /* 48 delayed samples, leaving 52 valid DC samples. */
+	assert(vs_analyzer_init(&ana, &cfg));
+	vs_analyzer_push_mono(&ana, samples, 100u, 1u);
+	vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	for (size_t i = 0; i < VS_FFT_LOW_SIZE; i++)
+		assert(ana.win_low[i] == 0.0f);
+	for (size_t i = 0; i < VS_FFT_MID_SIZE; i++)
+		assert(ana.win_mid[i] == 0.0f);
+	assert(frame.level == 0.0f);
+	vs_analyzer_free(&ana);
+
+	/* Configurable FFT sizes also support the mid window being the larger snapshot. */
+	vs_analyzer_default_config(&cfg);
+	cfg.fft_size_low = 1024u;
+	assert(vs_analyzer_init(&ana, &cfg));
+	vs_analyzer_push_mono(&ana, samples, 100u, 1u);
+	vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	assert(frame.level == 0.0f);
+	vs_analyzer_free(&ana);
+}
+
 int main(void)
 {
 	assert(vs_wav_ensure_fixtures(VS_TEST_FIXTURES_DIR));
 	test_wav_kick_120bpm();
 	test_wav_subbass_35hz_vs_kick_95hz();
 	test_wav_dynamic_range_and_silence();
+	test_custom_hz_flux_after_analyzer_step();
+	test_aligned_windows_with_delayed_startup();
 	printf("test-analyzer: all WAV fixture assertions passed\n");
 	return 0;
 }

@@ -164,6 +164,25 @@ size_t vs_baseline_restore_all(struct vs_baseline_table *table, vs_baseline_appl
 	return count;
 }
 
+size_t vs_baseline_restore_filter(struct vs_baseline_table *table, const char *filter_name,
+				  vs_baseline_apply_fn apply_cb, void *user_data)
+{
+	if (!table || !filter_name)
+		return 0;
+	size_t count = 0;
+	for (size_t i = 0; i < VS_MAX_BASELINE_ENTRIES; i++) {
+		struct vs_baseline_entry *e = &table->entries[i];
+		if (!e->in_use || strcmp(e->filter_name, filter_name) != 0)
+			continue;
+		if (apply_cb)
+			apply_cb(user_data, e->filter_name, e->setting_name, e->prop_type, e->original_float,
+				 e->original_int);
+		memset(e, 0, sizeof(*e));
+		count++;
+	}
+	return count;
+}
+
 size_t vs_baseline_on_pre_save(struct vs_baseline_table *table, vs_baseline_apply_fn apply_cb, void *user_data)
 {
 	if (!table)

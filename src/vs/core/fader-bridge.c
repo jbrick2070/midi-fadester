@@ -13,6 +13,8 @@
 
 #include <util/threading.h>
 
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
@@ -249,6 +251,141 @@ float vs_fader_bridge_get_slot(int slot_idx)
 	return val;
 }
 
+void vs_fader_bridge_get_slots(float out_values[VS_FADER_SLOT_COUNT])
+{
+	if (!out_values)
+		return;
+	pthread_mutex_lock(&g_bridge_mutex);
+	if (g_midi_fadester_loaded)
+		memcpy(out_values, g_fader_values, sizeof(g_fader_values));
+	else
+		memset(out_values, 0, sizeof(g_fader_values));
+	pthread_mutex_unlock(&g_bridge_mutex);
+}
+
+float vs_fader_bridge_resolve_scale(int slot_idx)
+{
+	if (slot_idx < 0)
+		return 1.0f;
+	if (slot_idx >= VS_FADER_SLOT_COUNT)
+		return 0.0f;
+	return vs_fader_bridge_get_slot(slot_idx);
+}
+
+void vs_fader_bridge_scale_audio_frame(const struct vs_audio_frame *in_frame, float reactivity_scale,
+				       struct vs_audio_frame *out_frame)
+{
+	if (!out_frame)
+		return;
+	if (!in_frame) {
+		memset(out_frame, 0, sizeof(*out_frame));
+		return;
+	}
+	*out_frame = *in_frame;
+	const float s = clamp01(reactivity_scale);
+	if (s >= 0.999999f)
+		return;
+
+	out_frame->level *= s;
+	out_frame->sub_bass *= s;
+	out_frame->bass *= s;
+	out_frame->mid *= s;
+	out_frame->high *= s;
+	out_frame->kick *= s;
+	out_frame->snare *= s;
+	out_frame->beat *= s;
+	out_frame->spectral_flux *= s;
+	for (size_t i = 0; i < VS_SPECTRUM_BANDS; i++)
+		out_frame->spectrum[i] *= s;
+	for (size_t i = 0; i < VS_FFT_TEX_BINS; i++) {
+		out_frame->fft_bins[i] *= s;
+		out_frame->waveform[i] = 0.5f + (out_frame->waveform[i] - 0.5f) * s;
+	}
+}
+
+static double clamp_f64_finite(double v, double lo, double hi)
+{
+	if (!isfinite(v))
+		return lo;
+	if (v < lo)
+		return lo;
+	if (v > hi)
+		return hi;
+	return v;
+}
+
+float vs_fader_bridge_map_float_param(float value, double min_val, double max_val, bool has_hard_min, double hard_min,
+				      bool has_hard_max, double hard_max)
+{
+	const double t = (double)clamp01(value);
+	/* Saturate before interpolation and conversion: a finite double can overflow a float. */
+	const double safe_min = isfinite(min_val) ? clamp_f64_finite(min_val, -FLT_MAX, FLT_MAX) : 0.0;
+	const double safe_max = isfinite(max_val) ? clamp_f64_finite(max_val, -FLT_MAX, FLT_MAX) : 1.0;
+	const double lo = (safe_min <= safe_max) ? safe_min : safe_max;
+	const double hi = (safe_min <= safe_max) ? safe_max : safe_min;
+
+	double mapped = clamp_f64_finite(safe_min + t * (safe_max - safe_min), lo, hi);
+	if (has_hard_min && isfinite(hard_min) && mapped < hard_min)
+		mapped = clamp_f64_finite(hard_min, -FLT_MAX, FLT_MAX);
+	if (has_hard_max && isfinite(hard_max) && mapped > hard_max)
+		mapped = clamp_f64_finite(hard_max, -FLT_MAX, FLT_MAX);
+	return (float)mapped;
+}
+
+float vs_fader_bridge_eval_float_param(int slot_idx, float slider_val, double min_val, double max_val,
+				       bool has_hard_min, double hard_min, bool has_hard_max, double hard_max)
+{
+	if (slot_idx < 0)
+		return slider_val;
+	return vs_fader_bridge_map_float_param(vs_fader_bridge_get_slot(slot_idx), min_val, max_val, has_hard_min,
+					       hard_min, has_hard_max, hard_max);
+}
+
+int vs_fader_bridge_map_int_param(float value, double min_val, double max_val, int step, bool has_hard_min,
+				  double hard_min, bool has_hard_max, double hard_max)
+{
+	const double t = (double)clamp01(value);
+	/* Every llround input and step arithmetic must already fit the uniform's int domain. */
+	const double safe_min = isfinite(min_val) ? clamp_f64_finite(min_val, INT_MIN, INT_MAX) : 0.0;
+	const double safe_max = isfinite(max_val) ? clamp_f64_finite(max_val, INT_MIN, INT_MAX) : 1.0;
+	const double lo = (safe_min <= safe_max) ? safe_min : safe_max;
+	const double hi = (safe_min <= safe_max) ? safe_max : safe_min;
+	const double mapped = clamp_f64_finite(safe_min + t * (safe_max - safe_min), lo, hi);
+
+	const int64_t q_step = (step > 1) ? (int64_t)step : 1;
+	const int64_t i_lo = (int64_t)llround(lo);
+	const int64_t i_hi = (int64_t)llround(hi);
+	int64_t q = i_lo + llround((mapped - (double)i_lo) / (double)q_step) * q_step;
+	if (q < i_lo)
+		q = i_lo;
+	if (q > i_hi)
+		q = i_hi;
+	if (has_hard_min && isfinite(hard_min)) {
+		const int64_t h_lo = (int64_t)ceil(clamp_f64_finite(hard_min, INT_MIN, INT_MAX));
+		if (q < h_lo)
+			q = h_lo;
+	}
+	if (has_hard_max && isfinite(hard_max)) {
+		const int64_t h_hi = (int64_t)floor(clamp_f64_finite(hard_max, INT_MIN, INT_MAX));
+		if (q > h_hi)
+			q = h_hi;
+	}
+	if (q < (int64_t)INT_MIN)
+		q = (int64_t)INT_MIN;
+	if (q > (int64_t)INT_MAX)
+		q = (int64_t)INT_MAX;
+	return (int)q;
+}
+
+int vs_fader_bridge_eval_int_param(int slot_idx, int slider_val, double min_val, double max_val, int step,
+				   bool has_hard_min, double hard_min, bool has_hard_max, double hard_max)
+{
+	if (slot_idx < 0)
+		return slider_val;
+	return vs_fader_bridge_map_int_param(vs_fader_bridge_get_slot(slot_idx), min_val, max_val, step, has_hard_min,
+					     hard_min, has_hard_max, hard_max);
+}
+
 void vs_fader_bridge_publish_signals(const struct vs_audio_frame *frame)
 {
 	if (!frame)
@@ -289,6 +426,12 @@ static bool signals_differ_beyond_eps(const struct vs_audio_frame *a, const stru
 		return true;
 	if (fabsf(a->spectral_flux - b->spectral_flux) > eps)
 		return true;
+	if (fabsf(a->estimated_bpm - b->estimated_bpm) > eps)
+		return true;
+	for (size_t i = 0; i < VS_SPECTRUM_BANDS; i++) {
+		if (fabsf(a->spectrum[i] - b->spectrum[i]) > eps)
+			return true;
+	}
 	return false;
 }
 

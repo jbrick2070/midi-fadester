@@ -56,6 +56,8 @@ struct vs_spectrum {
 	float fft_tex_freq_hz[VS_FFT_TEX_BINS];
 	float prev_mag_low[VS_MAX_BINS_LOW];
 	float prev_mag_mid[VS_MAX_BINS_MID];
+	float flux_low[VS_MAX_BINS_LOW];
+	float flux_mid[VS_MAX_BINS_MID];
 	bool has_prev;
 };
 
@@ -72,6 +74,7 @@ void vs_spectrum_compute(struct vs_spectrum *spec, const float *time_window_mid,
 /*
  * Extracts energy in an arbitrary [freq_low_hz, freq_high_hz] window using the
  * dual-FFT magnitudes (4096-pt for <= 250 Hz, 2048-pt for > 250 Hz).
+ * Flux mode reads the positive bin deltas cached by the latest vs_spectrum_compute().
  */
 float vs_spectrum_extract_hz_band(const struct vs_spectrum *spec, const float *mag_low, const float *mag_mid,
 				  float freq_low_hz, float freq_high_hz, enum vs_hz_band_mode mode);

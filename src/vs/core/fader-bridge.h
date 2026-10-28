@@ -23,7 +23,9 @@
 extern "C" {
 #endif
 
+#define VS_FADER_SLOT_NONE (-1)
 #define VS_FADER_SLOT_COUNT 10
+#define VS_SHADER_PARAM_FADER_SLOTS 2
 #define VS_SIGNALS_MAX_EVENTS_PER_SEC 30.0f
 #define VS_SIGNALS_MIN_INTERVAL_SEC (1.0f / VS_SIGNALS_MAX_EVENTS_PER_SEC)
 
@@ -53,6 +55,40 @@ bool vs_fader_bridge_poll_once(void);
 bool vs_fader_bridge_set_slot(int slot_idx, float value);
 bool vs_fader_bridge_set_slot_by_name(const char *name, float value);
 float vs_fader_bridge_get_slot(int slot_idx);
+/* Copies a coherent snapshot of all slots under one bridge lock. Unloaded slots read zero. */
+void vs_fader_bridge_get_slots(float out_values[VS_FADER_SLOT_COUNT]);
+
+/*
+ * Resolves an optional Fadester scale factor in [0.0f, 1.0f]:
+ * - Returns 1.0f when `slot_idx == VS_FADER_SLOT_NONE` (< 0, i.e. fader unbound).
+ * - Returns `vs_fader_bridge_get_slot(slot_idx)` (0.0f if Midi Fadester is not
+ *   loaded, or [0.0f, 1.0f] live fader value) when 0 <= slot_idx < VS_FADER_SLOT_COUNT.
+ * - Returns 0.0f for out-of-range positive indices.
+ */
+float vs_fader_bridge_resolve_scale(int slot_idx);
+
+/*
+ * Scales all reactive energy/transient fields of `in_frame` by `clamp01(reactivity_scale)`
+ * into `out_frame` while preserving pitch/tempo metadata (`spectral_centroid`, `estimated_bpm`).
+ */
+void vs_fader_bridge_scale_audio_frame(const struct vs_audio_frame *in_frame, float reactivity_scale,
+				       struct vs_audio_frame *out_frame);
+
+/*
+ * Evaluates a shader float or integer uniform optionally bound to a Fadester slot.
+ * When `slot_idx < 0` (`VS_FADER_SLOT_NONE`), returns `slider_val` unchanged.
+ * When `slot_idx >= 0`, maps the fader value [0, 1] linearly across [min_val, max_val]
+ * (supporting inverted ranges where min_val > max_val) and clamps to the shader's
+ * annotated hard [hard_min, hard_max] limits when `has_hard_min` / `has_hard_max` are set.
+ */
+float vs_fader_bridge_eval_float_param(int slot_idx, float slider_val, double min_val, double max_val,
+				       bool has_hard_min, double hard_min, bool has_hard_max, double hard_max);
+int vs_fader_bridge_eval_int_param(int slot_idx, int slider_val, double min_val, double max_val, int step,
+				   bool has_hard_min, double hard_min, bool has_hard_max, double hard_max);
+float vs_fader_bridge_map_float_param(float value, double min_val, double max_val, bool has_hard_min, double hard_min,
+				      bool has_hard_max, double hard_max);
+int vs_fader_bridge_map_int_param(float value, double min_val, double max_val, int step, bool has_hard_min,
+				  double hard_min, bool has_hard_max, double hard_max);
 
 void vs_fader_bridge_publish_signals(const struct vs_audio_frame *frame);
 void vs_fader_bridge_get_signals(struct vs_audio_frame *out_frame);

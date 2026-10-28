@@ -38,7 +38,8 @@ static void source_audio_capture_callback(void *param, obs_source_t *source, con
 		return;
 
 	vs_analyzer_push_planar(&tap->analyzer, (const float *const *)audio_data->data, tap->channels,
-				audio_data->frames, muted, tap->react_when_muted, audio_data->timestamp);
+				audio_data->frames, muted, os_atomic_load_bool(&tap->react_when_muted),
+				audio_data->timestamp);
 }
 
 static void detach_tap_callbacks(struct vs_audio_tap *tap)
@@ -209,7 +210,7 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 				       (strncmp(tap->source_name, safe_name, sizeof(tap->source_name) - 1u) != 0);
 	const bool target_changed = selection_changed || (!tap->raw_cb_active && !tap->source_cb_active);
 
-	tap->react_when_muted = react_when_muted;
+	os_atomic_set_bool(&tap->react_when_muted, react_when_muted);
 	if (ana_cfg)
 		vs_analyzer_update_config(&tap->analyzer, ana_cfg);
 
@@ -259,6 +260,15 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 	if (!tap)
 		return;
 
+	/* A removed source leaves only our weak reference. Clear the old attachment
+	 * so a named source recreated with the same name can use the existing retry. */
+	if (tap->source_cb_active && tap->weak_capture_source && obs_weak_source_expired(tap->weak_capture_source)) {
+		detach_tap_callbacks(tap);
+		tap->warned_attachment_failure = false;
+		tap->retry_accum_sec = 0.0f;
+		vs_analyzer_reset(&tap->analyzer);
+	}
+
 	/* Retry attachment once per second if a named or parent source was not ready at load time. */
 	if (!tap->raw_cb_active && !tap->source_cb_active) {
 		tap->retry_accum_sec += seconds;
@@ -294,6 +304,7 @@ void vs_audio_tap_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "release_ms", (double)VS_ENV_DEFAULT_RELEASE_MS);
 	obs_data_set_default_double(settings, "kick_sensitivity", 0.5);
 	obs_data_set_default_double(settings, "snare_sensitivity", 0.5);
+	obs_data_set_default_bool(settings, "show_advanced_analysis", false);
 }
 
 void vs_audio_tap_update_from_settings(struct vs_audio_tap *tap, obs_source_t *filter_source, obs_data_t *settings)
@@ -383,6 +394,7 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 	const bool is_named = (mode == (int)VS_TAP_NAMED_SOURCE);
 	const bool is_source = (mode == (int)VS_TAP_NAMED_SOURCE || mode == (int)VS_TAP_PARENT_SOURCE);
 	const bool auto_gain = obs_data_get_bool(settings, "auto_gain");
+	const bool advanced = obs_data_get_bool(settings, "show_advanced_analysis");
 	const char *warn_text = evaluate_tap_warning_text(filter_source, settings);
 
 	obs_property_t *p_src = obs_properties_get(props, "tap_source_name");
@@ -400,11 +412,31 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 	if (p_mute)
 		obs_property_set_visible(p_mute, is_source);
 	if (p_floor)
-		obs_property_set_visible(p_floor, !auto_gain);
+		obs_property_set_visible(p_floor, advanced && !auto_gain);
 	if (p_ceil)
-		obs_property_set_visible(p_ceil, !auto_gain);
+		obs_property_set_visible(p_ceil, advanced && !auto_gain);
+
+	/* Envelope and onset tuning stay hidden until requested; defaults suit most sources. */
+	static const char *const k_advanced_keys[] = {
+		"gate_db", "attack_ms", "release_ms", "kick_sensitivity", "snare_sensitivity",
+	};
+	for (size_t i = 0; i < sizeof(k_advanced_keys) / sizeof(k_advanced_keys[0]); i++) {
+		obs_property_t *p = obs_properties_get(props, k_advanced_keys[i]);
+		if (p)
+			obs_property_set_visible(p, advanced);
+	}
 
 	return true;
+}
+
+void vs_audio_tap_add_status_property(obs_properties_t *props)
+{
+	if (!props || obs_properties_get(props, S_TAP_STATUS_WARNING))
+		return;
+	obs_property_t *p_warn =
+		obs_properties_add_text(props, S_TAP_STATUS_WARNING, obs_module_text("AudioTap.Status"), OBS_TEXT_INFO);
+	obs_property_text_set_info_type(p_warn, OBS_TEXT_INFO_WARNING);
+	obs_property_set_visible(p_warn, false);
 }
 
 void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source)
@@ -432,10 +464,13 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 	obs_enum_sources(enum_audio_sources_cb, src_list);
 	obs_property_set_modified_callback2(src_list, tap_mode_modified_cb, filter_source);
 
-	obs_property_t *p_warn =
-		obs_properties_add_text(grp, S_TAP_STATUS_WARNING, obs_module_text("AudioTap.Status"), OBS_TEXT_INFO);
-	obs_property_text_set_info_type(p_warn, OBS_TEXT_INFO_WARNING);
-	obs_property_set_visible(p_warn, false);
+	/* Filters that hoist the status row to the top of their panel add it before this group. */
+	if (!obs_properties_get(props, S_TAP_STATUS_WARNING)) {
+		obs_property_t *p_warn = obs_properties_add_text(grp, S_TAP_STATUS_WARNING,
+								 obs_module_text("AudioTap.Status"), OBS_TEXT_INFO);
+		obs_property_text_set_info_type(p_warn, OBS_TEXT_INFO_WARNING);
+		obs_property_set_visible(p_warn, false);
+	}
 
 	obs_property_t *p_mute =
 		obs_properties_add_bool(grp, "react_when_muted", obs_module_text("AudioTap.ReactWhenMuted"));
@@ -448,6 +483,11 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 
 	obs_property_t *p_ag = obs_properties_add_bool(grp, "auto_gain", obs_module_text("AudioTap.AutoGain"));
 	obs_property_set_modified_callback2(p_ag, tap_mode_modified_cb, filter_source);
+
+	obs_property_t *p_adv =
+		obs_properties_add_bool(grp, "show_advanced_analysis", obs_module_text("AudioTap.AdvancedAnalysis"));
+	obs_property_set_long_description(p_adv, obs_module_text("AudioTap.AdvancedAnalysis.Tooltip"));
+	obs_property_set_modified_callback2(p_adv, tap_mode_modified_cb, filter_source);
 
 	obs_property_t *p_gate =
 		obs_properties_add_float_slider(grp, "gate_db", obs_module_text("AudioTap.GateDb"), -80.0, -20.0, 1.0);
@@ -469,10 +509,12 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 		grp, "release_ms", obs_module_text("AudioTap.ReleaseMs"), 0.0, 2000.0, 5.0);
 	obs_property_float_set_suffix(p_rel, " ms");
 
-	obs_properties_add_float_slider(grp, "kick_sensitivity", obs_module_text("AudioTap.KickSensitivity"), 0.0, 1.0,
-					0.01);
-	obs_properties_add_float_slider(grp, "snare_sensitivity", obs_module_text("AudioTap.SnareSensitivity"), 0.0,
-					1.0, 0.01);
+	obs_property_t *p_kick = obs_properties_add_float_slider(
+		grp, "kick_sensitivity", obs_module_text("AudioTap.KickSensitivity"), 0.0, 1.0, 0.01);
+	obs_property_set_long_description(p_kick, obs_module_text("AudioTap.KickSensitivity.Tooltip"));
+	obs_property_t *p_snare = obs_properties_add_float_slider(
+		grp, "snare_sensitivity", obs_module_text("AudioTap.SnareSensitivity"), 0.0, 1.0, 0.01);
+	obs_property_set_long_description(p_snare, obs_module_text("AudioTap.SnareSensitivity.Tooltip"));
 
 	obs_properties_add_group(props, "audio_tap_group", obs_module_text("AudioTap.Group"), OBS_GROUP_NORMAL, grp);
 

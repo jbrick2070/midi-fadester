@@ -173,6 +173,7 @@ static void test_spectrum_custom_hz_window(void)
 	generate_sine_windows(440.0f, 1.0f, win_4096, win_2048);
 	assert(vs_fft_compute(&fft_low, win_4096, mag_low));
 	assert(vs_fft_compute(&fft_mid, win_2048, mag_mid));
+	vs_spectrum_compute(&spec, win_2048, mag_low, mag_mid, &frame);
 
 	const float avg_440 = vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 420.0f, 460.0f, VS_HZ_MODE_AVERAGE);
 	const float peak_440 = vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 420.0f, 460.0f, VS_HZ_MODE_PEAK);
@@ -180,6 +181,9 @@ static void test_spectrum_custom_hz_window(void)
 	assert(avg_440 > 0.8f);
 	assert(peak_440 > 0.8f);
 	assert(flux_440 > 0.8f);
+	/* A repeated spectrum has no positive flux; the cached delta must advance each frame. */
+	vs_spectrum_compute(&spec, win_2048, mag_low, mag_mid, &frame);
+	assert(vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 420.0f, 460.0f, VS_HZ_MODE_FLUX) == 0.0f);
 
 	/* 220 Hz sine -> rejected (< 0.05) by [420, 460] Hz window. */
 	generate_sine_windows(220.0f, 1.0f, win_4096, win_2048);
@@ -203,11 +207,35 @@ static void test_spectrum_custom_hz_window(void)
 	vs_fft_plan_free(&fft_mid);
 }
 
+static void test_custom_hz_invalid_ranges(void)
+{
+	struct vs_spectrum spec;
+	float mag_low[VS_MAX_BINS_LOW] = {0};
+	float mag_mid[VS_MAX_BINS_MID] = {0};
+	struct vs_spectrum_frame frame;
+	/* At an 8 kHz sample rate, even UI-valid 10..20 kHz bounds are above Nyquist. */
+	assert(vs_spectrum_init(&spec, 8000u, VS_FFT_LOW_SIZE, VS_FFT_MID_SIZE));
+	vs_spectrum_compute(&spec, NULL, mag_low, mag_mid, &frame);
+	mag_mid[VS_MAX_BINS_MID - 1u] = 1.0f;
+	vs_spectrum_compute(&spec, NULL, mag_low, mag_mid, &frame);
+	for (int mode = VS_HZ_MODE_AVERAGE; mode <= VS_HZ_MODE_FLUX; mode++) {
+		assert(vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 10000.0f, 20000.0f, mode) == 0.0f);
+		assert(vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, NAN, 4000.0f, mode) == 0.0f);
+		assert(vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 1000.0f, INFINITY, mode) == 0.0f);
+		assert(vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, INFINITY, INFINITY, mode) == 0.0f);
+		const float bounded = vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 3900.0f, 20000.0f, mode);
+		assert(isfinite(bounded) && bounded >= 0.0f && bounded <= 1.0f);
+	}
+	vs_spectrum_reset(&spec);
+	assert(vs_spectrum_extract_hz_band(&spec, mag_low, mag_mid, 3900.0f, 4000.0f, VS_HZ_MODE_FLUX) == 0.0f);
+}
+
 int main(void)
 {
 	test_spectrum_subbass_vs_bass_4096();
 	test_spectrum_mid_high_isolation();
 	test_spectrum_custom_hz_window();
+	test_custom_hz_invalid_ranges();
 	printf("test-spectrum: all assertions passed\n");
 	return 0;
 }

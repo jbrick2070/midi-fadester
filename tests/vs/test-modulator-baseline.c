@@ -142,12 +142,31 @@ static void test_baseline_crash_recovery_reload(void)
 	assert(double_near(target.intensity, 0.25, 1e-6));
 }
 
+static void test_removed_filter_forgets_old_baseline_before_recreation(void)
+{
+	struct vs_baseline_table table;
+	struct mock_target_state target = {0.6, 0.5, 1};
+	vs_baseline_init(&table);
+	assert(vs_baseline_record_before_write_float(&table, "Color", "intensity", 0.6, 0.2));
+	assert(vs_baseline_record_before_write_float(&table, "Other", "threshold", 0.5, 0.8));
+	target.intensity = 0.2;
+	assert(vs_baseline_restore_filter(&table, "Color", apply_to_mock_target, &target) == 1);
+	assert(double_near(target.intensity, 0.6, 1e-6));
+	assert(vs_baseline_find(&table, "Color", "intensity") == NULL);
+	assert(vs_baseline_find(&table, "Other", "threshold") != NULL);
+	/* A recreated same-name filter owns its own original value. */
+	assert(vs_baseline_record_before_write_float(&table, "Color", "intensity", 0.9, 0.2));
+	assert(vs_baseline_restore_filter(&table, "Color", apply_to_mock_target, &target) == 1);
+	assert(double_near(target.intensity, 0.9, 1e-6));
+}
+
 int main(void)
 {
 	test_baseline_capture_once_during_pulse();
 	test_baseline_restore_on_disable_retarget_remove();
 	test_baseline_scene_save_mid_pulse();
 	test_baseline_crash_recovery_reload();
+	test_removed_filter_forgets_old_baseline_before_recreation();
 	printf("test-modulator-baseline: all assertions passed\n");
 	return 0;
 }

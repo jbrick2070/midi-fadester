@@ -16,6 +16,7 @@
 #include "shader-filter.h"
 
 #include "audio-tap.h"
+#include "property-status.h"
 #include "core/fader-bridge.h"
 #include "core/shader-parse.h"
 
@@ -28,6 +29,7 @@
 #include <util/platform.h>
 
 #include <math.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,9 +43,25 @@
 #define S_CUSTOM_LOW_HZ "custom_low_hz"
 #define S_CUSTOM_HIGH_HZ "custom_high_hz"
 #define S_CUSTOM_MODE "custom_mode"
+#define S_MIX_FADER_SLOT "mix_fader_slot"
+#define S_REACTIVITY_FADER_SLOT "reactivity_fader_slot"
+#define S_MIX_FADER_STATUS "vs_mix_fader_status"
+#define S_REACTIVITY_FADER_STATUS "vs_reactivity_fader_status"
+#define S_MIX_FADER_RESET "vs_mix_fader_reset"
+#define S_REACTIVITY_FADER_RESET "vs_reactivity_fader_reset"
+#define S_EFFECT_MIX "vs_effect_mix_pct"
+#define S_AUDIO_REACTIVITY "vs_audio_reactivity_pct"
+#define S_FADER_NOT_LOADED "vs_shader_fader_not_loaded"
 
 #define PRESET_CUSTOM_FILE "__custom_file__"
 #define PRESET_CUSTOM_TEXT "__custom_text__"
+
+struct vs_shader_param_fader_cfg {
+	char target_param[64];
+	int fader_slot;
+	double min_val;
+	double max_val;
+};
 
 struct vs_user_uniform_binding {
 	gs_eparam_t *eparam;
@@ -115,14 +133,24 @@ struct vs_shader_filter {
 	gs_eparam_t *p_audio_spectrum;
 	gs_eparam_t *p_audio_fft;
 
-	/* Fader slot uniform handles (R-MOD-7) */
+	/* Fader slot uniform handles & live Fadester control bindings (R-MOD-7) */
 	gs_eparam_t *p_fader[VS_FADER_SLOT_COUNT];
+	gs_eparam_t *p_vs_effect_mix;
+	gs_eparam_t *p_vs_reactivity_scale;
+	float effect_mix;       /* 0..1 slider; a bound Fadester slot scales it */
+	float audio_reactivity; /* 0..1 slider; a bound Fadester slot scales it */
+	int mix_fader_slot;
+	int reactivity_fader_slot;
+	struct vs_shader_param_fader_cfg param_faders[VS_SHADER_PARAM_FADER_SLOTS];
 
 	/* Ping-pong render targets for feedback shaders (R-UP-5, fft-feedback-trails.shader) */
 	gs_texrender_t *input_texrender[2];
 	gs_texrender_t *output_texrender[2];
 	int ping_pong_idx;
 	bool feedback_seeded;
+	uint32_t feedback_width;
+	uint32_t feedback_height;
+	enum gs_color_space feedback_space;
 
 	float elapsed_time;
 	float rand_f;
@@ -161,8 +189,24 @@ static uint32_t vec4_to_abgr_u32(const double rgba[4])
 }
 
 /* Caller must hold obs_enter_graphics(). */
+static void destroy_feedback_targets_locked(struct vs_shader_filter *sf)
+{
+	for (int i = 0; i < 2; i++) {
+		gs_texrender_destroy(sf->input_texrender[i]);
+		gs_texrender_destroy(sf->output_texrender[i]);
+		sf->input_texrender[i] = NULL;
+		sf->output_texrender[i] = NULL;
+	}
+	sf->feedback_seeded = false;
+	sf->ping_pong_idx = 0;
+	sf->feedback_width = 0;
+	sf->feedback_height = 0;
+}
+
+/* Caller must hold obs_enter_graphics(). */
 static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 {
+	destroy_feedback_targets_locked(sf);
 	for (size_t i = 0; i < VS_SHADER_MAX_UNIFORMS; i++) {
 		if (sf->user_bindings[i].image_loaded) {
 			gs_image_file_ex_free(&sf->user_bindings[i].image_file);
@@ -178,6 +222,8 @@ static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 	memset(sf->user_bindings, 0, sizeof(sf->user_bindings));
 	memset(sf->panic_slots, 0, sizeof(sf->panic_slots));
 	sf->p_audio_custom_band = NULL;
+	sf->p_vs_effect_mix = NULL;
+	sf->p_vs_reactivity_scale = NULL;
 }
 
 static void destroy_shader_effect(struct vs_shader_filter *sf)
@@ -216,7 +262,9 @@ static void resolve_shader_path_and_base_dir(const struct vs_shader_filter *sf, 
 		snprintf(out_base_dir, dir_cap, "%s", out_file_path);
 		char *slash1 = strrchr(out_base_dir, '/');
 		char *slash2 = strrchr(out_base_dir, '\\');
-		char *slash = (slash1 > slash2) ? slash1 : slash2;
+		char *slash = slash1;
+		if (!slash || (slash2 && slash2 > slash))
+			slash = slash2;
 		if (slash)
 			*slash = '\0';
 		else
@@ -277,6 +325,39 @@ static void update_user_uniform_values_locked(struct vs_shader_filter *sf, obs_d
 			}
 		}
 	}
+}
+
+/* Caller holds the graphics lock. The old percent keys can also be ordinary shader uniforms.
+ * Resolve their ownership only after successful compilation, and initialize the new keys once so switching away
+ * from a shader that owns a legacy name cannot later reinterpret its uniform as a host control. */
+static void sync_static_controls_from_settings_locked(struct vs_shader_filter *sf, obs_data_t *settings)
+{
+	if (!sf || !settings)
+		return;
+	const char *const current_keys[] = {S_EFFECT_MIX, S_AUDIO_REACTIVITY};
+	const char *const legacy_keys[] = {"effect_mix", "audio_reactivity"};
+	if (sf->effect && sf->parsed.full_effect_source) {
+		for (size_t k = 0; k < 2u; k++) {
+			if (obs_data_has_user_value(settings, current_keys[k]))
+				continue;
+			bool shader_owned = false;
+			for (size_t i = 0; i < sf->parsed.param_count; i++) {
+				if (strcmp(sf->parsed.params[i].name, legacy_keys[k]) == 0) {
+					shader_owned = true;
+					break;
+				}
+			}
+			const bool migrate_legacy = !shader_owned && obs_data_has_user_value(settings, legacy_keys[k]);
+			const double value = migrate_legacy ? obs_data_get_double(settings, legacy_keys[k])
+							    : obs_data_get_double(settings, current_keys[k]);
+			obs_data_set_double(settings, current_keys[k], value);
+			/* A proven host percentage must not become a future shader's same-named parameter. */
+			if (migrate_legacy)
+				obs_data_unset_user_value(settings, legacy_keys[k]);
+		}
+	}
+	sf->effect_mix = (float)fmin(fmax(obs_data_get_double(settings, S_EFFECT_MIX) * 0.01, 0.0), 1.0);
+	sf->audio_reactivity = (float)fmin(fmax(obs_data_get_double(settings, S_AUDIO_REACTIVITY) * 0.01, 0.0), 1.0);
 }
 
 static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
@@ -354,6 +435,8 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 
 	sf->effect = gs_effect_create(sf->parsed.full_effect_source, shader_label, &gs_err);
 	if (sf->effect) {
+		/* Manual Reload also enters here without the normal update's later fader synchronization. */
+		sync_static_controls_from_settings_locked(sf, settings);
 		sf->p_image = gs_effect_get_param_by_name(sf->effect, "image");
 		sf->p_previous_image = gs_effect_get_param_by_name(sf->effect, "previous_image");
 		sf->p_previous_output = gs_effect_get_param_by_name(sf->effect, "previous_output");
@@ -391,6 +474,8 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
 			sf->p_fader[i] = gs_effect_get_param_by_name(sf->effect, k_fader_uniform_names[i]);
 		}
+		sf->p_vs_effect_mix = gs_effect_get_param_by_name(sf->effect, "vs_effect_mix");
+		sf->p_vs_reactivity_scale = gs_effect_get_param_by_name(sf->effect, "vs_reactivity_scale");
 
 		for (size_t i = 0; i < sf->parsed.param_count; i++) {
 			sf->user_bindings[i].eparam =
@@ -436,6 +521,113 @@ static const char *shader_filter_get_name(void *unused)
 	return obs_module_text("VisualSidechain.ShaderFilter");
 }
 
+static void param_fader_key(char *buf, size_t cap, int idx, const char *suffix)
+{
+	snprintf(buf, cap, "param_fader_%d_%s", idx + 1, suffix);
+}
+
+static bool is_fader_bindable_shader_param(const struct vs_shader_param_info *info)
+{
+	if (!info || info->name[0] == '\0')
+		return false;
+	if (info->type == VS_SHADER_PARAM_FLOAT)
+		return true;
+	if (info->type == VS_SHADER_PARAM_INT) {
+		const bool is_select = (info->option_count > 0u) && (strcmp(info->widget_type, "select") == 0 ||
+								     strcmp(info->widget_type, "list") == 0);
+		return !is_select;
+	}
+	return false;
+}
+
+/* Caller must hold obs_enter_graphics(). */
+static bool find_bindable_shader_param_locked(const struct vs_shader_filter *sf, const char *param_name,
+					      struct vs_shader_param_info *out_info)
+{
+	if (!sf || !param_name || param_name[0] == '\0')
+		return false;
+	for (size_t i = 0; i < sf->parsed.param_count; i++) {
+		const struct vs_shader_param_info *info = &sf->parsed.params[i];
+		if (is_fader_bindable_shader_param(info) && strcmp(info->name, param_name) == 0) {
+			if (out_info)
+				*out_info = *info;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Caller must hold obs_enter_graphics(). */
+static void sync_fader_controls_from_settings_locked(struct vs_shader_filter *sf, obs_data_t *settings)
+{
+	if (!sf || !settings)
+		return;
+	sync_static_controls_from_settings_locked(sf, settings);
+
+	const int mix_slot = (int)obs_data_get_int(settings, S_MIX_FADER_SLOT);
+	sf->mix_fader_slot = (mix_slot >= 0 && mix_slot < VS_FADER_SLOT_COUNT) ? mix_slot : VS_FADER_SLOT_NONE;
+
+	const int react_slot = (int)obs_data_get_int(settings, S_REACTIVITY_FADER_SLOT);
+	sf->reactivity_fader_slot = (react_slot >= 0 && react_slot < VS_FADER_SLOT_COUNT) ? react_slot
+											  : VS_FADER_SLOT_NONE;
+
+	char k_target[64];
+	char k_slot[64];
+	char k_min[64];
+	char k_max[64];
+	char k_seed[64];
+
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		struct vs_shader_param_fader_cfg prev = sf->param_faders[k];
+		param_fader_key(k_target, sizeof(k_target), k, "target");
+		param_fader_key(k_slot, sizeof(k_slot), k, "slot");
+		param_fader_key(k_min, sizeof(k_min), k, "min");
+		param_fader_key(k_max, sizeof(k_max), k, "max");
+		param_fader_key(k_seed, sizeof(k_seed), k, "seeded");
+
+		const char *target = obs_data_get_string(settings, k_target);
+		if (!target)
+			target = "";
+		for (int prev_k = 0; prev_k < k; prev_k++) {
+			if (target[0] != '\0' && strcmp(target, sf->param_faders[prev_k].target_param) == 0) {
+				/* A uniform has one value per frame; keep the first binding and clear duplicates. */
+				obs_data_set_string(settings, k_target, "");
+				target = "";
+				break;
+			}
+		}
+
+		if (target[0] != '\0') {
+			char seed_id[220];
+			snprintf(seed_id, sizeof(seed_id), "%s::%s", sf->preset_shader, target);
+			const char *prev_seed = obs_data_get_string(settings, k_seed);
+			const bool same_as_prev = (strcmp(prev.target_param, target) == 0);
+			const bool has_explicit_bounds = (obs_data_has_user_value(settings, k_min) ||
+							  obs_data_has_user_value(settings, k_max)) &&
+							 same_as_prev;
+			if ((!same_as_prev || !prev_seed || strcmp(prev_seed, seed_id) != 0) && !has_explicit_bounds &&
+			    (!same_as_prev || (!obs_data_has_user_value(settings, k_min) &&
+					       !obs_data_has_user_value(settings, k_max)))) {
+				struct vs_shader_param_info pinfo;
+				if (find_bindable_shader_param_locked(sf, target, &pinfo)) {
+					obs_data_set_default_double(settings, k_min, pinfo.min_val);
+					obs_data_set_default_double(settings, k_max, pinfo.max_val);
+					obs_data_set_string(settings, k_seed, seed_id);
+				}
+			}
+		} else {
+			obs_data_set_string(settings, k_seed, "");
+		}
+
+		snprintf(sf->param_faders[k].target_param, sizeof(sf->param_faders[k].target_param), "%s", target);
+		const int fslot = (int)obs_data_get_int(settings, k_slot);
+		sf->param_faders[k].fader_slot = (fslot >= 0 && fslot < VS_FADER_SLOT_COUNT) ? fslot
+											     : VS_FADER_SLOT_NONE;
+		sf->param_faders[k].min_val = obs_data_get_double(settings, k_min);
+		sf->param_faders[k].max_val = obs_data_get_double(settings, k_max);
+	}
+}
+
 static void shader_filter_get_defaults(obs_data_t *settings)
 {
 	vs_audio_tap_get_defaults(settings);
@@ -448,6 +640,24 @@ static void shader_filter_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, S_CUSTOM_LOW_HZ, 60.0);
 	obs_data_set_default_double(settings, S_CUSTOM_HIGH_HZ, 150.0);
 	obs_data_set_default_int(settings, S_CUSTOM_MODE, (long long)VS_HZ_MODE_AVERAGE);
+	obs_data_set_default_double(settings, S_EFFECT_MIX, 100.0);
+	obs_data_set_default_double(settings, S_AUDIO_REACTIVITY, 100.0);
+	obs_data_set_default_int(settings, S_MIX_FADER_SLOT, VS_FADER_SLOT_NONE);
+	obs_data_set_default_int(settings, S_REACTIVITY_FADER_SLOT, VS_FADER_SLOT_NONE);
+
+	char key[64];
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		param_fader_key(key, sizeof(key), k, "target");
+		obs_data_set_default_string(settings, key, "");
+		param_fader_key(key, sizeof(key), k, "slot");
+		obs_data_set_default_int(settings, key, VS_FADER_SLOT_NONE);
+		param_fader_key(key, sizeof(key), k, "min");
+		obs_data_set_default_double(settings, key, 0.0);
+		param_fader_key(key, sizeof(key), k, "max");
+		obs_data_set_default_double(settings, key, 1.0);
+		param_fader_key(key, sizeof(key), k, "seeded");
+		obs_data_set_default_string(settings, key, "");
+	}
 }
 
 static void shader_filter_update(void *data, obs_data_t *settings)
@@ -473,7 +683,9 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	const char *fpath = obs_data_get_string(settings, S_SHADER_FILE_PATH);
 	snprintf(sf->shader_file_path, sizeof(sf->shader_file_path), "%s", fpath ? fpath : "");
 
-	sf->override_entire_effect = obs_data_get_bool(settings, S_OVERRIDE_EFFECT);
+	const bool is_custom = strcmp(sf->preset_shader, PRESET_CUSTOM_FILE) == 0 ||
+			       strcmp(sf->preset_shader, PRESET_CUSTOM_TEXT) == 0;
+	sf->override_entire_effect = is_custom && obs_data_get_bool(settings, S_OVERRIDE_EFFECT);
 
 	const char *stext = obs_data_get_string(settings, S_SHADER_TEXT);
 	bfree(sf->shader_text);
@@ -496,6 +708,10 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		snprintf(sf->last_compiled_signature, sizeof(sf->last_compiled_signature), "%s", sig);
 		compile_shader(sf, settings);
 
+		obs_enter_graphics();
+		sync_fader_controls_from_settings_locked(sf, settings);
+		obs_leave_graphics();
+
 		/* Rebuild Properties immediately when switching presets, selecting a file, toggling full-effect mode,
 		 * or clicking Defaults. Avoid rebuilding on every keystroke inside the inline HLSL multiline editor
 		 * so Qt text cursor focus is preserved while typing (Reload & Recompile rebuilds inline uniforms). */
@@ -510,6 +726,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	} else {
 		obs_enter_graphics();
 		update_user_uniform_values_locked(sf, settings);
+		sync_fader_controls_from_settings_locked(sf, settings);
 		obs_leave_graphics();
 	}
 }
@@ -538,15 +755,14 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 	sf->rand_instance_f = next_unit_rand();
 	sf->rand_activation_f = next_unit_rand();
 	sf->panic_passthrough = vs_fader_bridge_is_panic_active();
+	sf->effect_mix = 1.0f;
+	sf->audio_reactivity = 1.0f;
+	sf->mix_fader_slot = VS_FADER_SLOT_NONE;
+	sf->reactivity_fader_slot = VS_FADER_SLOT_NONE;
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++)
+		sf->param_faders[k].fader_slot = VS_FADER_SLOT_NONE;
 
 	vs_audio_tap_init(&sf->tap, true);
-
-	obs_enter_graphics();
-	for (int i = 0; i < 2; i++) {
-		sf->input_texrender[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-		sf->output_texrender[i] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-	}
-	obs_leave_graphics();
 
 	sf->in_create = true;
 	shader_filter_update(sf, settings);
@@ -562,15 +778,6 @@ static void shader_filter_destroy(void *data)
 
 	vs_audio_tap_destroy(&sf->tap);
 	destroy_shader_effect(sf);
-
-	obs_enter_graphics();
-	for (int i = 0; i < 2; i++) {
-		if (sf->input_texrender[i])
-			gs_texrender_destroy(sf->input_texrender[i]);
-		if (sf->output_texrender[i])
-			gs_texrender_destroy(sf->output_texrender[i]);
-	}
-	obs_leave_graphics();
 
 	bfree(sf->shader_text);
 	bfree(sf);
@@ -620,7 +827,23 @@ static void shader_filter_video_tick(void *data, float seconds)
 	obs_leave_graphics();
 }
 
-static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, uint32_t cy)
+/* A bound slot scales the static slider; with no slot, or when Midi Fadester is not loaded, the slider
+ * value stands alone so a missing fader plugin never silences or dries the effect. */
+static float fader_snapshot_scale(const float faders[VS_FADER_SLOT_COUNT], int slot, bool fadester_loaded)
+{
+	if (slot < 0 || !fadester_loaded)
+		return 1.0f;
+	return slot < VS_FADER_SLOT_COUNT ? faders[slot] : 0.0f;
+}
+
+static float effective_mix_scale(const struct vs_shader_filter *sf, const float faders[VS_FADER_SLOT_COUNT],
+				 bool fadester_loaded)
+{
+	return sf->effect_mix * fader_snapshot_scale(faders, sf->mix_fader_slot, fadester_loaded);
+}
+
+static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, uint32_t cy,
+				     const float faders[VS_FADER_SLOT_COUNT], bool fadester_loaded)
 {
 	struct vec2 uv_offset = {0.0f, 0.0f};
 	struct vec2 uv_scale = {1.0f, 1.0f};
@@ -649,35 +872,45 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 	if (sf->p_rand_activation_f)
 		gs_effect_set_float(sf->p_rand_activation_f, sf->rand_activation_f);
 
+	const float mix_scale = effective_mix_scale(sf, faders, fadester_loaded);
+	const float react_scale =
+		sf->audio_reactivity * fader_snapshot_scale(faders, sf->reactivity_fader_slot, fadester_loaded);
+
+	if (sf->p_vs_effect_mix)
+		gs_effect_set_float(sf->p_vs_effect_mix, mix_scale);
+	if (sf->p_vs_reactivity_scale)
+		gs_effect_set_float(sf->p_vs_reactivity_scale, react_scale);
+
+	/* GPU helpers scale the audio textures; only scalar uniforms need CPU scaling here. */
 	const struct vs_audio_frame *f = &sf->tap.current_frame;
 	if (sf->p_audio_level)
-		gs_effect_set_float(sf->p_audio_level, f->level);
+		gs_effect_set_float(sf->p_audio_level, f->level * react_scale);
 	if (sf->p_audio_sub_bass)
-		gs_effect_set_float(sf->p_audio_sub_bass, f->sub_bass);
+		gs_effect_set_float(sf->p_audio_sub_bass, f->sub_bass * react_scale);
 	if (sf->p_audio_bass)
-		gs_effect_set_float(sf->p_audio_bass, f->bass);
+		gs_effect_set_float(sf->p_audio_bass, f->bass * react_scale);
 	if (sf->p_audio_mid)
-		gs_effect_set_float(sf->p_audio_mid, f->mid);
+		gs_effect_set_float(sf->p_audio_mid, f->mid * react_scale);
 	if (sf->p_audio_high)
-		gs_effect_set_float(sf->p_audio_high, f->high);
+		gs_effect_set_float(sf->p_audio_high, f->high * react_scale);
 	if (sf->p_audio_kick)
-		gs_effect_set_float(sf->p_audio_kick, f->kick);
+		gs_effect_set_float(sf->p_audio_kick, f->kick * react_scale);
 	if (sf->p_audio_snare)
-		gs_effect_set_float(sf->p_audio_snare, f->snare);
+		gs_effect_set_float(sf->p_audio_snare, f->snare * react_scale);
 	if (sf->p_audio_beat)
-		gs_effect_set_float(sf->p_audio_beat, f->beat);
+		gs_effect_set_float(sf->p_audio_beat, f->beat * react_scale);
 	if (sf->p_audio_spectral_centroid)
 		gs_effect_set_float(sf->p_audio_spectral_centroid, f->spectral_centroid);
 	if (sf->p_audio_spectral_flux)
-		gs_effect_set_float(sf->p_audio_spectral_flux, f->spectral_flux);
+		gs_effect_set_float(sf->p_audio_spectral_flux, f->spectral_flux * react_scale);
 	if (sf->p_audio_custom_band)
-		gs_effect_set_float(sf->p_audio_custom_band, sf->current_custom_band);
+		gs_effect_set_float(sf->p_audio_custom_band, sf->current_custom_band * react_scale);
 
 	/* Legacy obs-shaderfilter compatibility uniforms (R-SHD-1, R-UP-6) */
 	if (sf->p_audio_peak)
-		gs_effect_set_float(sf->p_audio_peak, fmaxf(f->kick, f->level));
+		gs_effect_set_float(sf->p_audio_peak, fmaxf(f->kick, f->level) * react_scale);
 	if (sf->p_audio_magnitude)
-		gs_effect_set_float(sf->p_audio_magnitude, f->level);
+		gs_effect_set_float(sf->p_audio_magnitude, f->level * react_scale);
 
 	/* Dynamic FFT & Spectrum GPU textures (R-SHD-2) */
 	if (sf->p_audio_spectrum && sf->tap.tex_spectrum)
@@ -688,23 +921,46 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 	/* Fader slot float uniforms (R-MOD-7) */
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
 		if (sf->p_fader[i])
-			gs_effect_set_float(sf->p_fader[i], vs_fader_bridge_get_slot(i));
+			gs_effect_set_float(sf->p_fader[i], faders[i]);
 	}
 
-	/* User-annotated uniforms (R-UP-4) */
+	/* User-annotated uniforms with optional Fadester parameter overrides (R-UP-4, R-MOD-7) */
 	const bool panic_active = vs_fader_bridge_is_panic_active();
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
+		const struct vs_shader_param_info *info = &sf->parsed.params[i];
 		const struct vs_user_uniform_binding *b = &sf->user_bindings[i];
 		if (!b->eparam)
 			continue;
+
+		const struct vs_shader_param_fader_cfg *pf = NULL;
+		for (int k = 0; fadester_loaded && k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+			if (sf->param_faders[k].fader_slot >= 0 && sf->param_faders[k].target_param[0] != '\0' &&
+			    strcmp(sf->param_faders[k].target_param, info->name) == 0) {
+				pf = &sf->param_faders[k];
+			}
+		}
+
 		if (b->type == VS_SHADER_PARAM_FLOAT) {
-			const float val =
-				(panic_active && vs_fader_bridge_is_strobe_or_flash_param(sf->parsed.params[i].name))
-					? 0.0f
-					: b->f_val;
+			float val = b->f_val;
+			if (pf) {
+				val = vs_fader_bridge_map_float_param(faders[pf->fader_slot], pf->min_val, pf->max_val,
+								      info->has_min, info->min_val, info->has_max,
+								      info->max_val);
+			}
+			if (panic_active && vs_fader_bridge_is_strobe_or_flash_param(info->name))
+				val = 0.0f;
 			gs_effect_set_float(b->eparam, val);
 		} else if (b->type == VS_SHADER_PARAM_INT) {
-			gs_effect_set_int(b->eparam, b->i_val);
+			int val = b->i_val;
+			if (pf && is_fader_bindable_shader_param(info)) {
+				const int step = isfinite(info->step_val) && info->step_val >= 1.0
+							 ? (int)fmin(info->step_val, INT_MAX)
+							 : 1;
+				val = vs_fader_bridge_map_int_param(faders[pf->fader_slot], pf->min_val, pf->max_val,
+								    step, info->has_min, info->min_val, info->has_max,
+								    info->max_val);
+			}
+			gs_effect_set_int(b->eparam, val);
 		} else if (b->type == VS_SHADER_PARAM_BOOL) {
 			gs_effect_set_bool(b->eparam, b->b_val);
 		} else if (b->type == VS_SHADER_PARAM_COLOR) {
@@ -715,13 +971,34 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 	}
 }
 
-static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *target, uint32_t cx, uint32_t cy)
+static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *target, uint32_t cx, uint32_t cy,
+				     enum gs_color_space source_space, const float faders[VS_FADER_SLOT_COUNT],
+				     bool fadester_loaded)
 {
+	const enum gs_color_format format = gs_get_format_from_space(source_space);
+	if (sf->feedback_width != cx || sf->feedback_height != cy || sf->feedback_space != source_space) {
+		/* Drop history on size/space changes and avoid retaining four full-size targets after preset switches. */
+		destroy_feedback_targets_locked(sf);
+		for (int i = 0; i < 2; i++) {
+			sf->input_texrender[i] = gs_texrender_create(format, GS_ZS_NONE);
+			sf->output_texrender[i] = gs_texrender_create(format, GS_ZS_NONE);
+			if (!sf->input_texrender[i] || !sf->output_texrender[i]) {
+				destroy_feedback_targets_locked(sf);
+				obs_source_skip_video_filter(sf->context);
+				return;
+			}
+		}
+		sf->feedback_width = cx;
+		sf->feedback_height = cy;
+		sf->feedback_space = source_space;
+	}
 	const int cur = sf->ping_pong_idx;
 	const int prev = 1 - cur;
 
 	gs_texrender_reset(sf->input_texrender[cur]);
-	if (!gs_texrender_begin(sf->input_texrender[cur], cx, cy)) {
+	if (!gs_texrender_begin_with_color_space(sf->input_texrender[cur], cx, cy, source_space)) {
+		/* OBS retains dimensions after a failed GPU allocation; discard it to retry next frame. */
+		destroy_feedback_targets_locked(sf);
 		obs_source_skip_video_filter(sf->context);
 		return;
 	}
@@ -738,7 +1015,8 @@ static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *
 							 : cur_in_tex;
 
 	gs_texrender_reset(sf->output_texrender[cur]);
-	if (!gs_texrender_begin(sf->output_texrender[cur], cx, cy)) {
+	if (!gs_texrender_begin_with_color_space(sf->output_texrender[cur], cx, cy, source_space)) {
+		destroy_feedback_targets_locked(sf);
 		obs_source_skip_video_filter(sf->context);
 		return;
 	}
@@ -757,7 +1035,7 @@ static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *
 	if (sf->p_previous_output)
 		gs_effect_set_texture_srgb(sf->p_previous_output, prev_out_tex ? prev_out_tex : cur_in_tex);
 
-	bind_all_shader_uniforms(sf, cx, cy);
+	bind_all_shader_uniforms(sf, cx, cy, faders, fadester_loaded);
 
 	while (gs_effect_loop(sf->effect, "Draw")) {
 		gs_draw_sprite(cur_in_tex, 0, cx, cy);
@@ -798,6 +1076,15 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 		return;
 	}
 
+	float faders[VS_FADER_SLOT_COUNT];
+	vs_fader_bridge_get_slots(faders);
+	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+	if (!sf->override_entire_effect && effective_mix_scale(sf, faders, fadester_loaded) <= 1e-4f) {
+		sf->feedback_seeded = false;
+		obs_source_skip_video_filter(sf->context);
+		return;
+	}
+
 	obs_source_t *target = obs_filter_get_target(sf->context);
 	if (!target) {
 		obs_source_skip_video_filter(sf->context);
@@ -811,11 +1098,6 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 		return;
 	}
 
-	if (sf->uses_feedback) {
-		render_feedback_pipeline(sf, target, cx, cy);
-		return;
-	}
-
 	const enum gs_color_space preferred_spaces[] = {
 		GS_CS_SRGB,
 		GS_CS_SRGB_16F,
@@ -824,12 +1106,18 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 	const enum gs_color_space source_space = obs_source_get_color_space(
 		target, sizeof(preferred_spaces) / sizeof(preferred_spaces[0]), preferred_spaces);
 
-	if (!obs_source_process_filter_begin_with_color_space(sf->context, GS_RGBA, source_space,
+	if (sf->uses_feedback) {
+		render_feedback_pipeline(sf, target, cx, cy, source_space, faders, fadester_loaded);
+		return;
+	}
+
+	const enum gs_color_format format = gs_get_format_from_space(source_space);
+	if (!obs_source_process_filter_begin_with_color_space(sf->context, format, source_space,
 							      OBS_NO_DIRECT_RENDERING)) {
 		return;
 	}
 
-	bind_all_shader_uniforms(sf, cx, cy);
+	bind_all_shader_uniforms(sf, cx, cy, faders, fadester_loaded);
 
 	/* Premultiplied alpha blend around obs_source_process_filter_tech_end (R-SHD-5):
 	 * obs_source_process_filter_begin_with_color_space renders the upstream source into its internal
@@ -877,6 +1165,275 @@ static bool on_preset_changed(obs_properties_t *props, obs_property_t *property,
 	return true;
 }
 
+static void populate_shader_fader_slot_list(obs_property_t *list, bool fadester_loaded, const char *none_label)
+{
+	if (!list)
+		return;
+	obs_property_list_add_int(list, none_label, VS_FADER_SLOT_NONE);
+
+	const char *not_loaded_text = obs_module_text("Modulator.MidiFadesterNotLoaded");
+	static const char *const k_fader_locale_keys[VS_FADER_SLOT_COUNT] = {
+		"Signal.FaderCrossfader", "Signal.Fader1", "Signal.Fader2", "Signal.Fader3", "Signal.Fader4",
+		"Signal.Fader5",          "Signal.Fader6", "Signal.Fader7", "Signal.Fader8", "Signal.FaderMaster",
+	};
+	char label[160];
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+		const char *base = obs_module_text(k_fader_locale_keys[i]);
+		if (fadester_loaded) {
+			obs_property_list_add_int(list, base, i);
+		} else {
+			snprintf(label, sizeof(label), "%s - %s", base, not_loaded_text);
+			obs_property_list_add_int(list, label, i);
+		}
+	}
+}
+
+/* True when any Fadester binding is stored, so the Fader Control group must stay visible even when
+ * Midi Fadester is not loaded (the user may need to inspect or clear it). */
+static bool shader_fader_bindings_stored(obs_data_t *settings)
+{
+	if (obs_data_get_int(settings, S_MIX_FADER_SLOT) != VS_FADER_SLOT_NONE ||
+	    obs_data_get_int(settings, S_REACTIVITY_FADER_SLOT) != VS_FADER_SLOT_NONE)
+		return true;
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		char key[64];
+		param_fader_key(key, sizeof(key), k, "target");
+		if (obs_data_get_string(settings, key)[0] != '\0')
+			return true;
+		param_fader_key(key, sizeof(key), k, "slot");
+		if (obs_data_get_int(settings, key) != VS_FADER_SLOT_NONE)
+			return true;
+	}
+	return false;
+}
+
+static void refresh_shader_fader_props_visibility(obs_properties_t *props, obs_data_t *settings, bool has_bindable)
+{
+	if (!props || !settings)
+		return;
+
+	const char *preset = obs_data_get_string(settings, S_PRESET_SHADER);
+	const bool is_custom = strcmp(preset, PRESET_CUSTOM_FILE) == 0 || strcmp(preset, PRESET_CUSTOM_TEXT) == 0;
+	const bool show_mix_react = !(is_custom && obs_data_get_bool(settings, S_OVERRIDE_EFFECT));
+	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+	/* Without Midi Fadester and without stored bindings, the group shrinks to one explanatory row. */
+	const bool collapsed = !fadester_loaded && !shader_fader_bindings_stored(settings);
+	obs_property_set_visible(obs_properties_get(props, S_FADER_NOT_LOADED), collapsed);
+	obs_property_set_visible(obs_properties_get(props, S_EFFECT_MIX), show_mix_react);
+	obs_property_set_visible(obs_properties_get(props, S_AUDIO_REACTIVITY), show_mix_react);
+
+	const char *slot_keys[] = {S_MIX_FADER_SLOT, S_REACTIVITY_FADER_SLOT};
+	const char *slider_keys[] = {S_EFFECT_MIX, S_AUDIO_REACTIVITY};
+	const char *status_keys[] = {S_MIX_FADER_STATUS, S_REACTIVITY_FADER_STATUS};
+	const char *reset_keys[] = {S_MIX_FADER_RESET, S_REACTIVITY_FADER_RESET};
+	const char *fixed_text[] = {"Shader.MixFader.StatusFixed", "Shader.ReactivityFader.StatusFixed"};
+	const char *mapped_text[] = {"Shader.MixFader.StatusMapped", "Shader.ReactivityFader.StatusMapped"};
+	const char *unloaded_text[] = {"Shader.MixFader.StatusNotLoaded", "Shader.ReactivityFader.StatusNotLoaded"};
+	char summary[768];
+	for (size_t i = 0; i < 2; i++) {
+		obs_property_t *list = obs_properties_get(props, slot_keys[i]);
+		const long long slot = obs_data_get_int(settings, slot_keys[i]);
+		const char *label = vs_property_int_choice_name(list, slot);
+		const double slider_pct = obs_data_get_double(settings, slider_keys[i]);
+		if (slot >= 0 && slot < VS_FADER_SLOT_COUNT && label && fadester_loaded)
+			snprintf(summary, sizeof(summary), obs_module_text(mapped_text[i]), label, slider_pct);
+		else if (slot >= 0 && slot < VS_FADER_SLOT_COUNT && label)
+			snprintf(summary, sizeof(summary), obs_module_text(unloaded_text[i]), label, slider_pct);
+		else
+			snprintf(summary, sizeof(summary), obs_module_text(fixed_text[i]), slider_pct);
+		obs_property_t *status = obs_properties_get(props, status_keys[i]);
+		vs_property_info_set_text(status, summary);
+		obs_property_set_visible(list, show_mix_react && !collapsed);
+		obs_property_set_visible(status, show_mix_react && !collapsed);
+		obs_property_t *reset = obs_properties_get(props, reset_keys[i]);
+		obs_property_set_visible(reset, show_mix_react && !collapsed);
+		obs_property_set_enabled(reset, slot != VS_FADER_SLOT_NONE);
+	}
+
+	bool earlier_selected = false;
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		char kt[64], ks[64], kmin[64], kmax[64], kstatus[64], kreset[64];
+		param_fader_key(kt, sizeof(kt), k, "target");
+		param_fader_key(ks, sizeof(ks), k, "slot");
+		param_fader_key(kmin, sizeof(kmin), k, "min");
+		param_fader_key(kmax, sizeof(kmax), k, "max");
+		param_fader_key(kstatus, sizeof(kstatus), k, "status");
+		param_fader_key(kreset, sizeof(kreset), k, "reset");
+		const char *target = obs_data_get_string(settings, kt);
+		const bool selected = target[0] != '\0';
+		const bool visible = !collapsed && (has_bindable || selected) &&
+				     (k == 0 || earlier_selected || selected);
+		obs_property_t *target_list = obs_properties_get(props, kt);
+		const char *target_label = vs_property_string_choice_name(target_list, target);
+		for (size_t opt = 0; opt < obs_property_list_item_count(target_list); opt++) {
+			const char *candidate = obs_property_list_item_string(target_list, opt);
+			bool duplicate = false;
+			for (int prev = 0; prev < k && candidate && candidate[0]; prev++) {
+				char prev_key[64];
+				param_fader_key(prev_key, sizeof(prev_key), prev, "target");
+				if (strcmp(candidate, obs_data_get_string(settings, prev_key)) == 0)
+					duplicate = true;
+			}
+			obs_property_list_item_disable(target_list, opt, duplicate);
+		}
+		const long long slot = obs_data_get_int(settings, ks);
+		const char *slot_label = vs_property_int_choice_name(obs_properties_get(props, ks), slot);
+		if (!selected)
+			snprintf(summary, sizeof(summary), "%s", obs_module_text("Shader.ParamFader.StatusEmpty"));
+		else if (!target_label)
+			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusMissing"), target);
+		else if (slot < 0 || slot >= VS_FADER_SLOT_COUNT || !slot_label)
+			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusSlider"),
+				 target_label);
+		else if (!fadester_loaded)
+			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusNotLoaded"),
+				 slot_label, target_label);
+		else
+			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusMapped"),
+				 slot_label, target_label, obs_data_get_double(settings, kmin),
+				 obs_data_get_double(settings, kmax));
+		vs_property_info_set_text(obs_properties_get(props, kstatus), summary);
+		obs_property_set_visible(target_list, visible);
+		obs_property_set_visible(obs_properties_get(props, ks), visible && selected);
+		obs_property_set_visible(obs_properties_get(props, kmin), visible && selected);
+		obs_property_set_visible(obs_properties_get(props, kmax), visible && selected);
+		obs_property_set_visible(obs_properties_get(props, kstatus), visible);
+		obs_property_set_visible(obs_properties_get(props, kreset), visible);
+		obs_property_set_enabled(obs_properties_get(props, kreset),
+					 selected || slot != VS_FADER_SLOT_NONE ||
+						 obs_data_has_user_value(settings, kmin) ||
+						 obs_data_has_user_value(settings, kmax));
+		earlier_selected = earlier_selected || selected;
+	}
+	obs_property_set_visible(obs_properties_get(props, "vs_shader_fader_ownership"),
+				 !collapsed && (has_bindable || earlier_selected));
+}
+
+static void normalize_shader_fader_targets_for_ui(obs_data_t *settings)
+{
+	/* VIDEO source updates run on the next tick. Mirror the existing first-target
+	 * ownership rule now so this UI refresh cannot show a soon-to-be-cleared binding. */
+	char earlier_targets[VS_SHADER_PARAM_FADER_SLOTS][64] = {{0}};
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		char key[64];
+		param_fader_key(key, sizeof(key), k, "target");
+		const char *target = obs_data_get_string(settings, key);
+		for (int prev = 0; target[0] && prev < k; prev++) {
+			if (strcmp(target, earlier_targets[prev]) != 0)
+				continue;
+			obs_data_set_string(settings, key, "");
+			param_fader_key(key, sizeof(key), k, "seeded");
+			obs_data_set_string(settings, key, "");
+			target = "";
+			break;
+		}
+		snprintf(earlier_targets[k], sizeof(earlier_targets[k]), "%s", target);
+	}
+}
+
+static bool on_shader_param_fader_changed(void *priv, obs_properties_t *props, obs_property_t *property,
+					  obs_data_t *settings)
+{
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)priv;
+	if (!props || !settings)
+		return false;
+
+	bool has_bindable = false;
+	const char *prop_name = property ? obs_property_name(property) : NULL;
+	for (int k = 0; prop_name && k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		char key[64];
+		param_fader_key(key, sizeof(key), k, "target");
+		if (strcmp(prop_name, key) == 0) {
+			normalize_shader_fader_targets_for_ui(settings);
+			break;
+		}
+	}
+
+	if (sf) {
+		obs_enter_graphics();
+		for (size_t i = 0; i < sf->parsed.param_count; i++) {
+			if (is_fader_bindable_shader_param(&sf->parsed.params[i])) {
+				has_bindable = true;
+				break;
+			}
+		}
+		for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+			char k_target[64];
+			param_fader_key(k_target, sizeof(k_target), k, "target");
+			if (!prop_name || strcmp(prop_name, k_target) != 0)
+				continue;
+			char k_min[64], k_max[64], k_seed[64];
+			param_fader_key(k_min, sizeof(k_min), k, "min");
+			param_fader_key(k_max, sizeof(k_max), k, "max");
+			param_fader_key(k_seed, sizeof(k_seed), k, "seeded");
+			const char *target = obs_data_get_string(settings, prop_name);
+			if (target && target[0] != '\0') {
+				char seed_id[220];
+				snprintf(seed_id, sizeof(seed_id), "%s::%s", sf->preset_shader, target);
+				const char *prev_seed = obs_data_get_string(settings, k_seed);
+				if (!prev_seed || strcmp(prev_seed, seed_id) != 0) {
+					struct vs_shader_param_info pinfo;
+					if (find_bindable_shader_param_locked(sf, target, &pinfo)) {
+						obs_data_set_default_double(settings, k_min, pinfo.min_val);
+						obs_data_set_default_double(settings, k_max, pinfo.max_val);
+						obs_data_set_string(settings, k_seed, seed_id);
+					}
+				}
+			} else {
+				obs_data_set_string(settings, k_seed, "");
+			}
+		}
+		obs_leave_graphics();
+	}
+
+	refresh_shader_fader_props_visibility(props, settings, has_bindable);
+	return true;
+}
+
+static bool on_shader_fader_reset_clicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+	if (!sf || !sf->context || !property)
+		return false;
+	const char *name = obs_property_name(property);
+	obs_data_t *settings = obs_source_get_settings(sf->context);
+	if (!settings)
+		return false;
+	bool reset = false;
+	if (strcmp(name, S_MIX_FADER_RESET) == 0) {
+		obs_data_set_int(settings, S_MIX_FADER_SLOT, VS_FADER_SLOT_NONE);
+		reset = true;
+	} else if (strcmp(name, S_REACTIVITY_FADER_RESET) == 0) {
+		obs_data_set_int(settings, S_REACTIVITY_FADER_SLOT, VS_FADER_SLOT_NONE);
+		reset = true;
+	} else {
+		for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+			char key[64];
+			param_fader_key(key, sizeof(key), k, "reset");
+			if (strcmp(name, key) != 0)
+				continue;
+			param_fader_key(key, sizeof(key), k, "target");
+			obs_data_set_string(settings, key, "");
+			param_fader_key(key, sizeof(key), k, "slot");
+			obs_data_set_int(settings, key, VS_FADER_SLOT_NONE);
+			param_fader_key(key, sizeof(key), k, "min");
+			obs_data_unset_user_value(settings, key);
+			param_fader_key(key, sizeof(key), k, "max");
+			obs_data_unset_user_value(settings, key);
+			param_fader_key(key, sizeof(key), k, "seeded");
+			obs_data_set_string(settings, key, "");
+			reset = true;
+			break;
+		}
+	}
+	if (reset) {
+		obs_source_update(sf->context, settings);
+		on_shader_param_fader_changed(sf, props, NULL, settings);
+	}
+	obs_data_release(settings);
+	return reset;
+}
+
 static bool on_reload_shader_clicked(obs_properties_t *props, obs_property_t *property, void *data)
 {
 	(void)props;
@@ -900,13 +1457,15 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
 	obs_properties_t *props = obs_properties_create();
 
-	/* 1. Audio Sidechain & Analysis group (defaulting to Track 1) */
-	vs_audio_tap_add_properties(props, sf ? sf->context : NULL);
+	/* Panel order: tap status row, Shader Source, Shader Parameters, Fader Control, then the audio
+	 * analysis group last so a new user meets the effect before the DSP plumbing. */
+	vs_audio_tap_add_status_property(props);
 
 	/* Snapshot shader compiler state under graphics lock without holding the lock across OBS property creation */
 	char compile_err_snap[1024] = {0};
 	char preset_snap[128] = {0};
 	bool has_effect = false;
+	bool override_effect = false;
 	bool uses_custom_band = true;
 	size_t param_count = 0u;
 	struct vs_shader_param_info *params_snap = NULL;
@@ -916,6 +1475,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 		snprintf(compile_err_snap, sizeof(compile_err_snap), "%s", sf->compile_error);
 		snprintf(preset_snap, sizeof(preset_snap), "%s", sf->preset_shader);
 		has_effect = (sf->effect != NULL);
+		override_effect = sf->override_entire_effect;
 		uses_custom_band = (sf->p_audio_custom_band != NULL);
 		param_count = sf->parsed.param_count;
 		if (param_count > 0u) {
@@ -947,6 +1507,10 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 				     "fft-feedback-trails.shader");
 	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.StrobeFlash"), "fft-strobe-flash.shader");
 	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.MirrorSplit"), "fft-mirror-split.shader");
+	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.HexPulseLattice"),
+				     "fft-hex-pulse-lattice.shader");
+	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.PolygonTunnel"),
+				     "fft-polygon-tunnel.shader");
 	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.CustomFile"), PRESET_CUSTOM_FILE);
 	obs_property_list_add_string(p_preset, obs_module_text("Shader.Preset.CustomText"), PRESET_CUSTOM_TEXT);
 	obs_property_set_modified_callback(p_preset, on_preset_changed);
@@ -978,6 +1542,20 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 		obs_data_set_string(settings, S_COMPILE_STATUS, compile_err_snap);
 		obs_data_release(settings);
 	}
+
+	obs_property_t *p_emix = obs_properties_add_float_slider(sh_grp, S_EFFECT_MIX,
+								 obs_module_text("Shader.EffectMix"), 0.0, 100.0, 1.0);
+	obs_property_float_set_suffix(p_emix, "%");
+	obs_property_set_long_description(p_emix, obs_module_text("Shader.EffectMix.Tooltip"));
+	obs_property_set_visible(p_emix, !override_effect);
+	obs_property_set_modified_callback2(p_emix, on_shader_param_fader_changed, sf);
+
+	obs_property_t *p_areact = obs_properties_add_float_slider(
+		sh_grp, S_AUDIO_REACTIVITY, obs_module_text("Shader.AudioReactivity"), 0.0, 100.0, 1.0);
+	obs_property_float_set_suffix(p_areact, "%");
+	obs_property_set_long_description(p_areact, obs_module_text("Shader.AudioReactivity.Tooltip"));
+	obs_property_set_visible(p_areact, !override_effect);
+	obs_property_set_modified_callback2(p_areact, on_shader_param_fader_changed, sf);
 
 	const bool show_custom_band = (!has_effect || uses_custom_band);
 
@@ -1057,6 +1635,120 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 		obs_properties_add_group(props, "vs_shader_params_group", obs_module_text("Shader.ParamsGroup"),
 					 OBS_GROUP_NORMAL, u_grp);
 	}
+
+	/* 4. Fader Control (Midi & Stream Deck Fadester) */
+	vs_fader_bridge_poll_once();
+	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+
+	obs_properties_t *f_grp = obs_properties_create();
+	vs_properties_add_info(f_grp, S_FADER_NOT_LOADED, obs_module_text("Shader.FaderGroup.NotLoaded"));
+	obs_property_t *p_mix = obs_properties_add_list(f_grp, S_MIX_FADER_SLOT, obs_module_text("Shader.MixFader"),
+							OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	populate_shader_fader_slot_list(p_mix, fadester_loaded, obs_module_text("Shader.MixFader.None"));
+	obs_property_set_long_description(p_mix, obs_module_text("Shader.MixFader.Tooltip"));
+	obs_property_set_visible(p_mix, !override_effect);
+	obs_property_set_modified_callback2(p_mix, on_shader_param_fader_changed, sf);
+	vs_properties_add_info(f_grp, S_MIX_FADER_STATUS, "");
+	obs_properties_add_button2(f_grp, S_MIX_FADER_RESET, obs_module_text("Shader.MixFader.Reset"),
+				   on_shader_fader_reset_clicked, sf);
+
+	obs_property_t *p_react = obs_properties_add_list(f_grp, S_REACTIVITY_FADER_SLOT,
+							  obs_module_text("Shader.ReactivityFader"),
+							  OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	populate_shader_fader_slot_list(p_react, fadester_loaded, obs_module_text("Shader.ReactivityFader.None"));
+	obs_property_set_long_description(p_react, obs_module_text("Shader.ReactivityFader.Tooltip"));
+	obs_property_set_visible(p_react, !override_effect);
+	obs_property_set_modified_callback2(p_react, on_shader_param_fader_changed, sf);
+	vs_properties_add_info(f_grp, S_REACTIVITY_FADER_STATUS, "");
+	obs_properties_add_button2(f_grp, S_REACTIVITY_FADER_RESET, obs_module_text("Shader.ReactivityFader.Reset"),
+				   on_shader_fader_reset_clicked, sf);
+	vs_properties_add_info(f_grp, "vs_shader_fader_ownership", obs_module_text("Shader.ParamFader.Ownership"));
+
+	bool has_bindable_params = false;
+	for (size_t i = 0; i < param_count; i++) {
+		if (is_fader_bindable_shader_param(&params_snap[i])) {
+			has_bindable_params = true;
+			break;
+		}
+	}
+
+	static const char *const k_pf_target_keys[VS_SHADER_PARAM_FADER_SLOTS] = {
+		"Shader.ParamFader1.Target",
+		"Shader.ParamFader2.Target",
+	};
+	static const char *const k_pf_slot_keys[VS_SHADER_PARAM_FADER_SLOTS] = {
+		"Shader.ParamFader1.Slot",
+		"Shader.ParamFader2.Slot",
+	};
+	static const char *const k_pf_min_keys[VS_SHADER_PARAM_FADER_SLOTS] = {
+		"Shader.ParamFader1.Min",
+		"Shader.ParamFader2.Min",
+	};
+	static const char *const k_pf_max_keys[VS_SHADER_PARAM_FADER_SLOTS] = {
+		"Shader.ParamFader1.Max",
+		"Shader.ParamFader2.Max",
+	};
+
+	char key[64];
+	char opt_label[220];
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		param_fader_key(key, sizeof(key), k, "target");
+		obs_property_t *p_pt = obs_properties_add_list(f_grp, key, obs_module_text(k_pf_target_keys[k]),
+							       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+		obs_property_list_add_string(p_pt, obs_module_text("Shader.ParamFader.TargetNone"), "");
+		for (size_t i = 0; i < param_count; i++) {
+			const struct vs_shader_param_info *info = &params_snap[i];
+			if (!is_fader_bindable_shader_param(info))
+				continue;
+			if (info->label[0] != '\0' && strcmp(info->label, info->name) != 0)
+				snprintf(opt_label, sizeof(opt_label), "%s (%s)", info->label, info->name);
+			else
+				snprintf(opt_label, sizeof(opt_label), "%s", info->name);
+			obs_property_list_add_string(p_pt, opt_label, info->name);
+		}
+		obs_property_set_modified_callback2(p_pt, on_shader_param_fader_changed, sf);
+
+		param_fader_key(key, sizeof(key), k, "slot");
+		obs_property_t *p_ps = obs_properties_add_list(f_grp, key, obs_module_text(k_pf_slot_keys[k]),
+							       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+		populate_shader_fader_slot_list(p_ps, fadester_loaded, obs_module_text("Shader.ParamFader.SlotNone"));
+		obs_property_set_modified_callback2(p_ps, on_shader_param_fader_changed, sf);
+
+		param_fader_key(key, sizeof(key), k, "min");
+		obs_property_t *p_min = obs_properties_add_float(f_grp, key, obs_module_text(k_pf_min_keys[k]),
+								 -100000.0, 100000.0, 0.01);
+		obs_property_set_modified_callback2(p_min, on_shader_param_fader_changed, sf);
+
+		param_fader_key(key, sizeof(key), k, "max");
+		obs_property_t *p_max = obs_properties_add_float(f_grp, key, obs_module_text(k_pf_max_keys[k]),
+								 -100000.0, 100000.0, 0.01);
+		obs_property_set_modified_callback2(p_max, on_shader_param_fader_changed, sf);
+		param_fader_key(key, sizeof(key), k, "status");
+		vs_properties_add_info(f_grp, key, "");
+		param_fader_key(key, sizeof(key), k, "reset");
+		obs_properties_add_button2(f_grp, key, obs_module_text("Shader.ParamFader.Reset"),
+					   on_shader_fader_reset_clicked, sf);
+	}
+
+	obs_properties_add_group(props, "vs_shader_fader_group", obs_module_text("Shader.FaderGroup"), OBS_GROUP_NORMAL,
+				 f_grp);
+
+	/* 5. Audio Sidechain & Analysis group (defaulting to Track 1); advanced tuning hidden by default */
+	vs_audio_tap_add_properties(props, sf ? sf->context : NULL);
+
+	if (sf && sf->context) {
+		obs_data_t *cur_s = obs_source_get_settings(sf->context);
+		if (cur_s) {
+			refresh_shader_fader_props_visibility(props, cur_s, has_bindable_params);
+			obs_data_release(cur_s);
+		}
+	} else {
+		obs_data_t *tmp_s = obs_data_create();
+		shader_filter_get_defaults(tmp_s);
+		refresh_shader_fader_props_visibility(props, tmp_s, has_bindable_params);
+		obs_data_release(tmp_s);
+	}
+
 	bfree(params_snap);
 
 	return props;

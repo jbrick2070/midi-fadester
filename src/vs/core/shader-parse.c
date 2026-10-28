@@ -12,6 +12,8 @@
 #include "shader-parse.h"
 
 #include <ctype.h>
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +57,8 @@ static const char *const k_effect_template_begin =
 	"uniform float fader_7;\n"
 	"uniform float fader_8;\n"
 	"uniform float fader_master;\n"
+	"uniform float vs_effect_mix;\n"
+	"uniform float vs_reactivity_scale;\n"
 	"uniform texture2d audio_spectrum;\n"
 	"uniform texture2d audio_fft;\n"
 	"\n"
@@ -85,25 +89,35 @@ static const char *const k_effect_template_begin =
 	"\n"
 	"float vs_sample_spectrum(float u)\n"
 	"{\n"
-	"\treturn audio_spectrum.Sample(audio_sampler, float2(clamp(u, 0.0, 1.0), 0.5)).r;\n"
+	"\treturn audio_spectrum.Sample(audio_sampler, float2(clamp(u, 0.0, 1.0), 0.5)).r * saturate(vs_reactivity_scale);\n"
 	"}\n"
 	"\n"
 	"float vs_sample_fft(float u)\n"
 	"{\n"
-	"\treturn audio_fft.Sample(audio_sampler, float2(clamp(u, 0.0, 1.0), 0.25)).r;\n"
+	"\treturn audio_fft.Sample(audio_sampler, float2(clamp(u, 0.0, 1.0), 0.25)).r * saturate(vs_reactivity_scale);\n"
 	"}\n"
 	"\n"
 	"float vs_sample_waveform(float u)\n"
 	"{\n"
-	"\treturn audio_fft.Sample(audio_sampler, float2(clamp(u, 0.0, 1.0), 0.75)).r;\n"
+	"\tfloat raw = audio_fft.Sample(audio_sampler, float2(clamp(u, 0.0, 1.0), 0.75)).r;\n"
+	"\treturn 0.5 + (raw - 0.5) * saturate(vs_reactivity_scale);\n"
 	"}\n\n";
 
-static const char *const k_effect_template_end = "\n\ntechnique Draw\n"
+static const char *const k_effect_template_end = "\n\nfloat4 vs_mainImage_entry(VertData v_in) : TARGET\n"
+						 "{\n"
+						 "\tfloat4 wet = mainImage(v_in);\n"
+						 "\tfloat mix_amt = saturate(vs_effect_mix);\n"
+						 "\tif (mix_amt >= 0.9999)\n"
+						 "\t\treturn wet;\n"
+						 "\tfloat4 dry = image.Sample(texture_sampler, v_in.uv);\n"
+						 "\treturn lerp(dry, wet, mix_amt);\n"
+						 "}\n\n"
+						 "technique Draw\n"
 						 "{\n"
 						 "\tpass\n"
 						 "\t{\n"
 						 "\t\tvertex_shader = mainTransform(v_in);\n"
-						 "\t\tpixel_shader  = mainImage(v_in);\n"
+						 "\t\tpixel_shader  = vs_mainImage_entry(v_in);\n"
 						 "\t}\n"
 						 "}\n";
 
@@ -301,7 +315,75 @@ static bool is_builtin_uniform_name(const char *name)
 	return false;
 }
 
-static void parse_annotation_block(const char *ann_start, const char *ann_end, struct vs_shader_param_info *param)
+static bool is_fader_host_uniform_name(const char *name)
+{
+	return strcmp(name, "vs_effect_mix") == 0 || strcmp(name, "vs_reactivity_scale") == 0;
+}
+
+/* User parameters share the source's settings and OBS properties namespace. Keep this exact-name
+ * inventory aligned with shader-filter.c and audio-tap.c; do not reserve broad prefixes that would
+ * unnecessarily reject otherwise compatible custom shaders. */
+static bool is_host_property_name(const char *name)
+{
+	static const char *const names[] = {
+		"preset_shader",
+		"shader_file_path",
+		"override_entire_effect",
+		"shader_text",
+		"reload_shader",
+		"compile_status",
+		"custom_low_hz",
+		"custom_high_hz",
+		"custom_mode",
+		"mix_fader_slot",
+		"reactivity_fader_slot",
+		"vs_mix_fader_status",
+		"vs_reactivity_fader_status",
+		"vs_mix_fader_reset",
+		"vs_reactivity_fader_reset",
+		"vs_effect_mix_pct",
+		"vs_audio_reactivity_pct",
+		"vs_shader_fader_not_loaded",
+		"vs_shader_source_group",
+		"vs_shader_params_group",
+		"vs_shader_fader_group",
+		"vs_shader_fader_ownership",
+		"audio_tap_group",
+		"tap_status_warning",
+		"tap_mode",
+		"tap_source_name",
+		"react_when_muted",
+		"sync_offset_ms",
+		"auto_gain",
+		"gate_db",
+		"floor_db",
+		"ceiling_db",
+		"attack_ms",
+		"release_ms",
+		"kick_sensitivity",
+		"snare_sensitivity",
+		"show_advanced_analysis",
+	};
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (strcmp(name, names[i]) == 0)
+			return true;
+	}
+
+	/* Keep this inventory aligned with VS_SHADER_PARAM_FADER_SLOTS in fader-bridge.h.
+	 * The parser stays independent of that header's libobs callback dependencies. */
+	static const char *const suffixes[] = {"target", "slot", "min", "max", "seeded", "status", "reset"};
+	for (unsigned slot = 1u; slot <= 2u; slot++) {
+		for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+			char key[64];
+			snprintf(key, sizeof(key), "param_fader_%u_%s", slot, suffixes[i]);
+			if (strcmp(name, key) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+static bool parse_annotation_block(const char *ann_start, const char *ann_end, struct vs_shader_param_info *param)
 {
 	const char *p = ann_start;
 	while (p < ann_end) {
@@ -383,6 +465,8 @@ static void parse_annotation_block(const char *ann_start, const char *ann_end, s
 						   key[7] < (char)('0' + (int)VS_SHADER_MAX_OPTIONS) &&
 						   strcmp(key + 8, "_value") == 0) {
 						const size_t opt_idx = (size_t)(key[7] - '0');
+						if (!isfinite(num) || num < INT_MIN || num > INT_MAX)
+							return false;
 						param->option_values[opt_idx] = (int)llround(num);
 						if (opt_idx + 1u > param->option_count)
 							param->option_count = opt_idx + 1u;
@@ -393,6 +477,23 @@ static void parse_annotation_block(const char *ann_start, const char *ann_end, s
 
 		p = semi ? (semi + 1) : ann_end;
 	}
+	return true;
+}
+
+static bool valid_numeric_param(const struct vs_shader_param_info *info)
+{
+	if (info->type != VS_SHADER_PARAM_FLOAT && info->type != VS_SHADER_PARAM_INT)
+		return true;
+	const double lo = info->type == VS_SHADER_PARAM_INT ? (double)INT_MIN : -(double)FLT_MAX;
+	const double hi = info->type == VS_SHADER_PARAM_INT ? (double)INT_MAX : (double)FLT_MAX;
+	if (!isfinite(info->min_val) || info->min_val < lo || info->min_val > hi || !isfinite(info->max_val) ||
+	    info->max_val < lo || info->max_val > hi || !isfinite(info->step_val) || info->step_val <= 0.0 ||
+	    info->step_val > hi)
+		return false;
+	if (info->has_min && info->has_max && info->min_val > info->max_val)
+		return false;
+	return !info->has_default ||
+	       (isfinite(info->default_val[0]) && info->default_val[0] >= lo && info->default_val[0] <= hi);
 }
 
 /*
@@ -400,10 +501,11 @@ static void parse_annotation_block(const char *ann_start, const char *ann_end, s
  * to OBS's gs_effect_create when needed, while extracting all uniform metadata
  * into out_res->params[].
  */
-static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_result *out_res)
+static bool parse_uniforms_from_source(const char *src, bool override_entire_effect,
+				       struct vs_shader_parse_result *out_res)
 {
 	const char *p = src;
-	while (*p != '\0' && out_res->param_count < VS_SHADER_MAX_UNIFORMS) {
+	while (*p != '\0') {
 		/* Skip single-line and block comments. */
 		if (p[0] == '/' && p[1] == '/') {
 			const char *nl = strchr(p + 2, '\n');
@@ -442,6 +544,15 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 				type_str[t_len] = '\0';
 				memcpy(name_str, n_start, n_len);
 				name_str[n_len] = '\0';
+				if (is_host_property_name(name_str) ||
+				    (!override_entire_effect && is_fader_host_uniform_name(name_str))) {
+					out_res->error = VS_SHADER_ERR_RESERVED_UNIFORM;
+					snprintf(
+						out_res->error_msg, sizeof(out_res->error_msg),
+						"Uniform '%s' is reserved by Visual Sidechain; rename the shader parameter",
+						name_str);
+					return false;
+				}
 
 				const char *rest = n_end;
 				while (*rest && isspace((unsigned char)*rest))
@@ -457,7 +568,9 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 				}
 
 				const char *stmt_semi = strchr(rest, ';');
-				if (!is_builtin_uniform_name(name_str)) {
+				/* Full effects declare these host-supplied uniforms themselves. Do not expose them as
+				 * user parameters, whose later binding would overwrite the host's live values. */
+				if (!is_builtin_uniform_name(name_str) && !is_fader_host_uniform_name(name_str)) {
 					enum vs_shader_param_type ptype = VS_SHADER_PARAM_UNKNOWN;
 					if (strcmp(type_str, "float") == 0)
 						ptype = VS_SHADER_PARAM_FLOAT;
@@ -470,7 +583,8 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 					else if (strcmp(type_str, "texture2d") == 0)
 						ptype = VS_SHADER_PARAM_TEXTURE;
 
-					if (ptype != VS_SHADER_PARAM_UNKNOWN) {
+					if (ptype != VS_SHADER_PARAM_UNKNOWN &&
+					    out_res->param_count < VS_SHADER_MAX_UNIFORMS) {
 						struct vs_shader_param_info *info =
 							&out_res->params[out_res->param_count++];
 						memset(info, 0, sizeof(*info));
@@ -485,9 +599,13 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 						info->step_val = (ptype == VS_SHADER_PARAM_INT) ? 1.0 : 0.01;
 
 						if (ann_open && ann_close) {
-							parse_annotation_block(ann_open, ann_close, info);
+							if (!parse_annotation_block(ann_open, ann_close, info)) {
+								snprintf(out_res->error_msg, sizeof(out_res->error_msg),
+									 "Invalid numeric option for uniform '%s'",
+									 info->name);
+								return false;
+							}
 						}
-
 						if (stmt_semi) {
 							const char *eq = memchr(rest, '=', (size_t)(stmt_semi - rest));
 							if (eq) {
@@ -516,6 +634,13 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 								}
 							}
 						}
+						if (!valid_numeric_param(info)) {
+							snprintf(
+								out_res->error_msg, sizeof(out_res->error_msg),
+								"Invalid numeric bounds, step, or default for uniform '%s'",
+								info->name);
+							return false;
+						}
 					}
 				}
 
@@ -527,6 +652,7 @@ static void parse_uniforms_from_source(const char *src, struct vs_shader_parse_r
 		}
 		p++;
 	}
+	return true;
 }
 
 static bool strip_annotations_and_check_braces(const char *src, struct str_builder *clean_out, char *err_msg,
@@ -657,7 +783,11 @@ enum vs_shader_error vs_shader_ExpandAndParse(const char *source_text, const cha
 	}
 
 	out_res->expanded_source = expanded.data;
-	parse_uniforms_from_source(out_res->expanded_source, out_res);
+	if (!parse_uniforms_from_source(out_res->expanded_source, override_entire_effect, out_res)) {
+		if (out_res->error == VS_SHADER_OK)
+			out_res->error = VS_SHADER_ERR_INVALID_PARAM;
+		return out_res->error;
+	}
 
 	struct str_builder clean_body;
 	if (!sb_init(&clean_body, expanded.len + 256u)) {
@@ -679,15 +809,17 @@ enum vs_shader_error vs_shader_ExpandAndParse(const char *source_text, const cha
 		return out_res->error;
 	}
 
-	if (!override_entire_effect) {
-		sb_append(&full_effect, k_effect_template_begin);
-		sb_append(&full_effect, clean_body.data);
-		sb_append(&full_effect, k_effect_template_end);
-	} else {
-		sb_append(&full_effect, clean_body.data);
-	}
+	const bool built = override_entire_effect ? sb_append(&full_effect, clean_body.data)
+						  : sb_append(&full_effect, k_effect_template_begin) &&
+							    sb_append(&full_effect, clean_body.data) &&
+							    sb_append(&full_effect, k_effect_template_end);
 
 	free(clean_body.data);
+	if (!built) {
+		free(full_effect.data);
+		out_res->error = VS_SHADER_ERR_OUT_OF_MEMORY;
+		return out_res->error;
+	}
 	out_res->full_effect_source = full_effect.data;
 	out_res->error = VS_SHADER_OK;
 	return VS_SHADER_OK;
@@ -707,7 +839,7 @@ bool vs_shader_validate_builtin_file(const char *file_path, char *err_buf, size_
 
 	/* 1. Reject UTF-8 BOM (0xEF 0xBB 0xBF). */
 	const unsigned char *bytes = (const unsigned char *)raw;
-	if (bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+	if (strlen(raw) >= 3u && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
 		if (err_buf && err_cap > 0)
 			snprintf(err_buf, err_cap, "UTF-8 BOM detected in %s", file_path);
 		free(raw);

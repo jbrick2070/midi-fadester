@@ -200,8 +200,7 @@ try {
     $allPassed = ($passA -and $passB)
 } finally {
     if ($proc -and -not $proc.HasExited) {
-        $null = $proc.CloseMainWindow()
-        if (-not $proc.WaitForExit(6000)) { $proc.Kill() }
+        Write-Host "OBS remains open (PID=$($proc.Id)). Close it manually, then inspect its shutdown leak report."
     }
 }
 

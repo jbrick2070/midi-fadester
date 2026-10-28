@@ -116,7 +116,7 @@ bool vs_audio_ring_read_window(struct vs_audio_ring *ring, size_t window_size, s
 	if (!ring || !ring->mutex_initialized || !out_window || window_size == 0)
 		return false;
 
-	if (window_size + offset_samples > VS_AUDIO_RING_CAPACITY)
+	if (window_size > VS_AUDIO_RING_CAPACITY || offset_samples > VS_AUDIO_RING_CAPACITY - window_size)
 		return false;
 
 	pthread_mutex_lock(&ring->mutex);

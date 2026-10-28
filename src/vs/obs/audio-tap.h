@@ -34,7 +34,7 @@ enum vs_tap_mode {
 struct vs_audio_tap {
 	enum vs_tap_mode mode;
 	char source_name[256];
-	bool react_when_muted;
+	volatile bool react_when_muted; /* Audio callback reads via os_atomic_load_bool(). */
 	bool upload_gpu_textures;
 
 	bool raw_cb_active;
@@ -67,6 +67,9 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 /* Shared OBS settings & properties helpers used by both Shader Filter and Audio Modulator. */
 void vs_audio_tap_get_defaults(obs_data_t *settings);
 void vs_audio_tap_update_from_settings(struct vs_audio_tap *tap, obs_source_t *filter_source, obs_data_t *settings);
+/* Adds the tap status warning row at the current position (top-level) so it stays visible when the
+ * analysis group sits at the bottom of a panel. vs_audio_tap_add_properties then skips adding it again. */
+void vs_audio_tap_add_status_property(obs_properties_t *props);
 void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source);
 
 #ifdef __cplusplus

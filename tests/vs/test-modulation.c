@@ -16,6 +16,8 @@
 #include "core/modulation.h"
 
 #include <assert.h>
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,6 +165,127 @@ static void test_modulation_per_target_filter_batching(void)
 	assert(vs_mod_eval_and_batch_slots(cfgs, states, signals, VS_MOD_MAX_SLOTS, batches) == 0u);
 }
 
+static void test_modulation_depth_fader_scaling_and_ducking_zero_continuity(void)
+{
+	struct vs_mod_slot_config cfg;
+	struct vs_mod_slot_state state;
+	struct vs_mod_eval_result res;
+	vs_mod_slot_default_config(&cfg);
+	vs_mod_slot_reset_state(&state);
+
+	assert(cfg.depth_fader_slot == -1);
+	assert(double_near(cfg.depth_scale, 1.0, 1e-6));
+
+	cfg.enabled = true;
+	snprintf(cfg.target_filter, sizeof(cfg.target_filter), "Color Correction");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "contrast");
+	cfg.prop_type = VS_PROP_FLOAT;
+	cfg.min_value = 20.0;
+	cfg.max_value = 100.0;
+
+	/* 1. Positive amount (+1.0) scaled by depth_scale = 0.0, 0.5, 1.0 at sig = 1.0 */
+	cfg.amount = 1.0;
+	cfg.depth_scale = 0.0;
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write);
+	assert(double_near(res.float_val, 20.0, 1e-6));
+
+	cfg.depth_scale = 0.5;
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write);
+	assert(double_near(res.float_val, 60.0, 1e-6));
+
+	cfg.depth_scale = 1.0;
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write);
+	assert(double_near(res.float_val, 100.0, 1e-6));
+
+	/* 2. Negative amount (-1.0, sidechain ducking): at depth_scale = 0.0 and sig = 1.0,
+	 * output MUST stay continuously at resting max_value (100.0), NOT jump to min_value (20.0)! */
+	cfg.amount = -1.0;
+	vs_mod_slot_reset_state(&state);
+
+	cfg.depth_scale = 0.5;
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write);
+	assert(double_near(res.float_val, 60.0, 1e-6));
+
+	cfg.depth_scale = 0.0;
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write);
+	assert(double_near(res.float_val, 100.0, 1e-6));
+}
+
+static void test_duplicate_target_has_one_owner(void)
+{
+	struct vs_mod_slot_config cfgs[2];
+	struct vs_mod_slot_state states[2];
+	float signals[2] = {0.25f, 0.75f};
+	struct vs_mod_target_batch batches[VS_MOD_MAX_SLOTS];
+	for (size_t i = 0; i < 2; i++) {
+		vs_mod_slot_default_config(&cfgs[i]);
+		vs_mod_slot_reset_state(&states[i]);
+		cfgs[i].enabled = true;
+		snprintf(cfgs[i].target_filter, sizeof(cfgs[i].target_filter), "Color Correction");
+		snprintf(cfgs[i].target_setting, sizeof(cfgs[i].target_setting), "opacity");
+	}
+	assert(vs_mod_slot_has_duplicate_target(cfgs, 1, &cfgs[1]));
+	assert(vs_mod_eval_and_batch_slots(cfgs, states, signals, 2, batches) == 1);
+	assert(batches[0].write_count == 1);
+	assert(batches[0].writes[0].slot_index == 0);
+	assert(double_near(batches[0].writes[0].float_val, 0.25, 1e-6));
+	assert(!states[1].has_last_written);
+	cfgs[0].enabled = false;
+	assert(!vs_mod_slot_has_duplicate_target(cfgs, 1, &cfgs[1]));
+	assert(vs_mod_eval_and_batch_slots(cfgs, states, signals, 2, batches) == 1);
+	assert(batches[0].writes[0].slot_index == 1);
+}
+
+static void test_extreme_and_invalid_numeric_bounds(void)
+{
+	struct vs_mod_slot_config cfg;
+	struct vs_mod_slot_state state;
+	struct vs_mod_eval_result res;
+	vs_mod_slot_default_config(&cfg);
+	cfg.enabled = true;
+	snprintf(cfg.target_filter, sizeof(cfg.target_filter), "Numeric Target");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "value");
+	cfg.prop_type = VS_PROP_INT;
+	cfg.min_value = 1e20;
+	cfg.max_value = 1e30;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write && res.int_val == INT64_MAX);
+	cfg.min_value = -1e30;
+	cfg.max_value = -1e20;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 0.0f, &res);
+	assert(res.should_write && res.int_val == INT64_MIN);
+	cfg.min_value = -(double)INT64_MAX;
+	cfg.max_value = (double)INT64_MAX;
+	cfg.int_step = INT64_MAX;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.should_write && res.int_val == INT64_MAX);
+	cfg.prop_type = VS_PROP_FLOAT;
+	cfg.min_value = -DBL_MAX;
+	cfg.max_value = DBL_MAX;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 0.5f, &res);
+	assert(res.should_write && isfinite(res.float_val));
+	assert(res.float_val == 0.0);
+	cfg.min_value = NAN;
+	cfg.max_value = INFINITY;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 0.5f, &res);
+	assert(res.should_write && double_near(res.float_val, 0.5, 1e-6));
+	cfg.min_value = 100.0;
+	cfg.max_value = 20.0;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 0.25f, &res);
+	assert(res.should_write && double_near(res.float_val, 80.0, 1e-6));
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -171,6 +294,9 @@ int main(void)
 #endif
 	test_modulation_math_and_epsilon();
 	test_modulation_per_target_filter_batching();
+	test_modulation_depth_fader_scaling_and_ducking_zero_continuity();
+	test_duplicate_target_has_one_owner();
+	test_extreme_and_invalid_numeric_bounds();
 	printf("test-modulation: all assertions passed\n");
 	return 0;
 }

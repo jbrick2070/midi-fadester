@@ -32,6 +32,17 @@ static double clamp_d(double v, double lo, double hi)
 	return v;
 }
 
+static int64_t saturating_round_i64(double value)
+{
+	if (!is_finite_f64(value))
+		return 0;
+	if (value >= (double)INT64_MAX)
+		return INT64_MAX;
+	if (value <= (double)INT64_MIN)
+		return INT64_MIN;
+	return (int64_t)llround(value);
+}
+
 void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg)
 {
 	if (!cfg)
@@ -44,6 +55,8 @@ void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg)
 	cfg->custom_high_hz = 120.0f;
 	cfg->custom_mode = VS_HZ_MODE_PEAK;
 	cfg->amount = 1.0;
+	cfg->depth_fader_slot = -1;
+	cfg->depth_scale = 1.0;
 	cfg->min_value = 0.0;
 	cfg->max_value = 1.0;
 	cfg->int_step = 1;
@@ -56,6 +69,22 @@ void vs_mod_slot_reset_state(struct vs_mod_slot_state *state)
 	if (!state)
 		return;
 	memset(state, 0, sizeof(*state));
+}
+
+bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, size_t earlier_count,
+				      const struct vs_mod_slot_config *candidate)
+{
+	if (!cfgs || !candidate || !candidate->enabled || candidate->target_filter[0] == '\0' ||
+	    candidate->target_setting[0] == '\0')
+		return false;
+	if (earlier_count > VS_MOD_MAX_SLOTS)
+		earlier_count = VS_MOD_MAX_SLOTS;
+	for (size_t i = 0; i < earlier_count; i++) {
+		if (cfgs[i].enabled && strcmp(cfgs[i].target_filter, candidate->target_filter) == 0 &&
+		    strcmp(cfgs[i].target_setting, candidate->target_setting) == 0)
+			return true;
+	}
+	return false;
 }
 
 void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state, float signal_01,
@@ -85,17 +114,13 @@ void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_s
 	if (cfg->invert)
 		sig = 1.0 - sig;
 
-	const double amount = clamp_d(cfg->amount, -1.0, 1.0);
-	const double min_v = cfg->min_value;
-	const double max_v = cfg->max_value;
-	const double span = max_v - min_v;
-
-	double mapped = min_v;
-	if (amount >= 0.0) {
-		mapped = min_v + (sig * amount) * span;
-	} else {
-		mapped = max_v - (sig * (-amount)) * span;
-	}
+	const double raw_amount = clamp_d(cfg->amount, -1.0, 1.0);
+	const double depth = clamp_d(cfg->depth_scale, 0.0, 1.0);
+	const double min_v = is_finite_f64(cfg->min_value) ? cfg->min_value : 0.0;
+	const double max_v = is_finite_f64(cfg->max_value) ? cfg->max_value : 1.0;
+	const double weight = raw_amount >= 0.0 ? sig * raw_amount * depth : 1.0 - sig * (-raw_amount) * depth;
+	/* Weighted interpolation avoids overflowing max-min for large finite, opposite-signed bounds. */
+	double mapped = (1.0 - weight) * min_v + weight * max_v;
 
 	const double lo = (min_v <= max_v) ? min_v : max_v;
 	const double hi = (min_v <= max_v) ? max_v : min_v;
@@ -103,9 +128,12 @@ void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_s
 
 	if (cfg->prop_type == VS_PROP_INT) {
 		const int64_t step = (cfg->int_step > 1) ? cfg->int_step : 1;
-		const int64_t i_lo = (int64_t)llround(lo);
-		const int64_t i_hi = (int64_t)llround(hi);
-		int64_t quantized = i_lo + llround((mapped - (double)i_lo) / (double)step) * step;
+		const int64_t i_lo = saturating_round_i64(lo);
+		const int64_t i_hi = saturating_round_i64(hi);
+		mapped = clamp_d(mapped, (double)i_lo, (double)i_hi);
+		/* Keep the step calculation in double: the full signed range exceeds INT64_MAX. */
+		const double stepped = (double)i_lo + round((mapped - (double)i_lo) / (double)step) * (double)step;
+		int64_t quantized = saturating_round_i64(stepped);
 		if (quantized < i_lo)
 			quantized = i_lo;
 		if (quantized > i_hi)
@@ -126,7 +154,7 @@ void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_s
 	}
 
 	out_res->float_val = mapped;
-	out_res->int_val = (int64_t)llround(mapped);
+	out_res->int_val = saturating_round_i64(mapped);
 
 	if (state->has_last_written && fabs(mapped - state->last_written_float) < VS_MOD_FLOAT_EPSILON) {
 		out_res->should_write = false;
@@ -152,6 +180,8 @@ size_t vs_mod_eval_and_batch_slots(const struct vs_mod_slot_config *cfgs, struct
 	memset(out_batches, 0, sizeof(struct vs_mod_target_batch) * VS_MOD_MAX_SLOTS);
 
 	for (size_t i = 0u; i < slot_count; i++) {
+		if (vs_mod_slot_has_duplicate_target(cfgs, i, &cfgs[i]))
+			continue;
 		struct vs_mod_eval_result eval;
 		vs_mod_slot_eval(&cfgs[i], &states[i], signals_01[i], &eval);
 		if (!eval.should_write)

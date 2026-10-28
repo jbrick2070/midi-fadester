@@ -17,6 +17,8 @@
 #include "core/modulation.h"
 
 #include <assert.h>
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,6 +136,56 @@ static void test_in_process_bridge_missing_midi_fadester(void)
 	vs_fader_bridge_detach();
 	signal_handler_destroy(sh);
 	proc_handler_destroy(ph);
+}
+
+static void test_complete_fader_snapshot(void)
+{
+	vs_fader_bridge_reset();
+	float values[VS_FADER_SLOT_COUNT];
+	memset(values, 0xff, sizeof(values));
+	vs_fader_bridge_get_slots(values);
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
+		assert(values[i] == 0.0f);
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
+		vs_fader_bridge_set_slot(i, (float)i / 10.0f);
+	vs_fader_bridge_get_slots(values);
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
+		assert(float_near(values[i], (float)i / 10.0f, 1e-6f));
+	vs_fader_bridge_detach();
+	vs_fader_bridge_get_slots(values);
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
+		assert(values[i] == 0.0f);
+}
+
+static void test_vendor_payload_fields_trigger_events(void)
+{
+	vs_fader_bridge_reset();
+	struct vs_audio_frame frame = {0};
+	assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
+	frame.estimated_bpm = 120.0f;
+	assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
+	for (size_t i = 0; i < VS_SPECTRUM_BANDS; i++) {
+		frame.spectrum[i] = 0.5f;
+		assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
+	}
+	assert(!vs_fader_bridge_should_emit_signals(0.04f, &frame));
+}
+
+static void test_parameter_faders_saturate_before_numeric_conversion(void)
+{
+	vs_fader_bridge_reset();
+	vs_fader_bridge_set_slot(VS_FADER_1, 1.0f);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_1, 0, 1e20, 1e30, 1, false, 0, false, 0) == INT_MAX);
+	vs_fader_bridge_set_slot(VS_FADER_1, 0.0f);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_1, 0, -1e30, -1e20, 1, false, 0, false, 0) == INT_MIN);
+	vs_fader_bridge_set_slot(VS_FADER_1, 1.0f);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_1, 0, -DBL_MAX, DBL_MAX, 1, false, 0, false, 0) == INT_MAX);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_1, 0, INT_MIN, INT_MAX, INT_MAX, false, 0, false, 0) ==
+	       INT_MAX - 1);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_1, 0, 0, 100, 1, true, -DBL_MAX, true, DBL_MAX) == 100);
+	const float value = vs_fader_bridge_eval_float_param(VS_FADER_1, 0, -DBL_MAX, DBL_MAX, false, 0, false, 0);
+	assert(isfinite(value));
+	assert(value == FLT_MAX);
 }
 
 struct fake_fadester_ctx {
@@ -447,6 +499,90 @@ static void test_multi_instance_frame_deduplication_and_track1_priority(void)
 	proc_handler_destroy(ph);
 }
 
+static void test_shader_and_modulator_fader_parameter_controls(void)
+{
+	vs_fader_bridge_reset();
+
+	/* 1. Unbound scale (VS_FADER_SLOT_NONE) defaults to 1.0f; unloaded bound fader returns 0.0f */
+	assert(float_near(vs_fader_bridge_resolve_scale(VS_FADER_SLOT_NONE), 1.0f, 1e-6f));
+	assert(float_near(vs_fader_bridge_resolve_scale(VS_FADER_1), 0.0f, 1e-6f));
+	assert(float_near(vs_fader_bridge_resolve_scale(99), 0.0f, 1e-6f));
+
+	/* Load fader values via bridge */
+	vs_fader_bridge_set_slot(VS_FADER_1, 0.25f);
+	vs_fader_bridge_set_slot(VS_FADER_2, 0.50f);
+	vs_fader_bridge_set_slot(VS_FADER_MASTER, 1.00f);
+
+	assert(float_near(vs_fader_bridge_resolve_scale(VS_FADER_1), 0.25f, 1e-6f));
+	assert(float_near(vs_fader_bridge_resolve_scale(VS_FADER_2), 0.50f, 1e-6f));
+	assert(float_near(vs_fader_bridge_resolve_scale(VS_FADER_MASTER), 1.00f, 1e-6f));
+
+	/* 2. Audio reactivity frame scaling (scales reactive magnitudes & centers waveform around 0.5) */
+	struct vs_audio_frame in_f;
+	struct vs_audio_frame out_f;
+	memset(&in_f, 0, sizeof(in_f));
+	in_f.level = 0.80f;
+	in_f.sub_bass = 0.60f;
+	in_f.bass = 0.90f;
+	in_f.kick = 1.00f;
+	in_f.spectral_centroid = 0.44f;
+	in_f.estimated_bpm = 124.0f;
+	in_f.spectrum[0] = 0.80f;
+	in_f.fft_bins[0] = 0.60f;
+	in_f.waveform[0] = 0.90f; /* +0.40 excursion above 0.5 silence centerline */
+
+	vs_fader_bridge_scale_audio_frame(&in_f, 0.50f, &out_f);
+	assert(float_near(out_f.level, 0.40f, 1e-6f));
+	assert(float_near(out_f.sub_bass, 0.30f, 1e-6f));
+	assert(float_near(out_f.bass, 0.45f, 1e-6f));
+	assert(float_near(out_f.kick, 0.50f, 1e-6f));
+	assert(float_near(out_f.spectrum[0], 0.40f, 1e-6f));
+	assert(float_near(out_f.fft_bins[0], 0.30f, 1e-6f));
+	assert(float_near(out_f.waveform[0], 0.70f, 1e-6f));       /* 0.5 + 0.4 * 0.5 = 0.70 */
+	assert(float_near(out_f.spectral_centroid, 0.44f, 1e-6f)); /* metadata preserved */
+	assert(float_near(out_f.estimated_bpm, 124.0f, 1e-6f));    /* tempo preserved */
+
+	/* 3. Direct Shader Filter float/int parameter fader evaluation & hard safety cap clamping */
+	assert(float_near(vs_fader_bridge_eval_float_param(VS_FADER_SLOT_NONE, 1.40f, 0.0, 3.0, true, 0.0, true, 3.0),
+			  1.40f, 1e-6f));
+
+	/* Fader 2 at 0.50 across [0.20, 2.20] -> 1.20 */
+	assert(float_near(vs_fader_bridge_eval_float_param(VS_FADER_2, 0.50f, 0.20, 2.20, true, 0.0, true, 3.0), 1.20f,
+			  1e-6f));
+
+	/* Inverted range [3.0, 1.0] at Fader 1 = 0.25 -> 2.50 */
+	assert(float_near(vs_fader_bridge_eval_float_param(VS_FADER_1, 0.50f, 3.0, 1.0, true, 0.0, true, 3.0), 2.50f,
+			  1e-6f));
+
+	/* Hard photosensitivity / uniform ceiling clamp: even if user sets max_val = 10.0, hard_max = 3.0 caps at 3.0 */
+	assert(float_near(vs_fader_bridge_eval_float_param(VS_FADER_MASTER, 1.0f, 0.5, 10.0, true, 0.5, true, 3.0),
+			  3.0f, 1e-6f));
+
+	/* Integer parameter fader evaluation with step quantization (e.g. symmetry_folds 2..16 step 2) */
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_SLOT_NONE, 6, 2.0, 16.0, 2, true, 2.0, true, 16.0) == 6);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_1, 6, 2.0, 18.0, 2, true, 2.0, true, 16.0) == 6);
+	assert(vs_fader_bridge_eval_int_param(VS_FADER_MASTER, 6, 2.0, 24.0, 2, true, 2.0, true, 16.0) == 16);
+
+	/* 4. End-to-end Audio Modulator Depth Fader scaling */
+	struct vs_mod_slot_config cfg;
+	struct vs_mod_slot_state st;
+	struct vs_mod_eval_result res;
+	vs_mod_slot_default_config(&cfg);
+	vs_mod_slot_reset_state(&st);
+	cfg.enabled = true;
+	snprintf(cfg.target_filter, sizeof(cfg.target_filter), "Color Correction");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "hue_shift");
+	cfg.min_value = 0.0;
+	cfg.max_value = 160.0;
+	cfg.amount = 1.0;
+	cfg.depth_fader_slot = VS_FADER_1; /* 0.25 */
+	cfg.depth_scale = (double)vs_fader_bridge_resolve_scale(cfg.depth_fader_slot);
+
+	vs_mod_slot_eval(&cfg, &st, 1.0f, &res);
+	assert(res.should_write);
+	assert(fabs(res.float_val - 40.0) < 1e-6); /* 160.0 * 1.0 * 0.25 = 40.0 */
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -456,9 +592,13 @@ int main(void)
 	test_fader_slot_lookup_and_clamping();
 	test_signals_event_coalescing_30hz();
 	test_in_process_bridge_missing_midi_fadester();
+	test_complete_fader_snapshot();
+	test_parameter_faders_saturate_before_numeric_conversion();
+	test_vendor_payload_fields_trigger_events();
 	test_in_process_bridge_fake_proc_and_signal();
 	test_panic_and_restore_hotkeys_logic();
 	test_multi_instance_frame_deduplication_and_track1_priority();
+	test_shader_and_modulator_fader_parameter_controls();
 	printf("test-fader-bridge: all assertions passed\n");
 	return 0;
 }

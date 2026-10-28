@@ -151,29 +151,37 @@ void vs_spectrum_reset(struct vs_spectrum *spec)
 		return;
 	memset(spec->prev_mag_low, 0, sizeof(spec->prev_mag_low));
 	memset(spec->prev_mag_mid, 0, sizeof(spec->prev_mag_mid));
+	memset(spec->flux_low, 0, sizeof(spec->flux_low));
+	memset(spec->flux_mid, 0, sizeof(spec->flux_mid));
 	spec->has_prev = false;
 }
 
 float vs_spectrum_extract_hz_band(const struct vs_spectrum *spec, const float *mag_low, const float *mag_mid,
 				  float freq_low_hz, float freq_high_hz, enum vs_hz_band_mode mode)
 {
-	if (!spec || !mag_low || !mag_mid)
+	if (!spec || !mag_low || !mag_mid || spec->sample_rate == 0 || !isfinite(freq_low_hz) ||
+	    !isfinite(freq_high_hz))
 		return 0.0f;
 
+	const float nyquist_hz = 0.5f * (float)spec->sample_rate;
 	if (freq_low_hz < 1.0f)
 		freq_low_hz = 1.0f;
+	if (freq_low_hz >= nyquist_hz)
+		return 0.0f;
 	if (freq_high_hz <= freq_low_hz)
 		freq_high_hz = freq_low_hz + 1.0f;
+	if (freq_high_hz > nyquist_hz)
+		freq_high_hz = nyquist_hz;
 
 	const float center_hz = 0.5f * (freq_low_hz + freq_high_hz);
 	const bool use_low = (center_hz <= VS_DUAL_FFT_CROSSOVER_HZ);
 	const float *mag = use_low ? mag_low : mag_mid;
-	const float *prev_mag = use_low ? spec->prev_mag_low : spec->prev_mag_mid;
 	const uint32_t fft_size = use_low ? spec->fft_size_low : spec->fft_size_mid;
 
 	if (mode == VS_HZ_MODE_FLUX) {
 		if (!spec->has_prev)
 			return 0.0f;
+		const float *flux = use_low ? spec->flux_low : spec->flux_mid;
 		const uint32_t max_bin = fft_size / 2u;
 		uint32_t k0 = (uint32_t)floorf((freq_low_hz * (float)fft_size) / (float)spec->sample_rate);
 		uint32_t k1 = (uint32_t)ceilf((freq_high_hz * (float)fft_size) / (float)spec->sample_rate);
@@ -186,9 +194,7 @@ float vs_spectrum_extract_hz_band(const struct vs_spectrum *spec, const float *m
 
 		float flux_sum = 0.0f;
 		for (uint32_t k = k0; k <= k1; k++) {
-			const float diff = mag[k] - prev_mag[k];
-			if (diff > 0.0f)
-				flux_sum += diff;
+			flux_sum += flux[k];
 		}
 		return clamp01(flux_sum * 0.5f);
 	}
@@ -220,6 +226,17 @@ void vs_spectrum_compute(struct vs_spectrum *spec, const float *time_window_mid,
 		return;
 
 	memset(out_frame, 0, sizeof(*out_frame));
+
+	/* Cache current-vs-previous bin deltas before advancing history. Custom Hz
+	 * queries happen after this function, while prev_mag already holds this frame. */
+	for (uint32_t k = 0; k <= spec->fft_size_low / 2u; k++) {
+		const float diff = spec->has_prev ? mag_low[k] - spec->prev_mag_low[k] : 0.0f;
+		spec->flux_low[k] = (diff > 0.0f) ? diff : 0.0f;
+	}
+	for (uint32_t k = 0; k <= spec->fft_size_mid / 2u; k++) {
+		const float diff = spec->has_prev ? mag_mid[k] - spec->prev_mag_mid[k] : 0.0f;
+		spec->flux_mid[k] = (diff > 0.0f) ? diff : 0.0f;
+	}
 
 	/* 1. Time-domain RMS level, raw peak, raw magnitude, and 512-sample waveform row. */
 	if (time_window_mid && spec->fft_size_mid > 0) {
@@ -300,9 +317,7 @@ void vs_spectrum_compute(struct vs_spectrum *spec, const float *time_window_mid,
 			mag_sum += m;
 		}
 		if (spec->has_prev) {
-			const float diff = m - spec->prev_mag_mid[k];
-			if (diff > 0.0f)
-				flux_sum += diff;
+			flux_sum += spec->flux_mid[k];
 		}
 	}
 

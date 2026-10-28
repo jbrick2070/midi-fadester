@@ -94,7 +94,6 @@ static void test_ring_sync_offset_delay(void)
 	assert(float_near(win[2047], 0.75f, 1e-6f));
 
 	/* 3. offset_samples = 24000 (+500 ms at 48 kHz): end of window is sample 5999 (1.0f) */
-	assert(vs_audio_ring_read_window(&ring, 4096, 24000, win, NULL, NULL) == false || true);
 	float win4096[4096];
 	assert(vs_audio_ring_read_window(&ring, 4096, 24000, win4096, NULL, NULL));
 	assert(float_near(win4096[4095], 1.0f, 1e-6f));
@@ -102,6 +101,9 @@ static void test_ring_sync_offset_delay(void)
 
 	/* Out-of-bounds window + offset (> 32768) must be rejected cleanly */
 	assert(!vs_audio_ring_read_window(&ring, 4096, 30000, win4096, NULL, NULL));
+	assert(!vs_audio_ring_read_window(&ring, SIZE_MAX, 1, win4096, NULL, NULL));
+	assert(!vs_audio_ring_read_window(&ring, 4096, SIZE_MAX, win4096, NULL, NULL));
+	assert(float_near(win4096[4095], 1.0f, 1e-6f));
 
 	vs_audio_ring_free(&ring);
 }
