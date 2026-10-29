@@ -19,6 +19,10 @@ Download the latest release from [GitHub Releases](https://github.com/jbrick2070
 
 Open OBS Studio 33 and choose **Tools → Midi Fadester — Video Mixer & Fader Control**. When a recognized controller is connected, Midi Fadester auto-detects its USB MIDI port and loads its control layout (or lets you switch layouts under **Change controller → Layout** on **Strips** or **Profile** on **Advanced**).
 
+## Optional Stream Deck Companion
+
+Midi Fadester works independently with a MIDI controller; a Stream Deck is never treated as a MIDI device. If you also use a Stream Deck, [Fadester for OBS](https://github.com/jbrick2070/streamdeck-fadester) adds touch controls, live meters, crossfader control, and auto-fades to the same Midi Fadester slots. The Midi Fadester dialog shows a one-time companion card and keeps a **Stream Deck companion...** link available on the Strips screen.
+
 ## Supported MIDI Controllers (`0.4.0` Profile Registry — 10 Faders + 8 FX/Knob Slots)
 
 Midi Fadester uses a declarative **Controller Profile Registry** (`src/core/apc40-profile.c`) that pairs each controller's factory MIDI CC map (faders + dedicated FX knobs) with its physical strip count, `[Show controller]` vector desk topology, and explicit verification tier. All `fx_1..fx_8` slots remain active across every profile for **Stream Deck +** dials/keys and `obs-websocket` even when no physical MIDI knobs are connected:

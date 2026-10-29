@@ -33,6 +33,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -53,6 +54,7 @@
 #include <QStringList>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -149,6 +151,16 @@ static QString output_bar_stylesheet(const QString &chunk_hex, const QString &bo
 			      "border-radius: 4px; text-align: center; font-weight: bold; min-height: 22px; } "
 			      "QProgressBar::chunk { background-color: %1; border-radius: 3px; }")
 		.arg(chunk_hex, border_hex);
+}
+
+static QString stream_deck_companion_url()
+{
+	return QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester");
+}
+
+static void open_stream_deck_companion_url()
+{
+	QDesktopServices::openUrl(QUrl(stream_deck_companion_url()));
 }
 
 static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_slot &s,
@@ -454,6 +466,62 @@ public:
 			refresh_from_engine();
 		});
 
+		/* --- Optional Stream Deck Companion Discovery --- */
+		stream_deck_companion_card_ = new QFrame(this);
+		stream_deck_companion_card_->setObjectName(QStringLiteral("mfdStreamDeckCompanionCard"));
+		stream_deck_companion_card_->setStyleSheet(QStringLiteral(
+			"QFrame#mfdStreamDeckCompanionCard { background-color: #172554; border: 1px solid #6366f1; "
+			"border-radius: 6px; }"));
+		auto *sd_lay = new QHBoxLayout(stream_deck_companion_card_);
+		sd_lay->setContentsMargins(12, 8, 12, 8);
+		sd_lay->setSpacing(10);
+		auto *sd_copy = new QWidget(stream_deck_companion_card_);
+		auto *sd_copy_lay = new QVBoxLayout(sd_copy);
+		sd_copy_lay->setContentsMargins(0, 0, 0, 0);
+		sd_copy_lay->setSpacing(2);
+		auto *sd_title = new QLabel(QStringLiteral("Use a Stream Deck?"), sd_copy);
+		sd_title->setObjectName(QStringLiteral("mfdStreamDeckCompanionTitle"));
+		sd_title->setStyleSheet(QStringLiteral(
+			"color: #eef2ff; font-weight: bold; background: transparent; border: none;"));
+		auto *sd_text = new QLabel(
+			QStringLiteral("Fadester for OBS adds touch controls, live meters, crossfader control, and "
+				       "auto-fades to the same Midi Fadester slots."),
+			sd_copy);
+		sd_text->setObjectName(QStringLiteral("mfdStreamDeckCompanionText"));
+		sd_text->setWordWrap(true);
+		sd_text->setStyleSheet(QStringLiteral(
+			"color: #c7d2fe; background: transparent; border: none; font-size: 12px;"));
+		sd_copy_lay->addWidget(sd_title);
+		sd_copy_lay->addWidget(sd_text);
+		sd_lay->addWidget(sd_copy, 1);
+
+		auto *btn_sd_learn = new QPushButton(QStringLiteral("Learn about Fadester for OBS"), stream_deck_companion_card_);
+		btn_sd_learn->setObjectName(QStringLiteral("mfdBtnStreamDeckLearn"));
+		btn_sd_learn->setProperty("destinationUrl", stream_deck_companion_url());
+		btn_sd_learn->setCursor(Qt::PointingHandCursor);
+		btn_sd_learn->setStyleSheet(QStringLiteral(
+			"QPushButton { background-color: #4f46e5; color: #ffffff; font-weight: bold; border: 1px solid #818cf8; "
+			"border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background-color: #6366f1; }"));
+		sd_lay->addWidget(btn_sd_learn);
+
+		auto *btn_sd_dismiss = new QPushButton(QStringLiteral("Hide"), stream_deck_companion_card_);
+		btn_sd_dismiss->setObjectName(QStringLiteral("mfdBtnStreamDeckDismiss"));
+		btn_sd_dismiss->setToolTip(
+			QStringLiteral("Hide this card. The Stream Deck companion link stays available below."));
+		btn_sd_dismiss->setCursor(Qt::PointingHandCursor);
+		btn_sd_dismiss->setStyleSheet(QStringLiteral(
+			"QPushButton { background-color: transparent; color: #c7d2fe; border: 1px solid #6366f1; "
+			"border-radius: 5px; padding: 5px 10px; } QPushButton:hover { color: #ffffff; border-color: #a5b4fc; }"));
+		sd_lay->addWidget(btn_sd_dismiss);
+		stream_deck_companion_card_->hide();
+		root->addWidget(stream_deck_companion_card_);
+
+		connect(btn_sd_learn, &QPushButton::clicked, this, []() { open_stream_deck_companion_url(); });
+		connect(btn_sd_dismiss, &QPushButton::clicked, this, [this]() {
+			mfd_engine_set_stream_deck_companion_dismissed(eng_, true);
+			refresh_from_engine();
+		});
+
 		/* --- Main Tab Widget (Strips | Advanced) --- */
 		main_tabs_ = new QTabWidget(this);
 		main_tabs_->setObjectName(QStringLiteral("mfdMainTabs"));
@@ -522,6 +590,7 @@ public:
 
 		/* Top banners */
 		first_run_banner_->setVisible(snap_.first_run_offer_pending);
+		stream_deck_companion_card_->setVisible(!snap_.stream_deck_companion_dismissed);
 
 		size_t active_tbar_slots = 0U;
 		bool can_finish_any_tbar = false;
@@ -879,6 +948,16 @@ private:
 		btn_open_adv->setStyleSheet(z1_btn_style);
 		connect(btn_open_adv, &QPushButton::clicked, this, [this]() { main_tabs_->setCurrentIndex(1); });
 		z3_lay->addWidget(btn_open_adv);
+
+		auto *btn_stream_deck = new QPushButton(QStringLiteral("Stream Deck companion..."), zone3);
+		btn_stream_deck->setObjectName(QStringLiteral("mfdBtnStreamDeckCompanion"));
+		btn_stream_deck->setProperty("destinationUrl", stream_deck_companion_url());
+		btn_stream_deck->setToolTip(
+			QStringLiteral("Learn about the optional Fadester for OBS Stream Deck companion."));
+		btn_stream_deck->setCursor(Qt::PointingHandCursor);
+		btn_stream_deck->setStyleSheet(z1_btn_style);
+		connect(btn_stream_deck, &QPushButton::clicked, this, []() { open_stream_deck_companion_url(); });
+		z3_lay->addWidget(btn_stream_deck);
 
 		lay->addWidget(zone3);
 		main_tabs_->addTab(strips_tab, QStringLiteral("Strips"));
@@ -2197,6 +2276,7 @@ private:
 
 	QWidget *first_run_banner_ = nullptr;
 	QWidget *studio_note_widget_ = nullptr;
+	QWidget *stream_deck_companion_card_ = nullptr;
 	QTabWidget *main_tabs_ = nullptr;
 
 	/* Strips tab widgets */

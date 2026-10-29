@@ -797,6 +797,19 @@ int main(int argc, char **argv)
 	REQUIRE(!fr_banner->isHidden());
 	REQUIRE(fr_text->text().contains(QStringLiteral("Start with the usual layout?")));
 
+	/* Optional companion discovery stays separate from MIDI controller selection. */
+	auto *sd_card = must_find<QWidget>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionCard"));
+	auto *sd_title = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionTitle"));
+	auto *sd_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionText"));
+	auto *sd_learn = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckLearn"));
+	auto *sd_dismiss = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckDismiss"));
+	REQUIRE(!sd_card->isHidden());
+	REQUIRE(sd_title->text() == QStringLiteral("Use a Stream Deck?"));
+	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester slots")));
+	REQUIRE(sd_dismiss->text() == QStringLiteral("Hide"));
+	REQUIRE(sd_learn->property("destinationUrl").toString() ==
+		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
+
 	auto *z1_name = must_find<QLabel>(dlg.get(), QStringLiteral("mfdControllerNameLabel"));
 	auto *z1_status = must_find<QLabel>(dlg.get(), QStringLiteral("mfdControllerStatusLabel"));
 	auto *z1_reconnect = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnReconnect"));
@@ -805,6 +818,11 @@ int main(int argc, char **argv)
 	REQUIRE(z1_reconnect->isHidden());
 
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("01-first-run-offer.png"));
+
+	sd_dismiss->click();
+	pump_ui();
+	REQUIRE(sd_card->isHidden());
+	REQUIRE(eng.stream_deck_companion_dismissed);
 
 	/* Click [I'll set it up] -> all 10 strips become Not used, APC40 CCs remain bound and live */
 	fr_custom->click();
@@ -1215,7 +1233,11 @@ int main(int argc, char **argv)
 
 	auto *table = must_find<QTableWidget>(dlg.get(), QStringLiteral("mfdAdvancedTable"));
 	auto *adv_help = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvHelpLabel"));
+	auto *stream_deck_companion =
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckCompanion"));
 	REQUIRE(!adv_help->isHidden());
+	REQUIRE(stream_deck_companion->property("destinationUrl").toString() ==
+		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
 	REQUIRE(adv_help->text().contains(QStringLiteral("Switch scenes (T-bar):")));
 	REQUIRE(adv_help->text().contains(QStringLiteral("Mix two layers:")));
 	REQUIRE(table->horizontalHeaderItem(4)->text() == QStringLiteral("What it does"));

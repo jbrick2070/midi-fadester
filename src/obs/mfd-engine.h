@@ -248,6 +248,7 @@ struct mfd_ui_snapshot {
 	char preview_scene_name[MFD_SOURCE_NAME_MAX];
 	char program_scene_name[MFD_SOURCE_NAME_MAX];
 	bool first_run_offer_pending;
+	bool stream_deck_companion_dismissed;
 	int learning_slot_index;
 	bool has_last_midi;
 	struct mfd_midi_decoded last_midi_decoded;
@@ -340,6 +341,7 @@ struct mfd_engine {
 	bool tbar_bidirectional_flip;
 
 	bool first_run_offer_dismissed;
+	bool stream_deck_companion_dismissed;
 	bool frontend_finished_loading;
 	bool apc40_controller_detected;
 	bool cached_studio_mode;
@@ -450,6 +452,7 @@ bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_se
 
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng);
+void mfd_engine_set_stream_deck_companion_dismissed(struct mfd_engine *eng, bool dismissed);
 
 bool mfd_engine_update_slot_config(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit);
 bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit,

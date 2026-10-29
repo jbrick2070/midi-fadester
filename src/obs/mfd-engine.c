@@ -3063,6 +3063,7 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 	snprintf(out->program_scene_name, sizeof(out->program_scene_name), "%s", eng->cached_program_scene);
 	out->first_run_offer_pending = eng->frontend_finished_loading && !eng->first_run_offer_dismissed &&
 				       eng->apc40_controller_detected && (out->active_profile == MFD_PROFILE_APC40_MK2);
+	out->stream_deck_companion_dismissed = eng->stream_deck_companion_dismissed;
 	out->learning_slot_index = eng->learning_slot_index;
 	out->has_last_midi = eng->has_last_midi;
 	out->last_midi_decoded = eng->last_midi_decoded;
@@ -3538,6 +3539,21 @@ void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng)
 	mfd_engine_bump_slot_rev(eng, -1);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
+	unlock_and_persist_global_config(eng);
+}
+
+void mfd_engine_set_stream_deck_companion_dismissed(struct mfd_engine *eng, bool dismissed)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (eng->stream_deck_companion_dismissed == dismissed) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->stream_deck_companion_dismissed = dismissed;
+	mfd_engine_mark_ui_dirty(eng, true);
 	unlock_and_persist_global_config(eng);
 }
 
@@ -5537,6 +5553,7 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_double(data, "smooth_tau_ms", (double)eng->smooth_tau_ms);
 	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
 	obs_data_set_bool(data, "first_run_offer_dismissed", eng->first_run_offer_dismissed);
+	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
 	serialize_calibrations(eng, data);
 	serialize_slots(eng, data);
 	mfd_engine_unlock(eng);
@@ -5576,6 +5593,10 @@ bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
 		/* Upgrading from 0.1.x global.json without first_run_offer_dismissed: never prompt to reset */
 		eng->first_run_offer_dismissed = true;
 	}
+	/* Existing users have not seen the companion card, so show it once after upgrading. */
+	eng->stream_deck_companion_dismissed = obs_data_has_user_value(data, "stream_deck_companion_dismissed")
+							? obs_data_get_bool(data, "stream_deck_companion_dismissed")
+							: false;
 	deserialize_calibrations(eng, data);
 	deserialize_slots(eng, data);
 	refresh_apc40_detected_locked(eng);

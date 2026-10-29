@@ -1359,18 +1359,21 @@ int main(void)
 	snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "APC40 mkII");
 	eng.smooth_tau_ms = 24.5f;
 	eng.tbar_bidirectional_flip = false;
+	eng.stream_deck_companion_dismissed = true;
 	REQUIRE(mfd_engine_export_config_file(&eng, tmp_json));
 
 	mfd_engine_load_apc40_defaults(&eng);
 	eng.configured_device_name[0] = '\0';
 	eng.smooth_tau_ms = 12.0f;
 	eng.tbar_bidirectional_flip = true;
+	eng.stream_deck_companion_dismissed = false;
 	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_UNASSIGNED);
 
 	REQUIRE(mfd_engine_import_config_file(&eng, tmp_json));
 	REQUIRE(strcmp(eng.configured_device_name, "APC40 mkII") == 0);
 	REQUIRE(fabsf(eng.smooth_tau_ms - 24.5f) < 1e-4f);
 	REQUIRE(!eng.tbar_bidirectional_flip);
+	REQUIRE(eng.stream_deck_companion_dismissed);
 	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	REQUIRE(strcmp(eng.fader_slots[1].source_a_name, "Cam 1") == 0);
 	REQUIRE(strcmp(eng.fader_slots[1].source_b_name, "Loop 3") == 0);
@@ -2836,9 +2839,11 @@ int main(void)
 		fclose(fp);
 
 		eng.first_run_offer_dismissed = false;
+		eng.stream_deck_companion_dismissed = true;
 		mfd_engine_load_apc40_defaults(&eng);
 		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v013_json));
 		REQUIRE(eng.first_run_offer_dismissed);
+		REQUIRE(!eng.stream_deck_companion_dismissed);
 		mfd_engine_get_ui_snapshot(&eng, snap);
 		REQUIRE(!snap->first_run_offer_pending);
 		os_unlink(tmp_v013_json);
