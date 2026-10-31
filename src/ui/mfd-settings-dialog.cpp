@@ -481,21 +481,22 @@ public:
 		sd_copy_lay->setSpacing(2);
 		auto *sd_title = new QLabel(QStringLiteral("Use a Stream Deck?"), sd_copy);
 		sd_title->setObjectName(QStringLiteral("mfdStreamDeckCompanionTitle"));
-		sd_title->setStyleSheet(QStringLiteral(
-			"color: #eef2ff; font-weight: bold; background: transparent; border: none;"));
+		sd_title->setStyleSheet(
+			QStringLiteral("color: #eef2ff; font-weight: bold; background: transparent; border: none;"));
 		auto *sd_text = new QLabel(
 			QStringLiteral("Fadester for OBS adds touch controls, live meters, crossfader control, and "
 				       "auto-fades to the same Midi Fadester slots."),
 			sd_copy);
 		sd_text->setObjectName(QStringLiteral("mfdStreamDeckCompanionText"));
 		sd_text->setWordWrap(true);
-		sd_text->setStyleSheet(QStringLiteral(
-			"color: #c7d2fe; background: transparent; border: none; font-size: 12px;"));
+		sd_text->setStyleSheet(
+			QStringLiteral("color: #c7d2fe; background: transparent; border: none; font-size: 12px;"));
 		sd_copy_lay->addWidget(sd_title);
 		sd_copy_lay->addWidget(sd_text);
 		sd_lay->addWidget(sd_copy, 1);
 
-		auto *btn_sd_learn = new QPushButton(QStringLiteral("Learn about Fadester for OBS"), stream_deck_companion_card_);
+		auto *btn_sd_learn =
+			new QPushButton(QStringLiteral("Learn about Fadester for OBS"), stream_deck_companion_card_);
 		btn_sd_learn->setObjectName(QStringLiteral("mfdBtnStreamDeckLearn"));
 		btn_sd_learn->setProperty("destinationUrl", stream_deck_companion_url());
 		btn_sd_learn->setCursor(Qt::PointingHandCursor);

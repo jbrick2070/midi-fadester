@@ -1233,8 +1233,7 @@ int main(int argc, char **argv)
 
 	auto *table = must_find<QTableWidget>(dlg.get(), QStringLiteral("mfdAdvancedTable"));
 	auto *adv_help = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvHelpLabel"));
-	auto *stream_deck_companion =
-		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckCompanion"));
+	auto *stream_deck_companion = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckCompanion"));
 	REQUIRE(!adv_help->isHidden());
 	REQUIRE(stream_deck_companion->property("destinationUrl").toString() ==
 		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));

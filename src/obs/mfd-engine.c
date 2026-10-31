@@ -5595,8 +5595,8 @@ bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
 	}
 	/* Existing users have not seen the companion card, so show it once after upgrading. */
 	eng->stream_deck_companion_dismissed = obs_data_has_user_value(data, "stream_deck_companion_dismissed")
-							? obs_data_get_bool(data, "stream_deck_companion_dismissed")
-							: false;
+						       ? obs_data_get_bool(data, "stream_deck_companion_dismissed")
+						       : false;
 	deserialize_calibrations(eng, data);
 	deserialize_slots(eng, data);
 	refresh_apc40_detected_locked(eng);
