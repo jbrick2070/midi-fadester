@@ -246,3 +246,49 @@ foreach(
   )
   set_tests_properties(check-locale-keys-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
 endforeach()
+
+# every translation matches en-US.ini (R-I18N-5); REQUIRED_LOCALES joins once the ten language files exist. A good
+# file with awkward characters must pass, and each kind of fault must be caught (check-locale-files-bad.cmake)
+add_test(
+  NAME check-locale-files
+  COMMAND
+    "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
+)
+add_test(
+  NAME check-locale-files-passes-a-good-file
+  COMMAND
+    "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/locale-good" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
+)
+set_tests_properties(
+  check-locale-files-passes-a-good-file
+  PROPERTIES PASS_REGULAR_EXPRESSION "1 translations checked" FAIL_REGULAR_EXPRESSION "CMake Error"
+)
+foreach(
+  _case
+  IN
+  ITEMS
+    "missing-key|de-DE.ini: missing key Gone"
+    "extra-key|de-DE.ini: extra key Extra"
+    "repeated-key|de-DE.ini: key Extra appears more than once"
+    "placeholder|de-DE.ini: Greeting has placeholders"
+    "stray-quote|de-DE.ini: Plain has a quote that is not escaped"
+    "printf|de-DE.ini: Printf has a printf conversion"
+    "mnemonic|de-DE.ini: Mnemonic has 0 Qt mnemonic"
+    "bom|fr-FR.ini: starts with a BOM"
+    "invalid-utf8|fr-FR.ini: not valid UTF-8"
+    "file-name|german.ini: not named like de-DE.ini"
+)
+  string(REPLACE "|" ";" _parts "${_case}")
+  list(GET _parts 0 _name)
+  list(GET _parts 1 _expected)
+  add_test(
+    NAME check-locale-files-catches-${_name}
+    COMMAND
+      "${CMAKE_COMMAND}" "-DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/locale-bad"
+      "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/locale-bad-${_name}" -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files-bad.cmake"
+  )
+  set_tests_properties(check-locale-files-catches-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
+endforeach()

@@ -389,6 +389,19 @@ device texts). Each step ends with the full ctest green and its own commit; the 
    all ten required) with its negative tests. Strings whose English is word for word OBS's own start from OBS 33.0.0's
    official translations; Claude drafts the rest; Gemini 4 Argon reviews each file; corrections are applied unless one
    breaks a rule. README gets a Languages section.
+
+   *As built (7.5, the file check only; the ten files, REQUIRED_LOCALES and the README section come next):*
+   `tests/check-locale-files.cmake` and `check-locale-files-bad.cmake` ported from obs-playlister (keys missing,
+   extra or repeated; `%1`..`%9` sets; unescaped quotes; xx-YY.ini names; UTF-8 without BOM; REQUIRED_LOCALES when
+   set). Added: printf conversions are refused in every file, en-US.ini included: positional (`%1$s`) and width forms
+   (`%5s`, also `%1d`, so a placeholder may not be glued to a letter) on the raw text, then any other conversion with
+   flags, length (`hh`..`L`, `I64`) and the letters `sdiufFeEgGxXocpnaASC` once the placeholders are out; `%%` is a
+   literal; the space flag is not refused ("50 % visible"), so French/German spacing passes, while German "10%-ige"
+   must be written "10 %-ige". Qt mnemonics: the count of `&` followed by a letter or digit must equal the English,
+   after `&&` and HTML entities (`&rarr;`) are taken out, so "fader & video" and `Map.Transport` can be translated
+   freely. Fixtures `tests/fixtures/locale-good` (adds a percent line and a mnemonic line) and `locale-bad` (adds a
+   printf and a mnemonic fault). Tests: `check-locale-files` (real data/locale: 0 translations, 377 keys),
+   `-passes-a-good-file` (also fails on any "CMake Error"), and ten `-catches-*` cases. 32/32 green.
 6. **Step 7.6 -- Checks.** Sonnet 5.5 post-code QA before each build; full ctest; the portable OBS 33 harness (R-TST-2)
    in English; one run each in German (length), Japanese (CJK) and Russian, looking for cut-off text in the dialog and
    the controller drawing (fix elide widths). One push. The version (0.6.0) changes only on the operator's word.
