@@ -247,13 +247,13 @@ foreach(
   set_tests_properties(check-locale-keys-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
 endforeach()
 
-# every translation matches en-US.ini (R-I18N-5), and the ten languages of R-I18N-4 are all there. A good file with
+# every translation matches en-US.ini (R-I18N-5), and the eleven languages of R-I18N-4 are all there. A good file with
 # awkward characters must pass, and each kind of fault must be caught (check-locale-files-bad.cmake)
 add_test(
   NAME check-locale-files
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale"
-    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR" -P
+    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR,nl-NL" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
 )
 add_test(

@@ -158,11 +158,12 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
 
 ## Translations (0.6.0, 2026-11-01)
 
-`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all ten languages present, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`) and put the file back afterwards; the script installs every language file and keeps the updater off.
+`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all eleven languages present, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`, `nl-NL`) and put the file back afterwards; the script installs every language file and keeps the updater off.
 
 | Check | Expected | Result |
 |---|---|---|
 | T.1 | Live self-test with OBS in German: the German file loads, every case passes, zero leaks, clean exit | Pass (2026-11-01, OBS 33.0.1) |
 | T.2 | The same in Japanese | Pass (2026-11-01, OBS 33.0.1) |
 | T.3 | The same in Russian | Pass (2026-11-01, OBS 33.0.1) |
-| T.4 | By eye, OBS in German, Japanese and Russian: the settings dialog, the setup sheet, the controller drawing and the strip labels; nothing cut off that is whole in English | Pending (English already cuts the nanoKONTROL2 STOP/PLAY and some strip labels) |
+| T.4 | By eye, OBS in German, Japanese, Russian and Dutch: the settings dialog, the setup sheet, the controller drawing and the strip labels; nothing cut off that is whole in English | Pending (English already cuts the nanoKONTROL2 STOP/PLAY and some strip labels) |
+| T.5 | Live self-test with OBS in Dutch (nl-NL, added 2026-11-01): the Dutch file loads, every case passes, zero leaks, clean exit; the controller map's Dutch texts fit | Pass (2026-11-01, OBS 33.0.1, rerun after the QA changes to `nl-NL.ini`, started with `--portable --disable-updater --multi --disable-shutdown-check`; the log names no Midi Fadester text failure in nl-NL, `SELF-TEST RESULT` all 1, memory leaks 0; user.ini restored, hash checked. The map's fixed-width texts measured with the same Qt 6 `QFontMetrics` call the map uses: the beta-profile card (title, no-crossfader line, Learn line) and the four legend entries fit, the legend keeps the English positions; `Map.ModeProgram` "Programma" was 55 px in a 54 px box, so it is "Progr.". A by-eye look is part of T.4) |
