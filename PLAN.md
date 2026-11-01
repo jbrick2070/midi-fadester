@@ -405,6 +405,17 @@ device texts). Each step ends with the full ctest green and its own commit; the 
 6. **Step 7.6 -- Checks.** Sonnet 5.5 post-code QA before each build; full ctest; the portable OBS 33 harness (R-TST-2)
    in English; one run each in German (length), Japanese (CJK) and Russian, looking for cut-off text in the dialog and
    the controller drawing (fix elide widths). One push. The version (0.6.0) changes only on the operator's word.
+   *As built (2026-11-01):* the live self-test (`scripts/run-live-selftest.ps1`, portable OBS 33.0.1, APC40 and
+   loopMIDI) passes in full with zero memory leaks in English, German and Japanese (user.ini `Language=de-DE` /
+   `ja-JP` for the run, restored after); the German and Japanese files load (no "Failed to load" line for
+   midi-fadester.dll), the Transition button is found by structure in every language, and the dialog, setup sheet
+   and controller drawing build without error. The script now installs every language file (it copied only
+   en-US.ini before, so a non-English run tested the English fallback) and starts OBS with `--disable-updater`:
+   OBS 33.0.1 (2026-10-29) was offered by the updater, its dialog blocked the window close, the run was killed
+   and the next start reported a crash. Not done: Russian, and a look by eye for cut-off text in the dialog and
+   the drawing (the self-test checks behaviour, not layout); the marked-lookup test already showed the
+   nanoKONTROL2 STOP/PLAY labels and some strip labels get cut in English, so long translations will too. Still
+   0.6.0; the version changes on the operator's word.
 
 
 **Review round 1 (2026-10-31, Codex GPT-6.1 Sol ultra and Gemini 4 Argon High via agy): taken, and binding for the

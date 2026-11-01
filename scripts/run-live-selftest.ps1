@@ -83,7 +83,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $destPluginDir "data\locale
 Copy-Item (Join-Path $RepoDir "build_x64\RelWithDebInfo\midi-fadester.dll") (Join-Path $destPluginDir "midi-fadester.dll") -Force
 Copy-Item (Join-Path $RepoDir "build_x64\manifest.json") (Join-Path $destPluginDir "data\manifest.json") -Force
 Copy-Item (Join-Path $RepoDir "data\effects\mfd_layer_mixer.effect") (Join-Path $destPluginDir "data\effects\mfd_layer_mixer.effect") -Force
-Copy-Item (Join-Path $RepoDir "data\locale\en-US.ini") (Join-Path $destPluginDir "data\locale\en-US.ini") -Force
+# every language file, so a run with OBS in another language (user.ini [General] Language) tests that language
+Copy-Item (Join-Path $RepoDir "data\locale\*.ini") (Join-Path $destPluginDir "data\locale") -Force
 
 # 5. Start loopMIDI only if not already running; remember ownership so we only stop what we started
 $loopMidiAlreadyRunning = (@(Get-Process loopMIDI -ErrorAction SilentlyContinue).Count -gt 0)
@@ -108,6 +109,9 @@ $obsProc = $null
 try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $targetObsExe
+    # OBS 33.0.1 shipped on 2026-10-29; its "New update available" dialog blocked the window close and the run was
+    # killed (2026-11-01). The harness never updates OBS, so the updater stays off.
+    $psi.Arguments = "--disable-updater"
     $psi.WorkingDirectory = (Join-Path $resolvedObsRoot "bin\64bit")
     $psi.UseShellExecute = $false
     $psi.EnvironmentVariables["MFD_SELF_TEST"] = "1"

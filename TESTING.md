@@ -155,3 +155,14 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
   - **Case 8:** Mode-switch Soft Takeover reset to `Idle` and clean teardown (`Number of memory leaks: 0`).
 - **Live Filter Parameter & Shared Lease Suite (`FX FILTER LIVE CHECK`):**
   - Calls `get_catalog` against a live OBS `color_filter_v2`, binds `fx_1` (`filter_param`, `brightness` `[0.0 .. -1.0]`, `bypass_at_zero = true`), verifies GPU pixel darkening via `GetSourceScreenshot`, verifies external `obs_source_update` emits `fader_changed` with `origin == "obs"` + `display_value` and engages Soft Takeover, exercises live `"enable"` / `"update_properties"` / filter & host rename / filter remove + re-add signals, runs `reset_fx({ ms: 0 })` verifying pixel restoration and `obs_source_enabled == false`, and unbinds `fx_1` verifying `pre_mfd_enabled` lease restoration (`obs_source_enabled == true`).
+
+## Translations (0.6.0, 2026-11-01)
+
+`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all ten languages present, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`) and put the file back afterwards; the script installs every language file and keeps the updater off.
+
+| Check | Expected | Result |
+|---|---|---|
+| T.1 | Live self-test with OBS in German: the German file loads, every case passes, zero leaks, clean exit | Pass (2026-11-01, OBS 33.0.1) |
+| T.2 | The same in Japanese | Pass (2026-11-01, OBS 33.0.1) |
+| T.3 | The same in Russian | Pending |
+| T.4 | By eye, OBS in German, Japanese and Russian: the settings dialog, the setup sheet, the controller drawing and the strip labels; nothing cut off that is whole in English | Pending (English already cuts the nanoKONTROL2 STOP/PLAY and some strip labels) |
