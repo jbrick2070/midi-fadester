@@ -147,6 +147,17 @@ void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, siz
  * saved nothing, for example a Restore with no Panic before it).
  */
 size_t vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count, bool *out_restored);
+/*
+ * Carries what Panic saved across a recompile during Panic (a new preset, a reloaded or edited shader): each slot in
+ * `new_slots` whose name matches a slot in `old_slots` that Panic saved (`saved_valid`) takes that saved value and
+ * `saved_valid`, so Restore puts back the pre-panic value. A saved old slot with no same-named new slot is dropped;
+ * a new slot with no saved old one is left as it is. When `new_accepts` is not NULL it must hold `new_count` entries
+ * and only the new slots marked true may take a value. Call it before vs_fader_bridge_apply_panic_to_slots, which
+ * keeps a value already saved. Returns how many new slots took a value.
+ */
+size_t vs_fader_bridge_carry_saved_slots(const struct vs_panic_param_slot *old_slots, size_t old_count,
+					 struct vs_panic_param_slot *new_slots, size_t new_count,
+					 const bool *new_accepts);
 void vs_fader_bridge_apply_panic_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
 					   size_t count);
 /* Clears the filter's own pass-through, then restores as vs_fader_bridge_apply_restore_to_slots does. */

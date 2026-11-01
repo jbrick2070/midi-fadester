@@ -615,6 +615,110 @@ static void test_restore_writes_back_only_what_panic_saved(void)
 	assert_live_values(live, after_second_restore, RESTORE_TEST_SLOTS);
 }
 
+#define SWITCH_TEST_SLOTS 5u
+
+static void name_slots(struct vs_panic_param_slot *slots, const char *const *names, size_t count)
+{
+	memset(slots, 0, count * sizeof(*slots));
+	for (size_t i = 0; i < count; i++)
+		snprintf(slots[i].name, sizeof(slots[i].name), "%s", names[i]);
+}
+
+static void test_shader_switch_during_panic_keeps_saved_values(void)
+{
+	vs_fader_bridge_reset();
+
+	/* The old shader, compiled with no Panic active; `old_live` holds its float parameters. */
+	static const char *const old_names[SWITCH_TEST_SLOTS] = {"flash_intensity", "slot_1_amount_pct", "strobe_boost",
+								 "max_flash_rate_hz", "warp_speed"};
+	struct vs_panic_param_slot old_slots[SWITCH_TEST_SLOTS];
+	name_slots(old_slots, old_names, SWITCH_TEST_SLOTS);
+	double old_live[SWITCH_TEST_SLOTS] = {0.55, 100.0, 0.80, 3.0, 1.25};
+	bool saved[SWITCH_TEST_SLOTS];
+	bool restored[SWITCH_TEST_SLOTS];
+	bool accepts[SWITCH_TEST_SLOTS];
+	bool passthrough = false;
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		accepts[i] = true;
+
+	/* 1. A recompile with nothing saved (no Panic before it) carries nothing. */
+	struct vs_panic_param_slot new_slots[SWITCH_TEST_SLOTS];
+	name_slots(new_slots, old_names, SWITCH_TEST_SLOTS);
+	assert(vs_fader_bridge_carry_saved_slots(old_slots, SWITCH_TEST_SLOTS, new_slots, SWITCH_TEST_SLOTS, accepts) ==
+	       0u);
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		assert(!new_slots[i].saved_valid && new_slots[i].saved_value == 0.0);
+	assert(vs_fader_bridge_carry_saved_slots(NULL, SWITCH_TEST_SLOTS, new_slots, SWITCH_TEST_SLOTS, NULL) == 0u);
+
+	/* 2. Panic zeroes and saves the flash, amount and boost slots and writes the zeros into the settings. */
+	vs_fader_bridge_trigger_panic();
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		old_slots[i].current_value = old_live[i];
+	vs_fader_bridge_apply_panic_to_shader(&passthrough, old_slots, SWITCH_TEST_SLOTS);
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		saved[i] = old_slots[i].saved_valid;
+	assert(saved[0] && saved[1] && saved[2] && !saved[3] && !saved[4]);
+	write_back_slots(old_live, old_slots, saved, SWITCH_TEST_SLOTS);
+	const double old_panicked[SWITCH_TEST_SLOTS] = {0.0, 0.0, 0.0, 3.0, 1.25};
+	assert_live_values(old_live, old_panicked, SWITCH_TEST_SLOTS);
+
+	/* 3. A preset change during Panic, as compile_shader runs it: the reset gives fresh slots for the new
+	 * shader's parameters in its own order (strobe_boost is gone, glow_strength is new), each value is read
+	 * from the settings (zeros where Panic wrote them, glow_strength's default), then the carry, then Panic. */
+	assert(vs_fader_bridge_is_panic_active());
+	static const char *const new_names[SWITCH_TEST_SLOTS] = {"warp_speed", "glow_strength", "max_flash_rate_hz",
+								 "flash_intensity", "slot_1_amount_pct"};
+	name_slots(new_slots, new_names, SWITCH_TEST_SLOTS);
+	double new_live[SWITCH_TEST_SLOTS] = {1.25, 0.40, 3.0, 0.0, 0.0};
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		new_slots[i].current_value = new_live[i];
+	assert(vs_fader_bridge_carry_saved_slots(old_slots, SWITCH_TEST_SLOTS, new_slots, SWITCH_TEST_SLOTS, accepts) ==
+	       2u);
+	assert(!new_slots[0].saved_valid && !new_slots[1].saved_valid && !new_slots[2].saved_valid);
+	assert(new_slots[3].saved_valid && fabs(new_slots[3].saved_value - 0.55) < 1e-9);
+	assert(new_slots[4].saved_valid && fabs(new_slots[4].saved_value - 100.0) < 1e-9);
+	vs_fader_bridge_apply_panic_to_shader(&passthrough, new_slots, SWITCH_TEST_SLOTS);
+	assert(passthrough);
+	assert(new_slots[1].saved_valid && fabs(new_slots[1].saved_value - 0.40) < 1e-9);
+	assert(fabs(new_slots[3].saved_value - 0.55) < 1e-9 && fabs(new_slots[4].saved_value - 100.0) < 1e-9);
+	assert(new_slots[1].current_value == 0.0 && new_slots[3].current_value == 0.0 &&
+	       new_slots[4].current_value == 0.0);
+
+	/* Restore puts back the same-named values and the new one's own value; the gone one is not restored. */
+	vs_fader_bridge_trigger_restore();
+	assert(vs_fader_bridge_apply_restore_to_shader(&passthrough, new_slots, SWITCH_TEST_SLOTS, restored) == 3u);
+	assert(!passthrough);
+	assert(!restored[0] && restored[1] && !restored[2] && restored[3] && restored[4]);
+	write_back_slots(new_live, new_slots, restored, SWITCH_TEST_SLOTS);
+	const double new_restored[SWITCH_TEST_SLOTS] = {1.25, 0.40, 3.0, 0.55, 100.0};
+	assert_live_values(new_live, new_restored, SWITCH_TEST_SLOTS);
+
+	/* 4. A recompile after Restore carries nothing. */
+	struct vs_panic_param_slot next_slots[SWITCH_TEST_SLOTS];
+	name_slots(next_slots, new_names, SWITCH_TEST_SLOTS);
+	assert(vs_fader_bridge_carry_saved_slots(new_slots, SWITCH_TEST_SLOTS, next_slots, SWITCH_TEST_SLOTS, NULL) ==
+	       0u);
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		assert(!next_slots[i].saved_valid);
+
+	/* 5. A same-named parameter the new shader no longer declares as a float takes nothing. */
+	vs_fader_bridge_trigger_panic();
+	for (size_t i = 0; i < SWITCH_TEST_SLOTS; i++)
+		new_slots[i].current_value = new_live[i];
+	vs_fader_bridge_apply_panic_to_shader(&passthrough, new_slots, SWITCH_TEST_SLOTS);
+	name_slots(next_slots, new_names, SWITCH_TEST_SLOTS);
+	accepts[3] = false;
+	assert(vs_fader_bridge_carry_saved_slots(new_slots, SWITCH_TEST_SLOTS, next_slots, SWITCH_TEST_SLOTS,
+						 accepts) == 2u);
+	assert(next_slots[1].saved_valid && next_slots[4].saved_valid && !next_slots[3].saved_valid);
+
+	/* 6. Old slots past `old_count` are never read: here the saved flash_intensity and slot_1_amount_pct. */
+	name_slots(next_slots, new_names, SWITCH_TEST_SLOTS);
+	assert(vs_fader_bridge_carry_saved_slots(new_slots, 3u, next_slots, SWITCH_TEST_SLOTS, NULL) == 1u);
+	assert(next_slots[1].saved_valid && !next_slots[3].saved_valid && !next_slots[4].saved_valid);
+	vs_fader_bridge_trigger_restore();
+}
+
 static void test_multi_instance_frame_deduplication_and_track1_priority(void)
 {
 	proc_handler_t *ph = proc_handler_create();
@@ -802,6 +906,7 @@ int main(void)
 	test_newer_events_win_over_in_flight_poll();
 	test_panic_and_restore_hotkeys_logic();
 	test_restore_writes_back_only_what_panic_saved();
+	test_shader_switch_during_panic_keeps_saved_values();
 	test_multi_instance_frame_deduplication_and_track1_priority();
 	test_shader_and_modulator_fader_parameter_controls();
 	printf("test-fader-bridge: all assertions passed\n");

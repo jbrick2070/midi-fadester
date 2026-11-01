@@ -679,6 +679,29 @@ size_t vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots,
 	return restored;
 }
 
+size_t vs_fader_bridge_carry_saved_slots(const struct vs_panic_param_slot *old_slots, size_t old_count,
+					 struct vs_panic_param_slot *new_slots, size_t new_count,
+					 const bool *new_accepts)
+{
+	if (!old_slots || !new_slots)
+		return 0;
+	size_t carried = 0;
+	for (size_t i = 0; i < new_count; i++) {
+		if ((new_accepts && !new_accepts[i]) || new_slots[i].name[0] == '\0')
+			continue;
+		for (size_t j = 0; j < old_count; j++) {
+			if (!old_slots[j].saved_valid ||
+			    strncmp(old_slots[j].name, new_slots[i].name, sizeof(new_slots[i].name)) != 0)
+				continue;
+			new_slots[i].saved_value = old_slots[j].saved_value;
+			new_slots[i].saved_valid = true;
+			carried++;
+			break;
+		}
+	}
+	return carried;
+}
+
 void vs_fader_bridge_apply_panic_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
 					   size_t count)
 {

@@ -227,6 +227,20 @@ static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 	sf->p_vs_reactivity_scale = NULL;
 }
 
+/* Caller must hold obs_enter_graphics(). Copies the panic slots into `out` (VS_SHADER_MAX_UNIFORMS entries) before
+ * a compile resets them, keeping `saved_valid` only on float parameters: the only ones Panic, Restore and the settings
+ * writer write. Returns how many slots were copied. */
+static size_t keep_saved_float_slots_locked(const struct vs_shader_filter *sf, struct vs_panic_param_slot *out)
+{
+	const size_t count = sf->parsed.param_count;
+	for (size_t i = 0; i < count; i++) {
+		out[i] = sf->panic_slots[i];
+		if (sf->parsed.params[i].type != VS_SHADER_PARAM_FLOAT)
+			out[i].saved_valid = false;
+	}
+	return count;
+}
+
 static void destroy_shader_effect(struct vs_shader_filter *sf)
 {
 	obs_enter_graphics();
@@ -435,6 +449,9 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 
 	char *gs_err = NULL;
 	obs_enter_graphics();
+	/* The reset below clears the panic slots; keep what Panic saved for the new shader's same-named parameters. */
+	struct vs_panic_param_slot kept_slots[VS_SHADER_MAX_UNIFORMS];
+	const size_t kept_count = keep_saved_float_slots_locked(sf, kept_slots);
 	destroy_shader_effect_locked(sf);
 	sf->compile_error[0] = '\0';
 	sf->uses_feedback = uses_fb;
@@ -498,8 +515,17 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 			update_user_uniform_values_locked(sf, settings);
 
 		if (vs_fader_bridge_is_panic_active()) {
-			for (size_t i = 0; i < sf->parsed.param_count; i++)
+			bool is_float[VS_SHADER_MAX_UNIFORMS] = {false};
+			for (size_t i = 0; i < sf->parsed.param_count; i++) {
 				sf->panic_slots[i].current_value = (double)sf->user_bindings[i].f_val;
+				is_float[i] = sf->parsed.params[i].type == VS_SHADER_PARAM_FLOAT;
+			}
+			/* A recompile during Panic (a new preset, a reloaded or edited shader): the settings hold the
+			 * zeros Panic wrote, so same-named float parameters take the pre-panic values saved before the
+			 * reset, and Panic below keeps them. A parameter new to this shader is saved with its own value;
+			 * one the new shader lacks is dropped. */
+			vs_fader_bridge_carry_saved_slots(kept_slots, kept_count, sf->panic_slots,
+							  sf->parsed.param_count, is_float);
 			vs_fader_bridge_apply_panic_to_shader(&sf->panic_passthrough, sf->panic_slots,
 							      sf->parsed.param_count);
 		}
