@@ -17,7 +17,6 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-
 /* Fixture for the negative locale-key ctest: scanned, never compiled. Its English is not en-US.ini's text for the key,
  * so check-locale-keys.cmake must fail on it. */
 static const char *fixture_format = vs_text_format("Shader.Error.FileNotFound", "Shader file not found: %d");
