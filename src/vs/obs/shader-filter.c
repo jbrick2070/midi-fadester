@@ -19,6 +19,7 @@
 #include "property-status.h"
 #include "core/fader-bridge.h"
 #include "core/shader-parse.h"
+#include "text.h"
 
 #include <graphics/graphics.h>
 #include <graphics/image-file.h>
@@ -368,29 +369,35 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 
 	char *raw_source = NULL;
 	const char *shader_label = sf->preset_shader;
+	/* shader_label names the effect for the compiler and the log; ui_label is what Properties shows */
+	const char *ui_label = sf->preset_shader;
 
 	if (strcmp(sf->preset_shader, PRESET_CUSTOM_TEXT) == 0) {
 		raw_source = bstrdup(sf->shader_text ? sf->shader_text : "");
 		shader_label = "inline shader";
+		ui_label = obs_module_text("Shader.InlineLabel");
 	} else {
 		if (file_path[0] == '\0') {
 			obs_enter_graphics();
 			destroy_shader_effect_locked(sf);
 			sf->uses_feedback = false;
 			sf->feedback_seeded = false;
-			snprintf(sf->compile_error, sizeof(sf->compile_error), "No shader file path specified.");
+			snprintf(sf->compile_error, sizeof(sf->compile_error), "%s",
+				 obs_module_text("Shader.Error.NoPath"));
 			obs_leave_graphics();
 			blog(LOG_WARNING, "[visual-sidechain] No shader file path specified.");
 			return;
 		}
 		raw_source = read_text_file_utf8(file_path);
 		shader_label = file_path;
+		ui_label = file_path;
 		if (!raw_source) {
 			obs_enter_graphics();
 			destroy_shader_effect_locked(sf);
 			sf->uses_feedback = false;
 			sf->feedback_seeded = false;
-			snprintf(sf->compile_error, sizeof(sf->compile_error), "Shader file not found: %s", file_path);
+			snprintf(sf->compile_error, sizeof(sf->compile_error),
+				 vs_text_format("Shader.Error.FileNotFound", "Shader file not found: %s"), file_path);
 			obs_leave_graphics();
 			blog(LOG_WARNING, "[visual-sidechain] Shader file not found: %s", file_path);
 			return;
@@ -412,7 +419,8 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		destroy_shader_effect_locked(sf);
 		sf->uses_feedback = false;
 		sf->feedback_seeded = false;
-		snprintf(sf->compile_error, sizeof(sf->compile_error), "Shader parse error (%s): %s", shader_label,
+		snprintf(sf->compile_error, sizeof(sf->compile_error),
+			 vs_text_format("Shader.Error.Parse", "Shader parse error (%s): %s"), ui_label,
 			 local_parsed.error_msg);
 		obs_leave_graphics();
 		blog(LOG_WARNING, "[visual-sidechain] Shader parse error (%s): %s", shader_label,
@@ -496,8 +504,9 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 							      sf->parsed.param_count);
 		}
 	} else {
-		snprintf(sf->compile_error, sizeof(sf->compile_error), "HLSL compiler error (%s): %s", shader_label,
-			 gs_err ? gs_err : "unknown error");
+		snprintf(sf->compile_error, sizeof(sf->compile_error),
+			 vs_text_format("Shader.Error.Compile", "HLSL compiler error (%s): %s"), ui_label,
+			 gs_err ? gs_err : obs_module_text("Shader.Error.Unknown"));
 	}
 
 	const bool ok = (sf->effect != NULL);
@@ -1229,9 +1238,24 @@ static void refresh_shader_fader_props_visibility(obs_properties_t *props, obs_d
 	const char *slider_keys[] = {S_EFFECT_MIX, S_AUDIO_REACTIVITY};
 	const char *status_keys[] = {S_MIX_FADER_STATUS, S_REACTIVITY_FADER_STATUS};
 	const char *reset_keys[] = {S_MIX_FADER_RESET, S_REACTIVITY_FADER_RESET};
-	const char *fixed_text[] = {"Shader.MixFader.StatusFixed", "Shader.ReactivityFader.StatusFixed"};
-	const char *mapped_text[] = {"Shader.MixFader.StatusMapped", "Shader.ReactivityFader.StatusMapped"};
-	const char *unloaded_text[] = {"Shader.MixFader.StatusNotLoaded", "Shader.ReactivityFader.StatusNotLoaded"};
+	/* key and English pairs spelled out, so check-locale-keys sees each one */
+	const char *fixed_text[] = {
+		vs_text_format("Shader.MixFader.StatusFixed", "Effect mix follows the Effect Mix slider (%.0f%%)."),
+		vs_text_format("Shader.ReactivityFader.StatusFixed",
+			       "Audio reactivity follows the Audio Reactivity slider (%.0f%%)."),
+	};
+	const char *mapped_text[] = {
+		vs_text_format("Shader.MixFader.StatusMapped", "%s scales Effect Mix: 0%% dry to %.0f%% wet."),
+		vs_text_format("Shader.ReactivityFader.StatusMapped",
+			       "%s scales Audio Reactivity: 0%% calm to %.0f%% response."),
+	};
+	const char *unloaded_text[] = {
+		vs_text_format("Shader.MixFader.StatusNotLoaded",
+			       "%s is assigned, but Midi Fadester is not loaded: using the Effect Mix slider (%.0f%%)."),
+		vs_text_format(
+			"Shader.ReactivityFader.StatusNotLoaded",
+			"%s is assigned, but Midi Fadester is not loaded: using the Audio Reactivity slider (%.0f%%)."),
+	};
 	char summary[768];
 	for (size_t i = 0; i < 2; i++) {
 		obs_property_t *list = obs_properties_get(props, slot_keys[i]);
@@ -1239,11 +1263,11 @@ static void refresh_shader_fader_props_visibility(obs_properties_t *props, obs_d
 		const char *label = vs_property_int_choice_name(list, slot);
 		const double slider_pct = obs_data_get_double(settings, slider_keys[i]);
 		if (slot >= 0 && slot < VS_FADER_SLOT_COUNT && label && fadester_loaded)
-			snprintf(summary, sizeof(summary), obs_module_text(mapped_text[i]), label, slider_pct);
+			snprintf(summary, sizeof(summary), mapped_text[i], label, slider_pct);
 		else if (slot >= 0 && slot < VS_FADER_SLOT_COUNT && label)
-			snprintf(summary, sizeof(summary), obs_module_text(unloaded_text[i]), label, slider_pct);
+			snprintf(summary, sizeof(summary), unloaded_text[i], label, slider_pct);
 		else
-			snprintf(summary, sizeof(summary), obs_module_text(fixed_text[i]), slider_pct);
+			snprintf(summary, sizeof(summary), fixed_text[i], slider_pct);
 		obs_property_t *status = obs_properties_get(props, status_keys[i]);
 		vs_property_info_set_text(status, summary);
 		obs_property_set_visible(list, show_mix_react && !collapsed);
@@ -1284,15 +1308,26 @@ static void refresh_shader_fader_props_visibility(obs_properties_t *props, obs_d
 		if (!selected)
 			snprintf(summary, sizeof(summary), "%s", obs_module_text("Shader.ParamFader.StatusEmpty"));
 		else if (!target_label)
-			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusMissing"), target);
+			snprintf(
+				summary, sizeof(summary),
+				vs_text_format(
+					"Shader.ParamFader.StatusMissing",
+					"Parameter unavailable in this shader: %s. Select another target or clear this assignment."),
+				target);
 		else if (slot < 0 || slot >= VS_FADER_SLOT_COUNT || !slot_label)
-			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusSlider"),
+			snprintf(summary, sizeof(summary),
+				 vs_text_format("Shader.ParamFader.StatusSlider", "%s: using the shader slider value."),
 				 target_label);
 		else if (!fadester_loaded)
-			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusNotLoaded"),
-				 slot_label, target_label);
+			snprintf(
+				summary, sizeof(summary),
+				vs_text_format(
+					"Shader.ParamFader.StatusNotLoaded",
+					"%s -> %s is assigned, but Midi Fadester is not loaded: using the shader slider value."),
+				slot_label, target_label);
 		else
-			snprintf(summary, sizeof(summary), obs_module_text("Shader.ParamFader.StatusMapped"),
+			snprintf(summary, sizeof(summary),
+				 vs_text_format("Shader.ParamFader.StatusMapped", "%s -> %s: %.4g to %.4g."),
 				 slot_label, target_label, obs_data_get_double(settings, kmin),
 				 obs_data_get_double(settings, kmax));
 		vs_property_info_set_text(obs_properties_get(props, kstatus), summary);
@@ -1455,6 +1490,15 @@ static bool on_reload_shader_clicked(obs_properties_t *props, obs_property_t *pr
 	return true;
 }
 
+/* A file dialog filter's name: the characters Qt's filter syntax gives a meaning to become spaces */
+static void append_filter_name(struct dstr *out, const char *name)
+{
+	for (const char *c = name; *c; c++) {
+		const char ch = strchr("();*", *c) ? ' ' : *c;
+		dstr_ncat(out, &ch, 1);
+	}
+}
+
 static obs_properties_t *shader_filter_get_properties(void *data)
 {
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
@@ -1472,6 +1516,15 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	bool uses_custom_band = true;
 	size_t param_count = 0u;
 	struct vs_shader_param_info *params_snap = NULL;
+	/* the file dialogs' filters: translated names, fixed patterns (a name cannot break Qt's filter syntax) */
+	struct dstr shader_filter = {0};
+	struct dstr image_filter = {0};
+	append_filter_name(&shader_filter, obs_module_text("Shader.FileFilter.Shaders"));
+	dstr_cat(&shader_filter, " (*.shader *.effect *.hlsl);;");
+	append_filter_name(&shader_filter, obs_module_text("Shader.FileFilter.All"));
+	dstr_cat(&shader_filter, " (*.*)");
+	append_filter_name(&image_filter, obs_module_text("Shader.FileFilter.Images"));
+	dstr_cat(&image_filter, " (*.png *.jpg *.jpeg *.gif *.bmp *.tga *.webp)");
 
 	if (sf) {
 		obs_enter_graphics();
@@ -1521,9 +1574,8 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	const bool is_file = (strcmp(preset_snap, PRESET_CUSTOM_FILE) == 0);
 	const bool is_text = (strcmp(preset_snap, PRESET_CUSTOM_TEXT) == 0);
 
-	obs_property_t *p_path =
-		obs_properties_add_path(sh_grp, S_SHADER_FILE_PATH, obs_module_text("Shader.FilePath"), OBS_PATH_FILE,
-					"Shader Files (*.shader *.effect *.hlsl);;All Files (*.*)", NULL);
+	obs_property_t *p_path = obs_properties_add_path(sh_grp, S_SHADER_FILE_PATH, obs_module_text("Shader.FilePath"),
+							 OBS_PATH_FILE, shader_filter.array, NULL);
 	obs_property_set_visible(p_path, is_file);
 
 	obs_property_t *p_text =
@@ -1628,8 +1680,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 				up = obs_properties_add_color_alpha(u_grp, info->name, info->label);
 			} else if (info->type == VS_SHADER_PARAM_TEXTURE) {
 				up = obs_properties_add_path(u_grp, info->name, info->label, OBS_PATH_FILE,
-							     "Images (*.png *.jpg *.jpeg *.gif *.bmp *.tga *.webp)",
-							     NULL);
+							     image_filter.array, NULL);
 			}
 			if (up && info->tooltip[0] != '\0') {
 				obs_property_set_long_description(up, info->tooltip);
@@ -1753,6 +1804,8 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	}
 
 	bfree(params_snap);
+	dstr_free(&shader_filter);
+	dstr_free(&image_filter);
 
 	return props;
 }

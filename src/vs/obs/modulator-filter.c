@@ -16,6 +16,7 @@
 #include "core/modulation.h"
 #include "plugin-support.h"
 #include "property-status.h"
+#include "text.h"
 
 #include <util/threading.h>
 
@@ -943,7 +944,9 @@ static void refresh_modulator_properties_visibility(struct vs_modulator_filter *
 		if (!target_filter[0] || !target_setting[0]) {
 			snprintf(summary, sizeof(summary), "%s", obs_module_text("Modulator.Binding.StatusEmpty"));
 		} else if (!filter_label || !setting_label) {
-			snprintf(summary, sizeof(summary), obs_module_text("Modulator.Binding.StatusMissing"),
+			snprintf(summary, sizeof(summary),
+				 vs_text_format("Modulator.Binding.StatusMissing",
+						"Target unavailable: %s / %s. Select an available filter and setting."),
 				 target_filter, target_setting);
 		} else {
 			slot_key(key, sizeof(key), i, "signal");
@@ -960,7 +963,9 @@ static void refresh_modulator_properties_visibility(struct vs_modulator_filter *
 			slot_key(key, sizeof(key), i, "invert");
 			const char *inverted =
 				obs_data_get_bool(settings, key) ? obs_module_text("Modulator.Binding.Inverted") : "";
-			snprintf(summary, sizeof(summary), obs_module_text("Modulator.Binding.StatusMapped"),
+			snprintf(summary, sizeof(summary),
+				 vs_text_format("Modulator.Binding.StatusMapped",
+						"%s%s -> %s / %s | %.4g to %.4g | Amount %.0f%% | Depth: %s"),
 				 signal_label ? signal_label : obs_module_text("Modulator.Binding.UnknownSignal"),
 				 inverted, filter_label, setting_label, minimum, maximum, amount, depth_label);
 		}

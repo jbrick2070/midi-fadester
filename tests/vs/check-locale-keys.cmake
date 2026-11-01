@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Fails when a locale key used in src/ through obs_module_text("...") or T_("...") is missing from the locale file
-# (REQUIREMENTS R-TST-4). Run with:
+# (REQUIREMENTS R-TST-4), and when a vs_text_format("Key", "English") call's key is missing or its English is not the
+# locale file's text. Run with:
 #   cmake -DSOURCE_DIR=<repo> [-DLOCALE_FILE=<ini>] [-DEXTRA_SOURCE=<file>] -P check-locale-keys.cmake
 # EXTRA_SOURCE adds one more file to scan; the negative ctest uses it to prove that a missing key fails.
 
@@ -39,6 +40,26 @@ foreach(_source IN LISTS _sources)
     string(REGEX REPLACE "^(obs_module_text|T_)\\([ \t]*\"([^\"]+)\"[ \t]*\\)$" "\\2" _key "${_use}")
     if(NOT _key IN_LIST _keys)
       list(APPEND _missing "${_key} (${_source})")
+    endif()
+  endforeach()
+endforeach()
+
+# vs_text_format("Key", "English"), possibly across lines: the key must be in the locale file with exactly that English
+# (R-I18N-2: the literal is the trusted format). The English literals hold no escaped quote.
+file(READ "${LOCALE_FILE}" _locale_text)
+set(_format_use "vs_text_format\\([ \t\r\n]*\"([^\"]+)\"[ \t\r\n]*,[ \t\r\n]*\"([^\"]*)\"")
+foreach(_source IN LISTS _sources)
+  file(READ "${_source}" _text)
+  string(REGEX MATCHALL "${_format_use}" _uses "${_text}")
+  foreach(_use IN LISTS _uses)
+    string(REGEX MATCH "^${_format_use}$" _parts "${_use}")
+    set(_key "${CMAKE_MATCH_1}")
+    set(_english "${CMAKE_MATCH_2}")
+    string(REPLACE "." "\\." _key_pattern "${_key}")
+    if(NOT _locale_text MATCHES "(^|\n)${_key_pattern}=\"([^\n]*)\"[ \t\r]*(\n|$)")
+      list(APPEND _missing "${_key} (${_source})")
+    elseif(NOT CMAKE_MATCH_2 STREQUAL _english)
+      list(APPEND _missing "${_key}: the English in ${_source} is not the locale file's text")
     endif()
   endforeach()
 endforeach()
