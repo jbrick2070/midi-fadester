@@ -1849,9 +1849,11 @@ void vs_shader_filter_apply_panic(obs_source_t *source)
 	vs_fader_bridge_apply_panic_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count);
 	sf->feedback_seeded = false;
 
+	/* Write only the slots Panic zeroed and saved: the set shader_filter_save keeps at their saved values and
+	 * Restore writes back. */
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
-		if (info->type == VS_SHADER_PARAM_FLOAT) {
+		if (sf->panic_slots[i].saved_valid && info->type == VS_SHADER_PARAM_FLOAT) {
 			sf->user_bindings[i].f_val = (float)sf->panic_slots[i].current_value;
 			if (settings)
 				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
@@ -1875,11 +1877,15 @@ void vs_shader_filter_apply_restore(obs_source_t *source)
 	obs_data_t *settings = obs_source_get_settings(source);
 
 	obs_enter_graphics();
-	vs_fader_bridge_apply_restore_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count);
+	/* Write back only what Panic saved. Any other slot's current_value is a stale scratch copy (zero after a
+	 * compile), so a Restore with no Panic before it, or a second Restore, changes no parameter. */
+	bool restored[VS_SHADER_MAX_UNIFORMS] = {false};
+	vs_fader_bridge_apply_restore_to_shader(&sf->panic_passthrough, sf->panic_slots, sf->parsed.param_count,
+						restored);
 
 	for (size_t i = 0; i < sf->parsed.param_count; i++) {
 		const struct vs_shader_param_info *info = &sf->parsed.params[i];
-		if (info->type == VS_SHADER_PARAM_FLOAT) {
+		if (restored[i] && info->type == VS_SHADER_PARAM_FLOAT) {
 			sf->user_bindings[i].f_val = (float)sf->panic_slots[i].current_value;
 			if (settings)
 				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);

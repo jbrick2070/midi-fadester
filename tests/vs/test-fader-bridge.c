@@ -506,9 +506,9 @@ static void test_panic_and_restore_hotkeys_logic(void)
 	/* 2. Trigger "Visual Sidechain: Restore" */
 	vs_fader_bridge_trigger_restore();
 	assert(!vs_fader_bridge_is_panic_active());
-	vs_fader_bridge_apply_restore_to_shader(&builtin_passthrough, slots, 4u);
-	vs_fader_bridge_apply_restore_to_shader(&user_shader_passthrough, user_slots, 2u);
-	vs_fader_bridge_apply_restore_to_shader(&zero_param_shader_passthrough, NULL, 0u);
+	assert(vs_fader_bridge_apply_restore_to_shader(&builtin_passthrough, slots, 4u, NULL) == 2u);
+	assert(vs_fader_bridge_apply_restore_to_shader(&user_shader_passthrough, user_slots, 2u, NULL) == 0u);
+	assert(vs_fader_bridge_apply_restore_to_shader(&zero_param_shader_passthrough, NULL, 0u, NULL) == 0u);
 
 	/* Pass-through is cleared on Restore and pre-panic values are restored */
 	assert(!builtin_passthrough);
@@ -522,6 +522,97 @@ static void test_panic_and_restore_hotkeys_logic(void)
 	assert(fabs(slots[1].current_value - 100.0) < 1e-6);
 	assert(fabs(slots[2].current_value - 3.0) < 1e-6);
 	assert(fabs(slots[3].current_value - 0.30) < 1e-6);
+}
+
+#define RESTORE_TEST_SLOTS 5u
+
+/* As vs_shader_filter_apply_panic and vs_shader_filter_apply_restore do: copy a slot's value into the filter's
+ * live float value (its user_bindings f_val and its settings) only where `write_mask` is true. Keep this in
+ * step with their write-back loops in src/obs/shader-filter.c, which need libobs graphics to run. */
+static void write_back_slots(double *live, const struct vs_panic_param_slot *slots, const bool *write_mask,
+			     size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		if (write_mask[i])
+			live[i] = slots[i].current_value;
+	}
+}
+
+static void assert_live_values(const double *live, const double *expected, size_t count)
+{
+	for (size_t i = 0; i < count; i++)
+		assert(fabs(live[i] - expected[i]) < 1e-9);
+}
+
+static void test_restore_writes_back_only_what_panic_saved(void)
+{
+	vs_fader_bridge_reset();
+
+	/* A Shader Filter just compiled: its slots carry the parameter names, and their values are zero from the
+	 * reset that precedes every compile (shader-filter.c). `live` holds the filter's float parameters. */
+	struct vs_panic_param_slot slots[RESTORE_TEST_SLOTS];
+	memset(slots, 0, sizeof(slots));
+	snprintf(slots[0].name, sizeof(slots[0].name), "flash_intensity");
+	snprintf(slots[1].name, sizeof(slots[1].name), "slot_1_amount_pct");
+	snprintf(slots[2].name, sizeof(slots[2].name), "max_flash_rate_hz");
+	snprintf(slots[3].name, sizeof(slots[3].name), "onset_threshold");
+	snprintf(slots[4].name, sizeof(slots[4].name), "warp_speed");
+	double live[RESTORE_TEST_SLOTS] = {0.55, 100.0, 3.0, 0.30, 1.25};
+	bool restored[RESTORE_TEST_SLOTS];
+	bool panic_saved[RESTORE_TEST_SLOTS];
+	bool passthrough = true;
+
+	/* 1. Restore with no Panic before it: nothing restored, no slot and no live value changed, and the
+	 * filter's own pass-through is cleared. */
+	for (size_t i = 0; i < RESTORE_TEST_SLOTS; i++)
+		restored[i] = true;
+	assert(vs_fader_bridge_apply_restore_to_shader(&passthrough, slots, RESTORE_TEST_SLOTS, restored) == 0u);
+	assert(!passthrough);
+	for (size_t i = 0; i < RESTORE_TEST_SLOTS; i++) {
+		assert(!restored[i]);
+		assert(!slots[i].saved_valid);
+		assert(slots[i].current_value == 0.0);
+		assert(slots[i].saved_value == 0.0);
+	}
+	write_back_slots(live, slots, restored, RESTORE_TEST_SLOTS);
+	const double untouched[RESTORE_TEST_SLOTS] = {0.55, 100.0, 3.0, 0.30, 1.25};
+	assert_live_values(live, untouched, RESTORE_TEST_SLOTS);
+
+	/* 2. Panic captures the live values, then zeroes and saves exactly the flash and amount slots (never the
+	 * 3 Hz rate cap or the threshold) and writes back exactly the slots it saved. */
+	for (size_t i = 0; i < RESTORE_TEST_SLOTS; i++)
+		slots[i].current_value = live[i];
+	vs_fader_bridge_apply_panic_to_shader(&passthrough, slots, RESTORE_TEST_SLOTS);
+	assert(passthrough);
+	for (size_t i = 0; i < RESTORE_TEST_SLOTS; i++)
+		panic_saved[i] = slots[i].saved_valid;
+	assert(panic_saved[0] && panic_saved[1] && !panic_saved[2] && !panic_saved[3] && !panic_saved[4]);
+	write_back_slots(live, slots, panic_saved, RESTORE_TEST_SLOTS);
+	const double panicked[RESTORE_TEST_SLOTS] = {0.0, 0.0, 3.0, 0.30, 1.25};
+	assert_live_values(live, panicked, RESTORE_TEST_SLOTS);
+
+	/* During Panic the operator changes a non-strobe value and lowers the flash rate cap. */
+	live[4] = 2.0;
+	live[2] = 2.0;
+
+	/* Restore puts back exactly the two zeroed slots and keeps both changes made during Panic. */
+	assert(vs_fader_bridge_apply_restore_to_shader(&passthrough, slots, RESTORE_TEST_SLOTS, restored) == 2u);
+	assert(!passthrough);
+	assert(restored[0] && restored[1] && !restored[2] && !restored[3] && !restored[4]);
+	for (size_t i = 0; i < RESTORE_TEST_SLOTS; i++)
+		assert(!slots[i].saved_valid);
+	write_back_slots(live, slots, restored, RESTORE_TEST_SLOTS);
+	const double after_restore[RESTORE_TEST_SLOTS] = {0.55, 100.0, 2.0, 0.30, 2.0};
+	assert_live_values(live, after_restore, RESTORE_TEST_SLOTS);
+
+	/* 3. A second Restore restores nothing, even after the operator changed a restored value. */
+	live[0] = 0.70;
+	assert(vs_fader_bridge_apply_restore_to_shader(&passthrough, slots, RESTORE_TEST_SLOTS, restored) == 0u);
+	for (size_t i = 0; i < RESTORE_TEST_SLOTS; i++)
+		assert(!restored[i]);
+	write_back_slots(live, slots, restored, RESTORE_TEST_SLOTS);
+	const double after_second_restore[RESTORE_TEST_SLOTS] = {0.70, 100.0, 2.0, 0.30, 2.0};
+	assert_live_values(live, after_second_restore, RESTORE_TEST_SLOTS);
 }
 
 static void test_multi_instance_frame_deduplication_and_track1_priority(void)
@@ -710,6 +801,7 @@ int main(void)
 	test_fx_bridge_poll_signal_and_legacy_provider();
 	test_newer_events_win_over_in_flight_poll();
 	test_panic_and_restore_hotkeys_logic();
+	test_restore_writes_back_only_what_panic_saved();
 	test_multi_instance_frame_deduplication_and_track1_priority();
 	test_shader_and_modulator_fader_parameter_controls();
 	printf("test-fader-bridge: all assertions passed\n");

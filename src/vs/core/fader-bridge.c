@@ -660,16 +660,23 @@ void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, siz
 	}
 }
 
-void vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count)
+size_t vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count, bool *out_restored)
 {
+	for (size_t i = 0; out_restored && i < count; i++)
+		out_restored[i] = false;
 	if (!slots)
-		return;
+		return 0;
+	size_t restored = 0;
 	for (size_t i = 0; i < count; i++) {
 		if (!slots[i].saved_valid)
 			continue;
 		slots[i].current_value = slots[i].saved_value;
 		slots[i].saved_valid = false;
+		if (out_restored)
+			out_restored[i] = true;
+		restored++;
 	}
+	return restored;
 }
 
 void vs_fader_bridge_apply_panic_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
@@ -680,10 +687,10 @@ void vs_fader_bridge_apply_panic_to_shader(bool *filter_panic_passthrough, struc
 	vs_fader_bridge_apply_panic_to_slots(slots, count);
 }
 
-void vs_fader_bridge_apply_restore_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
-					     size_t count)
+size_t vs_fader_bridge_apply_restore_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
+					       size_t count, bool *out_restored)
 {
 	if (filter_panic_passthrough)
 		*filter_panic_passthrough = false;
-	vs_fader_bridge_apply_restore_to_slots(slots, count);
+	return vs_fader_bridge_apply_restore_to_slots(slots, count, out_restored);
 }

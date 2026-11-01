@@ -125,7 +125,7 @@ bool vs_fader_bridge_on_tick(float dt_sec, const struct vs_audio_frame *frame);
  * Panic & Restore hotkey state and parameter-slot helpers:
  * "Visual Sidechain: Panic" immediately sets every strobe/flash/modulation
  * amount to 0.0 (saving pre-panic values once); "Visual Sidechain: Restore"
- * restores them.
+ * puts back only the values Panic saved and leaves every other slot alone.
  */
 struct vs_panic_param_slot {
 	char name[64];
@@ -140,11 +140,18 @@ void vs_fader_bridge_trigger_restore(void);
 bool vs_fader_bridge_is_panic_active(void);
 bool vs_fader_bridge_should_shader_passthrough(bool filter_panic_passthrough, bool has_compiled_effect);
 void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, size_t count);
-void vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count);
+/*
+ * Restores each slot Panic saved (`saved_valid`) to its saved value and clears `saved_valid`; every other slot
+ * is left as it is. When `out_restored` is not NULL it must hold `count` entries and receives true for exactly
+ * the slots restored, so a caller writes back only those. Returns how many slots were restored (0 when Panic
+ * saved nothing, for example a Restore with no Panic before it).
+ */
+size_t vs_fader_bridge_apply_restore_to_slots(struct vs_panic_param_slot *slots, size_t count, bool *out_restored);
 void vs_fader_bridge_apply_panic_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
 					   size_t count);
-void vs_fader_bridge_apply_restore_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
-					     size_t count);
+/* Clears the filter's own pass-through, then restores as vs_fader_bridge_apply_restore_to_slots does. */
+size_t vs_fader_bridge_apply_restore_to_shader(bool *filter_panic_passthrough, struct vs_panic_param_slot *slots,
+					       size_t count, bool *out_restored);
 
 #ifdef __cplusplus
 }
