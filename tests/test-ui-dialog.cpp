@@ -656,6 +656,17 @@ static void fake_op_set_studio_mode(bool enabled, void *user_data)
 	}
 }
 
+/* OBS output channel 1 is Desktop Audio; the fake names it as a localized OBS might. */
+static bool fake_op_get_output_source_name(uint32_t channel, char *out_name, size_t out_size, void *user_data)
+{
+	(void)user_data;
+	if (channel != 1U || !out_name || out_size == 0U) {
+		return false;
+	}
+	snprintf(out_name, out_size, "%s", "Desktop Audio");
+	return true;
+}
+
 static const struct mfd_scene_graph_ops k_fake_sg_ops = {
 	fake_op_source_exists,
 	fake_op_scene_exists,
@@ -674,6 +685,7 @@ static const struct mfd_scene_graph_ops k_fake_sg_ops = {
 	fake_op_update_filter_settings,
 	fake_op_get_filter_enabled,
 	fake_op_set_filter_enabled,
+	fake_op_get_output_source_name,
 };
 
 template<typename T> static T *must_find(QObject *root, const QString &name)

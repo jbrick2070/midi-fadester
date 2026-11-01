@@ -5,6 +5,7 @@
  */
 
 #include "core/ui-sentences.h"
+#include "core/apc40-profile.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,57 +17,23 @@ void mfd_ui_strip_title(int slot_index, const char *slot_label, char *out, size_
 	}
 	out[0] = '\0';
 
-	if (slot_index == 0) {
-		if (!slot_label || slot_label[0] == '\0' || strcmp(slot_label, "Crossfader (A/B)") == 0 ||
-		    strcmp(slot_label, "Fader 1") == 0) {
-			snprintf(out, out_size, "Crossfader");
-		} else {
-			snprintf(out, out_size, "%s", slot_label);
-		}
-		return;
-	}
-
-	if (slot_index >= 1 && slot_index <= 8) {
-		char def_track[32];
-		char def_fader[32];
-		snprintf(def_track, sizeof(def_track), "Track Fader %d", slot_index);
-		snprintf(def_fader, sizeof(def_fader), "Fader %d", slot_index + 1);
-		if (!slot_label || slot_label[0] == '\0' || strcmp(slot_label, def_track) == 0 ||
-		    strcmp(slot_label, def_fader) == 0) {
-			snprintf(out, out_size, "%d", slot_index);
-		} else {
-			snprintf(out, out_size, "%s", slot_label);
-		}
-		return;
-	}
-
-	if (slot_index == 9) {
-		if (!slot_label || slot_label[0] == '\0' || strcmp(slot_label, "Master Fader") == 0 ||
-		    strcmp(slot_label, "Fader 10") == 0) {
-			snprintf(out, out_size, "Master");
-		} else {
-			snprintf(out, out_size, "%s", slot_label);
-		}
-		return;
-	}
-
-	if (slot_index >= 10 && slot_index <= 17) {
-		int fx_num = slot_index - 9;
-		char def_fx[32];
-		char def_fader[32];
-		snprintf(def_fx, sizeof(def_fx), "FX %d", fx_num);
-		snprintf(def_fader, sizeof(def_fader), "Fader %d", slot_index + 1);
-		if (!slot_label || slot_label[0] == '\0' || strcmp(slot_label, def_fx) == 0 ||
-		    strcmp(slot_label, def_fader) == 0) {
-			snprintf(out, out_size, "FX %d", fx_num);
-		} else {
-			snprintf(out, out_size, "%s", slot_label);
-		}
-		return;
-	}
-
-	if (slot_label && slot_label[0] != '\0') {
+	/* A default label is stored empty; older configs may still hold a profile's English default. Both show the
+	 * desk-printed short title, a label the user typed shows as typed (R-I18N-2). */
+	const bool is_default =
+		!slot_label || slot_label[0] == '\0' ||
+		(slot_index >= 0 && slot_index < 18 && mfd_profile_is_default_slot_label(slot_index, slot_label));
+	if (!is_default) {
 		snprintf(out, out_size, "%s", slot_label);
+		return;
+	}
+	if (slot_index == 0) {
+		snprintf(out, out_size, "Crossfader");
+	} else if (slot_index >= 1 && slot_index <= 8) {
+		snprintf(out, out_size, "%d", slot_index);
+	} else if (slot_index == 9) {
+		snprintf(out, out_size, "Master");
+	} else if (slot_index >= 10 && slot_index <= 17) {
+		snprintf(out, out_size, "FX %d", slot_index - 9);
 	} else {
 		snprintf(out, out_size, "%d", slot_index + 1);
 	}
@@ -283,8 +250,8 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 	}
 
 	/* Priority 2: Switch scenes with Studio Mode off */
-	if (!in->available && in->target_type == MFD_TARGET_TBAR && in->reason &&
-	    strcmp(in->reason, "Studio Mode is off.") == 0) {
+	if (!in->available && in->target_type == MFD_TARGET_TBAR && in->reason_msg &&
+	    in->reason_msg->code == MFD_MSG_STUDIO_MODE_OFF) {
 		snprintf(out->status_sentence, sizeof(out->status_sentence), "Studio Mode is off.");
 		out->severity = MFD_UI_SEVERITY_AMBER;
 		out->bottom_action = MFD_UI_ACTION_TURN_ON_STUDIO_MODE;
@@ -309,6 +276,7 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 	if (in->takeover_state == MFD_TAKEOVER_PARKED ||
 	    (in->target_type == MFD_TARGET_TBAR && in->tbar_state == MFD_TBAR_PARKED)) {
 		snprintf(out->state_readout, sizeof(out->state_readout), "At end.");
+		out->at_end = true;
 		return;
 	}
 

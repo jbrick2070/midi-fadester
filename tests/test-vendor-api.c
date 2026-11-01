@@ -733,6 +733,17 @@ static void fake_op_set_filter_enabled(const char *source_name, const char *filt
 	}
 }
 
+/* OBS output channel 1 is Desktop Audio; the fake names it as a localized OBS might. */
+static bool fake_op_get_output_source_name(uint32_t channel, char *out_name, size_t out_size, void *user_data)
+{
+	(void)user_data;
+	if (channel != 1U || !out_name || out_size == 0U) {
+		return false;
+	}
+	snprintf(out_name, out_size, "%s", "desktop audio");
+	return true;
+}
+
 static const struct mfd_scene_graph_ops g_fake_sg_ops = {
 	fake_op_source_exists,
 	fake_op_scene_exists,
@@ -751,6 +762,7 @@ static const struct mfd_scene_graph_ops g_fake_sg_ops = {
 	fake_op_update_filter_settings,
 	fake_op_get_filter_enabled,
 	fake_op_set_filter_enabled,
+	fake_op_get_output_source_name,
 };
 
 struct mt_stress_ctx {
@@ -1120,6 +1132,7 @@ int main(void)
 	REQUIRE(strcmp(obs_data_get_string(res, "comment"),
 		       "Unknown profile 'nonexistent_desk'. Valid profiles: apc40mk2, apcminimk2, midimix, nanokontrol2, launchcontrolxl, generic.") ==
 		0);
+	REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "unknown_profile") == 0);
 	obs_data_release(req);
 	obs_data_release(res);
 
@@ -1193,6 +1206,10 @@ int main(void)
 	REQUIRE(strcmp(obs_data_get_string(s0, "target_mode"), "tbar") == 0);
 	REQUIRE(!obs_data_get_bool(s0, "available"));
 	REQUIRE(strcmp(obs_data_get_string(s0, "reason"), "Studio Mode is off.") == 0);
+	REQUIRE(strcmp(obs_data_get_string(s0, "reason_code"), "studio_mode_off") == 0);
+	/* A default label is stored empty; the API still names the slot with its English default (R-I18N-1). */
+	REQUIRE(eng.fader_slots[0].label[0] == '\0');
+	REQUIRE(strcmp(obs_data_get_string(s0, "name"), "Crossfader (A/B)") == 0);
 	obs_data_release(s0);
 	obs_data_array_release(arr);
 	obs_data_release(req);
@@ -3288,6 +3305,7 @@ int main(void)
 		obs_data_set_bool(req, "enabled", true);
 		mfd_vendor_handle_set_slot(req, res, &eng);
 		REQUIRE(strstr(obs_data_get_string(res, "error"), "already controlled") != NULL);
+		REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "setting_already_controlled") == 0);
 		REQUIRE(strcmp(obs_data_get_string(res, "error"), obs_data_get_string(res, "comment")) == 0);
 		REQUIRE(!eng.fader_slots[11].enabled);
 		REQUIRE(eng.slot_config_rev[11] == disabled_dup_rev);

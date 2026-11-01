@@ -186,6 +186,7 @@ static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_s
 	in.display_value = disp_buf;
 	in.available = s.cached_available;
 	in.reason = s.cached_reason;
+	in.reason_msg = &s.cached_reason_msg;
 	in.raw_norm = s.last_raw_norm;
 	in.applied_val = s.last_applied_val;
 	in.alpha_a = s.last_alpha_a;
@@ -1444,7 +1445,7 @@ private:
 				strip_titles_[i]->setStyleSheet(title_style);
 			}
 
-			const bool at_end = (std::strcmp(sp.state_readout, "At end.") == 0);
+			const bool at_end = sp.at_end;
 			const bool is_fx_style = mfd_slot_is_fx_bank(i) || (s.target_type == MFD_TARGET_FILTER_PARAM);
 			strip_bars_[i]->set_state(sp.bar_percent, sp.dimmed, sp.severity, at_end, sp.show_pickup_marker,
 						  sp.pickup_target_percent, QString::fromUtf8(sp.arrow_glyph),
@@ -2235,7 +2236,7 @@ private:
 						QString::asprintf("%d%% \xC2\xB7 %s", desired_pct, sp.status_sentence);
 					desired_style = style_waiting;
 					desired_tip = QString::fromUtf8(sp.status_sentence);
-				} else if (std::strcmp(sp.state_readout, "At end.") == 0) {
+				} else if (sp.at_end) {
 					desired_text = QString::asprintf("%d%% \xC2\xB7 At end.", desired_pct);
 					desired_style = style_parked;
 					desired_tip = QStringLiteral("At end (parked at rail).");

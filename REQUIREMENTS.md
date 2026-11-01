@@ -108,6 +108,16 @@ Coordinates: `raw` is the control's raw MIDI value; `[cal_min, cal_max]` are the
 
 ---
 
+## 7a. Translations (`R-I18N-*`, requested by the operator 2026-10-31)
+
+| ID | Requirement |
+|---|---|
+| `R-I18N-1` | Every text a user reads in OBS comes from `data/locale/<lang>.ini`: the settings dialog, the setup sheet, the controller drawing, the T-bar error line, the layer filter, the strip titles, status and readout sentences, the MIDI device messages and the engine's error and reason lines as the UI shows them. With no translation for a key, the English text is shown. Log lines, setting keys, profile slugs, slot ids, exported file names and the obs-websocket vendor API (`reason`, `error`, `label`, `display_value`) stay English: the API is a contract with the Stream Deck plugin and scripts. |
+| `R-I18N-2` | No English text is used as data. Stored or compared values (default slot labels, the "Studio Mode is off" reason, the "At end" readout, OBS's own source names such as "Desktop Audio", OBS's button texts in the self-test) are replaced by codes, flags or OBS ids, and only their display is translated. A label the user typed is shown as typed; a default label is shown translated. |
+| `R-I18N-3` | A translated text never reaches printf as a format. Values go into numbered placeholders `%1`..`%9` filled by `mfd_text_fill` (pure C, char buffers) or, in Qt, a single-pass fill; a translation may reorder or repeat them. Whole sentences are keys: no sentence is built from translated fragments where another language would need a different word order, and counts use separate one and many texts. |
+| `R-I18N-4` | Ten languages beside English, as in obs-playlister and visual-sidechain: zh-CN, es-ES, pt-BR, ru-RU, ja-JP, de-DE, fr-FR, ko-KR, zh-TW, tr-TR. "Midi Fadester", "OBS", "MIDI", "CC", "APC40", "Stream Deck" and Qt mnemonics (`&`) are kept. Each file says it was drafted by an AI model and reviewed by a second one, and that corrections are welcome. |
+| `R-I18N-5` | ctest checks every language file against `en-US.ini` (same keys, same placeholders, no printf conversion, valid UTF-8 without BOM, OBS's parse rules, all ten present) with negative tests, and the key check finds every `mfd_text` key. README says which languages exist, how they were made and how to send corrections. |
+
 ## 8. Phase Roadmap Summary (Approved 2026-10-27)
 
 | Phase | Scope |

@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "core/midi-types.h"
+#include "core/slot-messages.h"
 #include "core/takeover.h"
 #include "core/tbar-logic.h"
 #include "midi/winmm-device.h"
@@ -59,7 +60,8 @@ struct mfd_ui_strip_input {
 	const char *filter_prop_label;
 	const char *display_value;
 	bool available;
-	const char *reason;
+	const char *reason;               /* English reason (shown until the UI words it from reason_msg) */
+	const struct mfd_msg *reason_msg; /* reason code + arguments; NULL when unknown */
 	float raw_norm;
 	float applied_val;
 	float alpha_a;
@@ -83,6 +85,7 @@ struct mfd_ui_strip_presentation {
 	enum mfd_ui_pickup_arrow arrow;
 	char arrow_glyph[8];
 	char state_readout[128];
+	bool at_end; /* parked at a rail ("At end.") */
 	char assignment_sentence[192];
 	char svg_short_label[96];
 	char status_sentence[192];

@@ -70,6 +70,13 @@ const struct mfd_controller_profile_def *mfd_profile_find_by_slug(const char *sl
 const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier);
 bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot_index);
 bool mfd_slot_is_fx_bank(int slot_index);
+
+/* A slot's default label in English: the profile's own label, else "FX n" / "Fader n". A slot whose label is the
+ * default stores an empty label, so the UI can show the default in the language OBS runs in (R-I18N-2); the API and
+ * the saved config use this English text for an empty label. */
+void mfd_profile_default_slot_label(enum mfd_controller_profile profile, int slot_index, char *out, size_t out_size);
+/* True when label is a default label any profile has given this slot (used to migrate stored defaults to empty). */
+bool mfd_profile_is_default_slot_label(int slot_index, const char *label);
 enum mfd_controller_profile mfd_profile_match_device_name(const char *device_name);
 
 bool mfd_is_apc40_mk2_name(const char *device_name);

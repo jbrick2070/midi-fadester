@@ -6,6 +6,7 @@
 
 #include "core/apc40-profile.h"
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 
 static const char *const k_apc40_usb_tokens[] = {"APC40 mkII", "APC40 mk2", "APC40", NULL};
@@ -615,6 +616,51 @@ const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier)
 bool mfd_slot_is_fx_bank(int slot_index)
 {
 	return slot_index >= (int)MFD_FADER_STRIP_COUNT && slot_index < (int)MFD_APC40_DEFAULT_SLOT_COUNT;
+}
+
+void mfd_profile_default_slot_label(enum mfd_controller_profile profile, int slot_index, char *out, size_t out_size)
+{
+	if (!out || out_size == 0U) {
+		return;
+	}
+	out[0] = '\0';
+	if (slot_index < 0) {
+		return;
+	}
+	const struct mfd_controller_profile_def *def = mfd_profile_get_def(profile);
+	if (def && (size_t)slot_index < MFD_APC40_DEFAULT_SLOT_COUNT && def->slots[slot_index].label &&
+	    def->slots[slot_index].label[0] != '\0') {
+		snprintf(out, out_size, "%s", def->slots[slot_index].label);
+	} else if (mfd_slot_is_fx_bank(slot_index)) {
+		snprintf(out, out_size, "FX %d", slot_index - (int)MFD_FADER_STRIP_COUNT + 1);
+	} else {
+		snprintf(out, out_size, "Fader %d", slot_index + 1);
+	}
+}
+
+bool mfd_profile_is_default_slot_label(int slot_index, const char *label)
+{
+	if (!label || label[0] == '\0' || slot_index < 0) {
+		return false;
+	}
+	char candidate[64];
+	snprintf(candidate, sizeof(candidate), "Fader %d", slot_index + 1);
+	if (strcmp(label, candidate) == 0) {
+		return true;
+	}
+	if (mfd_slot_is_fx_bank(slot_index)) {
+		snprintf(candidate, sizeof(candidate), "FX %d", slot_index - (int)MFD_FADER_STRIP_COUNT + 1);
+		if (strcmp(label, candidate) == 0) {
+			return true;
+		}
+	}
+	for (size_t i = 0U; i < MFD_PROFILE_REGISTRY_COUNT; ++i) {
+		mfd_profile_default_slot_label(k_profile_registry[i].id, slot_index, candidate, sizeof(candidate));
+		if (strcmp(label, candidate) == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot_index)

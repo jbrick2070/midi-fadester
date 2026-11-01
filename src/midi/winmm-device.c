@@ -113,12 +113,16 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	mfd_winmm_close(dev);
 	dev->last_error[0] = '\0';
 	dev->error_kind = MFD_WINMM_OK;
+	dev->error_operation = MFD_WINMM_OP_NONE;
+	dev->error_code = 0U;
+	dev->error_device_name[0] = '\0';
 
 	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
 	size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
 	if (count == 0U) {
 		dev->error_kind = (device_name && device_name[0] != '\0') ? MFD_WINMM_ERR_CONFIGURED_NOT_FOUND
 									  : MFD_WINMM_ERR_NO_DEVICES;
+		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", device_name ? device_name : "");
 		snprintf(
 			dev->last_error, sizeof(dev->last_error),
 			"No MIDI input devices detected. Connect your MIDI controller (e.g. Akai APC40 mkII) and click Reconnect.");
@@ -135,6 +139,7 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 		}
 		if (selected_idx < 0) {
 			dev->error_kind = MFD_WINMM_ERR_CONFIGURED_NOT_FOUND;
+			snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", device_name);
 			snprintf(dev->last_error, sizeof(dev->last_error),
 				 "Configured MIDI device '%s' is not connected.", device_name);
 			return false;
@@ -166,6 +171,9 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	HMIDIIN hmi = NULL;
 	MMRESULT res = midiInOpen(&hmi, winmm_id, (DWORD_PTR)winmm_in_proc, (DWORD_PTR)dev, CALLBACK_FUNCTION);
 	if (res != MMSYSERR_NOERROR) {
+		dev->error_operation = MFD_WINMM_OP_OPEN;
+		dev->error_code = (uint32_t)res;
+		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", chosen_name);
 		if (res == MMSYSERR_ALLOCATED) {
 			dev->error_kind = MFD_WINMM_ERR_BUSY_ALLOCATED;
 			snprintf(
@@ -185,6 +193,9 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	if (start_res != MMSYSERR_NOERROR) {
 		midiInClose(hmi);
 		dev->error_kind = MFD_WINMM_ERR_OPEN_FAILED;
+		dev->error_operation = MFD_WINMM_OP_START;
+		dev->error_code = (uint32_t)start_res;
+		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", chosen_name);
 		snprintf(dev->last_error, sizeof(dev->last_error),
 			 "Failed to start MIDI input stream on '%s' (WinMM error code %u).", chosen_name,
 			 (unsigned)start_res);
@@ -198,6 +209,25 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 	obs_log(LOG_INFO, "Opened MIDI In device '%s' (WinMM index %u)", dev->opened_name, (unsigned)winmm_id);
 	return true;
+}
+
+const char *mfd_winmm_error_slug(enum mfd_winmm_error_kind kind)
+{
+	switch (kind) {
+	case MFD_WINMM_ERR_NO_DEVICES:
+		return "no_devices";
+	case MFD_WINMM_ERR_CONFIGURED_NOT_FOUND:
+		return "device_not_found";
+	case MFD_WINMM_ERR_BUSY_ALLOCATED:
+		return "device_busy";
+	case MFD_WINMM_ERR_DISCONNECTED:
+		return "device_disconnected";
+	case MFD_WINMM_ERR_OPEN_FAILED:
+		return "device_open_failed";
+	case MFD_WINMM_OK:
+	default:
+		return "";
+	}
 }
 
 bool mfd_winmm_check_health(struct mfd_winmm_device *dev)
@@ -221,6 +251,9 @@ bool mfd_winmm_check_health(struct mfd_winmm_device *dev)
 		snprintf(lost_name, sizeof(lost_name), "%s", dev->opened_name);
 		mfd_winmm_close(dev);
 		dev->error_kind = MFD_WINMM_ERR_DISCONNECTED;
+		dev->error_operation = MFD_WINMM_OP_NONE;
+		dev->error_code = 0U;
+		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", lost_name);
 		snprintf(dev->last_error, sizeof(dev->last_error),
 			 "MIDI device '%s' was disconnected. Reconnect USB cable and click Reconnect.", lost_name);
 		obs_log(LOG_WARNING, "%s", dev->last_error);

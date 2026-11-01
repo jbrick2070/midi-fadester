@@ -55,6 +55,8 @@ target_sources(
     src/core/filter-math.c
     src/core/ui-sentences.h
     src/core/ui-sentences.c
+    src/core/slot-messages.h
+    src/core/slot-messages.c
     src/midi/winmm-device.h
     src/midi/winmm-device.c
     src/obs/mfd-layer-filter.h

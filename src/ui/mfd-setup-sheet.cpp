@@ -1633,8 +1633,8 @@ void MfdSetupSheetDialog::update_footer_buttons()
 	char strip_title[64] = {0};
 	mfd_ui_strip_title(slot_index_, snap_.slots[slot_index_].label, strip_title, sizeof(strip_title));
 	const int page = stack_->currentIndex();
-	title_label_->setText(
-		QStringLiteral("Set up %1 \xE2\x80\x94 Step %2 of 3").arg(QString::fromUtf8(strip_title)).arg(page + 1));
+	title_label_->setText(QStringLiteral("Set up %1 \xE2\x80\x94 Step %2 of 3")
+				      .arg(QString::fromUtf8(strip_title), QString::number(page + 1)));
 
 	btn_back_->setVisible(page > 0);
 	btn_next_->setVisible(page < 2);

@@ -20,6 +20,7 @@
 #include "core/tbar-logic.h"
 #include "core/filter-math.h"
 #include "core/apc40-profile.h"
+#include "core/slot-messages.h"
 #include "midi/winmm-device.h"
 
 #ifdef __cplusplus
@@ -98,7 +99,8 @@ struct mfd_fader_slot {
 	char resolved_scene_name[MFD_SOURCE_NAME_MAX];
 	bool a_is_above_b;
 	bool cached_available;
-	char cached_reason[160];
+	char cached_reason[160];          /* English, for logs and the API */
+	struct mfd_msg cached_reason_msg; /* code + arguments; compared for changes, worded by the UI */
 	float last_raw_norm;
 	float last_applied_val;
 	float last_alpha_a;
@@ -237,6 +239,9 @@ struct mfd_ui_snapshot {
 	char opened_device_name[MFD_MIDI_DEV_NAME_MAX];
 	bool midi_connected;
 	enum mfd_winmm_error_kind midi_error_kind;
+	enum mfd_winmm_operation midi_error_operation;
+	uint32_t midi_error_code;
+	char midi_error_device_name[MFD_MIDI_DEV_NAME_MAX];
 	char midi_last_error[MFD_MIDI_ERROR_MAX];
 	char active_profile_name[MFD_PROFILE_NAME_MAX];
 	enum mfd_controller_profile active_profile;
@@ -316,6 +321,10 @@ struct mfd_scene_graph_ops {
 	bool (*get_filter_enabled)(const char *source_name, const char *filter_name, bool *out_enabled,
 				   void *user_data);
 	void (*set_filter_enabled)(const char *source_name, const char *filter_name, bool enabled, void *user_data);
+
+	/* Optional: the name of the source on an OBS output channel (1 = Desktop Audio), so the first-run layout finds
+	 * desktop audio whatever language OBS names it in. */
+	bool (*get_output_source_name)(uint32_t channel, char *out_name, size_t out_size, void *user_data);
 };
 
 struct mfd_engine {
@@ -406,6 +415,8 @@ bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *so
 					  struct mfd_source_filter_catalog *out);
 bool mfd_engine_fill_vendor_catalog_locked(struct mfd_engine *eng, const char *source_name, obs_data_t *response_data,
 					   char *out_err, size_t err_size);
+bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const char *source_name,
+					       obs_data_t *response_data, struct mfd_msg *out_msg);
 bool mfd_is_internal_filter(const char *filter_name, const char *type_id);
 void mfd_collect_filter_numeric_props(obs_properties_t *props, obs_data_t *settings, mfd_numeric_prop_cb cb,
 				      void *param);
@@ -415,6 +426,12 @@ bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *en
 						     const char *filter_prop, bool has_from_to, double *inout_from_val,
 						     double *inout_to_val, struct mfd_filter_prop_info *out_prop_info,
 						     char *out_err, size_t err_size);
+bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
+							 const char *source_a, const char *filter_name,
+							 const char *filter_prop, bool has_from_to,
+							 double *inout_from_val, double *inout_to_val,
+							 struct mfd_filter_prop_info *out_prop_info,
+							 struct mfd_msg *out_msg);
 void mfd_engine_detach_filter_binding_locked(struct mfd_engine *eng, int slot_index);
 void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng);
 void mfd_engine_handle_filter_rename(struct mfd_engine *eng, const char *parent_source_name, const char *prev_name,
@@ -432,6 +449,8 @@ bool mfd_slot_is_reset_fx_eligible(const struct mfd_fader_slot *slot);
 void mfd_engine_sync_filter_slot_from_live_locked(struct mfd_engine *eng, int slot_index);
 bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
 			 int *out_queued_unavailable_count, char *out_err, size_t err_size);
+bool mfd_engine_reset_fx_msg(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
+			     int *out_queued_unavailable_count, struct mfd_msg *out_msg);
 
 void mfd_engine_set_test_frontend_state(struct mfd_engine *eng, bool finished_loading, bool studio_mode,
 					const char *preview_scene, const char *program_scene, bool apc40_detected);
@@ -447,8 +466,12 @@ size_t mfd_engine_find_addr_owners(struct mfd_engine *eng, const struct mfd_midi
 				   int *out_slots, size_t max_slots);
 bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					 char *out_reason, size_t reason_size);
+bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+					     struct mfd_msg *out_msg);
 bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_setup_candidate *cand, char *out_err,
 				     size_t err_size);
+bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+					 struct mfd_msg *out_msg);
 
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng);
@@ -457,10 +480,17 @@ void mfd_engine_set_stream_deck_companion_dismissed(struct mfd_engine *eng, bool
 bool mfd_engine_update_slot_config(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit);
 bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit,
 				      char *out_err, size_t err_size);
+bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit,
+				       struct mfd_msg *out_msg);
+/* An empty label, or any profile's English default, stores an empty label (shown as the translated default). */
 void mfd_engine_set_slot_label(struct mfd_engine *eng, int slot_index, const char *label);
+/* The slot's label, or its English default when the label is empty (API, logs, saved config). */
+void mfd_engine_slot_english_label(const struct mfd_engine *eng, int slot_index, char *out, size_t out_size);
 void mfd_engine_clear_slot_binding(struct mfd_engine *eng, int slot_index);
 bool mfd_engine_set_slot_value(struct mfd_engine *eng, int slot_index, float value_01, bool release, const char *origin,
 			       char *out_err, size_t err_size);
+bool mfd_engine_set_slot_value_msg(struct mfd_engine *eng, int slot_index, float value_01, bool release,
+				   const char *origin, struct mfd_msg *out_msg);
 bool mfd_engine_finish_tbar_throw(struct mfd_engine *eng, int slot_index);
 
 void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn);
@@ -501,6 +531,10 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed);
 void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_name, const char *new_name);
 void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
 				size_t label_size, bool *out_available, char *out_reason, size_t reason_size);
+/* As mfd_engine_get_slot_status, plus the reason's code and arguments (out_msg may be NULL). */
+void mfd_engine_get_slot_status_msg(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
+				    size_t label_size, bool *out_available, char *out_reason, size_t reason_size,
+				    struct mfd_msg *out_msg);
 
 void mfd_engine_notify_fader_changed(struct mfd_engine *eng, int slot_index, const char *origin);
 void mfd_engine_notify_state_changed(struct mfd_engine *eng);

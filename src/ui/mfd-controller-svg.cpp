@@ -167,16 +167,16 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 	const QString dot_hex = ctrl.dot_green ? QStringLiteral("#22c55e") : QStringLiteral("#ef4444");
 	const QString status_txt = elide_plain(QString::fromUtf8(ctrl.status_sentence), is_beta ? 26 : 50);
 
+	/* Geometry first, names last in one pass: a name holding "%2" is never filled again. */
 	svg.append(QStringLiteral("<text x='38' y='48' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
-				  "font-size='18' font-weight='bold'>%1</text>"
-				  "<circle cx='%2' cy='42' r='6' fill='%3'/>"
-				  "<text x='%4' y='47' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
+				  "font-size='18' font-weight='bold'>%4</text>"
+				  "<circle cx='%1' cy='42' r='6' fill='%2'/>"
+				  "<text x='%3' y='47' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
 				  "font-size='13'>%5</text>")
-			   .arg(xml_escape(header_title))
 			   .arg(status_cx)
 			   .arg(dot_hex)
 			   .arg(status_cx + 15)
-			   .arg(xml_escape(status_txt)));
+			   .arg(xml_escape(header_title), xml_escape(status_txt)));
 
 	if (is_beta) {
 		svg.append(QStringLiteral("<rect x='736' y='26' width='206' height='26' rx='13' fill='#451a03' "
@@ -350,7 +350,7 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		if (sp.severity == MFD_UI_SEVERITY_AMBER) {
 			return QStringLiteral("#f59e0b");
 		}
-		if (std::strcmp(sp.state_readout, "At end.") == 0) {
+		if (sp.at_end) {
 			return QStringLiteral("#10b981");
 		}
 		return QStringLiteral("#38bdf8");
@@ -377,6 +377,7 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		in.display_value = disp_buf;
 		in.available = s.cached_available;
 		in.reason = s.cached_reason;
+		in.reason_msg = &s.cached_reason_msg;
 		in.raw_norm = s.last_raw_norm;
 		in.applied_val = s.last_applied_val;
 		in.alpha_a = s.last_alpha_a;
@@ -412,21 +413,20 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		svg.append(QStringLiteral("<rect x='%1' y='146' width='74' height='248' rx='7' fill='#0f172a' "
 					  "stroke='%2' stroke-width='1.5'/>"
 					  "<text x='%3' y='162' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
-					  "font-size='12' font-weight='bold' text-anchor='middle'>%4</text>"
+					  "font-size='12' font-weight='bold' text-anchor='middle'>%12</text>"
 					  "<text x='%3' y='175' fill='#94a3b8' font-family='Segoe UI, sans-serif' "
 					  "font-size='9.5' text-anchor='middle'>%14</text>"
-					  "<rect x='%5' y='%6' width='8' height='%7' rx='4' fill='#1e293b'/>"
-					  "<rect x='%5' y='%8' width='8' height='%9' rx='4' fill='%2'/>"
-					  "<rect x='%10' y='%11' width='26' height='16' rx='3' fill='#e2e8f0' "
+					  "<rect x='%4' y='%5' width='8' height='%6' rx='4' fill='#1e293b'/>"
+					  "<rect x='%4' y='%7' width='8' height='%8' rx='4' fill='%2'/>"
+					  "<rect x='%9' y='%10' width='26' height='16' rx='3' fill='#e2e8f0' "
 					  "stroke='%2' stroke-width='1.5'/>"
 					  "<text x='%3' y='356' fill='#cbd5e1' font-family='Segoe UI, sans-serif' "
-					  "font-size='10' text-anchor='middle'>%12%</text>"
+					  "font-size='10' text-anchor='middle'>%11%</text>"
 					  "<text x='%3' y='378' fill='%2' font-family='Segoe UI, sans-serif' "
 					  "font-size='10' font-weight='bold' text-anchor='middle'>%13</text>")
 				   .arg(cx - 37)
 				   .arg(accent)
 				   .arg(cx)
-				   .arg(title)
 				   .arg(cx - 4)
 				   .arg(track_top)
 				   .arg(track_h)
@@ -435,8 +435,7 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 				   .arg(cx - 13)
 				   .arg(cap_y)
 				   .arg(sp.bar_percent)
-				   .arg(short_lbl)
-				   .arg(cc_lbl));
+				   .arg(title, short_lbl, cc_lbl));
 	}
 
 	if (def->has_crossfader) {
@@ -453,21 +452,20 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		svg.append(QStringLiteral("<rect x='642' y='406' width='298' height='68' rx='8' fill='#0f172a' "
 					  "stroke='%1' stroke-width='1.8'/>"
 					  "<text x='658' y='426' fill='#f8fafc' font-family='Segoe UI, sans-serif' "
-					  "font-size='12' font-weight='bold'>%2 (%3%)</text>"
+					  "font-size='12' font-weight='bold'>%7 (%2%)</text>"
 					  "<text x='924' y='426' fill='%1' font-family='Segoe UI, sans-serif' "
-					  "font-size='11' font-weight='bold' text-anchor='end'>%4</text>"
-					  "<rect x='%5' y='442' width='%6' height='8' rx='4' fill='#1e293b'/>"
-					  "<rect x='%5' y='442' width='%7' height='8' rx='4' fill='%1'/>"
-					  "<rect x='%8' y='434' width='16' height='24' rx='3' fill='#f8fafc' "
+					  "font-size='11' font-weight='bold' text-anchor='end'>%8</text>"
+					  "<rect x='%3' y='442' width='%4' height='8' rx='4' fill='#1e293b'/>"
+					  "<rect x='%3' y='442' width='%5' height='8' rx='4' fill='%1'/>"
+					  "<rect x='%6' y='434' width='16' height='24' rx='3' fill='#f8fafc' "
 					  "stroke='%1' stroke-width='1.5'/>")
 				   .arg(accent0)
-				   .arg(xml_escape(elide_plain(QString::fromUtf8(sp0.title), 18)))
 				   .arg(sp0.bar_percent)
-				   .arg(assign0)
 				   .arg(xf_left)
 				   .arg(xf_w)
 				   .arg(fill_w)
-				   .arg(cap_x));
+				   .arg(cap_x)
+				   .arg(xml_escape(elide_plain(QString::fromUtf8(sp0.title), 18)), assign0));
 	} else {
 		/* Beta spec & crossfader-less T-bar guidance card at bottom right */
 		svg.append(QStringLiteral(

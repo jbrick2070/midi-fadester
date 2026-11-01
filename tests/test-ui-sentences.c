@@ -114,6 +114,9 @@ int main(void)
 	in.target_type = MFD_TARGET_TBAR;
 	in.available = false;
 	in.reason = "Studio Mode is off.";
+	struct mfd_msg studio_off;
+	mfd_msg_set(&studio_off, MFD_MSG_STUDIO_MODE_OFF, NULL, NULL, NULL, NULL, NULL);
+	in.reason_msg = &studio_off;
 	in.raw_norm = 0.72f;
 	mfd_ui_format_strip_presentation(&in, &sp);
 	REQUIRE(!sp.dimmed);
@@ -124,6 +127,18 @@ int main(void)
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_AMBER);
 	REQUIRE(sp.bottom_action == MFD_UI_ACTION_TURN_ON_STUDIO_MODE);
 	REQUIRE(strcmp(sp.bottom_button_text, "Turn on Studio Mode") == 0);
+
+	/* The amber action comes from the reason code, not the English text (R-I18N-2). */
+	in.reason_msg = NULL;
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
+	REQUIRE(sp.bottom_action == MFD_UI_ACTION_SETUP);
+	in.reason = "Translated reason text";
+	in.reason_msg = &studio_off;
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(sp.severity == MFD_UI_SEVERITY_AMBER);
+	REQUIRE(sp.bottom_action == MFD_UI_ACTION_TURN_ON_STUDIO_MODE);
+	REQUIRE(strcmp(mfd_msg_slug(MFD_MSG_STUDIO_MODE_OFF), "studio_mode_off") == 0);
 
 	/* Row 3: Every red unmet precondition sentence + unbound MIDI hardware control */
 	const char *red_reasons[] = {
@@ -178,6 +193,7 @@ int main(void)
 	in.takeover_state = MFD_TAKEOVER_PARKED;
 	mfd_ui_format_strip_presentation(&in, &sp);
 	REQUIRE(strcmp(sp.state_readout, "At end.") == 0);
+	REQUIRE(sp.at_end);
 	REQUIRE(sp.status_sentence[0] == '\0');
 	REQUIRE(!sp.show_finish_now);
 
@@ -392,6 +408,38 @@ int main(void)
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_FILTER_PARAM), "Filter or effect setting") == 0);
 	REQUIRE(strcmp(mfd_ui_curve_plain_name(MFD_CURVE_DIP_FREE), "Dip-free") == 0);
 	REQUIRE(strcmp(mfd_ui_curve_plain_name(MFD_CURVE_COSINE), "Equal power") == 0);
+
+	/* Reason messages: single-pass fill, so a scene named "%1" or "%2" is never filled again (R-I18N-3). */
+	struct mfd_msg layer_gone;
+	mfd_msg_set(&layer_gone, MFD_MSG_LAYER_NOT_IN_SCENE, "Cam %2", "Scene %1", NULL, NULL, NULL);
+	char reason_text[160];
+	mfd_msg_format_english(&layer_gone, reason_text, sizeof(reason_text));
+	REQUIRE(strcmp(reason_text, "Cam %2 is no longer in scene Scene %1.") == 0);
+	struct mfd_msg same_args;
+	mfd_msg_set(&same_args, MFD_MSG_LAYER_NOT_IN_SCENE, "Cam %2", "Scene %1", NULL, NULL, NULL);
+	REQUIRE(mfd_msg_equal(&layer_gone, &same_args));
+	mfd_msg_set(&same_args, MFD_MSG_LAYER_NOT_IN_SCENE, "Cam %2", "Scene 2", NULL, NULL, NULL);
+	REQUIRE(!mfd_msg_equal(&layer_gone, &same_args));
+	mfd_msg_clear(&same_args);
+	mfd_msg_format_english(&same_args, reason_text, sizeof(reason_text));
+	REQUIRE(reason_text[0] == '\0');
+	REQUIRE(mfd_msg_slug(MFD_MSG_NONE)[0] == '\0');
+	for (int code = 1; code < (int)MFD_MSG_CODE_COUNT; ++code) {
+		REQUIRE(mfd_msg_slug((enum mfd_msg_code)code)[0] != '\0');
+	}
+
+	/* Default labels: stored empty (or a legacy English default) show the short title; a typed label as typed */
+	mfd_ui_strip_title(0, "", title, sizeof(title));
+	REQUIRE(strcmp(title, "Crossfader") == 0);
+	mfd_ui_strip_title(3, NULL, title, sizeof(title));
+	REQUIRE(strcmp(title, "3") == 0);
+	mfd_ui_strip_title(12, "", title, sizeof(title));
+	REQUIRE(strcmp(title, "FX 3") == 0);
+	REQUIRE(mfd_profile_is_default_slot_label(9, "Master Fader"));
+	REQUIRE(!mfd_profile_is_default_slot_label(9, "Master"));
+	char default_label[64];
+	mfd_profile_default_slot_label(MFD_PROFILE_APC40_MK2, 1, default_label, sizeof(default_label));
+	REQUIRE(strcmp(default_label, "Track Fader 1") == 0);
 
 	printf("test-ui-sentences: PASS\n");
 	return 0;

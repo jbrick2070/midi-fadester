@@ -8,6 +8,7 @@
 #include "obs/mfd-layer-filter.h"
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
+#include "core/slot-messages.h"
 #include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -56,6 +57,52 @@ static int ascii_stricmp(const char *a, const char *b)
 		++b;
 	}
 	return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
+/* An empty label means the slot's default; the API, logs and saved config read the English default (R-I18N-2). */
+void mfd_engine_slot_english_label(const struct mfd_engine *eng, int slot_index, char *out, size_t out_size)
+{
+	if (!out || out_size == 0U) {
+		return;
+	}
+	out[0] = '\0';
+	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
+		return;
+	}
+	const struct mfd_fader_slot *s = &eng->fader_slots[slot_index];
+	if (s->label[0] != '\0') {
+		snprintf(out, out_size, "%s", s->label);
+	} else {
+		mfd_profile_default_slot_label(mfd_engine_get_active_profile(eng), slot_index, out, out_size);
+	}
+}
+
+static void set_already_controlled_msg(const struct mfd_engine *eng, struct mfd_msg *msg, const char *filter_prop,
+				       const char *filter_name, int owner_slot)
+{
+	char owner_label[MFD_SLOT_LABEL_MAX];
+	char owner_index[16];
+	mfd_engine_slot_english_label(eng, owner_slot, owner_label, sizeof(owner_label));
+	if (owner_label[0] == '\0') {
+		snprintf(owner_label, sizeof(owner_label), "%s", mfd_slot_id_for_index(owner_slot));
+	}
+	snprintf(owner_index, sizeof(owner_index), "%d", owner_slot);
+	/* %4 carries the owner's slot index so the UI can show its translated strip title. */
+	mfd_msg_set(msg, MFD_MSG_SETTING_ALREADY_CONTROLLED, filter_prop, filter_name, owner_label, owner_index, NULL);
+}
+
+static void set_range_outside_msg(struct mfd_msg *msg, double from_val, double to_val, const char *filter_prop,
+				  double min_val, double max_val)
+{
+	char from_text[32];
+	char to_text[32];
+	char min_text[32];
+	char max_text[32];
+	snprintf(from_text, sizeof(from_text), "%.6g", from_val);
+	snprintf(to_text, sizeof(to_text), "%.6g", to_val);
+	snprintf(min_text, sizeof(min_text), "%.6g", min_val);
+	snprintf(max_text, sizeof(max_text), "%.6g", max_val);
+	mfd_msg_set(msg, MFD_MSG_RANGE_OUTSIDE_LIMITS, from_text, to_text, filter_prop, min_text, max_text);
 }
 
 static bool slot_addr_is_14bit(const struct mfd_midi_addr *addr)
@@ -645,7 +692,7 @@ bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controlle
 					     : (phys && def->slots[i].addr.type != MFD_MIDI_NONE);
 			snprintf(s->id, sizeof(s->id), "%s", def->slots[i].id);
 			snprintf(s->kind, sizeof(s->kind), "%s", def->slots[i].kind);
-			snprintf(s->label, sizeof(s->label), "%s", def->slots[i].label);
+			s->label[0] = '\0';
 			s->addr = def->slots[i].addr;
 			s->target_type = def->slots[i].default_target;
 			s->curve = def->slots[i].default_curve;
@@ -655,7 +702,7 @@ bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controlle
 			s->enabled = false;
 			snprintf(s->id, sizeof(s->id), "fader_%u", (unsigned)(i + 1U));
 			snprintf(s->kind, sizeof(s->kind), "fader");
-			snprintf(s->label, sizeof(s->label), "Fader %u", (unsigned)(i + 1U));
+			s->label[0] = '\0';
 			s->addr.type = MFD_MIDI_NONE;
 			s->target_type = MFD_TARGET_UNASSIGNED;
 			s->curve = MFD_CURVE_DIP_FREE;
@@ -699,14 +746,14 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 				struct mfd_fader_slot *s = &eng->fader_slots[i];
 				if (mfd_slot_is_fx_bank(i)) {
 					s->enabled = true;
-					snprintf(s->label, sizeof(s->label), "%s", def->slots[i].label);
+					s->label[0] = '\0';
 					s->addr = def->slots[i].addr;
 					mfd_engine_lookup_persisted_calibration(eng, eng->active_profile_name, &s->addr,
 										&s->cal);
 				} else if (mfd_profile_has_physical_slot(def->id, i) &&
 					   def->slots[i].addr.type != MFD_MIDI_NONE) {
 					s->enabled = true;
-					snprintf(s->label, sizeof(s->label), "%s", def->slots[i].label);
+					s->label[0] = '\0';
 					s->addr = def->slots[i].addr;
 					mfd_engine_lookup_persisted_calibration(eng, eng->active_profile_name, &s->addr,
 										&s->cal);
@@ -1473,38 +1520,40 @@ bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *en
 						     double *inout_to_val, struct mfd_filter_prop_info *out_prop_info,
 						     char *out_err, size_t err_size)
 {
-	if (out_err && err_size > 0U) {
-		out_err[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_validate_filter_param_binding_msg_locked(eng, slot_index, enabled, source_a, filter_name,
+								      filter_prop, has_from_to, inout_from_val,
+								      inout_to_val, out_prop_info, &msg);
+	mfd_msg_format_english(&msg, out_err, err_size);
+	return ok;
+}
+
+bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
+							 const char *source_a, const char *filter_name,
+							 const char *filter_prop, bool has_from_to,
+							 double *inout_from_val, double *inout_to_val,
+							 struct mfd_filter_prop_info *out_prop_info,
+							 struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Invalid strip index.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_INVALID_STRIP, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (!source_a || source_a[0] == '\0') {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Missing required 'source_a' for filter_param.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_MISSING_SOURCE_A, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (!filter_name || filter_name[0] == '\0') {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Missing required 'filter_name' for filter_param.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_MISSING_FILTER_NAME, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (mfd_is_internal_filter(filter_name, NULL)) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size,
-				 "Filter '%s' is reserved by Midi Fadester and cannot be bound directly.", filter_name);
-		}
+		mfd_msg_set(out_msg, MFD_MSG_FILTER_RESERVED, filter_name, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (!filter_prop || filter_prop[0] == '\0') {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Missing required 'filter_prop' for filter_param.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_MISSING_FILTER_PROP, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 
@@ -1518,39 +1567,24 @@ bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *en
 			    strcmp(other->source_a_name, source_a) == 0 &&
 			    strcmp(other->filter_name, filter_name) == 0 &&
 			    strcmp(other->filter_prop, filter_prop) == 0) {
-				if (out_err && err_size > 0U) {
-					snprintf(out_err, err_size, "Setting '%s' on '%s' is already controlled by %s.",
-						 filter_prop, filter_name,
-						 (other->label[0] != '\0') ? other->label : other->id);
-				}
+				set_already_controlled_msg(eng, out_msg, filter_prop, filter_name, j);
 				return false;
 			}
 		}
 	}
 
 	if (!mfd_engine_source_exists(eng, source_a)) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size,
-				 "Source '%s' not found. Create the source in OBS first or check its spelling.",
-				 source_a);
-		}
+		mfd_msg_set(out_msg, MFD_MSG_SOURCE_NOT_FOUND, source_a, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (!sg_filter_exists(eng, source_a, filter_name, NULL)) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size,
-				 "Filter '%s' not found on '%s'. Add the filter in OBS Filters first.", filter_name,
-				 source_a);
-		}
+		mfd_msg_set(out_msg, MFD_MSG_FILTER_NOT_FOUND, filter_name, source_a, NULL, NULL, NULL);
 		return false;
 	}
 
 	obs_properties_t *props = sg_create_filter_properties(eng, source_a, filter_name);
 	if (!props) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Filter '%s' on '%s' exposes no configurable properties.",
-				 filter_name, source_a);
-		}
+		mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
 		return false;
 	}
 	obs_data_t *settings = sg_get_filter_settings(eng, source_a, filter_name);
@@ -1565,19 +1599,8 @@ bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *en
 	obs_properties_destroy(props);
 
 	if (!found_numeric) {
-		if (out_err && err_size > 0U) {
-			if (found_non_numeric) {
-				snprintf(
-					out_err, err_size,
-					"Setting '%s' on '%s' is not a numeric setting. Choose a float or integer filter property.",
-					filter_prop, filter_name);
-			} else {
-				snprintf(
-					out_err, err_size,
-					"Setting '%s' not found on filter '%s'. Query get_catalog to list numeric settings.",
-					filter_prop, filter_name);
-			}
-		}
+		mfd_msg_set(out_msg, found_non_numeric ? MFD_MSG_SETTING_NOT_NUMERIC : MFD_MSG_SETTING_NOT_FOUND,
+			    filter_prop, filter_name, NULL, NULL, NULL);
 		return false;
 	}
 
@@ -1588,25 +1611,15 @@ bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *en
 		tval = inout_to_val ? *inout_to_val : info.max_val;
 	}
 	if (!isfinite(fval) || !isfinite(tval)) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "'from_val' and 'to_val' must be finite numbers.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_RANGE_NOT_FINITE, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (fabs(tval - fval) < MFD_FILTER_MIN_RANGE_SPAN) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size,
-				 "'from_val' and 'to_val' must differ so the control has a range to sweep.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_RANGE_EMPTY, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (!mfd_filter_range_is_valid(fval, tval, info.min_val, info.max_val)) {
-		if (out_err && err_size > 0U) {
-			snprintf(
-				out_err, err_size,
-				"Range [%.6g, %.6g] is outside '%s' limits [%.6g, %.6g]. Click Set up to update the range.",
-				fval, tval, filter_prop, info.min_val, info.max_val);
-		}
+		set_range_outside_msg(out_msg, fval, tval, filter_prop, info.min_val, info.max_val);
 		return false;
 	}
 
@@ -1815,32 +1828,30 @@ void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng)
 }
 
 static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot_index, bool *out_avail,
-						char *out_reason, size_t reason_size)
+						struct mfd_msg *out_reason)
 {
 	struct mfd_fader_slot *slot = &eng->fader_slots[slot_index];
 	bool avail = false;
-	char rsn[160] = {0};
+	struct mfd_msg rsn;
+	mfd_msg_clear(&rsn);
 
 	slot->filter_prop_valid = false;
 	if (!slot->enabled || slot->source_a_name[0] == '\0' || slot->filter_name[0] == '\0' ||
 	    slot->filter_prop[0] == '\0') {
-		snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+		mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 	} else if (mfd_is_internal_filter(slot->filter_name, NULL)) {
-		snprintf(rsn, sizeof(rsn), "Filter '%s' is reserved by Midi Fadester and cannot be bound directly.",
-			 slot->filter_name);
+		mfd_msg_set(&rsn, MFD_MSG_FILTER_RESERVED, slot->filter_name, NULL, NULL, NULL, NULL);
 	} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, NULL);
-		snprintf(rsn, sizeof(rsn), "%s was deleted.", slot->source_a_name);
+		mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL, NULL);
 	} else if (!sg_filter_exists(eng, slot->source_a_name, slot->filter_name, NULL)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, slot->filter_name);
-		snprintf(rsn, sizeof(rsn), "Filter '%s' was removed from %s. Re-add it in OBS Filters or click Set up.",
-			 slot->filter_name, slot->source_a_name);
+		mfd_msg_set(&rsn, MFD_MSG_FILTER_REMOVED, slot->filter_name, slot->source_a_name, NULL, NULL, NULL);
 	} else {
 		obs_properties_t *props = sg_create_filter_properties(eng, slot->source_a_name, slot->filter_name);
 		if (!props) {
-			snprintf(rsn, sizeof(rsn),
-				 "Setting '%s' is no longer available on '%s'. Click Set up to choose another setting.",
-				 slot->filter_prop, slot->filter_name);
+			mfd_msg_set(&rsn, MFD_MSG_SETTING_UNAVAILABLE, slot->filter_prop, slot->filter_name, NULL, NULL,
+				    NULL);
 		} else {
 			obs_data_t *settings = sg_get_filter_settings(eng, slot->source_a_name, slot->filter_name);
 			bool found_non_num = false;
@@ -1855,15 +1866,11 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 
 			if (!found_num) {
 				if (found_non_num) {
-					snprintf(
-						rsn, sizeof(rsn),
-						"Setting '%s' on '%s' is not a numeric setting. Choose a float or integer filter property.",
-						slot->filter_prop, slot->filter_name);
+					mfd_msg_set(&rsn, MFD_MSG_SETTING_NOT_NUMERIC, slot->filter_prop,
+						    slot->filter_name, NULL, NULL, NULL);
 				} else {
-					snprintf(
-						rsn, sizeof(rsn),
-						"Setting '%s' is no longer available on '%s'. Click Set up to choose another setting.",
-						slot->filter_prop, slot->filter_name);
+					mfd_msg_set(&rsn, MFD_MSG_SETTING_UNAVAILABLE, slot->filter_prop,
+						    slot->filter_name, NULL, NULL, NULL);
 				}
 			} else if (!mfd_filter_range_is_valid(slot->filter_from_val, slot->filter_to_val, info.min_val,
 							      info.max_val)) {
@@ -1873,11 +1880,8 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 				slot->filter_prop_step = info.step;
 				snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s", info.suffix);
 				snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s", info.label);
-				snprintf(
-					rsn, sizeof(rsn),
-					"Range [%.6g, %.6g] is outside '%s' limits [%.6g, %.6g]. Click Set up to update the range.",
-					slot->filter_from_val, slot->filter_to_val, slot->filter_prop, info.min_val,
-					info.max_val);
+				set_range_outside_msg(&rsn, slot->filter_from_val, slot->filter_to_val,
+						      slot->filter_prop, info.min_val, info.max_val);
 			} else {
 				slot->filter_prop_valid = true;
 				slot->filter_prop_is_int = info.is_int;
@@ -1887,7 +1891,7 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 				snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s", info.suffix);
 				snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s", info.label);
 				avail = true;
-				rsn[0] = '\0';
+				mfd_msg_clear(&rsn);
 			}
 		}
 	}
@@ -1895,19 +1899,20 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 	if (out_avail) {
 		*out_avail = avail;
 	}
-	if (out_reason && reason_size > 0U) {
-		snprintf(out_reason, reason_size, "%s", rsn);
+	if (out_reason) {
+		*out_reason = rsn;
 	}
 }
 
 static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, const struct mfd_fader_slot *slot,
-					      char *out_label, size_t label_size, bool *out_available, char *out_reason,
-					      size_t reason_size, char *out_resolved_scene, size_t resolved_size,
-					      bool *out_a_above_b)
+					      char *out_label, size_t label_size, bool *out_available,
+					      struct mfd_msg *out_reason, char *out_resolved_scene,
+					      size_t resolved_size, bool *out_a_above_b)
 {
 	char lbl[128] = "Unassigned";
 	bool avail = false;
-	char rsn[160] = "Not used. Click to set up.";
+	struct mfd_msg rsn;
+	mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 	char res_scene[MFD_SOURCE_NAME_MAX] = {0};
 	bool a_above_b = slot ? slot->a_is_above_b : false;
 
@@ -1916,26 +1921,26 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 		if (!slot->enabled) {
 			snprintf(lbl, sizeof(lbl), "Disabled");
 			avail = false;
-			snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+			mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 		} else {
 			switch (slot->target_type) {
 			case MFD_TARGET_UNASSIGNED:
 				snprintf(lbl, sizeof(lbl), "Unassigned");
 				avail = false;
-				snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+				mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				break;
 
 			case MFD_TARGET_TBAR:
 				snprintf(lbl, sizeof(lbl), "Studio Mode T-Bar");
 				if (!mfd_engine_is_studio_mode_active(eng)) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Studio Mode is off.");
+					mfd_msg_set(&rsn, MFD_MSG_STUDIO_MODE_OFF, NULL, NULL, NULL, NULL, NULL);
 				} else if (eng && eng->tbar_error[0] != '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "%s", eng->tbar_error);
+					mfd_msg_set(&rsn, MFD_MSG_TBAR_SLIDER_MISSING, NULL, NULL, NULL, NULL, NULL);
 				} else {
 					avail = true;
-					rsn[0] = '\0';
+					mfd_msg_clear(&rsn);
 				}
 				break;
 
@@ -1948,14 +1953,15 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				}
 				if (slot->source_a_name[0] == '\0' || slot->source_b_name[0] == '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Left and Right cannot be the same layer.");
+					mfd_msg_set(&rsn, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
 				} else if (slot->scene_name[0] != '\0') {
 					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
 						avail = false;
-						snprintf(rsn, sizeof(rsn), "Scene %s was deleted.", slot->scene_name);
+						mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL,
+							    NULL, NULL);
 					} else {
 						int idx_a = sg_scene_item_stack_index(eng, slot->scene_name,
 										      slot->source_a_name);
@@ -1963,15 +1969,17 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 										      slot->source_b_name);
 						if (idx_a < 0) {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
-								 slot->source_a_name, slot->scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
+								    slot->source_a_name, slot->scene_name, NULL, NULL,
+								    NULL);
 						} else if (idx_b < 0) {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
-								 slot->source_b_name, slot->scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
+								    slot->source_b_name, slot->scene_name, NULL, NULL,
+								    NULL);
 						} else {
 							avail = true;
-							rsn[0] = '\0';
+							mfd_msg_clear(&rsn);
 							a_above_b = (idx_a > idx_b);
 							snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
 						}
@@ -1983,28 +1991,30 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 					if (sg_find_scene_with_pair(eng, slot->source_a_name, slot->source_b_name,
 								    found_sc, sizeof(found_sc), &idx_a, &idx_b)) {
 						avail = true;
-						rsn[0] = '\0';
+						mfd_msg_clear(&rsn);
 						a_above_b = (idx_a > idx_b);
 						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
 					} else if (slot->resolved_scene_name[0] != '\0') {
 						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "Scene %s was deleted.",
-								 slot->resolved_scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED,
+								    slot->resolved_scene_name, NULL, NULL, NULL, NULL);
 						} else if (sg_scene_item_stack_index(eng, slot->resolved_scene_name,
 										     slot->source_a_name) < 0) {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
-								 slot->source_a_name, slot->resolved_scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
+								    slot->source_a_name, slot->resolved_scene_name,
+								    NULL, NULL, NULL);
 						} else {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
-								 slot->source_b_name, slot->resolved_scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
+								    slot->source_b_name, slot->resolved_scene_name,
+								    NULL, NULL, NULL);
 						}
 					} else {
 						avail = false;
-						snprintf(rsn, sizeof(rsn), "%s and %s are not in the same scene.",
-							 slot->source_a_name, slot->source_b_name);
+						mfd_msg_set(&rsn, MFD_MSG_LAYERS_NOT_IN_SAME_SCENE, slot->source_a_name,
+							    slot->source_b_name, NULL, NULL, NULL);
 					}
 				}
 				break;
@@ -2018,19 +2028,20 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				}
 				if (slot->source_a_name[0] == '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				} else if (slot->scene_name[0] != '\0') {
 					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
 						avail = false;
-						snprintf(rsn, sizeof(rsn), "Scene %s was deleted.", slot->scene_name);
+						mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL,
+							    NULL, NULL);
 					} else if (sg_scene_item_stack_index(eng, slot->scene_name,
 									     slot->source_a_name) < 0) {
 						avail = false;
-						snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
-							 slot->source_a_name, slot->scene_name);
+						mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
+							    slot->scene_name, NULL, NULL, NULL);
 					} else {
 						avail = true;
-						rsn[0] = '\0';
+						mfd_msg_clear(&rsn);
 						snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
 					}
 				} else {
@@ -2038,22 +2049,23 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 					if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name, NULL,
 										   found_sc, sizeof(found_sc))) {
 						avail = true;
-						rsn[0] = '\0';
+						mfd_msg_clear(&rsn);
 						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
 					} else if (slot->resolved_scene_name[0] != '\0') {
 						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "Scene %s was deleted.",
-								 slot->resolved_scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED,
+								    slot->resolved_scene_name, NULL, NULL, NULL, NULL);
 						} else {
 							avail = false;
-							snprintf(rsn, sizeof(rsn), "%s is no longer in scene %s.",
-								 slot->source_a_name, slot->resolved_scene_name);
+							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
+								    slot->source_a_name, slot->resolved_scene_name,
+								    NULL, NULL, NULL);
 						}
 					} else {
 						avail = false;
-						snprintf(rsn, sizeof(rsn), "%s is not in any scene.",
-							 slot->source_a_name);
+						mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_ANY_SCENE, slot->source_a_name,
+							    NULL, NULL, NULL, NULL);
 					}
 				}
 				break;
@@ -2067,16 +2079,18 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				}
 				if (slot->source_a_name[0] == '\0') {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "%s was deleted.", slot->source_a_name);
+					mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL,
+						    NULL);
 				} else if (!mfd_engine_source_has_audio(eng, slot->source_a_name)) {
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "%s has no audio.", slot->source_a_name);
+					mfd_msg_set(&rsn, MFD_MSG_NO_AUDIO, slot->source_a_name, NULL, NULL, NULL,
+						    NULL);
 				} else {
 					avail = true;
-					rsn[0] = '\0';
+					mfd_msg_clear(&rsn);
 				}
 				break;
 
@@ -2086,11 +2100,11 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 					snprintf(lbl, sizeof(lbl), "%s: %s (%s)", slot->source_a_name,
 						 slot->filter_name, slot->filter_prop);
 					avail = slot->cached_available;
-					snprintf(rsn, sizeof(rsn), "%s", slot->cached_reason);
+					rsn = slot->cached_reason_msg;
 				} else {
 					snprintf(lbl, sizeof(lbl), "Filter Setting");
 					avail = false;
-					snprintf(rsn, sizeof(rsn), "Not used. Click to set up.");
+					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				}
 				break;
 			}
@@ -2103,8 +2117,8 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 	if (out_available) {
 		*out_available = avail;
 	}
-	if (out_reason && reason_size > 0U) {
-		snprintf(out_reason, reason_size, "%s", rsn);
+	if (out_reason) {
+		*out_reason = rsn;
 	}
 	if (out_resolved_scene && resolved_size > 0U) {
 		snprintf(out_resolved_scene, resolved_size, "%s", res_scene);
@@ -2125,24 +2139,24 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
 		bool prev_avail = slot->cached_available;
 		bool prev_a_above_b = slot->a_is_above_b;
-		char prev_reason[160];
-		snprintf(prev_reason, sizeof(prev_reason), "%s", slot->cached_reason);
+		const struct mfd_msg prev_reason = slot->cached_reason_msg;
 
 		bool new_avail = false;
-		char new_reason[160] = {0};
+		struct mfd_msg new_reason;
+		mfd_msg_clear(&new_reason);
 		char new_resolved[MFD_SOURCE_NAME_MAX] = {0};
 		bool new_a_above_b = slot->a_is_above_b;
 		if (slot->enabled && slot->target_type == MFD_TARGET_FILTER_PARAM) {
-			refresh_filter_slot_metadata_locked(eng, i, &new_avail, new_reason, sizeof(new_reason));
+			refresh_filter_slot_metadata_locked(eng, i, &new_avail, &new_reason);
 		} else {
 			slot->filter_prop_valid = false;
-			evaluate_slot_preconditions_const(eng, slot, NULL, 0U, &new_avail, new_reason,
-							  sizeof(new_reason), new_resolved, sizeof(new_resolved),
-							  &new_a_above_b);
+			evaluate_slot_preconditions_const(eng, slot, NULL, 0U, &new_avail, &new_reason, new_resolved,
+							  sizeof(new_resolved), &new_a_above_b);
 		}
 
 		slot->cached_available = new_avail;
-		snprintf(slot->cached_reason, sizeof(slot->cached_reason), "%s", new_reason);
+		slot->cached_reason_msg = new_reason;
+		mfd_msg_format_english(&new_reason, slot->cached_reason, sizeof(slot->cached_reason));
 		snprintf(slot->resolved_scene_name, sizeof(slot->resolved_scene_name), "%s", new_resolved);
 		slot->a_is_above_b = new_a_above_b;
 
@@ -2180,7 +2194,7 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 		}
 
 		if (prev_avail != new_avail || prev_a_above_b != new_a_above_b ||
-		    strcmp(prev_reason, new_reason) != 0) {
+		    !mfd_msg_equal(&prev_reason, &new_reason)) {
 			any_changed = true;
 		}
 	}
@@ -2408,8 +2422,21 @@ void mfd_engine_handle_filter_properties_updated(struct mfd_engine *eng, const c
 void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
 				size_t label_size, bool *out_available, char *out_reason, size_t reason_size)
 {
-	evaluate_slot_preconditions_const(eng, slot, out_label, label_size, out_available, out_reason, reason_size,
-					  NULL, 0U, NULL);
+	struct mfd_msg msg;
+	evaluate_slot_preconditions_const(eng, slot, out_label, label_size, out_available, &msg, NULL, 0U, NULL);
+	mfd_msg_format_english(&msg, out_reason, reason_size);
+}
+
+void mfd_engine_get_slot_status_msg(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
+				    size_t label_size, bool *out_available, char *out_reason, size_t reason_size,
+				    struct mfd_msg *out_msg)
+{
+	struct mfd_msg msg;
+	evaluate_slot_preconditions_const(eng, slot, out_label, label_size, out_available, &msg, NULL, 0U, NULL);
+	mfd_msg_format_english(&msg, out_reason, reason_size);
+	if (out_msg) {
+		*out_msg = msg;
+	}
 }
 
 void mfd_engine_notify_fader_changed(struct mfd_engine *eng, int slot_index, const char *origin)
@@ -2952,20 +2979,23 @@ static bool append_live_vendor_audio_cb(void *param, obs_source_t *src)
 bool mfd_engine_fill_vendor_catalog_locked(struct mfd_engine *eng, const char *source_name, obs_data_t *response_data,
 					   char *out_err, size_t err_size)
 {
-	if (out_err && err_size > 0U) {
-		out_err[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_fill_vendor_catalog_msg_locked(eng, source_name, response_data, &msg);
+	mfd_msg_format_english(&msg, out_err, err_size);
+	return ok;
+}
+
+bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const char *source_name,
+					       obs_data_t *response_data, struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (!eng || !response_data) {
 		return false;
 	}
 
 	if (source_name && source_name[0] != '\0') {
 		if (!mfd_engine_source_exists(eng, source_name)) {
-			if (out_err && err_size > 0U) {
-				snprintf(out_err, err_size,
-					 "Source '%s' not found. Create the source in OBS first or check its spelling.",
-					 source_name);
-			}
+			mfd_msg_set(out_msg, MFD_MSG_SOURCE_NOT_FOUND, source_name, NULL, NULL, NULL, NULL);
 			return false;
 		}
 		bool is_sc = false;
@@ -3049,6 +3079,10 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 	snprintf(out->opened_device_name, sizeof(out->opened_device_name), "%s", eng->midi_dev.opened_name);
 	out->midi_connected = eng->midi_dev.is_open;
 	out->midi_error_kind = eng->midi_dev.error_kind;
+	out->midi_error_operation = eng->midi_dev.error_operation;
+	out->midi_error_code = eng->midi_dev.error_code;
+	snprintf(out->midi_error_device_name, sizeof(out->midi_error_device_name), "%s",
+		 eng->midi_dev.error_device_name);
 	snprintf(out->midi_last_error, sizeof(out->midi_last_error), "%s", eng->midi_dev.last_error);
 	out->active_profile = mfd_engine_get_active_profile(eng);
 	const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(out->active_profile);
@@ -3074,13 +3108,14 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		char lbl[128] = {0};
 		bool avail = false;
-		char rsn[160] = {0};
+		struct mfd_msg rsn;
 		char res_sc[MFD_SOURCE_NAME_MAX] = {0};
 		bool a_above = out->slots[i].a_is_above_b;
-		evaluate_slot_preconditions_const(eng, &out->slots[i], lbl, sizeof(lbl), &avail, rsn, sizeof(rsn),
-						  res_sc, sizeof(res_sc), &a_above);
+		evaluate_slot_preconditions_const(eng, &out->slots[i], lbl, sizeof(lbl), &avail, &rsn, res_sc,
+						  sizeof(res_sc), &a_above);
 		out->slots[i].cached_available = avail;
-		snprintf(out->slots[i].cached_reason, sizeof(out->slots[i].cached_reason), "%s", rsn);
+		out->slots[i].cached_reason_msg = rsn;
+		mfd_msg_format_english(&rsn, out->slots[i].cached_reason, sizeof(out->slots[i].cached_reason));
 		snprintf(out->slots[i].resolved_scene_name, sizeof(out->slots[i].resolved_scene_name), "%s", res_sc);
 		out->slots[i].a_is_above_b = a_above;
 	}
@@ -3292,13 +3327,18 @@ size_t mfd_engine_find_addr_owners(struct mfd_engine *eng, const struct mfd_midi
 bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					 char *out_reason, size_t reason_size)
 {
-	if (out_reason && reason_size > 0U) {
-		out_reason[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_validate_setup_candidate_msg(eng, cand, &msg);
+	mfd_msg_format_english(&msg, out_reason, reason_size);
+	return ok;
+}
+
+bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+					     struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (!eng || !cand || cand->slot_index < 0 || cand->slot_index >= MFD_MAX_FADER_SLOTS) {
-		if (out_reason && reason_size > 0U) {
-			snprintf(out_reason, reason_size, "Invalid strip index.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_INVALID_STRIP, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (!cand->enabled || cand->target_type == MFD_TARGET_UNASSIGNED) {
@@ -3307,37 +3347,29 @@ bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const str
 
 	if (cand->target_type == MFD_TARGET_TWO_SOURCE_MIX) {
 		if (cand->scene_name[0] == '\0') {
-			if (out_reason && reason_size > 0U) {
-				snprintf(out_reason, reason_size, "Choose a scene with at least two layers.");
-			}
+			mfd_msg_set(out_msg, MFD_MSG_CHOOSE_SCENE_TWO_LAYERS, NULL, NULL, NULL, NULL, NULL);
 			return false;
 		}
 		if (cand->source_a_name[0] == '\0' || cand->source_b_name[0] == '\0') {
-			if (out_reason && reason_size > 0U) {
-				snprintf(out_reason, reason_size, "Not used. Click to set up.");
-			}
+			mfd_msg_set(out_msg, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 			return false;
 		}
 		if (strcmp(cand->source_a_name, cand->source_b_name) == 0) {
-			if (out_reason && reason_size > 0U) {
-				snprintf(out_reason, reason_size, "Left and Right cannot be the same layer.");
-			}
+			mfd_msg_set(out_msg, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
 			return false;
 		}
 	} else if (cand->target_type == MFD_TARGET_SINGLE_LAYER) {
 		if (cand->scene_name[0] == '\0') {
-			if (out_reason && reason_size > 0U) {
-				snprintf(out_reason, reason_size, "Choose a scene with at least one layer.");
-			}
+			mfd_msg_set(out_msg, MFD_MSG_CHOOSE_SCENE_ONE_LAYER, NULL, NULL, NULL, NULL, NULL);
 			return false;
 		}
 	} else if (cand->target_type == MFD_TARGET_FILTER_PARAM) {
 		double fval = cand->filter_from_val;
 		double tval = cand->filter_to_val;
-		return mfd_engine_validate_filter_param_binding_locked(eng, cand->slot_index, cand->enabled,
-								       cand->source_a_name, cand->filter_name,
-								       cand->filter_prop, true, &fval, &tval, NULL,
-								       out_reason, reason_size);
+		return mfd_engine_validate_filter_param_binding_msg_locked(eng, cand->slot_index, cand->enabled,
+									   cand->source_a_name, cand->filter_name,
+									   cand->filter_prop, true, &fval, &tval, NULL,
+									   out_msg);
 	}
 
 	struct mfd_fader_slot tmp;
@@ -3351,10 +3383,10 @@ bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const str
 	tmp.audio_follows_video = cand->audio_follows_video;
 
 	bool avail = false;
-	char rsn[160] = {0};
-	evaluate_slot_preconditions_const(eng, &tmp, NULL, 0U, &avail, rsn, sizeof(rsn), NULL, 0U, NULL);
-	if (!avail && out_reason && reason_size > 0U) {
-		snprintf(out_reason, reason_size, "%s", rsn);
+	struct mfd_msg rsn;
+	evaluate_slot_preconditions_const(eng, &tmp, NULL, 0U, &avail, &rsn, NULL, 0U, NULL);
+	if (!avail && out_msg) {
+		*out_msg = rsn;
 	}
 	return avail;
 }
@@ -3362,42 +3394,37 @@ bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const str
 bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_setup_candidate *cand, char *out_err,
 				     size_t err_size)
 {
-	if (out_err && err_size > 0U) {
-		out_err[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_commit_setup_session_msg(eng, cand, &msg);
+	mfd_msg_format_english(&msg, out_err, err_size);
+	return ok;
+}
+
+bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+					 struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (!eng || !cand || cand->slot_index < 0 || cand->slot_index >= MFD_MAX_FADER_SLOTS) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Invalid strip index.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_INVALID_STRIP, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 
 	mfd_engine_lock(eng);
 	if (!eng->setup_session.active || eng->setup_session.slot_index != cand->slot_index) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Setup session is no longer active for this strip.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_SETUP_NOT_ACTIVE, NULL, NULL, NULL, NULL, NULL);
 		mfd_engine_unlock(eng);
 		return false;
 	}
 
 	if (eng->slot_config_rev[cand->slot_index] != eng->setup_session.base_slot_rev) {
 		eng->setup_session.base_slot_rev = eng->slot_config_rev[cand->slot_index];
-		if (out_err && err_size > 0U) {
-			snprintf(
-				out_err, err_size,
-				"This strip was changed externally while Set up was open. Review and press Done again.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_CHANGED_EXTERNALLY, NULL, NULL, NULL, NULL, NULL);
 		mfd_engine_mark_ui_dirty(eng, true);
 		mfd_engine_unlock(eng);
 		return false;
 	}
 
-	char rsn[160] = {0};
-	if (!mfd_engine_validate_setup_candidate(eng, cand, rsn, sizeof(rsn))) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "%s", rsn);
-		}
+	if (!mfd_engine_validate_setup_candidate_msg(eng, cand, out_msg)) {
 		mfd_engine_unlock(eng);
 		return false;
 	}
@@ -3477,6 +3504,29 @@ bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_se
 	return true;
 }
 
+/* OBS names its desktop audio source in its own UI language, so find it by output channel, never by name. */
+static bool sg_output_source_name(const struct mfd_engine *eng, uint32_t channel, char *out, size_t out_size)
+{
+	out[0] = '\0';
+	if (eng && eng->scene_graph_ops) {
+		return eng->scene_graph_ops->get_output_source_name &&
+		       eng->scene_graph_ops->get_output_source_name(channel, out, out_size,
+								    eng->scene_graph_user_data) &&
+		       out[0] != '\0';
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_output_source(channel);
+	if (!src) {
+		return false;
+	}
+	const char *name = obs_source_get_name(src);
+	snprintf(out, out_size, "%s", name ? name : "");
+	obs_source_release(src);
+	return out[0] != '\0';
+}
+
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -3489,16 +3539,26 @@ void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
 	if (cat) {
 		mfd_engine_get_ui_catalog(eng, cat);
-		for (size_t i = 0U; i < cat->audio_count; ++i) {
-			if (ascii_stricmp(cat->audio_sources[i].name, "Desktop Audio") == 0) {
-				struct mfd_fader_slot *master = &eng->fader_slots[9];
-				master->enabled = true;
-				snprintf(master->source_a_name, sizeof(master->source_a_name), "%s",
-					 cat->audio_sources[i].name);
-				master->source_b_name[0] = '\0';
-				master->scene_name[0] = '\0';
-				mfd_engine_reset_slot_mode_state(eng, master, MFD_TARGET_AUDIO_VOLUME);
-				break;
+		/* Output channels 1 and 2 are OBS's Desktop Audio and Desktop Audio 2. Injected scene-graph ops without
+		 * get_output_source_name (headless tests) find none, and Master stays unassigned. */
+		bool assigned = false;
+		for (uint32_t channel = 1U; channel <= 2U && !assigned; ++channel) {
+			char desktop_name[MFD_SOURCE_NAME_MAX];
+			if (!sg_output_source_name(eng, channel, desktop_name, sizeof(desktop_name))) {
+				continue;
+			}
+			for (size_t i = 0U; i < cat->audio_count; ++i) {
+				if (strcmp(cat->audio_sources[i].name, desktop_name) == 0) {
+					struct mfd_fader_slot *master = &eng->fader_slots[9];
+					master->enabled = true;
+					snprintf(master->source_a_name, sizeof(master->source_a_name), "%s",
+						 cat->audio_sources[i].name);
+					master->source_b_name[0] = '\0';
+					master->scene_name[0] = '\0';
+					mfd_engine_reset_slot_mode_state(eng, master, MFD_TARGET_AUDIO_VOLUME);
+					assigned = true;
+					break;
+				}
 			}
 		}
 		mfd_ui_catalog_destroy(cat);
@@ -3562,13 +3622,18 @@ void mfd_engine_set_stream_deck_companion_dismissed(struct mfd_engine *eng, bool
 bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit,
 				      char *out_err, size_t err_size)
 {
-	if (out_err && err_size > 0U) {
-		out_err[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_update_slot_config_msg(eng, slot_index, edit, &msg);
+	mfd_msg_format_english(&msg, out_err, err_size);
+	return ok;
+}
+
+bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, const struct mfd_slot_config_edit *edit,
+				       struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (!eng || !edit || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Invalid strip index.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_INVALID_STRIP, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	mfd_engine_lock(eng);
@@ -3590,21 +3655,17 @@ bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, co
 					   sg_filter_exists(eng, edit->source_a_name, edit->filter_name, NULL);
 			if (!same_filter_binding || edit->has_filter_range || live_exists) {
 				bool has_ft = edit->has_filter_range || same_filter_binding;
-				if (!mfd_engine_validate_filter_param_binding_locked(
+				if (!mfd_engine_validate_filter_param_binding_msg_locked(
 					    eng, slot_index, true, edit->source_a_name, edit->filter_name,
-					    edit->filter_prop, has_ft, &cand_from, &cand_to, NULL, out_err, err_size)) {
+					    edit->filter_prop, has_ft, &cand_from, &cand_to, NULL, out_msg)) {
 					mfd_engine_unlock(eng);
 					return false;
 				}
 			} else {
 				/* Offline bound target: still enforce reserved filter & single-writer uniqueness */
 				if (mfd_is_internal_filter(edit->filter_name, NULL)) {
-					if (out_err && err_size > 0U) {
-						snprintf(
-							out_err, err_size,
-							"Filter '%s' is reserved by Midi Fadester and cannot be bound directly.",
-							edit->filter_name);
-					}
+					mfd_msg_set(out_msg, MFD_MSG_FILTER_RESERVED, edit->filter_name, NULL, NULL,
+						    NULL, NULL);
 					mfd_engine_unlock(eng);
 					return false;
 				}
@@ -3617,21 +3678,17 @@ bool mfd_engine_update_slot_config_ex(struct mfd_engine *eng, int slot_index, co
 					    strcmp(other->source_a_name, edit->source_a_name) == 0 &&
 					    strcmp(other->filter_name, edit->filter_name) == 0 &&
 					    strcmp(other->filter_prop, edit->filter_prop) == 0) {
-						if (out_err && err_size > 0U) {
-							snprintf(out_err, err_size,
-								 "Setting '%s' on '%s' is already controlled by %s.",
-								 edit->filter_prop, edit->filter_name,
-								 (other->label[0] != '\0') ? other->label : other->id);
-						}
+						set_already_controlled_msg(eng, out_msg, edit->filter_prop,
+									   edit->filter_name, j);
 						mfd_engine_unlock(eng);
 						return false;
 					}
 				}
 			}
 		} else if (edit->enabled && (!full_binding_fields && edit->has_filter_range)) {
-			if (!mfd_engine_validate_filter_param_binding_locked(
+			if (!mfd_engine_validate_filter_param_binding_msg_locked(
 				    eng, slot_index, true, edit->source_a_name, edit->filter_name, edit->filter_prop,
-				    true, &cand_from, &cand_to, NULL, out_err, err_size)) {
+				    true, &cand_from, &cand_to, NULL, out_msg)) {
 				mfd_engine_unlock(eng);
 				return false;
 			}
@@ -3716,18 +3773,10 @@ void mfd_engine_set_slot_label(struct mfd_engine *eng, int slot_index, const cha
 	}
 	mfd_engine_lock(eng);
 	struct mfd_fader_slot *s = &eng->fader_slots[slot_index];
-	if (label && label[0] != '\0') {
+	if (label && label[0] != '\0' && !mfd_profile_is_default_slot_label(slot_index, label)) {
 		snprintf(s->label, sizeof(s->label), "%s", label);
 	} else {
-		const struct mfd_controller_profile_def *def = mfd_profile_get_def(mfd_engine_get_active_profile(eng));
-		if (def && (size_t)slot_index < MFD_APC40_DEFAULT_SLOT_COUNT && def->slots[slot_index].label &&
-		    def->slots[slot_index].label[0] != '\0') {
-			snprintf(s->label, sizeof(s->label), "%s", def->slots[slot_index].label);
-		} else if (mfd_slot_is_fx_bank(slot_index)) {
-			snprintf(s->label, sizeof(s->label), "FX %d", slot_index - 9);
-		} else {
-			snprintf(s->label, sizeof(s->label), "Fader %d", slot_index + 1);
-		}
+		s->label[0] = '\0';
 	}
 	mfd_engine_bump_slot_rev(eng, slot_index);
 	mfd_engine_notify_state_changed(eng);
@@ -3752,32 +3801,31 @@ void mfd_engine_clear_slot_binding(struct mfd_engine *eng, int slot_index)
 bool mfd_engine_set_slot_value(struct mfd_engine *eng, int slot_index, float value_01, bool release, const char *origin,
 			       char *out_err, size_t err_size)
 {
-	if (out_err && err_size > 0U) {
-		out_err[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_set_slot_value_msg(eng, slot_index, value_01, release, origin, &msg);
+	mfd_msg_format_english(&msg, out_err, err_size);
+	return ok;
+}
+
+bool mfd_engine_set_slot_value_msg(struct mfd_engine *eng, int slot_index, float value_01, bool release,
+				   const char *origin, struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Invalid strip index.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_INVALID_STRIP, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 
 	mfd_engine_lock(eng);
 	struct mfd_fader_slot *slot = &eng->fader_slots[slot_index];
 	if (eng->setup_session.active && eng->setup_session.slot_index == slot_index) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Strip is currently paused while Set up is open.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_STRIP_PAUSED_IN_SETUP, NULL, NULL, NULL, NULL, NULL);
 		mfd_engine_unlock(eng);
 		return false;
 	}
 	if (!mfd_engine_is_slot_writable(eng, slot)) {
 		bool avail = false;
-		char rsn[160] = {0};
-		mfd_engine_get_slot_status(eng, slot, NULL, 0U, &avail, rsn, sizeof(rsn));
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "%s", rsn);
-		}
+		evaluate_slot_preconditions_const(eng, slot, NULL, 0U, &avail, out_msg, NULL, 0U, NULL);
 		mfd_engine_unlock(eng);
 		return false;
 	}
@@ -4157,9 +4205,17 @@ bool mfd_slot_is_reset_fx_eligible(const struct mfd_fader_slot *slot)
 bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
 			 int *out_queued_unavailable_count, char *out_err, size_t err_size)
 {
-	if (out_err && err_size > 0U) {
-		out_err[0] = '\0';
-	}
+	struct mfd_msg msg;
+	bool ok = mfd_engine_reset_fx_msg(eng, ms, out_eligible_count, out_reset_count, out_queued_unavailable_count,
+					  &msg);
+	mfd_msg_format_english(&msg, out_err, err_size);
+	return ok;
+}
+
+bool mfd_engine_reset_fx_msg(struct mfd_engine *eng, int ms, int *out_eligible_count, int *out_reset_count,
+			     int *out_queued_unavailable_count, struct mfd_msg *out_msg)
+{
+	mfd_msg_clear(out_msg);
 	if (out_eligible_count) {
 		*out_eligible_count = 0;
 	}
@@ -4170,15 +4226,11 @@ bool mfd_engine_reset_fx(struct mfd_engine *eng, int ms, int *out_eligible_count
 		*out_queued_unavailable_count = 0;
 	}
 	if (!eng) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Engine is not initialized.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_ENGINE_NOT_INITIALIZED, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 	if (ms != 0 && (ms < 50 || ms > 20000)) {
-		if (out_err && err_size > 0U) {
-			snprintf(out_err, err_size, "Duration 'ms' must be 0 (instant) or between 50 and 20000 ms.");
-		}
+		mfd_msg_set(out_msg, MFD_MSG_INVALID_FADE_MS, NULL, NULL, NULL, NULL, NULL);
 		return false;
 	}
 
@@ -4363,7 +4415,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				if (obs_initialized()) {
 					eng->pending_config_save = true;
 				}
-				obs_log(LOG_INFO, "MIDI Learn bound slot '%s' to Ch %u Type %d Num %u", ls->label,
+				obs_log(LOG_INFO, "MIDI Learn bound slot '%s' to Ch %u Type %d Num %u", ls->id,
 					(unsigned)(learned.channel + 1U), (int)learned.type, (unsigned)learned.number);
 				mfd_engine_notify_state_changed(eng);
 			}
@@ -5273,7 +5325,9 @@ static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		obs_data_set_string(item, "id", s->id);
 		obs_data_set_string(item, "kind", s->kind);
 		obs_data_set_bool(item, "enabled", s->enabled);
-		obs_data_set_string(item, "label", s->label);
+		char english_label[MFD_SLOT_LABEL_MAX];
+		mfd_engine_slot_english_label(eng, i, english_label, sizeof(english_label));
+		obs_data_set_string(item, "label", english_label);
 		obs_data_set_int(item, "midi_type", (int)s->addr.type);
 		obs_data_set_int(item, "midi_channel", (int)s->addr.channel);
 		obs_data_set_int(item, "midi_number", (int)s->addr.number);
@@ -5372,7 +5426,12 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		s->enabled = obs_data_get_bool(item, "enabled");
 		const char *lbl = obs_data_get_string(item, "label");
 		if (lbl && *lbl) {
-			snprintf(s->label, sizeof(s->label), "%s", lbl);
+			/* A stored default label (any profile's English default) becomes empty, so it is shown translated. */
+			if (mfd_profile_is_default_slot_label(slot_idx, lbl)) {
+				s->label[0] = '\0';
+			} else {
+				snprintf(s->label, sizeof(s->label), "%s", lbl);
+			}
 		}
 
 		if (obs_data_has_user_value(item, "midi_type")) {

@@ -29,6 +29,13 @@ enum mfd_winmm_error_kind {
 	MFD_WINMM_ERR_OPEN_FAILED = 5,
 };
 
+/* Which WinMM call failed for MFD_WINMM_ERR_OPEN_FAILED / _BUSY_ALLOCATED (the UI words the error from this). */
+enum mfd_winmm_operation {
+	MFD_WINMM_OP_NONE = 0,
+	MFD_WINMM_OP_OPEN = 1,  /* midiInOpen */
+	MFD_WINMM_OP_START = 2, /* midiInStart */
+};
+
 struct mfd_midi_device_info {
 	uint32_t index;
 	char name[MFD_MIDI_DEV_NAME_MAX];
@@ -41,8 +48,11 @@ struct mfd_winmm_device {
 	struct mfd_midi_queue *queue;
 	bool is_open;
 	enum mfd_winmm_error_kind error_kind;
+	enum mfd_winmm_operation error_operation;
+	uint32_t error_code;                           /* MMRESULT of the failed call, 0 if none */
+	char error_device_name[MFD_MIDI_DEV_NAME_MAX]; /* the device the error is about, "" if none */
 	char opened_name[MFD_MIDI_DEV_NAME_MAX];
-	char last_error[MFD_MIDI_ERROR_MAX];
+	char last_error[MFD_MIDI_ERROR_MAX]; /* English, for logs and the API */
 	volatile bool device_closed_unexpectedly;
 };
 
@@ -67,6 +77,9 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
  * and sets dev->last_error and dev->error_kind so the UI shows a disconnected status without crashing.
  */
 bool mfd_winmm_check_health(struct mfd_winmm_device *dev);
+
+/* Stable id of an error kind for the obs-websocket API's device.error_code ("" for MFD_WINMM_OK). */
+const char *mfd_winmm_error_slug(enum mfd_winmm_error_kind kind);
 
 #ifdef __cplusplus
 }

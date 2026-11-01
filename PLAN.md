@@ -241,3 +241,130 @@ C:\midi-fadester\
 | `D-23` | Implement `MFD_TARGET_FILTER_PARAM` (`"filter_param"`) with `[from_val, to_val]` sub-range mapping (supporting inverted ranges and neutral-at-0% origins), quantized mapped-value write gating, signal-cached property metadata (zero `obs_source_properties()` calls on the video render tick), weak-ref tracked source/filter signal handlers (`obs_weak_source_t *`), and external OBS `"update"` Soft Takeover sync (`origin: "obs"`). | Eliminates 60 Hz `obs_source_properties()` heap churn and `obs_filter_get_parent()` lifetime hazards, supports nested `OBS_PROPERTY_GROUP` properties and Visual Sidechain dynamic `.shader` reloads with zero timers, and prevents physical knob jumps after OBS UI edits. |
 | `D-24` | Manage `bypass_at_zero` through a per-`(source, filter)` aggregated lease table (`struct mfd_filter_bypass_lease`) with pre-mutation `detach_filter_binding_locked`, source/filter rename tracking, live shutdown restoration, and persisted `filter_pre_bypass_enabled`. | Allows two FX slots to modulate different properties on the same OBS filter without fighting over `obs_source_set_enabled`, and guarantees filters are never left secretly disabled after unbinding or unloading the plugin. |
 | `D-25` | Provide `reset_fx` (`CLEAN / ALL FX OFF` in OBS UI, `obs-websocket` vendor API, and Stream Deck `__all_fx__` / dial actions) targeting every active `kind == "fx"` or `filter_param` slot (`ms = 0` or `50..20000`), snapping unavailable FX slots offline with `pending_clean_apply_on_avail = true`. | Satisfies *Fabel*'s live-show panic requirement: one press clears every FX slot back to clean (`from_val` + bypass) even across temporarily missing sources without disturbing non-filter channel faders, A/B crossfades, or media playback. |
+
+---
+
+## 7. Translations (`R-I18N-1..5`; requested by the operator 2026-10-31)
+
+Goal: Midi Fadester follows the language OBS runs in, in the ten languages obs-playlister and visual-sidechain have.
+Today `en-US.ini` has 5 keys; about 480 distinct visible strings are hardcoded (inventory 2026-10-31: settings dialog
+~111, ui-sentences.c ~104, setup sheet ~79, engine reasons and errors ~75, controller drawing ~38, APC40 and MIDI
+device texts). Each step ends with the full ctest green and its own commit; the push comes once, after step 6.
+
+1. **Step 7.1 -- No English as data (no visible change).** `ui-sentences.c` stops comparing slot labels with the
+   default English labels: whether a label is the default comes from comparing with the defaults the code itself
+   generates (kept English), and the display then picks the translated default. The "Studio Mode is off." test
+   (`ui-sentences.c:287`) becomes a reason code beside `cached_reason` in the engine; the API `reason` text stays
+   English. The "At end." comparisons (`mfd-settings-dialog.cpp:1447, 2238`) become an `at_end` flag in
+   `mfd_ui_strip_presentation`. The first-run layout finds desktop audio by output channel
+   (`obs_get_output_source(1)`), not by the English name "Desktop Audio" (`mfd-engine.c:3493`, a bug in any other
+   language today). Device and engine errors keep their English text for logs and the API and gain an error kind plus
+   arguments for the UI. The self-test finds OBS's Transition button by object name, not by its text
+   (`mfd-tbar.cpp:145`). Chained `.arg()` calls with user names become single-pass fills (a name containing "%1" must
+   not be replaced again). **Tests**: existing ctest unchanged and green; new cases for the at-end flag, the reason
+   code, and a scene name containing "%1".
+
+   *As built (7.1):* new `src/core/slot-messages.{h,c}` (pure C17): `struct mfd_msg` = `enum mfd_msg_code` + five
+   arguments; one table gives each code its API slug and English template (`%1`..`%5`, filled in one pass). Every slot
+   reason and engine error is now set as a message; the English text for logs and the API is formatted from it and is
+   byte-identical to before (long names now fit up to 255 bytes per argument). Slots keep `cached_reason` (English)
+   beside `cached_reason_msg`; change detection compares code plus arguments. Public engine calls keep their
+   char-buffer form and gain `_msg` siblings (`get_slot_status_msg`, `validate_setup_candidate_msg`,
+   `commit_setup_session_msg`, `update_slot_config_msg`, `set_slot_value_msg`, `reset_fx_msg`,
+   `validate_filter_param_binding_msg_locked`, `fill_vendor_catalog_msg_locked`). The vendor API adds `reason_code`
+   to slot data and procs, `error_code` to every error response (engine codes from the table; API-only codes
+   `missing_parameter`, `invalid_parameter`, `unknown_slot`, `unknown_profile`, `scene_not_found`, `source_not_found`,
+   `slot_unavailable`, `shutting_down`) and `device.error_code` / `device.winmm_code`. The T-bar reason is the code
+   `tbar_slider_missing` (same English). "Setting ... is already controlled by %3" also carries the owner's slot
+   index as `%4`, so the UI can show its translated strip title.
+   Default labels: profiles load with empty labels; `mfd_engine_set_slot_label` and config load store an empty label
+   for any profile's English default (`mfd_profile_is_default_slot_label`, the single rule); the saved config and the
+   API `name` use `mfd_engine_slot_english_label`. `mfd_ui_strip_title` uses the same rule (empty or a code-generated
+   English default shows the short title), so old configs and the existing tests keep their titles; a typed label
+   shows as typed. `is_stock_profile_slot_label` named in the review does not exist in this tree; the matchers in
+   `mfd_engine_select_profile` now set empty labels. The MIDI Learn log line names the slot id.
+   `mfd_ui_strip_presentation` gains `at_end`; `mfd_ui_strip_input` gains `reason_msg` (the amber Studio Mode action
+   checks the code). The settings dialog and the SVG test the flag. First-run Master: the source on OBS output
+   channel 1, then 2, through `mfd_scene_graph_ops.get_output_source_name` (production: `obs_get_output_source` with
+   release; test fakes return their desktop audio). WinMM errors keep `last_error` and add `error_operation` (open or
+   start), `error_code` (MMRESULT) and `error_device_name`, copied into the UI snapshot. The self-test finds OBS's
+   Transition button as the first visible text push button in the layout holding the T-bar slider. The SVG header,
+   strip and crossfader cells fill geometry first and names last in one multi-argument `arg`; the setup-sheet title
+   uses one multi-argument `arg`.
+   Tests: `test-ui-sentences` sets `reason_msg` for the Studio Mode case (it compared the English reason, which is now
+   a code) and adds cases for the code-not-text rule, `at_end`, single-pass fill of names holding "%1"/"%2", message
+   equality and slugs, empty default labels; `test-vendor-api` checks `reason_code`, `error_code`, the empty stored
+   label with the English API `name`; both fake scene graphs inject the output-channel lookup. 15/15 green.
+2. **Step 7.2 -- The text hook and the key check (`src/core/mfd-text.{h,c}`).** As obs-playlister's `pl_text`:
+   `mfd_text(key, english)` returns the lookup's text or `english`; `mfd_text_set_lookup(fn)` is set in
+   `plugin-main.c` to a wrapper of `obs_module_text` that returns NULL when OBS gives back the key;
+   `mfd_text_fill(out, size, text, values, count)` fills `%1`..`%9` in one pass into a char buffer (a missing value is
+   left out, other `%` stay, never printf). Qt gets `mfdText(key, english)` returning QString and a single-pass
+   `mfdFill`. `check-locale-keys.cmake` learns `mfd_text("Key", "English")` and `mfdText("Key", "English")`, and checks
+   that the English literal equals `en-US.ini`'s text. **Tests**: `test-mfd-text` (lookup, fallback, placeholders
+   missing, repeated, out of order, `%10`, `%` kept, buffer too small); a negative key-check test for a changed English.
+3. **Step 7.3 -- Core texts to keys.** `ui-sentences.c`, `midi-parser.c` (status lines), `filter-math.c`'s " (Off)" on
+   the UI path, the APC40 and Generic profiles' display texts and notes (by slug), and the winmm device messages:
+   whole-sentence keys with placeholders (up and down move hints as two sentences, fallback words such as "Left" or
+   "layer" as their own keys, one and many forms for counts). **Tests**: the existing English assertions in
+   `test-ui-sentences`, `test-midi-parser`, `test-takeover`, `test-apc40-profile` stay as they are (no lookup set, so
+   English), plus a test with a lookup that returns marked text, proving every sentence goes through the hook.
+4. **Step 7.4 -- Qt UI to keys.** The settings dialog, the setup sheet and the controller drawing (every SVG text
+   through `xml_escape`), engine reasons and errors formatted from their codes in the UI, and the T-bar's error line.
+   Combo labels are translated, their item data stay as they are. The Qt tests' `main()` loads `data/locale/en-US.ini`
+   with `text_lookup_create` and sets it as the module lookup, so their English assertions keep passing through the
+   real keys. **Tests**: `test-ui-dialog` unchanged and green; a run with a marked lookup that finds no hardcoded
+   English left in the dialog's widget texts (every QLabel, QAbstractButton, QGroupBox, QComboBox item and tooltip).
+5. **Step 7.5 -- The ten files and the file check.** `tests/check-locale-files.cmake` ported from obs-playlister
+   (`%1`..`%9` sets, any printf conversion refused, `&` count kept for keys with a mnemonic, UTF-8 without BOM, names,
+   all ten required) with its negative tests. Strings whose English is word for word OBS's own start from OBS 33.0.0's
+   official translations; Claude drafts the rest; Gemini 4 Argon reviews each file; corrections are applied unless one
+   breaks a rule. README gets a Languages section.
+6. **Step 7.6 -- Checks.** Sonnet 5.5 post-code QA before each build; full ctest; the portable OBS 33 harness (R-TST-2)
+   in English; one run each in German (length), Japanese (CJK) and Russian, looking for cut-off text in the dialog and
+   the controller drawing (fix elide widths). One push. The version (0.6.0) changes only on the operator's word.
+
+
+**Review round 1 (2026-10-31, Codex GPT-6.1 Sol ultra and Gemini 4 Argon High via agy): taken, and binding for the
+steps above where they differ.**
+
+- *Defaults:* a default slot label is stored as an empty label (with a load-time migration: a stored label equal to
+  that slot's English default becomes empty); the display shows the translated default, the API `name` and saved
+  config keep the English default for an empty label. The duplicate stock-label matchers (`is_stock_profile_slot_label`,
+  `mfd_engine_select_profile`) use the same rule. No English comparison remains.
+- *"At end."*: also `mfd-controller-svg.cpp:353`; the `at_end` flag reaches the SVG builder. The engine's change
+  detection (`mfd-engine.c:2183`) compares the reason code plus its arguments.
+- *Transition button*: OBS 33 gives it no object name (`OBSBasic_StudioMode.cpp:78`); the self-test identifies it
+  structurally (the push button beside OBS's T-bar slider), not by text.
+- *Desktop audio*: found through the injectable scene-graph ops (`mfd_scene_graph_ops`), which call
+  `obs_get_output_source(1)` and `(2)` and release them; the headless tests inject a fake.
+- *API boundary*: everything the vendor API returns (`reason`, `error`, `label`, `name`, `display_value`,
+  `profile_display_name`, `device.error`) stays English. The UI formats its own texts from structured values and
+  codes: the filter " (Off)" suffix, profile display names and notes (all six profiles), device errors (extending
+  the existing `error_kind` with the operation and error code). `reason_code` and `error_code` fields are added to the
+  API alongside the English text, so the Stream Deck plugin can translate later.
+- *Hook*: `src/core/mfd-text.{h,c}` is standard C17 only (no `dstr`, no OBS header); the bounded filler writes into a
+  char buffer. The lookup in `plugin-main.c` uses `obs_module_get_string`'s boolean result. The hook pointer is set in
+  `obs_module_load` before any consumer starts and cleared in `obs_module_unload` after they stop; text is looked up
+  on use and never cached across a locale change. UI texts are built on the Qt thread; nothing on the video tick or a
+  websocket thread calls the hook (the API stays English).
+- *Qt*: `mfdText` / `mfdFill` live outside core (`src/ui/mfd-text-qt.{hpp,cpp}`), copying with `QString::fromUtf8`.
+  The SVG builder formats its geometry first and inserts escaped texts last (no 14-argument `.arg` chain).
+  `QProgressBar::setFormat` gets a text whose `%` are not followed by `p`, `v` or `m` (a filled value is escaped).
+- *Tests*: `test-ui-dialog` and `test-vendor-api` define their own module text functions; their `main()` loads
+  `en-US.ini` from a CMake-injected path with `text_lookup_create`, assigns it to the generated `obs_module_lookup`,
+  installs the hook, asserts the load worked, and destroys the lookup after the last consumer. The first-run tests
+  inject the output-channel lookup.
+- *Sentences*: no fallback noun is stitched into another sentence; each case has its own whole sentence. Counts are
+  phrased without agreement ("Filters: %1"), since two plural forms do not fit Russian; directions cover up/down,
+  left/right (crossfader) and turning (FX knobs). "Beta", the "Last move" text and the "%d%% · %s" readouts are
+  whole-sentence keys with placeholders.
+- *Coverage*: window and file-dialog titles, progress formats, the " ms" and " %" suffixes, the mode cards, the module
+  name and description; en-US.ini grows within each step, not at the end.
+- *Checks*: `check-locale-keys.cmake` reads multi-line calls, treats only `#` as a comment (as OBS does), and fails
+  on a key built at run time it cannot see unless that key family is listed in the check. Layout: the fixed-width
+  captions and buttons in the setup sheet and dialog move to layouts that size to their text; the SVG elides by
+  measured width, not by character count. A marked-lookup test scans the dialog's widgets, tabs, headers, window
+  titles and the generated SVG for untranslated English.
+Not in this plan: translating log lines and the vendor API's texts (the Stream Deck plugin would need codes first; a
+follow-up), README itself.

@@ -28,6 +28,7 @@
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QImage>
+#include <QLayout>
 #include <QMetaObject>
 #include <QPointer>
 #include <QProcess>
@@ -128,39 +129,45 @@ static QSlider *locate_slider_tbar_on_ui_thread(void)
 }
 
 #ifdef MFD_ENABLE_SELF_TEST
-static QPushButton *locate_studio_transition_button_on_ui_thread(void)
+/* OBS 33 gives the Studio Mode Transition button no object name and translates its text, so it is found by place:
+ * the first visible push button with text in the layout that holds the T-bar slider (OBSBasic_StudioMode.cpp puts
+ * the Transition button row above the quick transitions and the slider; the dots button beside it has no text). */
+static QPushButton *first_text_button_in_layout(QLayout *layout)
 {
-	auto match_in_widget = [](QWidget *root) -> QPushButton * {
-		if (!root) {
-			return nullptr;
+	if (!layout) {
+		return nullptr;
+	}
+	for (int i = 0; i < layout->count(); ++i) {
+		QLayoutItem *item = layout->itemAt(i);
+		if (!item) {
+			continue;
 		}
-		const QList<QPushButton *> btns = root->findChildren<QPushButton *>();
-		for (QPushButton *b : btns) {
-			if (!b || !b->isVisible()) {
-				continue;
-			}
-			QString txt = b->text();
-			txt.remove(QLatin1Char('&'));
-			txt = txt.trimmed();
-			if (txt.compare(QStringLiteral("Transition"), Qt::CaseInsensitive) == 0) {
+		if (auto *b = qobject_cast<QPushButton *>(item->widget())) {
+			if (b->isVisible() && !b->text().trimmed().isEmpty()) {
 				return b;
 			}
 		}
-		return nullptr;
-	};
-
-	if (g_tbar_slider) {
-		if (QPushButton *b = match_in_widget(g_tbar_slider->parentWidget())) {
+		if (QPushButton *b = first_text_button_in_layout(item->layout())) {
 			return b;
 		}
-		if (g_tbar_slider->parentWidget()) {
-			if (QPushButton *b = match_in_widget(g_tbar_slider->parentWidget()->parentWidget())) {
-				return b;
-			}
+	}
+	return nullptr;
+}
+
+static QPushButton *locate_studio_transition_button_on_ui_thread(void)
+{
+	if (!g_tbar_slider) {
+		return nullptr;
+	}
+	for (QWidget *host = g_tbar_slider->parentWidget(); host; host = host->parentWidget()) {
+		if (QPushButton *b = first_text_button_in_layout(host->layout())) {
+			return b;
+		}
+		if (host->parentWidget() == static_cast<QWidget *>(obs_frontend_get_main_window())) {
+			break;
 		}
 	}
-	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
-	return match_in_widget(main_win);
+	return nullptr;
 }
 #endif
 
