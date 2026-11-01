@@ -114,14 +114,14 @@ set_tests_properties(
   PROPERTIES PASS_REGULAR_EXPRESSION "Shader\.Error\.FileNotFound: the English in .*locale-format-mismatch\.c"
 )
 
-# Every translation matches en-US.ini (R-I18N-4): the real files with the ten required languages, a file full of
+# Every translation matches en-US.ini (R-I18N-4): the real files with the eleven required languages, a file full of
 # awkward characters must pass, and each kind of fault must be caught (check-locale-files-bad.cmake)
 add_test(
   NAME check-locale-files
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
-    # the ten languages of R-I18N-3: a missing file fails
-    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR" -P
+    # the eleven languages of R-I18N-3: a missing file fails
+    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR,nl-NL" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
 )
 add_test(
