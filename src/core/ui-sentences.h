@@ -96,6 +96,17 @@ struct mfd_ui_strip_presentation {
 };
 
 void mfd_ui_strip_title(int slot_index, const char *slot_label, char *out, size_t out_size);
+/* The strip as named in a sentence: the short title, but "Fader n" for a numbered fader with a default label. */
+void mfd_ui_strip_name(int slot_index, const char *slot_label, char *out, size_t out_size);
+/* "-inf dB" / "-6.0 dB" and "65%" in the language OBS runs in. */
+void mfd_ui_format_db(float db, char *out, size_t out_size);
+void mfd_ui_format_percent(int percent, char *out, size_t out_size);
+/* A slot reason or engine error worded in the language OBS runs in (the English stays for logs and the API). */
+void mfd_ui_format_msg(const struct mfd_msg *msg, char *out, size_t out_size);
+/* The MIDI device error banner from the error's kind, operation, WinMM code and device (the English last_error stays
+ * for logs and the API). Writes "" for MFD_WINMM_OK. */
+void mfd_ui_format_device_error(enum mfd_winmm_error_kind kind, enum mfd_winmm_operation operation, uint32_t error_code,
+				const char *device_name, char *out, size_t out_size);
 
 void mfd_ui_format_controller_status(bool connected, const char *configured_name, const char *opened_name,
 				     enum mfd_winmm_error_kind error_kind, struct mfd_ui_controller_presentation *out);

@@ -5,6 +5,7 @@
  */
 
 #include "core/filter-math.h"
+#include "core/mfd-text.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
@@ -168,9 +169,9 @@ int mfd_filter_decimals_for_step(bool is_int, double step)
 	return 3;
 }
 
-void mfd_filter_format_display_value(float norm_01, double from_val, double to_val, double prop_min, double prop_max,
-				     bool is_int, double step, const char *suffix, bool bypass_at_zero, char *out,
-				     size_t out_size)
+void mfd_filter_format_display_value_ex(float norm_01, double from_val, double to_val, double prop_min, double prop_max,
+					bool is_int, double step, const char *suffix, bool bypass_at_zero,
+					bool translate, char *out, size_t out_size)
 {
 	if (!out || out_size == 0U) {
 		return;
@@ -180,19 +181,34 @@ void mfd_filter_format_display_value(float norm_01, double from_val, double to_v
 	float t = clamp01f(norm_01);
 	double mapped = mfd_filter_map_value(t, from_val, to_val, prop_min, prop_max, is_int);
 	const char *sfx = suffix ? suffix : "";
-	const char *off_tag = (bypass_at_zero && t <= MFD_FILTER_BYPASS_ZERO_THRESHOLD) ? " (Off)" : "";
+	const bool off = bypass_at_zero && t <= MFD_FILTER_BYPASS_ZERO_THRESHOLD;
 
+	char value[96];
 	if (is_int) {
 		int64_t q = (int64_t)llround(mapped);
-		snprintf(out, out_size, "%" PRId64 "%s%s", q, sfx, off_tag);
+		snprintf(value, sizeof(value), "%" PRId64 "%s", q, sfx);
+	} else {
+		int dec = mfd_filter_decimals_for_step(false, step);
+		double scale = pow(10.0, (double)dec);
+		double qf = round(mapped * scale + (mapped >= 0.0 ? 1e-12 : -1e-12)) / scale;
+		if (fabs(qf) < 0.5 / scale) {
+			qf = 0.0;
+		}
+		snprintf(value, sizeof(value), "%.*f%s", dec, qf, sfx);
+	}
+	if (!off) {
+		snprintf(out, out_size, "%s", value);
 		return;
 	}
+	/* the bypassed value as a whole text: "%1 (Off)" */
+	const char *const values[1] = {value};
+	mfd_text_fill(out, out_size, mfd_text_or_english(translate, "FilterValue.Off", "%1 (Off)"), values, 1U);
+}
 
-	int dec = mfd_filter_decimals_for_step(false, step);
-	double scale = pow(10.0, (double)dec);
-	double qf = round(mapped * scale + (mapped >= 0.0 ? 1e-12 : -1e-12)) / scale;
-	if (fabs(qf) < 0.5 / scale) {
-		qf = 0.0;
-	}
-	snprintf(out, out_size, "%.*f%s%s", dec, qf, sfx, off_tag);
+void mfd_filter_format_display_value(float norm_01, double from_val, double to_val, double prop_min, double prop_max,
+				     bool is_int, double step, const char *suffix, bool bypass_at_zero, char *out,
+				     size_t out_size)
+{
+	mfd_filter_format_display_value_ex(norm_01, from_val, to_val, prop_min, prop_max, is_int, step, suffix,
+					   bypass_at_zero, false, out, out_size);
 }

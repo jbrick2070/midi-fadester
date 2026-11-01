@@ -62,6 +62,10 @@ int main(void)
 		REQUIRE(def->spec_note != NULL && def->spec_note[0] != '\0');
 		REQUIRE(mfd_profile_find_by_slug(def->slug) == def);
 		REQUIRE(mfd_profile_get_def(def->id) == def);
+		/* the UI texts (no locale loaded here) are the English the API sends */
+		REQUIRE(strcmp(mfd_profile_ui_display_name(def), def->display_name) == 0);
+		REQUIRE(strcmp(mfd_profile_ui_short_name(def), def->short_name) == 0);
+		REQUIRE(strcmp(mfd_profile_ui_spec_note(def), def->spec_note) == 0);
 
 		if (def->tier == MFD_PROFILE_TIER_VERIFIED) {
 			++verified_count;

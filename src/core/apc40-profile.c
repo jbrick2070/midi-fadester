@@ -5,6 +5,7 @@
  */
 
 #include "core/apc40-profile.h"
+#include "core/mfd-text.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
@@ -598,6 +599,68 @@ const struct mfd_controller_profile_def *mfd_profile_find_by_slug(const char *sl
 		}
 	}
 	return NULL;
+}
+
+const char *mfd_profile_ui_display_name(const struct mfd_controller_profile_def *def)
+{
+	if (!def) {
+		return "";
+	}
+	if (def->id == MFD_PROFILE_GENERIC) {
+		return mfd_text("Profile.Generic.Name", "Generic MIDI (Custom)");
+	}
+	return def->display_name;
+}
+
+const char *mfd_profile_ui_short_name(const struct mfd_controller_profile_def *def)
+{
+	if (!def) {
+		return "";
+	}
+	if (def->id == MFD_PROFILE_GENERIC) {
+		return mfd_text("Profile.Generic.ShortName", "Generic MIDI");
+	}
+	return def->short_name;
+}
+
+const char *mfd_profile_ui_spec_note(const struct mfd_controller_profile_def *def)
+{
+	if (!def) {
+		return "";
+	}
+	switch (def->id) {
+	case MFD_PROFILE_GENERIC:
+		return mfd_text(
+			"Profile.Generic.Note",
+			"Custom MIDI layout — click Set up or Learn on any strip to bind your controller's faders "
+			"or knobs.");
+	case MFD_PROFILE_APC40_MK2:
+		return mfd_text(
+			"Profile.Apc40mk2.Note",
+			"Hardware-verified on physical Akai APC40 mkII (Crossfader Ch 1 CC 15, Faders 1-8 Ch 1-8 "
+			"CC 7, Master Ch 1 CC 14, Device Knobs 1-8 Ch 1 CC 16-23).");
+	case MFD_PROFILE_APC_MINI_MK2:
+		return mfd_text("Profile.Apcminimk2.Note",
+				"Beta (untested on hardware) — mapped from Akai APC mini mk2 factory MIDI spec (Faders "
+				"1-8: Ch 1 CC 48-55, Master: Ch 1 CC 56).");
+	case MFD_PROFILE_AKAI_MIDIMIX:
+		return mfd_text(
+			"Profile.Midimix.Note",
+			"Beta (untested on hardware) — mapped from Akai MIDImix factory MIDI spec (Faders 1-8: Ch "
+			"1 CC 19/23/27/31/49/53/57/61, Master: Ch 1 CC 62, Bottom Knobs 1-8: Ch 1 CC "
+			"18/22/26/30/48/52/56/60).");
+	case MFD_PROFILE_KORG_NANOKONTROL2:
+		return mfd_text("Profile.Nanokontrol2.Note",
+				"Beta (untested on hardware) — mapped from Korg nanoKONTROL2 CC-mode factory defaults "
+				"(Sliders 1-8: Ch 1 CC 0-7, Knobs 1-8: Ch 1 CC 16-23).");
+	case MFD_PROFILE_LAUNCH_CONTROL_XL:
+		return mfd_text("Profile.Launchcontrolxl.Note",
+				"Beta (untested on hardware) — mapped from Novation Launch Control XL User Template 1 "
+				"spec (Faders 1-8: Ch 1 CC 77-84, Bottom Knobs 1-8: Ch 1 CC 49-56; use Learn if on "
+				"Factory Ch 9).");
+	default:
+		return def->spec_note;
+	}
 }
 
 const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier)

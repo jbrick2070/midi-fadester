@@ -80,6 +80,9 @@ const char *mfd_msg_slug(enum mfd_msg_code code);
 /* text with %1..%5 filled from the message's arguments in one pass (mfd_text_fill). */
 void mfd_msg_fill(const struct mfd_msg *msg, const char *text, char *out, size_t out_size);
 
+/* The sentence in the language OBS runs in (translate) or in English; "" for MFD_MSG_NONE. */
+void mfd_msg_format(const struct mfd_msg *msg, bool translate, char *out, size_t out_size);
+
 /* The English sentence for logs and the obs-websocket API; "" for MFD_MSG_NONE. */
 void mfd_msg_format_english(const struct mfd_msg *msg, char *out, size_t out_size);
 

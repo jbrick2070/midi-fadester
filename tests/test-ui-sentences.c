@@ -5,6 +5,9 @@
  */
 
 #include "core/ui-sentences.h"
+#include "core/filter-math.h"
+#include "core/midi-parser.h"
+#include "core/mfd-text.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,6 +19,293 @@
 			return 1;                                                       \
 		}                                                                       \
 	} while (0)
+
+/* --- Marked lookup: en-US.ini's texts wrapped in guillemets, so a sentence that bypasses the hook shows up --- */
+#define MARK_MAX_KEYS 1024
+static char g_mark_keys[MARK_MAX_KEYS][64];
+static char g_mark_texts[MARK_MAX_KEYS][320];
+static size_t g_mark_count;
+
+static void load_marked_locale(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		return;
+	}
+	char line[1024];
+	while (fgets(line, sizeof(line), f) && g_mark_count < MARK_MAX_KEYS) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq || eq[1] != '"') {
+			continue;
+		}
+		*eq = '\0';
+		snprintf(g_mark_keys[g_mark_count], sizeof(g_mark_keys[0]), "%s", line);
+		char *src = eq + 2;
+		char *dst = g_mark_texts[g_mark_count];
+		size_t used = 0U;
+		dst[used++] = '\xC2';
+		dst[used++] = '\xAB';
+		for (; *src && *src != '\r' && *src != '\n' && used + 4U < sizeof(g_mark_texts[0]); ++src) {
+			if (src[0] == '\\' && src[1] != '\0') {
+				++src;
+				dst[used++] = (*src == 'n') ? '\n' : *src;
+				continue;
+			}
+			if (src[0] == '"') {
+				break;
+			}
+			dst[used++] = *src;
+		}
+		dst[used++] = '\xC2';
+		dst[used++] = '\xBB';
+		dst[used] = '\0';
+		++g_mark_count;
+	}
+	fclose(f);
+}
+
+static const char *marked_text(const char *key)
+{
+	for (size_t i = 0U; i < g_mark_count; ++i) {
+		if (strcmp(g_mark_keys[i], key) == 0) {
+			return g_mark_texts[i];
+		}
+	}
+	return NULL;
+}
+
+static int is_marked(const char *text)
+{
+	if (!text || !strstr(text, "\xC2\xAB")) {
+		fprintf(stderr, "not through the text hook: '%s'\n", text ? text : "(null)");
+		return 0;
+	}
+	/* every placeholder filled */
+	for (const char *c = strchr(text, '%'); c; c = strchr(c + 1, '%')) {
+		if (c[1] >= '1' && c[1] <= '9') {
+			fprintf(stderr, "placeholder left: '%s'\n", text);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int check_marked_sentences(void)
+{
+	load_marked_locale(MFD_TEST_LOCALE_FILE);
+	REQUIRE(g_mark_count > 100U);
+	mfd_text_set_lookup(marked_text);
+	char out[512];
+
+	/* strip titles that are words, and strip names */
+	mfd_ui_strip_title(0, "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_strip_title(9, "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_strip_title(12, "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_strip_name(3, "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+
+	/* controller bar, every kind, named and unnamed */
+	const enum mfd_winmm_error_kind kinds[] = {MFD_WINMM_ERR_NO_DEVICES, MFD_WINMM_ERR_CONFIGURED_NOT_FOUND,
+						   MFD_WINMM_ERR_BUSY_ALLOCATED, MFD_WINMM_ERR_DISCONNECTED,
+						   MFD_WINMM_ERR_OPEN_FAILED};
+	struct mfd_ui_controller_presentation ctrl;
+	mfd_ui_format_controller_status(true, "", "", MFD_WINMM_OK, &ctrl);
+	REQUIRE(is_marked(ctrl.status_sentence) && is_marked(ctrl.display_name));
+	for (size_t k = 0U; k < sizeof(kinds) / sizeof(kinds[0]); ++k) {
+		mfd_ui_format_controller_status(false, "APC40 mkII", "", kinds[k], &ctrl);
+		REQUIRE(is_marked(ctrl.status_sentence));
+		mfd_ui_format_controller_status(false, "", "", kinds[k], &ctrl);
+		REQUIRE(is_marked(ctrl.status_sentence) && is_marked(ctrl.display_name));
+		mfd_ui_format_device_error(kinds[k], MFD_WINMM_OP_OPEN, 4U, "APC40 mkII", out, sizeof(out));
+		REQUIRE(is_marked(out));
+		mfd_ui_format_device_error(kinds[k], MFD_WINMM_OP_START, 4U, "", out, sizeof(out));
+		REQUIRE(is_marked(out));
+	}
+
+	/* strips: every target, named and unnamed, in each state */
+	const enum mfd_target_type targets[] = {MFD_TARGET_UNASSIGNED,     MFD_TARGET_TBAR,
+						MFD_TARGET_TWO_SOURCE_MIX, MFD_TARGET_SINGLE_LAYER,
+						MFD_TARGET_AUDIO_VOLUME,   MFD_TARGET_FILTER_PARAM};
+	for (size_t t = 0U; t < sizeof(targets) / sizeof(targets[0]); ++t) {
+		for (int named = 0; named < 2; ++named) {
+			for (int with_scene = 0; with_scene < 2; ++with_scene) {
+				struct mfd_ui_strip_input in;
+				struct mfd_ui_strip_presentation sp;
+				memset(&in, 0, sizeof(in));
+				in.slot_index = (targets[t] == MFD_TARGET_FILTER_PARAM) ? 10 : 2;
+				in.enabled = true;
+				in.addr_type = MFD_MIDI_CC;
+				in.target_type = targets[t];
+				in.scene_name = with_scene ? "Red" : "";
+				in.source_a_name = named ? "Cam" : "";
+				in.source_b_name = named ? "Loop" : "";
+				if (named && with_scene && targets[t] == MFD_TARGET_TWO_SOURCE_MIX) {
+					struct mfd_ui_strip_presentation half;
+					in.source_b_name = "";
+					mfd_ui_format_strip_presentation(&in, &half);
+					REQUIRE(is_marked(half.assignment_sentence) && is_marked(half.svg_short_label));
+					in.source_a_name = "";
+					in.source_b_name = "Loop";
+					mfd_ui_format_strip_presentation(&in, &half);
+					REQUIRE(is_marked(half.assignment_sentence) && is_marked(half.svg_short_label));
+					mfd_ui_format_finished_sentence(2, "", targets[t], "Red", "Cam", "", out,
+									sizeof(out));
+					REQUIRE(is_marked(out));
+					mfd_ui_format_finished_sentence(2, "", targets[t], "", "", "Loop", out,
+									sizeof(out));
+					REQUIRE(is_marked(out));
+					in.source_a_name = "Cam";
+				}
+				in.filter_name = named ? "Blur" : "";
+				in.filter_prop_label = named ? "Radius" : "";
+				in.available = true;
+				in.has_last_fader = true;
+				in.audio_db = -6.0f;
+				mfd_ui_format_strip_presentation(&in, &sp);
+				REQUIRE(is_marked(sp.assignment_sentence) && is_marked(sp.svg_short_label));
+				REQUIRE(is_marked(sp.bottom_button_text));
+				if (targets[t] != MFD_TARGET_UNASSIGNED && targets[t] != MFD_TARGET_FILTER_PARAM) {
+					REQUIRE(is_marked(sp.state_readout));
+				}
+				in.auto_fade_active = true;
+				mfd_ui_format_strip_presentation(&in, &sp);
+				if (targets[t] != MFD_TARGET_UNASSIGNED &&
+				    !(targets[t] == MFD_TARGET_TBAR && in.tbar_state != MFD_TBAR_THROWING)) {
+					REQUIRE(is_marked(sp.state_readout));
+				}
+				in.auto_fade_active = false;
+				in.takeover_state = MFD_TAKEOVER_WAITING;
+				in.takeover_hint = MFD_HINT_MOVE_UP;
+				for (int horizontal = 0; horizontal < 2; ++horizontal) {
+					in.is_horizontal = horizontal != 0;
+					mfd_ui_format_strip_presentation(&in, &sp);
+					if (targets[t] != MFD_TARGET_UNASSIGNED) {
+						REQUIRE(is_marked(sp.status_sentence));
+					}
+				}
+				in.takeover_hint = MFD_HINT_MOVE_DOWN;
+				for (int horizontal = 0; horizontal < 2; ++horizontal) {
+					in.is_horizontal = horizontal != 0;
+					mfd_ui_format_strip_presentation(&in, &sp);
+					if (targets[t] != MFD_TARGET_UNASSIGNED) {
+						REQUIRE(is_marked(sp.status_sentence));
+					}
+				}
+				in.is_horizontal = false;
+				in.takeover_state = MFD_TAKEOVER_PARKED;
+				mfd_ui_format_strip_presentation(&in, &sp);
+				if (targets[t] != MFD_TARGET_UNASSIGNED) {
+					REQUIRE(is_marked(sp.state_readout) && sp.at_end);
+				}
+				in.takeover_state = MFD_TAKEOVER_ENGAGED;
+				in.addr_type = MFD_MIDI_NONE;
+				mfd_ui_format_strip_presentation(&in, &sp);
+				if (targets[t] != MFD_TARGET_UNASSIGNED && targets[t] != MFD_TARGET_FILTER_PARAM) {
+					REQUIRE(is_marked(sp.status_sentence));
+				}
+
+				mfd_ui_format_finished_sentence_ex(in.slot_index, "", targets[t], in.scene_name,
+								   in.source_a_name, in.source_b_name, in.filter_name,
+								   in.filter_prop_label, out, sizeof(out));
+				REQUIRE(is_marked(out));
+			}
+		}
+		REQUIRE(is_marked(mfd_ui_target_plain_name(targets[t])));
+	}
+
+	/* reasons and errors: every code, with the Studio Mode action */
+	for (int code = 1; code < (int)MFD_MSG_CODE_COUNT; ++code) {
+		struct mfd_msg msg;
+		mfd_msg_set(&msg, (enum mfd_msg_code)code, "A", "B", "C", "3", "E");
+		mfd_ui_format_msg(&msg, out, sizeof(out));
+		REQUIRE(is_marked(out));
+		char english[512];
+		mfd_msg_format_english(&msg, english, sizeof(english));
+		REQUIRE(!strstr(english, "\xC2\xAB")); /* the API stays English */
+
+		struct mfd_ui_strip_input in;
+		struct mfd_ui_strip_presentation sp;
+		memset(&in, 0, sizeof(in));
+		in.slot_index = 0;
+		in.enabled = true;
+		in.addr_type = MFD_MIDI_CC;
+		in.target_type = MFD_TARGET_TBAR;
+		in.available = false;
+		in.reason = english;
+		in.reason_msg = &msg;
+		mfd_ui_format_strip_presentation(&in, &sp);
+		REQUIRE(is_marked(sp.status_sentence) && is_marked(sp.bottom_button_text));
+	}
+
+	/* notes, last move, zone 3, curves, values */
+	const char *others[] = {"Blue", "Green", "Yellow"};
+	mfd_ui_format_live_scene_note("Red", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	for (size_t n = 1U; n <= 3U; ++n) {
+		mfd_ui_format_shared_layer_note("Cam", others, n, out, sizeof(out));
+		REQUIRE(is_marked(out));
+	}
+	struct mfd_midi_decoded ev;
+	memset(&ev, 0, sizeof(ev));
+	const enum mfd_midi_msg_type types[] = {MFD_MIDI_CC, MFD_MIDI_PITCH_BEND, MFD_MIDI_NOTE_ON, MFD_MIDI_NOTE_OFF};
+	for (size_t ti = 0U; ti < sizeof(types) / sizeof(types[0]); ++ti) {
+		ev.addr.type = types[ti];
+		mfd_ui_format_last_move(-1, NULL, true, &ev, out, sizeof(out));
+		REQUIRE(is_marked(out));
+	}
+	mfd_ui_format_last_move(-1, NULL, false, NULL, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_format_last_move(4, "", false, NULL, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_format_zone3_status(true, "", "", "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_format_zone3_status(false, "", "Red", "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_format_zone3_status(false, "", "", "", out, sizeof(out));
+	REQUIRE(is_marked(out));
+	const enum mfd_crossfade_curve curves[] = {MFD_CURVE_DIP_FREE, MFD_CURVE_COSINE, MFD_CURVE_LINEAR,
+						   MFD_CURVE_CUT, MFD_CURVE_FULL_CENTER};
+	for (size_t ci = 0U; ci < sizeof(curves) / sizeof(curves[0]); ++ci) {
+		REQUIRE(is_marked(mfd_ui_curve_plain_name(curves[ci])));
+		REQUIRE(is_marked(mfd_ui_curve_plain_description(curves[ci])));
+	}
+	mfd_ui_format_db(-INFINITY, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_format_db(-6.0f, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_ui_format_percent(40, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_filter_format_display_value_ex(0.0f, 0.0, 10.0, 0.0, 10.0, false, 0.1, " px", true, true, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	mfd_filter_format_display_value(0.0f, 0.0, 10.0, 0.0, 10.0, false, 0.1, " px", true, out, sizeof(out));
+	REQUIRE(strcmp(out, "0.0 px (Off)") == 0); /* the API path stays English */
+	for (size_t pi = 0U; pi < mfd_profile_count(); ++pi) {
+		const struct mfd_controller_profile_def *def = mfd_profile_get_by_index(pi);
+		REQUIRE(is_marked(mfd_profile_ui_spec_note(def)));
+		if (def->id == MFD_PROFILE_GENERIC) {
+			REQUIRE(is_marked(mfd_profile_ui_display_name(def)) &&
+				is_marked(mfd_profile_ui_short_name(def)));
+		}
+	}
+	mfd_format_last_midi_readout(false, NULL, out, sizeof(out));
+	REQUIRE(is_marked(out));
+	for (size_t ti = 0U; ti < sizeof(types) / sizeof(types[0]); ++ti) {
+		ev.addr.type = types[ti];
+		mfd_format_last_midi_readout(true, &ev, out, sizeof(out));
+		REQUIRE(is_marked(out));
+	}
+	REQUIRE(is_marked(mfd_learn_button_text(true)) && is_marked(mfd_learn_button_text(false)));
+
+	/* a translation may reorder placeholders; a name holding "%1" is never filled again */
+	mfd_ui_format_shared_layer_note("Cam %2", others, 2U, out, sizeof(out));
+	REQUIRE(strstr(out, "Cam %2") != NULL && strstr(out, "Blue") != NULL);
+
+	mfd_text_set_lookup(NULL);
+	return 0;
+}
 
 int main(void)
 {
@@ -253,7 +543,7 @@ int main(void)
 	REQUIRE(sp.pickup_target_percent == 60);
 	REQUIRE(sp.arrow == MFD_UI_ARROW_LEFT);
 	REQUIRE(strcmp(sp.arrow_glyph, "\xE2\x86\x90") == 0);
-	REQUIRE(strcmp(sp.status_sentence, "Move the fader down to 60% to pick up.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "Move the crossfader left to 60% to pick up.") == 0);
 
 	/* Row 6: Throwing 63% + Finish now mini-button (and Fading 63% during auto_fade) */
 	in.takeover_state = MFD_TAKEOVER_ENGAGED;
@@ -440,6 +730,8 @@ int main(void)
 	char default_label[64];
 	mfd_profile_default_slot_label(MFD_PROFILE_APC40_MK2, 1, default_label, sizeof(default_label));
 	REQUIRE(strcmp(default_label, "Track Fader 1") == 0);
+
+	REQUIRE(check_marked_sentences() == 0);
 
 	printf("test-ui-sentences: PASS\n");
 	return 0;

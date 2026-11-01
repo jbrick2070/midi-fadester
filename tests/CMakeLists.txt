@@ -61,13 +61,13 @@ endfunction()
 set(_core "${CMAKE_SOURCE_DIR}/src/core")
 midi_fadester_add_test(test-mfd-text test-mfd-text.c "${_core}/mfd-text.c" "${_core}/slot-messages.c")
 midi_fadester_add_test(test-midi-queue test-midi-queue.c "${_core}/midi-queue.c")
-midi_fadester_add_test(test-midi-parser test-midi-parser.c "${_core}/midi-parser.c")
+midi_fadester_add_test(test-midi-parser test-midi-parser.c "${_core}/midi-parser.c" "${_core}/mfd-text.c")
 midi_fadester_add_test(test-smoother test-smoother.c "${_core}/smoother.c")
 midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
 midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
-midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c")
+midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c" "${_core}/mfd-text.c")
 midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
-midi_fadester_add_test(test-filter-mod test-filter-mod.c "${_core}/filter-math.c")
+midi_fadester_add_test(test-filter-mod test-filter-mod.c "${_core}/filter-math.c" "${_core}/mfd-text.c")
 midi_fadester_add_test(
   test-ui-sentences
   test-ui-sentences.c
@@ -77,6 +77,11 @@ midi_fadester_add_test(
   "${_core}/apc40-profile.c"
   "${_core}/takeover.c"
   "${_core}/filter-math.c"
+  "${_core}/midi-parser.c"
+)
+target_compile_definitions(
+  test-ui-sentences
+  PRIVATE "MFD_TEST_LOCALE_FILE=\"${CMAKE_SOURCE_DIR}/data/locale/en-US.ini\""
 )
 
 add_executable(

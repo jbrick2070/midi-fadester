@@ -122,7 +122,7 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	if (count == 0U) {
 		dev->error_kind = (device_name && device_name[0] != '\0') ? MFD_WINMM_ERR_CONFIGURED_NOT_FOUND
 									  : MFD_WINMM_ERR_NO_DEVICES;
-		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", device_name ? device_name : "");
+		/* error_device_name stays empty: no device at all, whatever was configured */
 		snprintf(
 			dev->last_error, sizeof(dev->last_error),
 			"No MIDI input devices detected. Connect your MIDI controller (e.g. Akai APC40 mkII) and click Reconnect.");

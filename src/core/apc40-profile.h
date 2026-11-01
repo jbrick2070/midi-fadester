@@ -68,6 +68,11 @@ const struct mfd_controller_profile_def *mfd_profile_get_by_index(size_t index);
 const struct mfd_controller_profile_def *mfd_profile_get_def(enum mfd_controller_profile profile);
 const struct mfd_controller_profile_def *mfd_profile_find_by_slug(const char *slug);
 const char *mfd_profile_tier_to_string(enum mfd_profile_support_tier tier);
+/* A profile's names and note as the UI shows them, in the language OBS runs in (R-I18N-1). Brand names stay as they
+ * are; the API keeps display_name / short_name / spec_note in English. */
+const char *mfd_profile_ui_display_name(const struct mfd_controller_profile_def *def);
+const char *mfd_profile_ui_short_name(const struct mfd_controller_profile_def *def);
+const char *mfd_profile_ui_spec_note(const struct mfd_controller_profile_def *def);
 bool mfd_profile_has_physical_slot(enum mfd_controller_profile profile, int slot_index);
 bool mfd_slot_is_fx_bank(int slot_index);
 

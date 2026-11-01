@@ -9,6 +9,7 @@
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/slot-messages.h"
+#include "core/mfd-text.h"
 #include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -464,7 +465,21 @@ void mfd_engine_unlatch_tbar(struct mfd_engine *eng)
 static float query_live_filter_unmapped_deflection_locked(const struct mfd_engine *eng,
 							  const struct mfd_fader_slot *slot);
 
+static void format_percent_value(bool translate, float val, char *out, size_t out_size)
+{
+	char number[16];
+	snprintf(number, sizeof(number), "%d", (int)lroundf(val * 100.0f));
+	const char *const values[1] = {number};
+	mfd_text_fill(out, out_size, mfd_text_or_english(translate, "Readout.Percent", "%1%"), values, 1U);
+}
+
 void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, float norm_01, char *out, size_t out_size)
+{
+	mfd_engine_format_slot_display_value_ex(slot, norm_01, false, out, out_size);
+}
+
+void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, float norm_01, bool translate,
+					     char *out, size_t out_size)
 {
 	if (!out || out_size == 0U) {
 		return;
@@ -472,7 +487,7 @@ void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, flo
 	out[0] = '\0';
 	float val = clamp01(norm_01);
 	if (!slot) {
-		snprintf(out, out_size, "%d%%", (int)lroundf(val * 100.0f));
+		format_percent_value(translate, val, out, out_size);
 		return;
 	}
 
@@ -483,19 +498,21 @@ void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, flo
 		double pmax = slot->filter_prop_valid ? slot->filter_prop_max
 						      : fmax(slot->filter_from_val, slot->filter_to_val);
 		double step = (slot->filter_prop_valid && slot->filter_prop_step > 0.0) ? slot->filter_prop_step : 0.01;
-		mfd_filter_format_display_value(val, slot->filter_from_val, slot->filter_to_val, pmin, pmax,
-						slot->filter_prop_is_int, step, slot->filter_prop_suffix,
-						slot->filter_bypass_at_zero, out, out_size);
+		mfd_filter_format_display_value_ex(val, slot->filter_from_val, slot->filter_to_val, pmin, pmax,
+						   slot->filter_prop_is_int, step, slot->filter_prop_suffix,
+						   slot->filter_bypass_at_zero, translate, out, out_size);
 		break;
 	}
 	case MFD_TARGET_AUDIO_VOLUME: {
 		float db = mfd_deflection_to_db(val);
 		if (!isfinite(db)) {
-			snprintf(out, out_size, "-inf dB");
-		} else if (fabsf(db) < 0.05f) {
-			snprintf(out, out_size, "0.0 dB");
+			mfd_text_fill(out, out_size, mfd_text_or_english(translate, "Readout.DbSilent", "-inf dB"),
+				      NULL, 0U);
 		} else {
-			snprintf(out, out_size, "%.1f dB", (double)db);
+			char number[32];
+			snprintf(number, sizeof(number), "%.1f", (fabsf(db) < 0.05f) ? 0.0 : (double)db);
+			const char *const values[1] = {number};
+			mfd_text_fill(out, out_size, mfd_text_or_english(translate, "Readout.Db", "%1 dB"), values, 1U);
 		}
 		break;
 	}
@@ -504,7 +521,7 @@ void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, flo
 	case MFD_TARGET_SINGLE_LAYER:
 	case MFD_TARGET_TWO_SOURCE_MIX:
 	default:
-		snprintf(out, out_size, "%d%%", (int)lroundf(val * 100.0f));
+		format_percent_value(translate, val, out, out_size);
 		break;
 	}
 }

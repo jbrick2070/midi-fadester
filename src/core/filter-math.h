@@ -34,6 +34,10 @@ bool mfd_filter_should_write_mapped(bool has_prev, bool is_int, int64_t prev_int
 
 int mfd_filter_decimals_for_step(bool is_int, double step);
 
+/* translate: the UI's " (Off)" in the language OBS runs in; false keeps the API's English text. */
+void mfd_filter_format_display_value_ex(float norm_01, double from_val, double to_val, double prop_min, double prop_max,
+					bool is_int, double step, const char *suffix, bool bypass_at_zero,
+					bool translate, char *out, size_t out_size);
 void mfd_filter_format_display_value(float norm_01, double from_val, double to_val, double prop_min, double prop_max,
 				     bool is_int, double step, const char *suffix, bool bypass_at_zero, char *out,
 				     size_t out_size);

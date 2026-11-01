@@ -421,6 +421,9 @@ bool mfd_is_internal_filter(const char *filter_name, const char *type_id);
 void mfd_collect_filter_numeric_props(obs_properties_t *props, obs_data_t *settings, mfd_numeric_prop_cb cb,
 				      void *param);
 void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, float norm_01, char *out, size_t out_size);
+/* translate: the UI's words (" (Off)", "dB", "%") in the language OBS runs in; false is the API's English. */
+void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, float norm_01, bool translate,
+					     char *out, size_t out_size);
 bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
 						     const char *source_a, const char *filter_name,
 						     const char *filter_prop, bool has_from_to, double *inout_from_val,

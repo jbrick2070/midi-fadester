@@ -24,9 +24,15 @@ static const char *locale_text(const char *key)
 	return (obs_module_get_string(key, &text) && text) ? text : NULL;
 }
 
+MODULE_EXPORT const char *obs_module_name(void)
+{
+	/* the product name stays as it is in every language (R-I18N-4) */
+	return "Midi Fadester";
+}
+
 MODULE_EXPORT const char *obs_module_description(void)
 {
-	return "MIDI hardware fader & video mixer engine for OBS Studio";
+	return mfd_text("PluginDescription", "MIDI hardware fader & video mixer engine for OBS Studio");
 }
 
 bool obs_module_load(void)

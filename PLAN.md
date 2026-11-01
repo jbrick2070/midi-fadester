@@ -327,6 +327,31 @@ device texts). Each step ends with the full ctest green and its own commit; the 
    "layer" as their own keys, one and many forms for counts). **Tests**: the existing English assertions in
    `test-ui-sentences`, `test-midi-parser`, `test-takeover`, `test-apc40-profile` stay as they are (no lookup set, so
    English), plus a test with a lookup that returns marked text, proving every sentence goes through the hook.
+
+   *As built (7.3):* `ui-sentences.c` rewritten: every sentence is one `mfd_text("Key", "English")` filled in one
+   pass (`%1`..`%4`); a missing name has its own whole sentence (`*Unnamed`, `MixNoLeft` / `MixNoRight`), so no
+   fallback word is stitched in. English is unchanged except: a half-chosen layer pair keeps the chosen name (as
+   before), an unnamed single layer reads "Shows or hides a layer" / "Layer %1% visible", an incomplete filter
+   binding reads "Filter setting" / "%1 controls a filter setting", and pickup hints are whole sentences per control:
+   fader up/down, "Move the crossfader left/right to %1% to pick up.", "Turn the knob left/right ...". The one test
+   that compared the crossfader's old "Move the fader down" English now expects the crossfader sentence (the plan's
+   review asks for left/right there). Counts: "%1 is also in scene %2 and %3 other scenes" keeps its English; a
+   translation words it without agreement. New UI helpers: `mfd_ui_strip_name` ("Fader %1" for a numbered default),
+   `mfd_ui_format_db`, `mfd_ui_format_percent` (the decimal point stays "."), `mfd_ui_format_msg` (reasons and errors
+   from their codes; "already controlled by" names the owner strip translated) and `mfd_ui_format_device_error`
+   (banner from kind, operation, WinMM code and device; with no device at all the configured-but-missing case now
+   leaves `error_device_name` empty and shows the no-devices sentence, as `last_error` does). `slot-messages.c`: one
+   switch of `mfd_text_or_english(translate, "Msg.*", ...)`, `mfd_msg_format(msg, translate, ...)`; the API calls it
+   with false, so its English is byte-identical. `midi-parser.c` (last MIDI readout, Learn button),
+   `filter-math.c` (`_ex(translate)`: "%1 (Off)" only on the UI path), `apc40-profile.c`
+   (`mfd_profile_ui_display_name/_short_name/_spec_note`: Generic's names and all six notes; brand names stay),
+   `mfd_engine_format_slot_display_value_ex(translate)`, and `plugin-main.c` (`obs_module_name` returns the product
+   name as is, `obs_module_description` through the hook; en-US.ini's unused old `PluginDescription` text replaced
+   by the code's). `takeover.c`'s bar formatters are used only by tests and stay English. en-US.ini: 176 keys.
+   Tests: `test-ui-sentences` gains a marked lookup (en-US.ini wrapped in guillemets, path from CMake) run over every
+   formatter, target, state, code, kind, curve and profile, failing on any text without the mark or with a `%N`
+   left, and checking the API English stays unmarked; `test-apc40-profile` checks the UI texts equal the English
+   profile fields with no locale. 20/20 green.
 4. **Step 7.4 -- Qt UI to keys.** The settings dialog, the setup sheet and the controller drawing (every SVG text
    through `xml_escape`), engine reasons and errors formatted from their codes in the UI, and the T-bar's error line.
    Combo labels are translated, their item data stay as they are. The Qt tests' `main()` loads `data/locale/en-US.ini`

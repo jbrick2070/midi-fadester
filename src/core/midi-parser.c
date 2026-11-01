@@ -5,6 +5,7 @@
  */
 
 #include "core/midi-parser.h"
+#include "core/mfd-text.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -174,35 +175,44 @@ void mfd_format_last_midi_readout(bool has_event, const struct mfd_midi_decoded 
 	if (!out_buf || out_size == 0U) {
 		return;
 	}
+	const char *none = mfd_text("LastMidi.None", "No MIDI received yet");
 	if (!has_event || !ev || ev->addr.type == MFD_MIDI_NONE) {
-		snprintf(out_buf, out_size, "No MIDI received yet");
+		mfd_text_fill(out_buf, out_size, none, NULL, 0U);
 		return;
 	}
 
-	unsigned ch = (unsigned)ev->addr.channel + 1U;
-	unsigned num = (unsigned)ev->addr.number;
-	unsigned val = (unsigned)ev->raw_value;
+	char ch[16];
+	char num[16];
+	char val[16];
+	snprintf(ch, sizeof(ch), "%u", (unsigned)ev->addr.channel + 1U);
+	snprintf(num, sizeof(num), "%u", (unsigned)ev->addr.number);
+	snprintf(val, sizeof(val), "%u", (unsigned)ev->raw_value);
+	const char *const values[3] = {ch, num, val};
 
 	switch (ev->addr.type) {
 	case MFD_MIDI_CC:
-		snprintf(out_buf, out_size, "Last MIDI: Ch %u CC %u = %u", ch, num, val);
+		mfd_text_fill(out_buf, out_size, mfd_text("LastMidi.Cc", "Last MIDI: Ch %1 CC %2 = %3"), values, 3U);
 		break;
 	case MFD_MIDI_PITCH_BEND:
-		snprintf(out_buf, out_size, "Last MIDI: Ch %u Pitch Bend = %u", ch, val);
+		mfd_text_fill(out_buf, out_size, mfd_text("LastMidi.PitchBend", "Last MIDI: Ch %1 Pitch Bend = %3"),
+			      values, 3U);
 		break;
 	case MFD_MIDI_NOTE_ON:
-		snprintf(out_buf, out_size, "Last MIDI: Ch %u Note %u = %u", ch, num, val);
+		mfd_text_fill(out_buf, out_size, mfd_text("LastMidi.Note", "Last MIDI: Ch %1 Note %2 = %3"), values,
+			      3U);
 		break;
 	case MFD_MIDI_NOTE_OFF:
-		snprintf(out_buf, out_size, "Last MIDI: Ch %u Note Off %u = %u", ch, num, val);
+		mfd_text_fill(out_buf, out_size, mfd_text("LastMidi.NoteOff", "Last MIDI: Ch %1 Note Off %2 = %3"),
+			      values, 3U);
 		break;
 	default:
-		snprintf(out_buf, out_size, "No MIDI received yet");
+		mfd_text_fill(out_buf, out_size, none, NULL, 0U);
 		break;
 	}
 }
 
 const char *mfd_learn_button_text(bool is_learning_this_row)
 {
-	return is_learning_this_row ? "Move a control..." : "Learn";
+	return is_learning_this_row ? mfd_text("Learn.Listening", "Move a control...")
+				    : mfd_text("Learn.Button", "Learn");
 }
