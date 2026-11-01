@@ -1956,8 +1956,8 @@ int main(int argc, char **argv)
 			REQUIRE(g_lang_lookup != nullptr);
 			mfd_text_set_lookup(lang_locale_text);
 			for (const enum mfd_target_type mode :
-			     {MFD_TARGET_TBAR, MFD_TARGET_TWO_SOURCE_MIX, MFD_TARGET_SINGLE_LAYER, MFD_TARGET_AUDIO_VOLUME,
-			      MFD_TARGET_FILTER_PARAM}) {
+			     {MFD_TARGET_TBAR, MFD_TARGET_TWO_SOURCE_MIX, MFD_TARGET_SINGLE_LAYER,
+			      MFD_TARGET_AUDIO_VOLUME, MFD_TARGET_FILTER_PARAM}) {
 				const QString card = QString::fromUtf8(mfd_make_mode_card_svg(mode));
 				if (card.contains(QChar(0x2026)))
 					cut << QStringLiteral("%1 (mode %2)").arg(file).arg(static_cast<int>(mode));
