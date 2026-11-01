@@ -164,5 +164,5 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
 |---|---|---|
 | T.1 | Live self-test with OBS in German: the German file loads, every case passes, zero leaks, clean exit | Pass (2026-11-01, OBS 33.0.1) |
 | T.2 | The same in Japanese | Pass (2026-11-01, OBS 33.0.1) |
-| T.3 | The same in Russian | Pending |
+| T.3 | The same in Russian | Pass (2026-11-01, OBS 33.0.1) |
 | T.4 | By eye, OBS in German, Japanese and Russian: the settings dialog, the setup sheet, the controller drawing and the strip labels; nothing cut off that is whole in English | Pending (English already cuts the nanoKONTROL2 STOP/PLAY and some strip labels) |
