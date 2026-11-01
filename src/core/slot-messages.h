@@ -77,6 +77,9 @@ bool mfd_msg_equal(const struct mfd_msg *a, const struct mfd_msg *b);
 /* Stable snake_case id for the API's reason_code / error_code ("" for MFD_MSG_NONE). */
 const char *mfd_msg_slug(enum mfd_msg_code code);
 
+/* text with %1..%5 filled from the message's arguments in one pass (mfd_text_fill). */
+void mfd_msg_fill(const struct mfd_msg *msg, const char *text, char *out, size_t out_size);
+
 /* The English sentence for logs and the obs-websocket API; "" for MFD_MSG_NONE. */
 void mfd_msg_format_english(const struct mfd_msg *msg, char *out, size_t out_size);
 

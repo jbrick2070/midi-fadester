@@ -59,6 +59,7 @@ function(midi_fadester_add_test name)
 endfunction()
 
 set(_core "${CMAKE_SOURCE_DIR}/src/core")
+midi_fadester_add_test(test-mfd-text test-mfd-text.c "${_core}/mfd-text.c" "${_core}/slot-messages.c")
 midi_fadester_add_test(test-midi-queue test-midi-queue.c "${_core}/midi-queue.c")
 midi_fadester_add_test(test-midi-parser test-midi-parser.c "${_core}/midi-parser.c")
 midi_fadester_add_test(test-smoother test-smoother.c "${_core}/smoother.c")
@@ -72,6 +73,7 @@ midi_fadester_add_test(
   test-ui-sentences.c
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
+  "${_core}/mfd-text.c"
   "${_core}/apc40-profile.c"
   "${_core}/takeover.c"
   "${_core}/filter-math.c"
@@ -94,8 +96,10 @@ add_executable(
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
+  "${_core}/mfd-text.c"
 )
 target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
+target_compile_definitions(test-vendor-api PRIVATE "MFD_TEST_LOCALE_FILE=\"${CMAKE_SOURCE_DIR}/data/locale/en-US.ini\"")
 target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support winmm)
 add_test(NAME test-vendor-api COMMAND test-vendor-api)
 set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
@@ -103,6 +107,8 @@ set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_tes
 add_executable(
   test-ui-dialog
   test-ui-dialog.cpp
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.cpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-svg-canvas.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.cpp"
@@ -124,9 +130,13 @@ add_executable(
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
+  "${_core}/mfd-text.c"
 )
 set_target_properties(test-ui-dialog PROPERTIES AUTOMOC ON)
-target_compile_definitions(test-ui-dialog PRIVATE QT_NO_KEYWORDS)
+target_compile_definitions(
+  test-ui-dialog
+  PRIVATE QT_NO_KEYWORDS "MFD_TEST_LOCALE_FILE=\"${CMAKE_SOURCE_DIR}/data/locale/en-US.ini\""
+)
 target_include_directories(test-ui-dialog PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(
   test-ui-dialog
@@ -162,8 +172,10 @@ set(
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.h"
   "${_core}/slot-messages.h"
+  "${_core}/mfd-text.h"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
+  "${_core}/mfd-text.c"
   "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.h"
   "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.h"
@@ -172,6 +184,8 @@ set(
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.h"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.cpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-svg-canvas.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.cpp"
@@ -203,3 +217,27 @@ set_tests_properties(
   check-locale-keys-fails-on-missing-key
   PROPERTIES PASS_REGULAR_EXPRESSION "LocaleKeyThatIsNotInTheLocaleFile \\(.*locale-missing-key\\.c\\)"
 )
+# the key check reads calls wrapped over lines; it fails on English that differs from en-US.ini and on a key built at
+# run time
+foreach(
+  _case
+  IN
+  ITEMS
+    "reads-multi-line-calls|locale-multi-line.c|locale keys: every key used"
+    "fails-on-changed-english|locale-changed-english.c|English in the code differs.*PluginDisplayName.*locale-changed-english\\.c"
+    "fails-on-changed-wrapped-english|locale-multi-line-changed.c|English in the code differs.*PluginDisplayName.*locale-multi-line-changed\\.c"
+    "fails-on-runtime-key|locale-runtime-key.c|built at run time.*key_from_somewhere"
+)
+  string(REPLACE "|" ";" _parts "${_case}")
+  list(GET _parts 0 _name)
+  list(GET _parts 1 _fixture)
+  list(GET _parts 2 _expected)
+  add_test(
+    NAME check-locale-keys-${_name}
+    COMMAND
+      "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+      "-DEXTRA_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_fixture}" -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-keys.cmake"
+  )
+  set_tests_properties(check-locale-keys-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
+endforeach()

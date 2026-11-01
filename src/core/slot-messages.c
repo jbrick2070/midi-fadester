@@ -5,6 +5,7 @@
  */
 
 #include "core/slot-messages.h"
+#include "core/mfd-text.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -124,23 +125,16 @@ const char *mfd_msg_slug(enum mfd_msg_code code)
 	return entry_for(code)->slug;
 }
 
-/* Single pass: "%1".."%5" become the arguments, any other "%" stays (the arguments are never re-scanned). */
-static void fill_template(const char *text, const struct mfd_msg *msg, char *out, size_t out_size)
+void mfd_msg_fill(const struct mfd_msg *msg, const char *text, char *out, size_t out_size)
 {
-	size_t len = 0U;
-	out[0] = '\0';
-	for (const char *c = text; *c && len + 1U < out_size; ++c) {
-		if (c[0] == '%' && c[1] >= '1' && c[1] <= '0' + MFD_MSG_MAX_ARGS) {
-			const char *value = msg->args[c[1] - '1'];
-			while (*value && len + 1U < out_size) {
-				out[len++] = *value++;
-			}
-			++c;
-			continue;
-		}
-		out[len++] = *c;
+	if (!out || out_size == 0U) {
+		return;
 	}
-	out[len] = '\0';
+	const char *values[MFD_MSG_MAX_ARGS];
+	for (size_t i = 0U; i < MFD_MSG_MAX_ARGS; ++i) {
+		values[i] = msg ? msg->args[i] : "";
+	}
+	mfd_text_fill(out, out_size, text, values, MFD_MSG_MAX_ARGS);
 }
 
 void mfd_msg_format_english(const struct mfd_msg *msg, char *out, size_t out_size)
@@ -152,5 +146,5 @@ void mfd_msg_format_english(const struct mfd_msg *msg, char *out, size_t out_siz
 	if (!msg) {
 		return;
 	}
-	fill_template(entry_for(msg->code)->english, msg, out, out_size);
+	mfd_msg_fill(msg, entry_for(msg->code)->english, out, out_size);
 }

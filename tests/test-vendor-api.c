@@ -7,8 +7,10 @@
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
+#include "core/mfd-text.h"
 #include "plugin-support.h"
 #include <obs-module.h>
+#include <util/text-lookup.h>
 #include <util/platform.h>
 #include <util/threading.h>
 #include <math.h>
@@ -18,6 +20,13 @@
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("midi-fadester", "en-US")
+
+/* en-US.ini through OBS's own text lookup, as the plugin loads it, so English assertions pass through the real keys */
+static const char *test_locale_text(const char *key)
+{
+	const char *text = NULL;
+	return (obs_module_get_string(key, &text) && text) ? text : NULL;
+}
 
 #define REQUIRE(cond)                                                                   \
 	do {                                                                            \
@@ -1100,6 +1109,10 @@ static int test_config_abort_and_movement_errors(void)
 
 int main(void)
 {
+	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
+	REQUIRE(obs_module_lookup != NULL);
+	mfd_text_set_lookup(test_locale_text);
+	REQUIRE(strcmp(mfd_text("PluginDisplayName", "missing"), "Midi Fadester") == 0);
 	REQUIRE(test_config_abort_and_movement_errors() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
@@ -3969,6 +3982,9 @@ int main(void)
 
 	fake_sg_cleanup_filters(&fake_sg);
 	mfd_vendor_set_event_sink(NULL, NULL);
+	mfd_text_set_lookup(NULL);
+	text_lookup_destroy(obs_module_lookup);
+	obs_module_lookup = NULL;
 	printf("test-vendor-api: PASS\n");
 	return 0;
 }

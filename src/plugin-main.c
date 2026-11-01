@@ -7,6 +7,7 @@
 #include <obs-module.h>
 #include "plugin-support.h"
 
+#include "core/mfd-text.h"
 #include "obs/mfd-layer-filter.h"
 #include "obs/mfd-engine.h"
 #include "obs/mfd-tbar.h"
@@ -16,6 +17,13 @@
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
+/* The locale's text for key, or NULL when OBS has none (then the English in the code is used, R-I18N-1). */
+static const char *locale_text(const char *key)
+{
+	const char *text = NULL;
+	return (obs_module_get_string(key, &text) && text) ? text : NULL;
+}
+
 MODULE_EXPORT const char *obs_module_description(void)
 {
 	return "MIDI hardware fader & video mixer engine for OBS Studio";
@@ -23,9 +31,12 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 bool obs_module_load(void)
 {
+	/* before any consumer starts (R-THR-1) */
+	mfd_text_set_lookup(locale_text);
 	mfd_register_layer_filter();
 	if (!mfd_engine_init()) {
 		obs_log(LOG_ERROR, "Midi Fadester failed to initialize engine state mutex");
+		mfd_text_set_lookup(NULL);
 		return false;
 	}
 	mfd_tbar_init();
@@ -47,5 +58,7 @@ void obs_module_unload(void)
 	mfd_ui_shutdown();
 	mfd_tbar_shutdown();
 	mfd_engine_shutdown();
+	/* after every consumer has stopped */
+	mfd_text_set_lookup(NULL);
 	obs_log(LOG_INFO, "plugin unloaded");
 }

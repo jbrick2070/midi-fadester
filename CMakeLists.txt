@@ -57,6 +57,8 @@ target_sources(
     src/core/ui-sentences.c
     src/core/slot-messages.h
     src/core/slot-messages.c
+    src/core/mfd-text.h
+    src/core/mfd-text.c
     src/midi/winmm-device.h
     src/midi/winmm-device.c
     src/obs/mfd-layer-filter.h
@@ -68,6 +70,8 @@ target_sources(
     src/obs/obs-websocket-api.h
     src/obs/mfd-vendor-api.h
     src/obs/mfd-vendor-api.c
+    src/ui/mfd-text-qt.hpp
+    src/ui/mfd-text-qt.cpp
     src/ui/mfd-svg-canvas.hpp
     src/ui/mfd-controller-svg.hpp
     src/ui/mfd-controller-svg.cpp

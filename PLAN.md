@@ -303,6 +303,24 @@ device texts). Each step ends with the full ctest green and its own commit; the 
    `mfdFill`. `check-locale-keys.cmake` learns `mfd_text("Key", "English")` and `mfdText("Key", "English")`, and checks
    that the English literal equals `en-US.ini`'s text. **Tests**: `test-mfd-text` (lookup, fallback, placeholders
    missing, repeated, out of order, `%10`, `%` kept, buffer too small); a negative key-check test for a changed English.
+
+   *As built (7.2):* `src/core/mfd-text.{h,c}` (C17, no OBS): `mfd_text`, `mfd_text_set_lookup`, `mfd_text_fill`
+   (single pass; a cut lands on a UTF-8 character boundary; returns the length), and `mfd_text_or_english(translate,
+   key, english)` so one table can serve the UI (translated) and the API (English) without writing the English
+   twice. `slot-messages.c` now fills through `mfd_text_fill` (`mfd_msg_fill`). `plugin-main.c` sets the lookup first
+   in `obs_module_load` (cleared again if the engine fails) and clears it last in `obs_module_unload`; the wrapper uses
+   `obs_module_get_string`'s boolean. `src/ui/mfd-text-qt.{hpp,cpp}`: `mfdText` (`QString::fromUtf8`) and `mfdFill`
+   (one pass over `%1`..`%9`). `check-locale-keys.cmake` now reads `obs_module_text("Key")`,
+   `mfd_text("Key", "English")`, `mfdText("Key", "English")` and `mfd_text_or_english(flag, "Key", "English")` with the
+   English split over literals and lines, strips comments first, decodes C escapes (`\xHH`, `\n`, `\t`, `\"`) and
+   en-US.ini's escapes to bytes and compares them, treats only `#` as a comment, reports a key built at run time unless
+   its family is listed (only the hook's own two calls are), and reports any hook call it cannot read (a macro or
+   variable as English, a complex flag), so nothing goes unchecked silently. The Qt and vendor-API test mains load
+   `data/locale/en-US.ini` (path from CMake, `MFD_TEST_LOCALE_FILE`) with `text_lookup_create` into
+   `obs_module_lookup`, install the hook, assert it works, and destroy it at the end; `test-ui-dialog` also checks
+   `mfdFill`. Tests added: `test-mfd-text` (also two-/three-/four-byte cuts, exact fit, `mfd_msg_fill`) and four
+   key-check cases (reads a wrapped call; fails on changed English, on changed English in a wrapped call, on a key
+   built at run time). 20/20 green.
 3. **Step 7.3 -- Core texts to keys.** `ui-sentences.c`, `midi-parser.c` (status lines), `filter-math.c`'s " (Off)" on
    the UI path, the APC40 and Generic profiles' display texts and notes (by slug), and the winmm device messages:
    whole-sentence keys with placeholders (up and down move hints as two sentences, fallback words such as "Left" or

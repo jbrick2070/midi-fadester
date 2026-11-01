@@ -11,10 +11,20 @@
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
+#include "core/mfd-text.h"
+#include "ui/mfd-text-qt.hpp"
 #include <obs-module.h>
+#include <util/text-lookup.h>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("midi-fadester", "en-US")
+
+/* en-US.ini through OBS's own text lookup, as the plugin loads it, so English assertions pass through the real keys */
+static const char *test_locale_text(const char *key)
+{
+	const char *text = NULL;
+	return (obs_module_get_string(key, &text) && text) ? text : NULL;
+}
 
 #include <QApplication>
 #include <QCheckBox>
@@ -735,6 +745,19 @@ int main(int argc, char **argv)
 {
 	QApplication app(argc, argv);
 	REQUIRE(QGuiApplication::platformName() == QStringLiteral("windows"));
+
+	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
+	REQUIRE(obs_module_lookup != nullptr);
+	mfd_text_set_lookup(test_locale_text);
+	REQUIRE(std::strcmp(mfd_text("PluginDisplayName", "missing"), "Midi Fadester") == 0);
+	REQUIRE(mfdText("PluginDisplayName", "missing") == QStringLiteral("Midi Fadester"));
+
+	/* mfdFill: one pass, out of order, repeated, missing values left out, other % kept */
+	REQUIRE(mfdFill(QStringLiteral("%2 / %1 / %1"), {QStringLiteral("Cam %2"), QStringLiteral("Red")}) ==
+		QStringLiteral("Red / Cam %2 / Cam %2"));
+	REQUIRE(mfdFill(QStringLiteral("only %1 and %3, 100%"), {QStringLiteral("A")}) ==
+		QStringLiteral("only A and , 100%"));
+	REQUIRE(mfdFill(QStringLiteral("%10 %"), {QStringLiteral("x")}) == QStringLiteral("x0 %"));
 
 	QString screenshot_dir = QDir::current().filePath(QStringLiteral("ui_screenshots"));
 	for (int i = 1; i + 1 < argc; ++i) {
@@ -1644,6 +1667,9 @@ int main(int argc, char **argv)
 	dlg->close();
 	dlg.reset();
 	mfd_engine_destroy_mutex(&eng);
+	mfd_text_set_lookup(nullptr);
+	text_lookup_destroy(obs_module_lookup);
+	obs_module_lookup = nullptr;
 
 	std::printf(
 		"test-ui-dialog: PASS (all end-to-end flows, FX bank, filter_param, multi-controller profiles & 12 screenshots verified in %s)\n",
