@@ -26,6 +26,14 @@ static const char *test_locale_text(const char *key)
 	return (obs_module_get_string(key, &text) && text) ? text : NULL;
 }
 
+/* one language file at a time, for the per-language width checks */
+static lookup_t *g_lang_lookup = nullptr;
+static const char *lang_locale_text(const char *key)
+{
+	const char *text = NULL;
+	return (g_lang_lookup && text_lookup_getstr(g_lang_lookup, key, &text) && text) ? text : NULL;
+}
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -1934,6 +1942,34 @@ int main(int argc, char **argv)
 		pump_ui();
 		mfd_text_set_lookup(test_locale_text);
 		REQUIRE(bad.isEmpty());
+	}
+
+	/* --- Every language, every strip-mode card: no label is cut off (Preview/Program 54 px, Left 48, Right 72, Layer 128,
+	 * Filter 100; Segoe UI 10 bold) --- */
+	{
+		const QDir locale_dir = QFileInfo(QString::fromUtf8(MFD_TEST_LOCALE_FILE)).dir();
+		const QStringList files = locale_dir.entryList({QStringLiteral("*.ini")}, QDir::Files, QDir::Name);
+		REQUIRE(files.size() >= 11);
+		QStringList cut;
+		for (const QString &file : files) {
+			g_lang_lookup = text_lookup_create(locale_dir.filePath(file).toUtf8().constData());
+			REQUIRE(g_lang_lookup != nullptr);
+			mfd_text_set_lookup(lang_locale_text);
+			for (const enum mfd_target_type mode :
+			     {MFD_TARGET_TBAR, MFD_TARGET_TWO_SOURCE_MIX, MFD_TARGET_SINGLE_LAYER, MFD_TARGET_AUDIO_VOLUME,
+			      MFD_TARGET_FILTER_PARAM}) {
+				const QString card = QString::fromUtf8(mfd_make_mode_card_svg(mode));
+				if (card.contains(QChar(0x2026)))
+					cut << QStringLiteral("%1 (mode %2)").arg(file).arg(static_cast<int>(mode));
+			}
+			mfd_text_set_lookup(test_locale_text);
+			text_lookup_destroy(g_lang_lookup);
+			g_lang_lookup = nullptr;
+		}
+		for (const QString &f : cut) {
+			std::fprintf(stderr, "mode card text cut off: %s\n", f.toUtf8().constData());
+		}
+		REQUIRE(cut.isEmpty());
 	}
 
 	mfd_engine_destroy_mutex(&eng);
