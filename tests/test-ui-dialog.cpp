@@ -33,6 +33,7 @@ static const char *test_locale_text(const char *key)
 #include <QDialog>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QImage>
@@ -45,13 +46,21 @@ static const char *test_locale_text(const char *key)
 #include <QString>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QAbstractButton>
+#include <QGroupBox>
+#include <QHeaderView>
+#include <QLineEdit>
+#include <QRegularExpression>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <string>
 
 #define REQUIRE(cond)                                                                        \
 	do {                                                                                 \
@@ -697,6 +706,161 @@ static const struct mfd_scene_graph_ops k_fake_sg_ops = {
 	fake_op_set_filter_enabled,
 	fake_op_get_output_source_name,
 };
+
+/* --- Marked lookup: en-US.ini's texts wrapped in guillemets, so a widget text that bypasses the hook shows up --- */
+static std::map<std::string, std::string> g_marked_texts;
+
+static void load_marked_locale(const char *path)
+{
+	g_marked_texts.clear();
+	FILE *f = std::fopen(path, "rb");
+	if (!f) {
+		return;
+	}
+	char line[2048];
+	while (std::fgets(line, sizeof(line), f)) {
+		char *eq = std::strchr(line, '=');
+		if (line[0] == '#' || !eq || eq[1] != '"') {
+			continue;
+		}
+		*eq = '\0';
+		std::string text = "\xC2\xAB";
+		for (const char *c = eq + 2; *c && *c != '\r' && *c != '\n'; ++c) {
+			if (c[0] == '\\' && c[1] != '\0') {
+				++c;
+				text.push_back(*c == 'n' ? '\n' : *c);
+				continue;
+			}
+			if (c[0] == '"') {
+				break;
+			}
+			text.push_back(*c);
+		}
+		text += "\xC2\xBB";
+		g_marked_texts[line] = text;
+	}
+	std::fclose(f);
+}
+
+static const char *marked_locale_text(const char *key)
+{
+	auto it = g_marked_texts.find(key);
+	return (it != g_marked_texts.end()) ? it->second.c_str() : nullptr;
+}
+
+/* A text passes when it came through the hook, or when nothing is left once user data, brand and product names
+ * (kept in every language, R-I18N-4) are taken out. */
+static bool marked_or_data(const QString &raw, const QStringList &allowed)
+{
+	QString t = raw;
+	t.remove(QRegularExpression(QStringLiteral("<[^>]*>")));
+	t.remove(QRegularExpression(QStringLiteral("&[a-z]+;")));
+	/* what came through the hook is marked; whatever is left beside it must be data */
+	static const QRegularExpression marked_span(QStringLiteral("\u00AB[^\u00AB\u00BB]*\u00BB"));
+	static const QRegularExpression elided_span(QStringLiteral("\u00AB[^\u00AB\u00BB]*\u2026$"));
+	for (qsizetype before = -1; before != t.size();) {
+		before = t.size();
+		t.remove(marked_span); /* inner texts first, then the texts they were filled into */
+		t.remove(elided_span); /* a marked text cut by eliding loses its closing mark */
+	}
+	for (const QString &a : allowed) {
+		t.remove(QRegularExpression(QStringLiteral("(?<![A-Za-z0-9])") + QRegularExpression::escape(a) +
+					    QStringLiteral("(?![A-Za-z0-9])")));
+	}
+	return !t.contains(QRegularExpression(QStringLiteral("[A-Za-z]")));
+}
+
+static void scan_widget_texts(QWidget *root, const QStringList &allowed, QStringList &bad)
+{
+	if (!root) {
+		return;
+	}
+	QList<QWidget *> widgets = root->findChildren<QWidget *>();
+	widgets.prepend(root);
+	auto check = [&](const QString &where, const QString &text) {
+		if (!text.trimmed().isEmpty() && !marked_or_data(text, allowed)) {
+			bad.append(where + QStringLiteral(": ") + text);
+		}
+	};
+	for (QWidget *w : widgets) {
+		const QString name = w->objectName().isEmpty() ? QString::fromLatin1(w->metaObject()->className())
+							       : w->objectName();
+		check(name + QStringLiteral(" tooltip"), w->toolTip());
+		if (w->isWindow()) {
+			check(name + QStringLiteral(" title"), w->windowTitle());
+		}
+		if (auto *l = qobject_cast<QLabel *>(w)) {
+			check(name, l->text());
+		}
+		if (auto *b = qobject_cast<QAbstractButton *>(w)) {
+			check(name, b->text().remove(QLatin1Char('&')));
+		}
+		if (auto *g = qobject_cast<QGroupBox *>(w)) {
+			check(name, g->title());
+		}
+		if (auto *e = qobject_cast<QLineEdit *>(w)) {
+			check(name + QStringLiteral(" placeholder"), e->placeholderText());
+		}
+		if (auto *pb = qobject_cast<QProgressBar *>(w)) {
+			check(name + QStringLiteral(" format"), pb->format());
+		}
+		if (auto *sb = qobject_cast<QAbstractSpinBox *>(w)) {
+			if (auto *ds = qobject_cast<QDoubleSpinBox *>(sb)) {
+				check(name + QStringLiteral(" suffix"), ds->suffix());
+				check(name + QStringLiteral(" prefix"), ds->prefix());
+			}
+			if (auto *is = qobject_cast<QSpinBox *>(sb)) {
+				check(name + QStringLiteral(" suffix"), is->suffix());
+				check(name + QStringLiteral(" prefix"), is->prefix());
+			}
+		}
+		if (auto *c = qobject_cast<QComboBox *>(w)) {
+			check(name + QStringLiteral(" placeholder"), c->placeholderText());
+			for (int i = 0; i < c->count(); ++i) {
+				check(name + QStringLiteral(" item"), c->itemText(i));
+			}
+		}
+		if (auto *tw = qobject_cast<QTabWidget *>(w)) {
+			for (int i = 0; i < tw->count(); ++i) {
+				check(name + QStringLiteral(" tab"), tw->tabText(i));
+				check(name + QStringLiteral(" tab tooltip"), tw->tabToolTip(i));
+			}
+		}
+		if (auto *t = qobject_cast<QTableWidget *>(w)) {
+			for (int i = 0; i < t->columnCount(); ++i) {
+				if (QTableWidgetItem *h = t->horizontalHeaderItem(i)) {
+					check(name + QStringLiteral(" header"), h->text());
+					check(name + QStringLiteral(" header tooltip"), h->toolTip());
+				}
+			}
+			for (int r = 0; r < t->rowCount(); ++r) {
+				for (int col = 0; col < t->columnCount(); ++col) {
+					if (QTableWidgetItem *cell = t->item(r, col)) {
+						check(name + QStringLiteral(" cell"), cell->text());
+						check(name + QStringLiteral(" cell tooltip"), cell->toolTip());
+					}
+				}
+			}
+		}
+	}
+}
+
+static void scan_svg_texts(const QByteArray &svg, const QString &where, const QStringList &allowed, QStringList &bad)
+{
+	static const QRegularExpression text_re(QStringLiteral("<text[^>]*>([^<]*)</text>"));
+	const QString xml = QString::fromUtf8(svg);
+	for (auto it = text_re.globalMatch(xml); it.hasNext();) {
+		QString t = it.next().captured(1);
+		t.replace(QStringLiteral("&lt;"), QStringLiteral("<"))
+			.replace(QStringLiteral("&gt;"), QStringLiteral(">"))
+			.replace(QStringLiteral("&quot;"), QStringLiteral("\""))
+			.replace(QStringLiteral("&apos;"), QStringLiteral("'"))
+			.replace(QStringLiteral("&amp;"), QStringLiteral("&"));
+		if (!t.trimmed().isEmpty() && !marked_or_data(t, allowed)) {
+			bad.append(where + QStringLiteral(" svg: ") + t);
+		}
+	}
+}
 
 template<typename T> static T *must_find(QObject *root, const QString &name)
 {
@@ -1666,6 +1830,112 @@ int main(int argc, char **argv)
 
 	dlg->close();
 	dlg.reset();
+
+	/* --- Marked lookup: no hardcoded English left in the dialog, the setup sheet or the controller map --- */
+	{
+		load_marked_locale(MFD_TEST_LOCALE_FILE);
+		REQUIRE(g_marked_texts.size() > 100U);
+		mfd_text_set_lookup(marked_locale_text);
+
+		/* user data of this test's fake scene graph and device, product and brand names, OBS's own window title */
+		QStringList allowed = {
+			QStringLiteral("Desktop Audio"),
+			QStringLiteral("Color 2"),
+			QStringLiteral("Color"),
+			QStringLiteral("Guest Mic"),
+			QStringLiteral("Mic/Aux"),
+			QStringLiteral("Title Card"),
+			QStringLiteral("SoloScene"),
+			QStringLiteral("OldScene"),
+			QStringLiteral("Cam"),
+			QStringLiteral("Red"),
+			QStringLiteral("Blue"),
+			QStringLiteral("AudioMod"),
+			QStringLiteral("Blur Radius"),
+			QStringLiteral("Blur"),
+			QStringLiteral("Passes"),
+			QStringLiteral("Slot 1 Amount"),
+			QStringLiteral("Modulation Slot 1"),
+			QStringLiteral("APC40 mkII"),
+			QStringLiteral("Midi Fadester"),
+			QStringLiteral("px"), /* a filter setting's unit, given by OBS */
+		};
+		/* the MIDI ports this machine has, as WinMM names them */
+		{
+			struct mfd_midi_device_info ports[MFD_MAX_MIDI_DEVICES];
+			const size_t port_count = mfd_winmm_enumerate(ports, MFD_MAX_MIDI_DEVICES);
+			for (size_t pi = 0U; pi < port_count; ++pi) {
+				allowed.append(QString::fromUtf8(ports[pi].name));
+			}
+		}
+		for (size_t pi = 0U; pi < mfd_profile_count(); ++pi) {
+			const struct mfd_controller_profile_def *pdef = mfd_profile_get_by_index(pi);
+			if (pdef && pdef->id != MFD_PROFILE_GENERIC) {
+				allowed.append(QString::fromUtf8(pdef->display_name));
+				allowed.append(QString::fromUtf8(pdef->short_name));
+			}
+		}
+		/* longest first, so "Color 2" goes before "Color" */
+		std::sort(allowed.begin(), allowed.end(),
+			  [](const QString &a, const QString &b) { return a.size() > b.size(); });
+
+		QStringList bad;
+		std::unique_ptr<QDialog> mdlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+		REQUIRE(mdlg != nullptr);
+		mdlg->setAttribute(Qt::WA_DontShowOnScreen, true);
+		mdlg->show();
+		pump_ui();
+		auto *mtabs = must_find<QTabWidget>(mdlg.get(), QStringLiteral("mfdMainTabs"));
+		for (int ti = 0; ti < mtabs->count(); ++ti) {
+			mtabs->setCurrentIndex(ti);
+			pump_ui();
+			scan_widget_texts(mdlg.get(), allowed, bad);
+		}
+		mtabs->setCurrentIndex(0);
+		pump_ui();
+
+		must_find<QPushButton>(mdlg.get(), QStringLiteral("mfdStripActionBtn_1"))->click();
+		pump_ui();
+		auto *msheet = must_find<QDialog>(mdlg.get(), QStringLiteral("mfdSetupSheet"));
+		scan_widget_texts(msheet, allowed, bad);
+		must_find<QPushButton>(msheet, QStringLiteral("mfdCardMixTwoLayers"))->click();
+		pump_ui();
+		scan_widget_texts(msheet, allowed, bad);
+		msheet->close();
+		pump_ui();
+
+		must_find<QPushButton>(mdlg.get(), QStringLiteral("mfdBtnShowController"))->click();
+		pump_ui();
+		scan_widget_texts(must_find<QDialog>(mdlg.get(), QStringLiteral("mfdControllerSvgDialog")), allowed,
+				  bad);
+
+		for (size_t pi = 0U; pi < mfd_profile_count(); ++pi) {
+			const struct mfd_controller_profile_def *pdef = mfd_profile_get_by_index(pi);
+			REQUIRE(mfd_engine_select_profile(&eng, pdef->id, false));
+			struct mfd_ui_snapshot msnap {};
+			mfd_engine_get_ui_snapshot(&eng, &msnap);
+			scan_svg_texts(mfd_make_controller_desk_svg(msnap), QString::fromUtf8(pdef->slug), allowed,
+				       bad);
+		}
+		REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC40_MK2, false));
+		const enum mfd_target_type card_modes[] = {MFD_TARGET_TBAR, MFD_TARGET_TWO_SOURCE_MIX,
+							   MFD_TARGET_SINGLE_LAYER, MFD_TARGET_AUDIO_VOLUME,
+							   MFD_TARGET_FILTER_PARAM};
+		for (enum mfd_target_type mode : card_modes) {
+			scan_svg_texts(mfd_make_mode_card_svg(mode), QStringLiteral("mode card"), allowed, bad);
+		}
+
+		bad.removeDuplicates();
+		for (const QString &b : bad) {
+			std::fprintf(stderr, "untranslated: %s\n", b.toUtf8().constData());
+		}
+		mdlg->close();
+		mdlg.reset();
+		pump_ui();
+		mfd_text_set_lookup(test_locale_text);
+		REQUIRE(bad.isEmpty());
+	}
+
 	mfd_engine_destroy_mutex(&eng);
 	mfd_text_set_lookup(nullptr);
 	text_lookup_destroy(obs_module_lookup);

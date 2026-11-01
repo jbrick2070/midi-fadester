@@ -15,6 +15,7 @@
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-setup-sheet.hpp"
+#include "ui/mfd-text-qt.hpp"
 #include "obs/mfd-engine.h"
 #include "core/apc40-profile.h"
 #include "core/filter-math.h"
@@ -69,20 +70,18 @@ namespace {
 
 static QString format_midi_addr(const struct mfd_midi_addr &addr)
 {
+	const QString ch = QString::number(static_cast<int>(addr.channel) + 1);
+	const QString num = QString::number(static_cast<int>(addr.number));
 	switch (addr.type) {
 	case MFD_MIDI_CC:
-		return QStringLiteral("Ch %1 CC %2%3")
-			.arg(static_cast<int>(addr.channel) + 1)
-			.arg(static_cast<int>(addr.number))
-			.arg(addr.is_14bit ? QStringLiteral(" (14-bit)") : QString());
+		return addr.is_14bit ? mfdFill(mfdText("Dialog.MidiAddr.Cc14", "Ch %1 CC %2 (14-bit)"), {ch, num})
+				     : mfdFill(mfdText("Dialog.MidiAddr.Cc", "Ch %1 CC %2"), {ch, num});
 	case MFD_MIDI_PITCH_BEND:
-		return QStringLiteral("Ch %1 Pitch Bend").arg(static_cast<int>(addr.channel) + 1);
+		return mfdFill(mfdText("Dialog.MidiAddr.PitchBend", "Ch %1 Pitch Bend"), {ch});
 	case MFD_MIDI_NOTE_ON:
-		return QStringLiteral("Ch %1 Note %2")
-			.arg(static_cast<int>(addr.channel) + 1)
-			.arg(static_cast<int>(addr.number));
+		return mfdFill(mfdText("Dialog.MidiAddr.Note", "Ch %1 Note %2"), {ch, num});
 	default:
-		return QStringLiteral("Unbound");
+		return mfdText("Dialog.MidiAddr.Unbound", "Unbound");
 	}
 }
 
@@ -153,6 +152,23 @@ static QString output_bar_stylesheet(const QString &chunk_hex, const QString &bo
 		.arg(chunk_hex, border_hex);
 }
 
+/* QProgressBar::setFormat reads %p, %v and %m; a word joiner after any such "%" keeps a filled name or a
+ * translation from turning into a format code. */
+static QString progress_format_text(const QString &text)
+{
+	QString out;
+	out.reserve(text.size() + 4);
+	for (qsizetype i = 0; i < text.size(); ++i) {
+		out.append(text.at(i));
+		if (text.at(i) == QLatin1Char('%') && i + 1 < text.size() &&
+		    (text.at(i + 1) == QLatin1Char('p') || text.at(i + 1) == QLatin1Char('v') ||
+		     text.at(i + 1) == QLatin1Char('m'))) {
+			out.append(QChar(0x2060));
+		}
+	}
+	return out;
+}
+
 static QString stream_deck_companion_url()
 {
 	return QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester");
@@ -167,7 +183,7 @@ static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_s
 					       struct mfd_ui_strip_presentation *out)
 {
 	char disp_buf[64] = {0};
-	mfd_engine_format_slot_display_value(&s, s.last_applied_val, disp_buf, sizeof(disp_buf));
+	mfd_engine_format_slot_display_value_ex(&s, s.last_applied_val, true, disp_buf, sizeof(disp_buf));
 
 	struct mfd_ui_strip_input in;
 	std::memset(&in, 0, sizeof(in));
@@ -373,9 +389,9 @@ public:
 		  adv_catalog_(mfd_ui_catalog_create())
 	{
 		setObjectName(QStringLiteral("mfdSettingsDialog"));
-		setWindowTitle(QStringLiteral("Midi Fadester %1 (commit %2, built %3)")
-				       .arg(QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
-					    QString::fromUtf8(PLUGIN_BUILT_AT)));
+		setWindowTitle(mfdFill(mfdText("Dialog.WindowTitle", "Midi Fadester %1 (commit %2, built %3)"),
+				       {QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
+					QString::fromUtf8(PLUGIN_BUILT_AT)}));
 		resize(1380, 660);
 		setMinimumSize(1160, 560);
 		setStyleSheet(QStringLiteral(
@@ -403,7 +419,7 @@ public:
 		fr_lay->setContentsMargins(12, 8, 12, 8);
 		fr_lay->setSpacing(10);
 		auto *fr_lbl = new QLabel(
-			QStringLiteral(
+			mfdText("Dialog.FirstRun.Text",
 				"Start with the usual layout? Crossfader switches scenes, Master is Desktop Audio volume. "
 				"Change anything by clicking a strip."),
 			first_run_banner_);
@@ -411,12 +427,13 @@ public:
 		fr_lbl->setWordWrap(true);
 		fr_lbl->setStyleSheet(
 			QStringLiteral("color: #e0f2fe; font-weight: bold; background: transparent; border: none;"));
-		auto *btn_fr_yes = new QPushButton(QStringLiteral("Yes"), first_run_banner_);
+		auto *btn_fr_yes = new QPushButton(mfdText("Dialog.FirstRun.Yes", "Yes"), first_run_banner_);
 		btn_fr_yes->setObjectName(QStringLiteral("mfdFirstRunYesBtn"));
 		btn_fr_yes->setCursor(Qt::PointingHandCursor);
 		btn_fr_yes->setStyleSheet(QStringLiteral(
 			"QPushButton { background-color: #0284c7; color: #ffffff; font-weight: bold; padding: 6px 18px; border-radius: 5px; border: 1px solid #38bdf8; }"));
-		auto *btn_fr_custom = new QPushButton(QStringLiteral("I'll set it up"), first_run_banner_);
+		auto *btn_fr_custom =
+			new QPushButton(mfdText("Dialog.FirstRun.Custom", "I'll set it up"), first_run_banner_);
 		btn_fr_custom->setObjectName(QStringLiteral("mfdFirstRunCustomBtn"));
 		btn_fr_custom->setCursor(Qt::PointingHandCursor);
 		btn_fr_custom->setStyleSheet(QStringLiteral(
@@ -444,14 +461,16 @@ public:
 				       "border-radius: 6px; }"));
 		auto *note_layout = new QHBoxLayout(studio_note_widget_);
 		note_layout->setContentsMargins(12, 7, 12, 7);
-		auto *note_label = new QLabel(
-			QStringLiteral("Studio Mode is off. Turn on Studio Mode to switch scenes with the T-bar."),
-			studio_note_widget_);
+		auto *note_label =
+			new QLabel(mfdText("Dialog.StudioNote.Text",
+					   "Studio Mode is off. Turn on Studio Mode to switch scenes with the T-bar."),
+				   studio_note_widget_);
 		note_label->setObjectName(QStringLiteral("mfdStudioNoteLabel"));
 		note_label->setStyleSheet(
 			QStringLiteral("color: #fde68a; font-weight: bold; background: transparent; border: none;"));
 		note_label->setWordWrap(true);
-		auto *btn_turn_on_studio = new QPushButton(QStringLiteral("Turn on Studio Mode"), studio_note_widget_);
+		auto *btn_turn_on_studio =
+			new QPushButton(mfdText("Strip.TurnOnStudioMode", "Turn on Studio Mode"), studio_note_widget_);
 		btn_turn_on_studio->setObjectName(QStringLiteral("mfdBannerTurnOnStudioBtn"));
 		btn_turn_on_studio->setCursor(Qt::PointingHandCursor);
 		btn_turn_on_studio->setStyleSheet(
@@ -480,14 +499,15 @@ public:
 		auto *sd_copy_lay = new QVBoxLayout(sd_copy);
 		sd_copy_lay->setContentsMargins(0, 0, 0, 0);
 		sd_copy_lay->setSpacing(2);
-		auto *sd_title = new QLabel(QStringLiteral("Use a Stream Deck?"), sd_copy);
+		auto *sd_title = new QLabel(mfdText("Dialog.StreamDeck.Title", "Use a Stream Deck?"), sd_copy);
 		sd_title->setObjectName(QStringLiteral("mfdStreamDeckCompanionTitle"));
 		sd_title->setStyleSheet(
 			QStringLiteral("color: #eef2ff; font-weight: bold; background: transparent; border: none;"));
-		auto *sd_text = new QLabel(
-			QStringLiteral("Fadester for OBS adds touch controls, live meters, crossfader control, and "
-				       "auto-fades to the same Midi Fadester slots."),
-			sd_copy);
+		auto *sd_text =
+			new QLabel(mfdText("Dialog.StreamDeck.Text",
+					   "Fadester for OBS adds touch controls, live meters, crossfader control, and "
+					   "auto-fades to the same Midi Fadester slots."),
+				   sd_copy);
 		sd_text->setObjectName(QStringLiteral("mfdStreamDeckCompanionText"));
 		sd_text->setWordWrap(true);
 		sd_text->setStyleSheet(
@@ -496,8 +516,8 @@ public:
 		sd_copy_lay->addWidget(sd_text);
 		sd_lay->addWidget(sd_copy, 1);
 
-		auto *btn_sd_learn =
-			new QPushButton(QStringLiteral("Learn about Fadester for OBS"), stream_deck_companion_card_);
+		auto *btn_sd_learn = new QPushButton(mfdText("Dialog.StreamDeck.Learn", "Learn about Fadester for OBS"),
+						     stream_deck_companion_card_);
 		btn_sd_learn->setObjectName(QStringLiteral("mfdBtnStreamDeckLearn"));
 		btn_sd_learn->setProperty("destinationUrl", stream_deck_companion_url());
 		btn_sd_learn->setCursor(Qt::PointingHandCursor);
@@ -506,10 +526,12 @@ public:
 			"border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background-color: #6366f1; }"));
 		sd_lay->addWidget(btn_sd_learn);
 
-		auto *btn_sd_dismiss = new QPushButton(QStringLiteral("Hide"), stream_deck_companion_card_);
+		auto *btn_sd_dismiss =
+			new QPushButton(mfdText("Dialog.StreamDeck.Hide", "Hide"), stream_deck_companion_card_);
 		btn_sd_dismiss->setObjectName(QStringLiteral("mfdBtnStreamDeckDismiss"));
 		btn_sd_dismiss->setToolTip(
-			QStringLiteral("Hide this card. The Stream Deck companion link stays available below."));
+			mfdText("Dialog.StreamDeck.HideTip",
+				"Hide this card. The Stream Deck companion link stays available below."));
 		btn_sd_dismiss->setCursor(Qt::PointingHandCursor);
 		btn_sd_dismiss->setStyleSheet(QStringLiteral(
 			"QPushButton { background-color: transparent; color: #c7d2fe; border: 1px solid #6366f1; "
@@ -672,7 +694,7 @@ private:
 		z1_lay->setContentsMargins(12, 8, 12, 8);
 		z1_lay->setSpacing(10);
 
-		z1_name_label_ = new QLabel(QStringLiteral("Controller: None"), zone1);
+		z1_name_label_ = new QLabel(mfdText("Dialog.Controller.NoneName", "Controller: None"), zone1);
 		z1_name_label_->setObjectName(QStringLiteral("mfdControllerNameLabel"));
 		z1_name_label_->setStyleSheet(QStringLiteral("color: #f8fafc; font-size: 13px; font-weight: bold;"));
 		z1_lay->addWidget(z1_name_label_);
@@ -681,7 +703,7 @@ private:
 		z1_dot_label_->setObjectName(QStringLiteral("mfdControllerDot"));
 		z1_lay->addWidget(z1_dot_label_);
 
-		z1_status_label_ = new QLabel(QStringLiteral("Connected"), zone1);
+		z1_status_label_ = new QLabel(mfdText("Controller.Connected", "Connected"), zone1);
 		z1_status_label_->setObjectName(QStringLiteral("mfdControllerStatusLabel"));
 		z1_status_label_->setWordWrap(true);
 		z1_lay->addWidget(z1_status_label_, 1);
@@ -694,7 +716,7 @@ private:
 		z1_beta_badge_->hide();
 		z1_lay->addWidget(z1_beta_badge_);
 
-		z1_btn_reconnect_ = new QPushButton(QStringLiteral("Reconnect"), zone1);
+		z1_btn_reconnect_ = new QPushButton(mfdText("Dialog.Reconnect", "Reconnect"), zone1);
 		z1_btn_reconnect_->setObjectName(QStringLiteral("mfdBtnReconnect"));
 		z1_btn_reconnect_->setCursor(Qt::PointingHandCursor);
 		z1_btn_reconnect_->setStyleSheet(QStringLiteral(
@@ -706,14 +728,14 @@ private:
 		auto *cp_lay = new QHBoxLayout(z1_change_panel_);
 		cp_lay->setContentsMargins(0, 0, 0, 0);
 		cp_lay->setSpacing(6);
-		auto *lbl_z1_port = new QLabel(QStringLiteral("Port:"), z1_change_panel_);
+		auto *lbl_z1_port = new QLabel(mfdText("Dialog.Port", "Port:"), z1_change_panel_);
 		lbl_z1_port->setStyleSheet(QStringLiteral("color: #cbd5e1; font-size: 12px; font-weight: bold;"));
 		cp_lay->addWidget(lbl_z1_port);
 		zone1_device_combo_ = new QComboBox(z1_change_panel_);
 		zone1_device_combo_->setObjectName(QStringLiteral("mfdZone1DeviceCombo"));
 		zone1_device_combo_->setMinimumWidth(190);
 		cp_lay->addWidget(zone1_device_combo_);
-		auto *lbl_z1_layout = new QLabel(QStringLiteral("Layout:"), z1_change_panel_);
+		auto *lbl_z1_layout = new QLabel(mfdText("Dialog.Layout", "Layout:"), z1_change_panel_);
 		lbl_z1_layout->setStyleSheet(QStringLiteral("color: #cbd5e1; font-size: 12px; font-weight: bold;"));
 		cp_lay->addWidget(lbl_z1_layout);
 		zone1_profile_combo_ = new QComboBox(z1_change_panel_);
@@ -728,13 +750,13 @@ private:
 			"QPushButton { background-color: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 5px; padding: 5px 12px; font-weight: bold; } "
 			"QPushButton:hover { border-color: #93c5fd; color: #ffffff; }");
 
-		z1_btn_change_ctrl_ = new QPushButton(QStringLiteral("Change controller"), zone1);
+		z1_btn_change_ctrl_ = new QPushButton(mfdText("Dialog.ChangeController", "Change controller"), zone1);
 		z1_btn_change_ctrl_->setObjectName(QStringLiteral("mfdBtnChangeController"));
 		z1_btn_change_ctrl_->setCursor(Qt::PointingHandCursor);
 		z1_btn_change_ctrl_->setStyleSheet(z1_btn_style);
 		z1_lay->addWidget(z1_btn_change_ctrl_);
 
-		z1_btn_show_ctrl_ = new QPushButton(QStringLiteral("Show controller"), zone1);
+		z1_btn_show_ctrl_ = new QPushButton(mfdText("Dialog.ShowController", "Show controller"), zone1);
 		z1_btn_show_ctrl_->setObjectName(QStringLiteral("mfdBtnShowController"));
 		z1_btn_show_ctrl_->setCursor(Qt::PointingHandCursor);
 		z1_btn_show_ctrl_->setStyleSheet(z1_btn_style);
@@ -783,7 +805,7 @@ private:
 			"QPushButton:hover { border-color: #93c5fd; color: #ffffff; } "
 			"QPushButton:checked { background-color: #0284c7; color: #ffffff; border: 1px solid #38bdf8; }");
 
-		btn_bank_faders_ = new QPushButton(QStringLiteral("Faders"), bank_bar);
+		btn_bank_faders_ = new QPushButton(mfdText("Dialog.Bank.Faders", "Faders"), bank_bar);
 		btn_bank_faders_->setObjectName(QStringLiteral("mfdBtnBankFaders"));
 		btn_bank_faders_->setCheckable(true);
 		btn_bank_faders_->setChecked(true);
@@ -791,7 +813,7 @@ private:
 		btn_bank_faders_->setStyleSheet(pill_style);
 		bb_lay->addWidget(btn_bank_faders_);
 
-		btn_bank_fx_ = new QPushButton(QStringLiteral("FX && Knobs (8)"), bank_bar);
+		btn_bank_fx_ = new QPushButton(mfdText("Dialog.Bank.Fx", "FX && Knobs (8)"), bank_bar);
 		btn_bank_fx_->setObjectName(QStringLiteral("mfdBtnBankFx"));
 		btn_bank_fx_->setCheckable(true);
 		btn_bank_fx_->setChecked(false);
@@ -804,11 +826,13 @@ private:
 		bank_hint_label_->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px; padding-left: 6px;"));
 		bb_lay->addWidget(bank_hint_label_, 1);
 
-		btn_clean_all_fx_ = new QPushButton(QStringLiteral("Clean / All FX Off"), bank_bar);
+		btn_clean_all_fx_ = new QPushButton(mfdText("Dialog.CleanAllFx", "Clean / All FX Off"), bank_bar);
 		btn_clean_all_fx_->setObjectName(QStringLiteral("mfdBtnCleanAllFx"));
 		btn_clean_all_fx_->setCursor(Qt::PointingHandCursor);
-		btn_clean_all_fx_->setToolTip(QStringLiteral(
-			"Instantly return enabled filter controls in either bank to 0% (Clean). Audio, layer and T-bar controls stay unchanged."));
+		btn_clean_all_fx_->setToolTip(
+			mfdText("Dialog.CleanAllFx.Tip",
+				"Instantly return enabled filter controls in either bank to 0% (Clean). "
+				"Audio, layer and T-bar controls stay unchanged."));
 		bb_lay->addWidget(btn_clean_all_fx_);
 
 		lay->addWidget(bank_bar);
@@ -867,7 +891,7 @@ private:
 			lbl_state->setMinimumHeight(32);
 			c_lay->addWidget(lbl_state);
 
-			auto *btn_finish = new QPushButton(QStringLiteral("Finish now"), card);
+			auto *btn_finish = new QPushButton(mfdText("Dialog.FinishNow", "Finish now"), card);
 			btn_finish->setObjectName(QStringLiteral("mfdStripFinishBtn_%1").arg(i));
 			btn_finish->setCursor(Qt::PointingHandCursor);
 			btn_finish->setStyleSheet(QStringLiteral(
@@ -902,7 +926,7 @@ private:
 			lbl_status->hide();
 			c_lay->addWidget(lbl_status);
 
-			auto *btn_action = new QPushButton(QStringLiteral("Set up"), card);
+			auto *btn_action = new QPushButton(mfdText("Strip.SetUp", "Set up"), card);
 			btn_action->setObjectName(QStringLiteral("mfdStripActionBtn_%1").arg(i));
 			btn_action->setCursor(Qt::PointingHandCursor);
 			c_lay->addWidget(btn_action);
@@ -944,25 +968,27 @@ private:
 		z3_status_label_->setStyleSheet(QStringLiteral("color: #cbd5e1; font-size: 13px; font-weight: bold;"));
 		z3_lay->addWidget(z3_status_label_, 1);
 
-		auto *btn_open_adv = new QPushButton(QStringLiteral("Advanced"), zone3);
+		auto *btn_open_adv = new QPushButton(mfdText("Dialog.Advanced", "Advanced"), zone3);
 		btn_open_adv->setObjectName(QStringLiteral("mfdBtnOpenAdvanced"));
 		btn_open_adv->setCursor(Qt::PointingHandCursor);
 		btn_open_adv->setStyleSheet(z1_btn_style);
 		connect(btn_open_adv, &QPushButton::clicked, this, [this]() { main_tabs_->setCurrentIndex(1); });
 		z3_lay->addWidget(btn_open_adv);
 
-		auto *btn_stream_deck = new QPushButton(QStringLiteral("Stream Deck companion..."), zone3);
+		auto *btn_stream_deck =
+			new QPushButton(mfdText("Dialog.StreamDeck.Button", "Stream Deck companion..."), zone3);
 		btn_stream_deck->setObjectName(QStringLiteral("mfdBtnStreamDeckCompanion"));
 		btn_stream_deck->setProperty("destinationUrl", stream_deck_companion_url());
 		btn_stream_deck->setToolTip(
-			QStringLiteral("Learn about the optional Fadester for OBS Stream Deck companion."));
+			mfdText("Dialog.StreamDeck.ButtonTip",
+				"Learn about the optional Fadester for OBS Stream Deck companion."));
 		btn_stream_deck->setCursor(Qt::PointingHandCursor);
 		btn_stream_deck->setStyleSheet(z1_btn_style);
 		connect(btn_stream_deck, &QPushButton::clicked, this, []() { open_stream_deck_companion_url(); });
 		z3_lay->addWidget(btn_stream_deck);
 
 		lay->addWidget(zone3);
-		main_tabs_->addTab(strips_tab, QStringLiteral("Strips"));
+		main_tabs_->addTab(strips_tab, mfdText("Dialog.Tab.Strips", "Strips"));
 	}
 
 	void build_advanced_tab()
@@ -983,7 +1009,7 @@ private:
 		root->addWidget(banner_label_);
 
 		auto *top_bar = new QHBoxLayout();
-		auto *lbl_midi_in = new QLabel(QStringLiteral("MIDI In:"), adv_tab);
+		auto *lbl_midi_in = new QLabel(mfdText("Dialog.MidiIn", "MIDI In:"), adv_tab);
 		lbl_midi_in->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		top_bar->addWidget(lbl_midi_in);
 
@@ -992,16 +1018,16 @@ private:
 		device_combo_->setMinimumWidth(220);
 		top_bar->addWidget(device_combo_);
 
-		conn_status_label_ = new QLabel(QStringLiteral("Checking..."), adv_tab);
+		conn_status_label_ = new QLabel(mfdText("Dialog.Checking", "Checking..."), adv_tab);
 		conn_status_label_->setObjectName(QStringLiteral("mfdAdvConnLabel"));
 		top_bar->addWidget(conn_status_label_);
 
-		auto *btn_reconnect = new QPushButton(QStringLiteral("Reconnect / Rescan"), adv_tab);
+		auto *btn_reconnect = new QPushButton(mfdText("Dialog.ReconnectRescan", "Reconnect / Rescan"), adv_tab);
 		btn_reconnect->setObjectName(QStringLiteral("mfdAdvReconnectBtn"));
 		top_bar->addWidget(btn_reconnect);
 
 		top_bar->addSpacing(8);
-		auto *lbl_prof = new QLabel(QStringLiteral("Profile:"), adv_tab);
+		auto *lbl_prof = new QLabel(mfdText("Dialog.Profile", "Profile:"), adv_tab);
 		lbl_prof->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		top_bar->addWidget(lbl_prof);
 
@@ -1010,7 +1036,8 @@ private:
 		populate_profile_combo(profile_combo_);
 		top_bar->addWidget(profile_combo_);
 
-		btn_defaults_ = new QPushButton(QStringLiteral("Load APC40 mkII Defaults"), adv_tab);
+		btn_defaults_ =
+			new QPushButton(mfdText("Dialog.LoadApc40Defaults", "Load APC40 mkII Defaults"), adv_tab);
 		btn_defaults_->setObjectName(QStringLiteral("mfdAdvDefaultsBtn"));
 		top_bar->addWidget(btn_defaults_);
 		top_bar->addStretch(1);
@@ -1026,17 +1053,17 @@ private:
 		root->addWidget(adv_beta_note_);
 
 		auto *telemetry_bar = new QHBoxLayout();
-		studio_status_label_ = new QLabel(QStringLiteral("Studio Mode: Off"), adv_tab);
+		studio_status_label_ = new QLabel(mfdText("Dialog.StudioModeOffLabel", "Studio Mode: Off"), adv_tab);
 		studio_status_label_->setObjectName(QStringLiteral("mfdAdvStudioLabel"));
 		telemetry_bar->addWidget(studio_status_label_);
 
-		btn_finish_tbar_ = new QPushButton(QStringLiteral("Finish now"), adv_tab);
+		btn_finish_tbar_ = new QPushButton(mfdText("Dialog.FinishNow", "Finish now"), adv_tab);
 		btn_finish_tbar_->setObjectName(QStringLiteral("mfdAdvFinishBtn"));
 		btn_finish_tbar_->setEnabled(false);
 		telemetry_bar->addWidget(btn_finish_tbar_);
 
 		telemetry_bar->addSpacing(16);
-		auto *lbl_tau = new QLabel(QStringLiteral("Smoothing (ms):"), adv_tab);
+		auto *lbl_tau = new QLabel(mfdText("Dialog.Smoothing", "Smoothing (ms):"), adv_tab);
 		lbl_tau->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		telemetry_bar->addWidget(lbl_tau);
 
@@ -1045,17 +1072,18 @@ private:
 		tau_spin_->setRange(0.0, 250.0);
 		tau_spin_->setSingleStep(5.0);
 		tau_spin_->setDecimals(1);
-		tau_spin_->setSuffix(QStringLiteral(" ms"));
+		tau_spin_->setSuffix(mfdText("Dialog.Suffix.Ms", " ms"));
 		telemetry_bar->addWidget(tau_spin_);
 
 		telemetry_bar->addSpacing(12);
-		flip_check_ = new QCheckBox(QStringLiteral("T-bar works in both directions"), adv_tab);
+		flip_check_ =
+			new QCheckBox(mfdText("Dialog.TbarBothDirections", "T-bar works in both directions"), adv_tab);
 		flip_check_->setObjectName(QStringLiteral("mfdAdvFlipCheck"));
 		flip_check_->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		telemetry_bar->addWidget(flip_check_);
 		telemetry_bar->addStretch(1);
 
-		last_midi_label_ = new QLabel(QStringLiteral("No MIDI received yet"), adv_tab);
+		last_midi_label_ = new QLabel(mfdText("LastMidi.None", "No MIDI received yet"), adv_tab);
 		last_midi_label_->setObjectName(QStringLiteral("mfdAdvLastMidiLabel"));
 		last_midi_label_->setStyleSheet(
 			QStringLiteral("QLabel { background-color: #1f2937; color: #93c5fd; padding: 4px 10px; "
@@ -1077,16 +1105,16 @@ private:
 		table_ = new QTableWidget(MFD_MAX_FADER_SLOTS, 10, adv_tab);
 		table_->setObjectName(QStringLiteral("mfdAdvancedTable"));
 		table_->setHorizontalHeaderLabels({
-			QStringLiteral("On"),
-			QStringLiteral("Strip"),
-			QStringLiteral("MIDI Control"),
-			QStringLiteral("Reverse direction"),
-			QStringLiteral("What it does"),
-			QStringLiteral("Left"),
-			QStringLiteral("Right"),
-			QStringLiteral("Feel"),
-			QStringLiteral("Also fade audio"),
-			QStringLiteral("Output"),
+			mfdText("Dialog.Column.On", "On"),
+			mfdText("Dialog.Column.Strip", "Strip"),
+			mfdText("Dialog.Column.MidiControl", "MIDI Control"),
+			mfdText("Dialog.Column.Reverse", "Reverse direction"),
+			mfdText("Dialog.Column.WhatItDoes", "What it does"),
+			mfdText("Dialog.Column.Left", "Left"),
+			mfdText("Dialog.Column.Right", "Right"),
+			mfdText("Dialog.Column.Feel", "Feel"),
+			mfdText("Dialog.Column.AlsoFadeAudio", "Also fade audio"),
+			mfdText("Dialog.Column.Output", "Output"),
 		});
 		table_->horizontalHeader()->setStretchLastSection(true);
 		table_->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
@@ -1098,15 +1126,19 @@ private:
 		root->addWidget(table_, 1);
 
 		auto *hint = new QLabel(
-			QStringLiteral(
+			mfdText("Dialog.Help.Tbar",
 				"<b style='color:#f8fafc;'>Switch scenes (T-bar):</b> Fades Preview &rarr; "
 				"Program from 0&ndash;100%. Reach the far end to finish, or return to the start "
-				"to cancel.<br>"
-				"<b style='color:#f8fafc;'>Mix two layers:</b> Crossfades Left and Right in one scene "
-				"(layer order is detected automatically).<br>"
-				"<b style='color:#f8fafc;'>Filter or effect setting:</b> Sweeps any numeric filter or "
-				"shader slider across a custom Clean &rarr; Max range (click <b>Edit...</b> to pick "
-				"filter, setting, and range)."),
+				"to cancel.") +
+				QStringLiteral("<br>") +
+				mfdText("Dialog.Help.Mix",
+					"<b style='color:#f8fafc;'>Mix two layers:</b> Crossfades Left and Right in one "
+					"scene (layer order is detected automatically).") +
+				QStringLiteral("<br>") +
+				mfdText("Dialog.Help.Filter",
+					"<b style='color:#f8fafc;'>Filter or effect setting:</b> Sweeps any numeric filter "
+					"or shader slider across a custom Clean &rarr; Max range (click <b>Edit...</b> to "
+					"pick filter, setting, and range)."),
 			adv_tab);
 		hint->setObjectName(QStringLiteral("mfdAdvHelpLabel"));
 		hint->setTextFormat(Qt::RichText);
@@ -1117,33 +1149,34 @@ private:
 		root->addWidget(hint);
 
 		auto *footer = new QHBoxLayout();
-		auto *btn_back_strips = new QPushButton(QStringLiteral("Back to Strips"), adv_tab);
+		auto *btn_back_strips = new QPushButton(mfdText("Dialog.BackToStrips", "Back to Strips"), adv_tab);
 		btn_back_strips->setObjectName(QStringLiteral("mfdBtnBackToStrips"));
 		footer->addWidget(btn_back_strips);
 		connect(btn_back_strips, &QPushButton::clicked, this, [this]() { main_tabs_->setCurrentIndex(0); });
 		footer->addStretch(1);
 
-		auto *btn_import = new QPushButton(QStringLiteral("Import..."), adv_tab);
+		auto *btn_import = new QPushButton(mfdText("Dialog.Import", "Import..."), adv_tab);
 		btn_import->setObjectName(QStringLiteral("mfdBtnImport"));
 		footer->addWidget(btn_import);
 
-		auto *btn_export = new QPushButton(QStringLiteral("Export..."), adv_tab);
+		auto *btn_export = new QPushButton(mfdText("Dialog.Export", "Export..."), adv_tab);
 		btn_export->setObjectName(QStringLiteral("mfdBtnExport"));
 		footer->addWidget(btn_export);
 
-		auto *btn_refresh_sources = new QPushButton(QStringLiteral("Refresh Sources"), adv_tab);
+		auto *btn_refresh_sources =
+			new QPushButton(mfdText("Dialog.RefreshSources", "Refresh Sources"), adv_tab);
 		btn_refresh_sources->setObjectName(QStringLiteral("mfdBtnRefreshSources"));
 		footer->addWidget(btn_refresh_sources);
 
-		auto *btn_close = new QPushButton(QStringLiteral("Close"), adv_tab);
+		auto *btn_close = new QPushButton(mfdText("Dialog.Close", "Close"), adv_tab);
 		btn_close->setObjectName(QStringLiteral("mfdBtnClose"));
 		footer->addWidget(btn_close);
 		root->addLayout(footer);
 
 		connect(btn_import, &QPushButton::clicked, this, [this]() {
 			const QString path = QFileDialog::getOpenFileName(
-				this, QStringLiteral("Import Midi Fadester Configuration"), QString(),
-				QStringLiteral("JSON Files (*.json);;All Files (*)"));
+				this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"), QString(),
+				mfdText("Dialog.FileFilter.Json", "JSON Files (*.json);;All Files (*)"));
 			if (path.isEmpty()) {
 				return;
 			}
@@ -1157,10 +1190,10 @@ private:
 		});
 
 		connect(btn_export, &QPushButton::clicked, this, [this]() {
-			const QString path =
-				QFileDialog::getSaveFileName(this, QStringLiteral("Export Midi Fadester Configuration"),
-							     QStringLiteral("midi-fadester-config.json"),
-							     QStringLiteral("JSON Files (*.json);;All Files (*)"));
+			const QString path = QFileDialog::getSaveFileName(
+				this, mfdText("Dialog.Export.Title", "Export Midi Fadester Configuration"),
+				QStringLiteral("midi-fadester-config.json"),
+				mfdText("Dialog.FileFilter.Json", "JSON Files (*.json);;All Files (*)"));
 			if (path.isEmpty()) {
 				return;
 			}
@@ -1209,7 +1242,7 @@ private:
 		});
 		connect(btn_close, &QPushButton::clicked, this, &QDialog::accept);
 
-		main_tabs_->addTab(adv_tab, QStringLiteral("Advanced"));
+		main_tabs_->addTab(adv_tab, mfdText("Dialog.Advanced", "Advanced"));
 	}
 
 	static void populate_profile_combo(QComboBox *cb)
@@ -1225,10 +1258,12 @@ private:
 			if (!def) {
 				continue;
 			}
-			const QString name = (def->tier == MFD_PROFILE_TIER_BETA_UNTESTED)
-						     ? QStringLiteral("%1 (Beta \xE2\x80\x94 untested)")
-							       .arg(QString::fromUtf8(def->display_name))
-						     : QString::fromUtf8(def->display_name);
+			const QString display = QString::fromUtf8(mfd_profile_ui_display_name(def));
+			const QString name =
+				(def->tier == MFD_PROFILE_TIER_BETA_UNTESTED)
+					? mfdFill(mfdText("Dialog.Profile.BetaName", "%1 (Beta \xE2\x80\x94 untested)"),
+						  {display})
+					: display;
 			cb->addItem(name, static_cast<int>(def->id));
 		}
 		cb->blockSignals(false);
@@ -1264,7 +1299,8 @@ private:
 			}
 			cb->blockSignals(true);
 			cb->clear();
-			cb->addItem(QStringLiteral("(Auto-Detect Known Controller / First Port)"), QStringLiteral(""));
+			cb->addItem(mfdText("Dialog.Device.AutoDetect", "(Auto-Detect Known Controller / First Port)"),
+				    QStringLiteral(""));
 			int select_idx = 0;
 			for (size_t i = 0U; i < count; ++i) {
 				const QString name = QString::fromUtf8(devs[i].name);
@@ -1273,12 +1309,14 @@ private:
 					const struct mfd_controller_profile_def *pdef =
 						mfd_profile_get_def(devs[i].detected_profile);
 					if (pdef) {
+						const QString short_name =
+							QString::fromUtf8(mfd_profile_ui_short_name(pdef));
 						label = (pdef->tier == MFD_PROFILE_TIER_BETA_UNTESTED)
-								? QStringLiteral("%1 [%2 \xE2\x80\x94 Beta]")
-									  .arg(name,
-									       QString::fromUtf8(pdef->short_name))
-								: QStringLiteral("%1 [%2]").arg(
-									  name, QString::fromUtf8(pdef->short_name));
+								? mfdFill(mfdText("Dialog.Device.BetaLabel",
+										  "%1 [%2 \xE2\x80\x94 Beta]"),
+									  {name, short_name})
+								: mfdFill(mfdText("Dialog.Device.Label", "%1 [%2]"),
+									  {name, short_name});
 					}
 				}
 				cb->addItem(label, name);
@@ -1325,7 +1363,8 @@ private:
 		mfd_ui_format_controller_status(snap_.midi_connected, snap_.configured_device_name,
 						snap_.opened_device_name, snap_.midi_error_kind, &ctrl);
 
-		z1_name_label_->setText(QStringLiteral("Controller: %1").arg(QString::fromUtf8(ctrl.display_name)));
+		z1_name_label_->setText(mfdFill(mfdText("Dialog.Controller.Name", "Controller: %1"),
+						{QString::fromUtf8(ctrl.display_name)}));
 		z1_dot_label_->setStyleSheet(ctrl.dot_green ? QStringLiteral("color: #22c55e; font-size: 14px;")
 							    : QStringLiteral("color: #ef4444; font-size: 14px;"));
 		z1_status_label_->setText(QString::fromUtf8(ctrl.status_sentence));
@@ -1345,9 +1384,10 @@ private:
 		}
 		if (z1_beta_badge_) {
 			if (pdef && pdef->tier == MFD_PROFILE_TIER_BETA_UNTESTED) {
-				z1_beta_badge_->setText(QStringLiteral("BETA: %1 (untested spec)")
-								.arg(QString::fromUtf8(pdef->short_name)));
-				z1_beta_badge_->setToolTip(QString::fromUtf8(pdef->spec_note));
+				z1_beta_badge_->setText(
+					mfdFill(mfdText("Dialog.Controller.BetaBadge", "BETA: %1 (untested spec)"),
+						{QString::fromUtf8(mfd_profile_ui_short_name(pdef))}));
+				z1_beta_badge_->setToolTip(QString::fromUtf8(mfd_profile_ui_spec_note(pdef)));
 				z1_beta_badge_->show();
 			} else {
 				z1_beta_badge_->hide();
@@ -1361,9 +1401,11 @@ private:
 		if (bank_hint_label_) {
 			const QString hint_txt =
 				showing_fx_bank_
-					? QStringLiteral(
-						  "Dedicated FX slots for filter sweeps, shader controls, MIDI knobs, and Stream Deck + dials.")
-					: QStringLiteral("Channel faders, master, and A/B crossfader.");
+					? mfdText("Dialog.Bank.FxHint",
+						  "Dedicated FX slots for filter sweeps, shader controls, MIDI "
+						  "knobs, and Stream Deck + dials.")
+					: mfdText("Dialog.Bank.FadersHint",
+						  "Channel faders, master, and A/B crossfader.");
 			if (bank_hint_label_->text() != hint_txt) {
 				bank_hint_label_->setText(hint_txt);
 			}
@@ -1539,7 +1581,8 @@ private:
 		z3_status_label_->setText(QString::fromUtf8(zone3_buf));
 		if (snap_.midi_dropped_count > 0U) {
 			z3_status_label_->setToolTip(
-				QStringLiteral("Dropped MIDI queue events: %1").arg(snap_.midi_dropped_count));
+				mfdFill(mfdText("Dialog.DroppedMidiEvents", "Dropped MIDI queue events: %1"),
+					{QString::number(snap_.midi_dropped_count)}));
 		} else {
 			z3_status_label_->setToolTip(QString());
 		}
@@ -1572,7 +1615,7 @@ private:
 	{
 		combo->blockSignals(true);
 		combo->clear();
-		combo->addItem(QStringLiteral("(None)"), QStringLiteral(""));
+		combo->addItem(mfdText("Dialog.Source.None", "(None)"), QStringLiteral(""));
 		const QString cur = QString::fromUtf8(current_name ? current_name : "");
 		int found_idx = 0;
 		for (int i = 0; i < sources.size(); ++i) {
@@ -1582,7 +1625,7 @@ private:
 			}
 		}
 		if (!cur.isEmpty() && found_idx == 0) {
-			combo->addItem(QStringLiteral("%1 (missing)").arg(cur), cur);
+			combo->addItem(mfdFill(mfdText("Dialog.Source.Missing", "%1 (missing)"), {cur}), cur);
 			found_idx = combo->count() - 1;
 		}
 		combo->setCurrentIndex(found_idx);
@@ -1647,10 +1690,13 @@ private:
 
 	void apply_advanced_row_edit(int row, const struct mfd_slot_config_edit &edit, bool force_rebuild = false)
 	{
-		char err_buf[192] = {0};
-		if (!mfd_engine_update_slot_config_ex(eng_, row, &edit, err_buf, sizeof(err_buf))) {
-			adv_edit_error_ = QString::fromUtf8(
-				(err_buf[0] != '\0') ? err_buf : "Could not update strip configuration.");
+		struct mfd_msg err_msg;
+		if (!mfd_engine_update_slot_config_msg(eng_, row, &edit, &err_msg)) {
+			char err_buf[256] = {0};
+			mfd_ui_format_msg(&err_msg, err_buf, sizeof(err_buf));
+			adv_edit_error_ = (err_buf[0] != '\0') ? QString::fromUtf8(err_buf)
+							       : mfdText("Dialog.UpdateFailed",
+									 "Could not update strip configuration.");
 			last_adv_topology_rev_ = ~0ULL;
 		} else {
 			adv_edit_error_.clear();
@@ -1729,10 +1775,9 @@ private:
 
 			/* Column 0: On */
 			QCheckBox *chk_on = nullptr;
-			QWidget *on_cell = make_centered_checkbox_cell(table_, QStringLiteral("mfdAdvOn_%1").arg(row),
-								       slot.enabled,
-								       QStringLiteral("Enable or disable this strip."),
-								       &chk_on);
+			QWidget *on_cell = make_centered_checkbox_cell(
+				table_, QStringLiteral("mfdAdvOn_%1").arg(row), slot.enabled,
+				mfdText("Dialog.Tip.EnableStrip", "Enable or disable this strip."), &chk_on);
 			connect(chk_on, &QCheckBox::toggled, this, [this, row](bool on) {
 				if (rebuilding_adv_table_) {
 					return;
@@ -1749,7 +1794,8 @@ private:
 			auto *lbl_name = new QLabel(QString::fromUtf8(st_title), table_);
 			lbl_name->setMargin(6);
 			lbl_name->setStyleSheet(QStringLiteral("font-weight: bold;"));
-			lbl_name->setToolTip(QStringLiteral("Slot ID: %1").arg(QString::fromUtf8(slot.id)));
+			lbl_name->setToolTip(
+				mfdFill(mfdText("Dialog.Tip.SlotId", "Slot ID: %1"), {QString::fromUtf8(slot.id)}));
 			table_->setCellWidget(row, 1, lbl_name);
 
 			/* Column 2: MIDI Control */
@@ -1792,7 +1838,9 @@ private:
 			QCheckBox *chk_inv = nullptr;
 			QWidget *inv_cell = make_centered_checkbox_cell(
 				table_, QStringLiteral("mfdAdvInv_%1").arg(row), slot.invert,
-				QStringLiteral("Reverse physical fader direction (0% \xE2\x86\x94 100%)."), &chk_inv);
+				mfdText("Dialog.Tip.Reverse",
+					"Reverse physical fader direction (0% \xE2\x86\x94 100%)."),
+				&chk_inv);
 			connect(chk_inv, &QCheckBox::toggled, this, [this, row](bool inverted) {
 				if (rebuilding_adv_table_) {
 					return;
@@ -1806,15 +1854,17 @@ private:
 			/* Column 4: What it does */
 			auto *target_combo = new QComboBox(table_);
 			target_combo->setObjectName(QStringLiteral("mfdAdvMode_%1").arg(row));
-			target_combo->addItem(QStringLiteral("Not used"), static_cast<int>(MFD_TARGET_UNASSIGNED));
-			target_combo->addItem(QStringLiteral("Switch scenes (T-bar)"),
+			target_combo->addItem(mfdText("Target.NotUsed", "Not used"),
+					      static_cast<int>(MFD_TARGET_UNASSIGNED));
+			target_combo->addItem(mfdText("Target.Tbar", "Switch scenes (T-bar)"),
 					      static_cast<int>(MFD_TARGET_TBAR));
-			target_combo->addItem(QStringLiteral("Mix two layers"),
+			target_combo->addItem(mfdText("Target.Mix", "Mix two layers"),
 					      static_cast<int>(MFD_TARGET_TWO_SOURCE_MIX));
-			target_combo->addItem(QStringLiteral("Show or hide a layer"),
+			target_combo->addItem(mfdText("Target.Layer", "Show or hide a layer"),
 					      static_cast<int>(MFD_TARGET_SINGLE_LAYER));
-			target_combo->addItem(QStringLiteral("Volume"), static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
-			target_combo->addItem(QStringLiteral("Filter or effect setting"),
+			target_combo->addItem(mfdText("Target.Volume", "Volume"),
+					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
+			target_combo->addItem(mfdText("Target.Filter", "Filter or effect setting"),
 					      static_cast<int>(MFD_TARGET_FILTER_PARAM));
 			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot.target_type)));
 			adv_mode_combos_[row] = target_combo;
@@ -1868,12 +1918,12 @@ private:
 								? mfd_filter_decimals_for_step(slot.filter_prop_is_int,
 											       slot.filter_prop_step)
 								: 2;
-					full_summary = QStringLiteral("%1: %2 [%3..%4]")
-							       .arg(fnm, plbl,
-								    QString::number(slot.filter_from_val, 'f', dec),
-								    QString::number(slot.filter_to_val, 'f', dec));
+					full_summary =
+						mfdFill(mfdText("Dialog.FilterSummary", "%1: %2 [%3..%4]"),
+							{fnm, plbl, QString::number(slot.filter_from_val, 'f', dec),
+							 QString::number(slot.filter_to_val, 'f', dec)});
 				} else {
-					full_summary = QStringLiteral("Choose filter...");
+					full_summary = mfdText("Dialog.ChooseFilter", "Choose filter...");
 				}
 
 				auto *lbl_fsum = new QLabel(full_summary, fcell);
@@ -1885,7 +1935,7 @@ private:
 						? QStringLiteral("color: #7dd3fc; font-size: 11px; font-weight: bold;")
 						: QStringLiteral("color: #94a3b8; font-size: 11px;"));
 
-				auto *btn_fedit = new QPushButton(QStringLiteral("Edit..."), fcell);
+				auto *btn_fedit = new QPushButton(mfdText("Dialog.Edit", "Edit..."), fcell);
 				btn_fedit->setObjectName(QStringLiteral("mfdAdvFilterEdit_%1").arg(row));
 				btn_fedit->setCursor(Qt::PointingHandCursor);
 				btn_fedit->setStyleSheet(QStringLiteral(
@@ -1911,16 +1961,19 @@ private:
 				curve_combo = new QComboBox(table_);
 				curve_combo->setObjectName(QStringLiteral("mfdAdvFeel_%1").arg(row));
 				curve_combo->setMaximumWidth(170);
-				curve_combo->addItem(QStringLiteral("Dip-free"), static_cast<int>(MFD_CURVE_DIP_FREE));
-				curve_combo->addItem(QStringLiteral("Full-center"),
+				curve_combo->addItem(mfdText("Curve.DipFree", "Dip-free"),
+						     static_cast<int>(MFD_CURVE_DIP_FREE));
+				curve_combo->addItem(mfdText("Dialog.Curve.FullCenter", "Full-center"),
 						     static_cast<int>(MFD_CURVE_FULL_CENTER));
-				curve_combo->addItem(QStringLiteral("Equal power"), static_cast<int>(MFD_CURVE_COSINE));
-				curve_combo->addItem(QStringLiteral("Linear"), static_cast<int>(MFD_CURVE_LINEAR));
-				curve_combo->addItem(QStringLiteral("Cut"), static_cast<int>(MFD_CURVE_CUT));
+				curve_combo->addItem(mfdText("Curve.EqualPower", "Equal power"),
+						     static_cast<int>(MFD_CURVE_COSINE));
+				curve_combo->addItem(mfdText("Curve.Linear", "Linear"),
+						     static_cast<int>(MFD_CURVE_LINEAR));
+				curve_combo->addItem(mfdText("Curve.Cut", "Cut"), static_cast<int>(MFD_CURVE_CUT));
 				curve_combo->setCurrentIndex(curve_combo->findData(static_cast<int>(slot.curve)));
 				table_->setCellWidget(row, 7, curve_combo);
 			} else if (is_filter_param) {
-				auto *lbl_lin = new QLabel(QStringLiteral("Linear"), table_);
+				auto *lbl_lin = new QLabel(mfdText("Curve.Linear", "Linear"), table_);
 				lbl_lin->setObjectName(QStringLiteral("mfdAdvFeelLabel_%1").arg(row));
 				lbl_lin->setAlignment(Qt::AlignCenter);
 				lbl_lin->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
@@ -1936,14 +1989,16 @@ private:
 			if (show_afv) {
 				QWidget *afv_cell = make_centered_checkbox_cell(
 					table_, QStringLiteral("mfdAdvAfv_%1").arg(row), slot.audio_follows_video,
-					QStringLiteral("Also fade audio volume alongside layer opacity."), &chk_afv);
+					mfdText("Dialog.Tip.Afv", "Also fade audio volume alongside layer opacity."),
+					&chk_afv);
 				table_->setCellWidget(row, 8, afv_cell);
 			} else if (is_filter_param) {
 				QWidget *byp_cell = make_centered_checkbox_cell(
 					table_, QStringLiteral("mfdAdvFilterBypass_%1").arg(row),
 					slot.filter_bypass_at_zero,
-					QStringLiteral("Turn filter off at 0% (saves GPU)."), &chk_flt_bypass);
-				chk_flt_bypass->setText(QStringLiteral("Off at 0%"));
+					mfdText("Dialog.Tip.FilterBypass", "Turn filter off at 0% (saves GPU)."),
+					&chk_flt_bypass);
+				chk_flt_bypass->setText(mfdText("Dialog.FilterBypass", "Off at 0%"));
 				chk_flt_bypass->setStyleSheet(QStringLiteral("font-size: 11px; color: #cbd5e1;"));
 				table_->setCellWidget(row, 8, byp_cell);
 			} else {
@@ -2087,17 +2142,17 @@ private:
 
 		const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(snap_.active_profile);
 		if (btn_defaults_ && pdef) {
-			const QString btn_txt =
-				(pdef->id == MFD_PROFILE_GENERIC)
-					? QStringLiteral("Reset Generic Slots")
-					: QStringLiteral("Load %1 Defaults").arg(QString::fromUtf8(pdef->short_name));
+			const QString btn_txt = (pdef->id == MFD_PROFILE_GENERIC)
+							? mfdText("Dialog.ResetGenericSlots", "Reset Generic Slots")
+							: mfdFill(mfdText("Dialog.LoadDefaults", "Load %1 Defaults"),
+								  {QString::fromUtf8(mfd_profile_ui_short_name(pdef))});
 			if (btn_defaults_->text() != btn_txt) {
 				btn_defaults_->setText(btn_txt);
 			}
 		}
 		if (adv_beta_note_) {
 			if (pdef && pdef->tier == MFD_PROFILE_TIER_BETA_UNTESTED) {
-				const QString note_txt = QString::fromUtf8(pdef->spec_note);
+				const QString note_txt = QString::fromUtf8(mfd_profile_ui_spec_note(pdef));
 				if (adv_beta_note_->text() != note_txt) {
 					adv_beta_note_->setText(note_txt);
 				}
@@ -2114,7 +2169,8 @@ private:
 		if (ctrl.dot_green) {
 			set_label_text_and_style(
 				conn_status_label_,
-				QStringLiteral("\xE2\x97\x8F Connected: %1").arg(QString::fromUtf8(ctrl.display_name)),
+				mfdFill(mfdText("Dialog.ConnectedTo", "\xE2\x97\x8F Connected: %1"),
+					{QString::fromUtf8(ctrl.display_name)}),
 				QStringLiteral("QLabel { background-color: #064e3b; color: #6ee7b7; padding: 4px 10px; "
 					       "border: 1px solid #10b981; border-radius: 4px; font-weight: bold; }"));
 			if (!adv_edit_error_.isEmpty()) {
@@ -2132,7 +2188,14 @@ private:
 				banner_label_->setText(adv_edit_error_);
 				banner_label_->show();
 			} else if (snap_.midi_last_error[0] != '\0') {
-				banner_label_->setText(QString::fromUtf8(snap_.midi_last_error));
+				/* worded from the error's kind, not the English last_error the log and API keep */
+				char device_error[320] = {0};
+				mfd_ui_format_device_error(snap_.midi_error_kind, snap_.midi_error_operation,
+							   snap_.midi_error_code, snap_.midi_error_device_name,
+							   device_error, sizeof(device_error));
+				banner_label_->setText(device_error[0] != '\0'
+							       ? QString::fromUtf8(device_error)
+							       : QString::fromUtf8(snap_.midi_last_error));
 				banner_label_->show();
 			} else {
 				banner_label_->hide();
@@ -2148,13 +2211,14 @@ private:
 							: QStringLiteral("\xE2\x80\x94");
 			set_label_text_and_style(
 				studio_status_label_,
-				QStringLiteral("\xE2\x97\x8F Studio Mode on: Preview [%1] \xE2\x86\x92 Program [%2]")
-					.arg(prev_nm, prog_nm),
+				mfdFill(mfdText("Dialog.StudioModeOn",
+						"\xE2\x97\x8F Studio Mode on: Preview [%1] \xE2\x86\x92 Program [%2]"),
+					{prev_nm, prog_nm}),
 				QStringLiteral("QLabel { background-color: #172554; color: #bfdbfe; padding: 4px 10px; "
 					       "border: 1px solid #2563eb; border-radius: 4px; font-weight: bold; }"));
 		} else {
 			set_label_text_and_style(
-				studio_status_label_, QStringLiteral("\xE2\x97\x8B Studio Mode off"),
+				studio_status_label_, mfdText("Dialog.StudioModeOff", "\xE2\x97\x8B Studio Mode off"),
 				QStringLiteral("QLabel { background-color: #1f2937; color: #9ca3af; padding: 4px 10px; "
 					       "border: 1px solid #374151; border-radius: 4px; font-weight: bold; }"));
 		}
@@ -2214,37 +2278,45 @@ private:
 			build_strip_presentation_from_slot(row, s, &sp);
 
 			const int desired_pct = sp.bar_percent;
+			const QString pct_q = QString::number(desired_pct);
 			QString desired_text;
 			QString desired_style = style_disabled;
 			QString desired_tip;
 
 			if (!s.enabled) {
-				desired_text = QStringLiteral("Off");
-				desired_tip = QStringLiteral("Strip is turned off.");
+				desired_text = mfdText("Dialog.Output.Off", "Off");
+				desired_tip = mfdText("Dialog.Output.OffTip", "Strip is turned off.");
 			} else if (s.target_type == MFD_TARGET_UNASSIGNED) {
-				desired_text = s.takeover.has_last_fader
-						       ? QString::asprintf("%d%% (Not used)", desired_pct)
-						       : QStringLiteral("Not used");
-				desired_tip = QStringLiteral("Choose What it does to activate this strip.");
+				desired_text =
+					s.takeover.has_last_fader
+						? mfdFill(mfdText("Dialog.Output.PercentNotUsed", "%1% (Not used)"),
+							  {pct_q})
+						: mfdText("Target.NotUsed", "Not used");
+				desired_tip = mfdText("Dialog.Output.NotUsedTip",
+						      "Choose What it does to activate this strip.");
 			} else if (!s.cached_available) {
-				desired_text = QString::asprintf("%d%% \xC2\xB7 %s", desired_pct, sp.status_sentence);
+				desired_text = mfdFill(mfdText("Dialog.Output.PercentStatus", "%1% \xC2\xB7 %2"),
+						       {pct_q, QString::fromUtf8(sp.status_sentence)});
 				desired_style = style_unavail;
 				desired_tip = QString::fromUtf8(sp.status_sentence);
 			} else {
 				if (sp.status_sentence[0] != '\0') {
 					desired_text =
-						QString::asprintf("%d%% \xC2\xB7 %s", desired_pct, sp.status_sentence);
+						mfdFill(mfdText("Dialog.Output.PercentStatus", "%1% \xC2\xB7 %2"),
+							{pct_q, QString::fromUtf8(sp.status_sentence)});
 					desired_style = style_waiting;
 					desired_tip = QString::fromUtf8(sp.status_sentence);
 				} else if (sp.at_end) {
-					desired_text = QString::asprintf("%d%% \xC2\xB7 At end.", desired_pct);
+					desired_text = mfdFill(
+						mfdText("Dialog.Output.PercentAtEnd", "%1% \xC2\xB7 At end."), {pct_q});
 					desired_style = style_parked;
-					desired_tip = QStringLiteral("At end (parked at rail).");
+					desired_tip = mfdText("Dialog.Output.AtEndTip", "At end (parked at rail).");
 				} else {
 					desired_text =
 						(sp.state_readout[0] != '\0')
-							? QString::asprintf("%d%% (%s)", desired_pct, sp.state_readout)
-							: QString::asprintf("%d%%", desired_pct);
+							? mfdFill(mfdText("Dialog.Output.PercentReadout", "%1% (%2)"),
+								  {pct_q, QString::fromUtf8(sp.state_readout)})
+							: mfdFill(mfdText("Readout.Percent", "%1%"), {pct_q});
 					desired_style = style_engaged;
 					desired_tip = QString::fromUtf8(sp.assignment_sentence);
 				}
@@ -2253,6 +2325,7 @@ private:
 			if (bar->value() != desired_pct) {
 				bar->setValue(desired_pct);
 			}
+			desired_text = progress_format_text(desired_text);
 			if (bar->format() != desired_text) {
 				bar->setFormat(desired_text);
 			}

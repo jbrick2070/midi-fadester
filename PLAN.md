@@ -358,6 +358,32 @@ device texts). Each step ends with the full ctest green and its own commit; the 
    with `text_lookup_create` and sets it as the module lookup, so their English assertions keep passing through the
    real keys. **Tests**: `test-ui-dialog` unchanged and green; a run with a marked lookup that finds no hardcoded
    English left in the dialog's widget texts (every QLabel, QAbstractButton, QGroupBox, QComboBox item and tooltip).
+
+   *As built (7.4):* every visible text in `mfd-settings-dialog.cpp` (`Dialog.*`, ~95 new keys plus reused core keys),
+   `mfd-setup-sheet.cpp` (`Setup.*`, ~67) and `mfd-controller-svg.cpp` (`Map.*`, 38) is a `mfdText` key filled with
+   `mfdFill`; no `QString::asprintf` or `.arg` on a translated text or over names remains (the remaining `.arg`
+   calls fill numbers, colours and the font attribute). The English is unchanged, except the setup sheet's filter
+   count, now count-free: "%1  (Filters: %2)" / "%1  (Scene · Filters: %2)" (no test asserted the old "1 filter" /
+   "%1 filters"). Combo labels are translated, item data unchanged; the curve combo's "Full-center" keeps its own key
+   because its English differs from the core's "Full at center". Help HTML is three keys, one per block. The UI shows
+   profile names and notes through `mfd_profile_ui_*`, strip values through
+   `mfd_engine_format_slot_display_value_ex(..., true)`, the device banner through `mfd_ui_format_device_error` (falls
+   back to `last_error` if that gives nothing), and engine refusals through the `_msg` calls and `mfd_ui_format_msg`.
+   `QProgressBar::setFormat` texts pass a helper that puts U+2060 after a `%` followed by p, v or m. Text-bearing
+   labels and buttons in the setup sheet with `setFixedWidth` now use `setMinimumWidth` (11 places; the dialog had
+   none besides the "×" glyph button). SVG: each `<text>` is built geometry first, then the text escaped once with
+   `xml_escape` on insertion (the old `&amp;` / `&lt;` literals became plain text in the English); eliding is by
+   measured Segoe UI width (`QFontMetrics`), the header status dot and the Beta badge follow the measured text.
+   Left as is: painted numeric bar labels ("%1%  %2 %3%"), glyph-only buttons, `obs_module_text("ToolsMenuTitle")`.
+   Tests: `test-ui-dialog` unchanged and green; at its end a marked lookup (en-US.ini in guillemets) builds a fresh
+   dialog, every tab, the setup sheet, the controller map for all six profiles and the mode cards, and scans labels,
+   buttons, group titles, placeholders, progress formats, spin suffixes and prefixes, combo items, tab texts, table
+   headers and cells, tooltips, window titles and the SVG `<text>` nodes; marked spans (also elided ones) are removed
+   and what is left must be data (the fake scene graph's names, brand names, the product name, the machine's MIDI
+   port names, the unit "px"), matched as whole words. en-US.ini: 377 keys. 20/20 green. The portable OBS harness was
+   not run: an OBS (`docs\demo-reel\production\obs\portable\bin\64bit\obs64.exe`) was running. Known for 7.6: with
+   marks the nanoKONTROL2 transport labels ("STOP", "PLAY") and several strip labels elide, so longer translations
+   will; the widths need the German/Russian/Japanese run.
 5. **Step 7.5 -- The ten files and the file check.** `tests/check-locale-files.cmake` ported from obs-playlister
    (`%1`..`%9` sets, any printf conversion refused, `&` count kept for keys with a mnemonic, UTF-8 without BOM, names,
    all ten required) with its negative tests. Strings whose English is word for word OBS's own start from OBS 33.0.0's

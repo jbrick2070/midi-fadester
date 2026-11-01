@@ -10,6 +10,7 @@
 #include "core/apc40-profile.h"
 #include "core/filter-math.h"
 #include "core/ui-sentences.h"
+#include "ui/mfd-text-qt.hpp"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -32,22 +33,45 @@
 
 namespace {
 
+/* An engine refusal in the language OBS runs in (its English stays for logs and the API). */
+static QString msg_text(const struct mfd_msg &msg)
+{
+	char text[256] = {0};
+	mfd_ui_format_msg(&msg, text, sizeof(text));
+	return QString::fromUtf8(text);
+}
+
+/* QProgressBar::setFormat reads %p, %v and %m; a filled name or value must never form one. */
+static QString progress_format(const QString &text)
+{
+	QString out = text;
+	for (qsizetype i = out.size() - 2; i >= 0; --i) {
+		const QChar next = out.at(i + 1);
+		if (out.at(i) == QLatin1Char('%') &&
+		    (next == QLatin1Char('p') || next == QLatin1Char('v') || next == QLatin1Char('m'))) {
+			out.insert(i + 1, QChar(0x2060)); /* word joiner: invisible, breaks the pair */
+		}
+	}
+	return out;
+}
+
 static QString format_plain_midi_addr(const struct mfd_midi_addr &addr)
 {
 	switch (addr.type) {
 	case MFD_MIDI_CC:
-		return QStringLiteral("Channel %1, CC %2%3")
-			.arg(static_cast<int>(addr.channel) + 1)
-			.arg(static_cast<int>(addr.number))
-			.arg(addr.is_14bit ? QStringLiteral(" (14-bit)") : QString());
+		return mfdFill(addr.is_14bit ? mfdText("Setup.Address.Cc14", "Channel %1, CC %2 (14-bit)")
+					     : mfdText("Setup.Address.Cc", "Channel %1, CC %2"),
+			       {QString::number(static_cast<int>(addr.channel) + 1),
+				QString::number(static_cast<int>(addr.number))});
 	case MFD_MIDI_PITCH_BEND:
-		return QStringLiteral("Channel %1, Pitch Bend").arg(static_cast<int>(addr.channel) + 1);
+		return mfdFill(mfdText("Setup.Address.PitchBend", "Channel %1, Pitch Bend"),
+			       {QString::number(static_cast<int>(addr.channel) + 1)});
 	case MFD_MIDI_NOTE_ON:
-		return QStringLiteral("Channel %1, Note %2")
-			.arg(static_cast<int>(addr.channel) + 1)
-			.arg(static_cast<int>(addr.number));
+		return mfdFill(mfdText("Setup.Address.Note", "Channel %1, Note %2"),
+			       {QString::number(static_cast<int>(addr.channel) + 1),
+				QString::number(static_cast<int>(addr.number))});
 	default:
-		return QStringLiteral("No MIDI control bound");
+		return mfdText("Setup.NoMidiControl", "No MIDI control bound");
 	}
 }
 
@@ -99,7 +123,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	  filter_cat_(mfd_source_filter_catalog_create())
 {
 	setObjectName(QStringLiteral("mfdSetupSheet"));
-	setWindowTitle(QStringLiteral("Midi Fadester \xE2\x80\x94 Set up strip"));
+	setWindowTitle(mfdText("Setup.WindowTitle", "Midi Fadester \xE2\x80\x94 Set up strip"));
 	resize(640, 560);
 	setStyleSheet(QStringLiteral(
 		"QDialog { background-color: #0b1120; color: #f8fafc; } "
@@ -115,7 +139,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	root->setContentsMargins(18, 16, 18, 16);
 	root->setSpacing(12);
 
-	title_label_ = new QLabel(QStringLiteral("Set up strip"), this);
+	title_label_ = new QLabel(mfdText("Setup.Title", "Set up strip"), this);
 	title_label_->setObjectName(QStringLiteral("mfdSetupTitle"));
 	title_label_->setStyleSheet(QStringLiteral("font-size: 17px; font-weight: bold; color: #f8fafc;"));
 	root->addWidget(title_label_);
@@ -139,29 +163,33 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p1_lay->setContentsMargins(0, 0, 0, 0);
 	p1_lay->setSpacing(10);
 
-	auto *p1_prompt = new QLabel(QStringLiteral("What should this fader do?"), page1);
+	auto *p1_prompt = new QLabel(mfdText("Setup.Step1.Prompt", "What should this fader do?"), page1);
 	p1_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p1_lay->addWidget(p1_prompt);
 
 	auto *grid = new QGridLayout();
 	grid->setSpacing(10);
 	card_tbar_ = create_mode_card_button(page1, QStringLiteral("mfdCardSwitchScenes"), MFD_TARGET_TBAR,
-					     QStringLiteral("Switch scenes"),
-					     QStringLiteral("Fade Program to Preview, like OBS's T-bar."));
+					     mfdText("Setup.Card.Tbar", "Switch scenes"),
+					     mfdText("Setup.Card.Tbar.Description",
+						     "Fade Program to Preview, like OBS's T-bar."));
 	card_mix_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardMixTwoLayers"), MFD_TARGET_TWO_SOURCE_MIX,
-		QStringLiteral("Mix two layers"),
-		QStringLiteral("In one scene, fade between two layers. Left is one, right is the other."));
+		mfdText("Setup.Card.Mix", "Mix two layers"),
+		mfdText("Setup.Card.Mix.Description",
+			"In one scene, fade between two layers. Left is one, right is the other."));
 	card_single_ = create_mode_card_button(page1, QStringLiteral("mfdCardShowHideLayer"), MFD_TARGET_SINGLE_LAYER,
-					       QStringLiteral("Show or hide a layer"),
-					       QStringLiteral("Fade one layer in (right) or out (left)."));
-	card_volume_ = create_mode_card_button(page1, QStringLiteral("mfdCardVolume"), MFD_TARGET_AUDIO_VOLUME,
-					       QStringLiteral("Volume"),
-					       QStringLiteral("Control one audio source, like OBS's mixer slider."));
+					       mfdText("Setup.Card.Layer", "Show or hide a layer"),
+					       mfdText("Setup.Card.Layer.Description",
+						       "Fade one layer in (right) or out (left)."));
+	card_volume_ = create_mode_card_button(
+		page1, QStringLiteral("mfdCardVolume"), MFD_TARGET_AUDIO_VOLUME, mfdText("Setup.Card.Volume", "Volume"),
+		mfdText("Setup.Card.Volume.Description", "Control one audio source, like OBS's mixer slider."));
 	card_filter_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardFilterSetting"), MFD_TARGET_FILTER_PARAM,
-		QStringLiteral("Filter or effect setting"),
-		QStringLiteral("Sweep any numeric filter, shader, or reactivity slider on a layer or scene."));
+		mfdText("Setup.Card.Filter", "Filter or effect setting"),
+		mfdText("Setup.Card.Filter.Description",
+			"Sweep any numeric filter, shader, or reactivity slider on a layer or scene."));
 	grid->addWidget(card_tbar_, 0, 0);
 	grid->addWidget(card_mix_, 0, 1);
 	grid->addWidget(card_single_, 1, 0);
@@ -170,7 +198,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p1_lay->addLayout(grid, 1);
 
 	auto *not_used_row = new QHBoxLayout();
-	btn_not_used_ = new QPushButton(QStringLiteral("Not used (turn off this strip's assignment)"), page1);
+	btn_not_used_ = new QPushButton(mfdText("Setup.NotUsed", "Not used (turn off this strip's assignment)"), page1);
 	btn_not_used_->setObjectName(QStringLiteral("mfdBtnNotUsed"));
 	btn_not_used_->setCursor(Qt::PointingHandCursor);
 	btn_not_used_->setStyleSheet(
@@ -204,7 +232,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p2_lay->setContentsMargins(0, 0, 0, 0);
 	p2_lay->setSpacing(12);
 
-	auto *p2_prompt = new QLabel(QStringLiteral("Which?"), page2);
+	auto *p2_prompt = new QLabel(mfdText("Setup.Step2.Prompt", "Which?"), page2);
 	p2_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p2_lay->addWidget(p2_prompt);
 
@@ -219,10 +247,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	step2_tbar_info_->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: bold;"));
 	tbar_box_lay->addWidget(step2_tbar_info_);
 
-	step2_turn_on_studio_btn_ = new QPushButton(QStringLiteral("Turn on Studio Mode"), step2_tbar_box_);
+	step2_turn_on_studio_btn_ =
+		new QPushButton(mfdText("Setup.TurnOnStudioMode", "Turn on Studio Mode"), step2_tbar_box_);
 	step2_turn_on_studio_btn_->setObjectName(QStringLiteral("mfdStep2TurnOnStudioBtn"));
 	step2_turn_on_studio_btn_->setCursor(Qt::PointingHandCursor);
-	step2_turn_on_studio_btn_->setFixedWidth(200);
+	step2_turn_on_studio_btn_->setMinimumWidth(200);
 	step2_turn_on_studio_btn_->setStyleSheet(
 		QStringLiteral("QPushButton { background-color: #d97706; color: #111827; font-weight: bold; "
 			       "border-radius: 5px; padding: 7px 14px; }"));
@@ -249,8 +278,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	sc_lay->addWidget(step2_empty_scene_note_);
 
 	auto *row_sc = new QHBoxLayout();
-	auto *lbl_sc = new QLabel(QStringLiteral("Scene:"), step2_scene_box_);
-	lbl_sc->setFixedWidth(70);
+	auto *lbl_sc = new QLabel(mfdText("Setup.Scene", "Scene:"), step2_scene_box_);
+	lbl_sc->setMinimumWidth(70);
 	lbl_sc->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_scene_ = new QComboBox(step2_scene_box_);
 	combo_scene_->setObjectName(QStringLiteral("mfdComboScene"));
@@ -259,8 +288,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	sc_lay->addLayout(row_sc);
 
 	auto *row_left = new QHBoxLayout();
-	lbl_left_caption_ = new QLabel(QStringLiteral("Left:"), step2_scene_box_);
-	lbl_left_caption_->setFixedWidth(70);
+	lbl_left_caption_ = new QLabel(mfdText("Setup.Left", "Left:"), step2_scene_box_);
+	lbl_left_caption_->setMinimumWidth(70);
 	lbl_left_caption_->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_left_ = new QComboBox(step2_scene_box_);
 	combo_left_->setObjectName(QStringLiteral("mfdComboLeft"));
@@ -271,8 +300,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	right_row_widget_ = new QWidget(step2_scene_box_);
 	auto *row_right = new QHBoxLayout(right_row_widget_);
 	row_right->setContentsMargins(0, 0, 0, 0);
-	auto *lbl_right = new QLabel(QStringLiteral("Right:"), right_row_widget_);
-	lbl_right->setFixedWidth(70);
+	auto *lbl_right = new QLabel(mfdText("Setup.Right", "Right:"), right_row_widget_);
+	lbl_right->setMinimumWidth(70);
 	lbl_right->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_right_ = new QComboBox(right_row_widget_);
 	combo_right_->setObjectName(QStringLiteral("mfdComboRight"));
@@ -280,7 +309,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	row_right->addWidget(combo_right_, 1);
 	sc_lay->addWidget(right_row_widget_);
 
-	same_layer_refusal_ = new QLabel(QStringLiteral("Left and Right cannot be the same layer."), step2_scene_box_);
+	same_layer_refusal_ =
+		new QLabel(mfdText("Setup.SameLayer", "Left and Right cannot be the same layer."), step2_scene_box_);
 	same_layer_refusal_->setObjectName(QStringLiteral("mfdSameLayerRefusal"));
 	same_layer_refusal_->setStyleSheet(
 		QStringLiteral("QLabel { background-color: #451a1a; color: #fecaca; border: 1px solid #ef4444; "
@@ -311,8 +341,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	aud_lay->setContentsMargins(0, 0, 0, 0);
 	aud_lay->setSpacing(10);
 
-	step2_empty_audio_note_ =
-		new QLabel(QStringLiteral("No sources with audio were found in OBS."), step2_audio_box_);
+	step2_empty_audio_note_ = new QLabel(
+		mfdText("Setup.NoAudioSources", "No sources with audio were found in OBS."), step2_audio_box_);
 	step2_empty_audio_note_->setObjectName(QStringLiteral("mfdStep2EmptyAudioNote"));
 	step2_empty_audio_note_->setStyleSheet(
 		QStringLiteral("QLabel { background-color: #3f2b05; color: #fde68a; border: 1px solid #d97706; "
@@ -320,8 +350,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	aud_lay->addWidget(step2_empty_audio_note_);
 
 	auto *row_aud = new QHBoxLayout();
-	auto *lbl_aud = new QLabel(QStringLiteral("Audio source:"), step2_audio_box_);
-	lbl_aud->setFixedWidth(96);
+	auto *lbl_aud = new QLabel(mfdText("Setup.AudioSource", "Audio source:"), step2_audio_box_);
+	lbl_aud->setMinimumWidth(96);
 	lbl_aud->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_audio_ = new QComboBox(step2_audio_box_);
 	combo_audio_->setObjectName(QStringLiteral("mfdComboAudioSource"));
@@ -346,8 +376,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	flt_lay->addWidget(step2_empty_filter_note_);
 
 	auto *row_fhost = new QHBoxLayout();
-	auto *lbl_fhost = new QLabel(QStringLiteral("Layer or Scene:"), step2_filter_box_);
-	lbl_fhost->setFixedWidth(112);
+	auto *lbl_fhost = new QLabel(mfdText("Setup.FilterHost", "Layer or Scene:"), step2_filter_box_);
+	lbl_fhost->setMinimumWidth(112);
 	lbl_fhost->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_filter_host_ = new QComboBox(step2_filter_box_);
 	combo_filter_host_->setObjectName(QStringLiteral("mfdComboFilterHost"));
@@ -356,8 +386,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	flt_lay->addLayout(row_fhost);
 
 	auto *row_fname = new QHBoxLayout();
-	auto *lbl_fname = new QLabel(QStringLiteral("Filter:"), step2_filter_box_);
-	lbl_fname->setFixedWidth(112);
+	auto *lbl_fname = new QLabel(mfdText("Setup.FilterName", "Filter:"), step2_filter_box_);
+	lbl_fname->setMinimumWidth(112);
 	lbl_fname->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_filter_name_ = new QComboBox(step2_filter_box_);
 	combo_filter_name_->setObjectName(QStringLiteral("mfdComboFilterName"));
@@ -366,8 +396,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	flt_lay->addLayout(row_fname);
 
 	auto *row_fprop = new QHBoxLayout();
-	auto *lbl_fprop = new QLabel(QStringLiteral("Setting:"), step2_filter_box_);
-	lbl_fprop->setFixedWidth(112);
+	auto *lbl_fprop = new QLabel(mfdText("Setup.FilterSetting", "Setting:"), step2_filter_box_);
+	lbl_fprop->setMinimumWidth(112);
 	lbl_fprop->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_filter_prop_ = new QComboBox(step2_filter_box_);
 	combo_filter_prop_->setObjectName(QStringLiteral("mfdComboFilterProp"));
@@ -382,12 +412,12 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 			       "QPushButton:disabled { color: #64748b; border-color: #334155; }");
 
 	auto *row_ffrom = new QHBoxLayout();
-	auto *lbl_ffrom = new QLabel(QStringLiteral("At 0% (Clean):"), step2_filter_box_);
-	lbl_ffrom->setFixedWidth(112);
+	auto *lbl_ffrom = new QLabel(mfdText("Setup.FilterFrom", "At 0% (Clean):"), step2_filter_box_);
+	lbl_ffrom->setMinimumWidth(112);
 	lbl_ffrom->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	spin_filter_from_ = new QDoubleSpinBox(step2_filter_box_);
 	spin_filter_from_->setObjectName(QStringLiteral("mfdSpinFilterFrom"));
-	btn_use_current_from_ = new QPushButton(QStringLiteral("Use current"), step2_filter_box_);
+	btn_use_current_from_ = new QPushButton(mfdText("Setup.UseCurrent", "Use current"), step2_filter_box_);
 	btn_use_current_from_->setObjectName(QStringLiteral("mfdBtnUseCurrentFrom"));
 	btn_use_current_from_->setCursor(Qt::PointingHandCursor);
 	btn_use_current_from_->setStyleSheet(use_cur_style);
@@ -397,12 +427,12 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	flt_lay->addLayout(row_ffrom);
 
 	auto *row_fto = new QHBoxLayout();
-	auto *lbl_fto = new QLabel(QStringLiteral("At 100% (Max):"), step2_filter_box_);
-	lbl_fto->setFixedWidth(112);
+	auto *lbl_fto = new QLabel(mfdText("Setup.FilterTo", "At 100% (Max):"), step2_filter_box_);
+	lbl_fto->setMinimumWidth(112);
 	lbl_fto->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	spin_filter_to_ = new QDoubleSpinBox(step2_filter_box_);
 	spin_filter_to_->setObjectName(QStringLiteral("mfdSpinFilterTo"));
-	btn_use_current_to_ = new QPushButton(QStringLiteral("Use current"), step2_filter_box_);
+	btn_use_current_to_ = new QPushButton(mfdText("Setup.UseCurrent", "Use current"), step2_filter_box_);
 	btn_use_current_to_->setObjectName(QStringLiteral("mfdBtnUseCurrentTo"));
 	btn_use_current_to_->setCursor(Qt::PointingHandCursor);
 	btn_use_current_to_->setStyleSheet(use_cur_style);
@@ -417,7 +447,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	lbl_filter_limits_note_->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 12px;"));
 	flt_lay->addWidget(lbl_filter_limits_note_);
 
-	chk_filter_bypass_ = new QCheckBox(QStringLiteral("Turn filter off at 0% (saves GPU)"), step2_filter_box_);
+	chk_filter_bypass_ =
+		new QCheckBox(mfdText("Setup.FilterBypass", "Turn filter off at 0% (saves GPU)"), step2_filter_box_);
 	chk_filter_bypass_->setObjectName(QStringLiteral("mfdChkFilterBypass"));
 	flt_lay->addWidget(chk_filter_bypass_);
 
@@ -432,8 +463,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 
 	p2_lay->addWidget(step2_filter_box_);
 
-	catalog_truncated_note_ = new QLabel(
-		QStringLiteral("Showing the first 48 scenes/layers or 64 audio sources in this collection."), page2);
+	catalog_truncated_note_ =
+		new QLabel(mfdText("Setup.CatalogTruncated",
+				   "Showing the first 48 scenes/layers or 64 audio sources in this collection."),
+			   page2);
 	catalog_truncated_note_->setObjectName(QStringLiteral("mfdCatalogTruncatedNote"));
 	catalog_truncated_note_->setWordWrap(true);
 	catalog_truncated_note_->setStyleSheet(QStringLiteral("color: #fcd34d; font-size: 12px;"));
@@ -550,7 +583,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p3_lay->setContentsMargins(0, 0, 0, 0);
 	p3_lay->setSpacing(10);
 
-	auto *p3_prompt = new QLabel(QStringLiteral("Try it."), page3);
+	auto *p3_prompt = new QLabel(mfdText("Setup.Step3.Prompt", "Try it."), page3);
 	p3_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p3_lay->addWidget(p3_prompt);
 
@@ -579,15 +612,19 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	feel_lay->setContentsMargins(0, 0, 0, 0);
 	feel_lay->setSpacing(4);
 	auto *feel_row = new QHBoxLayout();
-	auto *lbl_feel = new QLabel(QStringLiteral("Feel:"), feel_box_);
-	lbl_feel->setFixedWidth(56);
+	auto *lbl_feel = new QLabel(mfdText("Setup.Feel", "Feel:"), feel_box_);
+	lbl_feel->setMinimumWidth(56);
 	lbl_feel->setStyleSheet(QStringLiteral("font-weight: bold;"));
 	combo_feel_ = new QComboBox(feel_box_);
 	combo_feel_->setObjectName(QStringLiteral("mfdComboFeel"));
-	combo_feel_->addItem(QStringLiteral("Dip-free"), static_cast<int>(MFD_CURVE_DIP_FREE));
-	combo_feel_->addItem(QStringLiteral("Equal power"), static_cast<int>(MFD_CURVE_COSINE));
-	combo_feel_->addItem(QStringLiteral("Linear"), static_cast<int>(MFD_CURVE_LINEAR));
-	combo_feel_->addItem(QStringLiteral("Cut"), static_cast<int>(MFD_CURVE_CUT));
+	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_DIP_FREE)),
+			     static_cast<int>(MFD_CURVE_DIP_FREE));
+	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_COSINE)),
+			     static_cast<int>(MFD_CURVE_COSINE));
+	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_LINEAR)),
+			     static_cast<int>(MFD_CURVE_LINEAR));
+	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_CUT)),
+			     static_cast<int>(MFD_CURVE_CUT));
 	feel_row->addWidget(lbl_feel);
 	feel_row->addWidget(combo_feel_, 1);
 	feel_lay->addLayout(feel_row);
@@ -606,7 +643,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 		feel_desc_label_->setText(QString::fromUtf8(mfd_ui_curve_plain_description(chosen_curve_)));
 	});
 
-	chk_also_fade_audio_ = new QCheckBox(QStringLiteral("Also fade audio"), page3);
+	chk_also_fade_audio_ = new QCheckBox(mfdText("Setup.AlsoFadeAudio", "Also fade audio"), page3);
 	chk_also_fade_audio_->setObjectName(QStringLiteral("mfdChkAlsoFadeAudio"));
 	connect(chk_also_fade_audio_, &QCheckBox::toggled, this, [this](bool checked) {
 		if (!updating_widgets_) {
@@ -616,7 +653,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p3_lay->addWidget(chk_also_fade_audio_);
 
 	volume_law_label_ = new QLabel(
-		QStringLiteral(
+		mfdText("Setup.VolumeLaw",
 			"Uses OBS's own cubic dB fader curve (0.0 dB at top, smooth fade to silence at bottom)."),
 		page3);
 	volume_law_label_->setObjectName(QStringLiteral("mfdVolumeLawLabel"));
@@ -624,7 +661,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	volume_law_label_->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
 	p3_lay->addWidget(volume_law_label_);
 
-	chk_reverse_dir_ = new QCheckBox(QStringLiteral("Reverse direction"), page3);
+	chk_reverse_dir_ = new QCheckBox(mfdText("Setup.ReverseDirection", "Reverse direction"), page3);
 	chk_reverse_dir_->setObjectName(QStringLiteral("mfdChkReverseDirection"));
 	connect(chk_reverse_dir_, &QCheckBox::toggled, this, [this](bool checked) {
 		if (!updating_widgets_) {
@@ -638,14 +675,15 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	tbar_step3_box_ = new QWidget(page3);
 	auto *tb3_lay = new QHBoxLayout(tbar_step3_box_);
 	tb3_lay->setContentsMargins(0, 0, 0, 0);
-	chk_tbar_bidir_ = new QCheckBox(QStringLiteral("T-bar works in both directions"), tbar_step3_box_);
+	chk_tbar_bidir_ =
+		new QCheckBox(mfdText("Setup.TbarBothDirections", "T-bar works in both directions"), tbar_step3_box_);
 	chk_tbar_bidir_->setObjectName(QStringLiteral("mfdChkTbarBidir"));
 	connect(chk_tbar_bidir_, &QCheckBox::toggled, this, [this](bool checked) {
 		if (!updating_widgets_) {
 			chosen_tbar_bidir_ = checked;
 		}
 	});
-	btn_step3_finish_now_ = new QPushButton(QStringLiteral("Finish now"), tbar_step3_box_);
+	btn_step3_finish_now_ = new QPushButton(mfdText("Setup.FinishNow", "Finish now"), tbar_step3_box_);
 	btn_step3_finish_now_->setObjectName(QStringLiteral("mfdStep3FinishNowBtn"));
 	btn_step3_finish_now_->setStyleSheet(
 		QStringLiteral("QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; "
@@ -660,7 +698,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	tb3_lay->addWidget(btn_step3_finish_now_);
 	p3_lay->addWidget(tbar_step3_box_);
 
-	btn_hw_toggle_ = new QPushButton(QStringLiteral("Which hardware control? \xE2\x96\xBE"), page3);
+	btn_hw_toggle_ = new QPushButton(mfdText("Setup.WhichHardware", "Which hardware control? \xE2\x96\xBE"), page3);
 	btn_hw_toggle_->setObjectName(QStringLiteral("mfdBtnHardwareToggle"));
 	btn_hw_toggle_->setCursor(Qt::PointingHandCursor);
 	btn_hw_toggle_->setFlat(true);
@@ -680,7 +718,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	auto *hw_top = new QHBoxLayout();
 	candidate_addr_label_ = new QLabel(hw_panel_);
 	candidate_addr_label_->setObjectName(QStringLiteral("mfdCandidateAddrLabel"));
-	btn_setup_learn_ = new QPushButton(QStringLiteral("Learn"), hw_panel_);
+	btn_setup_learn_ = new QPushButton(mfdText("Learn.Button", "Learn"), hw_panel_);
 	btn_setup_learn_->setObjectName(QStringLiteral("mfdSetupLearnBtn"));
 	btn_setup_learn_->setMinimumWidth(140);
 	connect(btn_setup_learn_, &QPushButton::clicked, this, [this]() {
@@ -718,13 +756,13 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	root->addWidget(sep);
 
 	auto *footer = new QHBoxLayout();
-	btn_cancel_ = new QPushButton(QStringLiteral("Cancel"), this);
+	btn_cancel_ = new QPushButton(mfdText("Setup.Cancel", "Cancel"), this);
 	btn_cancel_->setObjectName(QStringLiteral("mfdSetupCancelBtn"));
-	btn_back_ = new QPushButton(QStringLiteral("Back"), this);
+	btn_back_ = new QPushButton(mfdText("Setup.Back", "Back"), this);
 	btn_back_->setObjectName(QStringLiteral("mfdSetupBackBtn"));
-	btn_next_ = new QPushButton(QStringLiteral("Next"), this);
+	btn_next_ = new QPushButton(mfdText("Setup.Next", "Next"), this);
 	btn_next_->setObjectName(QStringLiteral("mfdSetupNextBtn"));
-	btn_done_ = new QPushButton(QStringLiteral("Done"), this);
+	btn_done_ = new QPushButton(mfdText("Setup.Done", "Done"), this);
 	btn_done_->setObjectName(QStringLiteral("mfdSetupDoneBtn"));
 
 	const QString sec_btn_style =
@@ -762,9 +800,9 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 			select_mode_and_go_step2(chosen_mode_);
 		} else if (stack_->currentIndex() == 1) {
 			struct mfd_setup_candidate cand = build_candidate();
-			char rsn[160] = {0};
-			if (!mfd_engine_validate_setup_candidate(eng_, &cand, rsn, sizeof(rsn))) {
-				error_banner_->setText(QString::fromUtf8(rsn));
+			struct mfd_msg rsn;
+			if (!mfd_engine_validate_setup_candidate_msg(eng_, &cand, &rsn)) {
+				error_banner_->setText(msg_text(rsn));
 				error_banner_->show();
 				update_step2_notes_and_validation();
 				return;
@@ -1039,8 +1077,9 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 
 	if (chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX || chosen_mode_ == MFD_TARGET_SINGLE_LAYER) {
 		const size_t min_layers = (chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX) ? 2U : 1U;
-		lbl_left_caption_->setText((chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX) ? QStringLiteral("Left:")
-										       : QStringLiteral("Layer:"));
+		lbl_left_caption_->setText((chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX)
+						   ? mfdText("Setup.Left", "Left:")
+						   : mfdText("Setup.Layer", "Layer:"));
 		right_row_widget_->setVisible(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX);
 
 		combo_scene_->clear();
@@ -1071,9 +1110,9 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 			combo_scene_->setEnabled(false);
 			step2_empty_scene_note_->setText(
 				(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX)
-					? QStringLiteral(
+					? mfdText("Setup.NoSceneTwoLayers",
 						  "No scene has at least two layers yet. Add two sources to a scene in OBS, and they will appear here automatically.")
-					: QStringLiteral(
+					: mfdText("Setup.NoSceneLayers",
 						  "No scene has any layers yet. Add a source to a scene in OBS, and it will appear here automatically."));
 			step2_empty_scene_note_->show();
 		}
@@ -1085,15 +1124,11 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 			for (size_t i = 0U; i < catalog_->audio_count; ++i) {
 				const struct mfd_ui_audio_entry &ae = catalog_->audio_sources[i];
 				const QString nm = QString::fromUtf8(ae.name);
-				QString db_str;
-				if (!std::isfinite(ae.db)) {
-					db_str = QStringLiteral("-inf dB");
-				} else if (std::fabs(ae.db) < 0.05f) {
-					db_str = QStringLiteral("0.0 dB");
-				} else {
-					db_str = QString::asprintf("%.1f dB", static_cast<double>(ae.db));
-				}
-				combo_audio_->addItem(QStringLiteral("%1  (%2)").arg(nm, db_str), nm);
+				char db_buf[48] = {0};
+				mfd_ui_format_db(ae.db, db_buf, sizeof(db_buf));
+				combo_audio_->addItem(mfdFill(mfdText("Setup.AudioItem", "%1  (%2)"),
+							      {nm, QString::fromUtf8(db_buf)}),
+						      nm);
 				if (nm == chosen_audio_) {
 					selected_idx = combo_audio_->count() - 1;
 				}
@@ -1122,12 +1157,14 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 					continue;
 				}
 				const QString nm = QString::fromUtf8(fh.name);
-				const QString cnt_lbl = (fh.filter_count == 1U)
-								? QStringLiteral("1 filter")
-								: QStringLiteral("%1 filters").arg(fh.filter_count);
+				/* the count is worded without plural agreement (R-I18N-3) */
+				const QString cnt = QString::number(static_cast<qulonglong>(fh.filter_count));
 				const QString disp =
-					fh.is_scene ? QStringLiteral("%1  (Scene \xC2\xB7 %2)").arg(nm, cnt_lbl)
-						    : QStringLiteral("%1  (%2)").arg(nm, cnt_lbl);
+					fh.is_scene ? mfdFill(mfdText("Setup.FilterHostScene",
+								      "%1  (Scene \xC2\xB7 Filters: %2)"),
+							      {nm, cnt})
+						    : mfdFill(mfdText("Setup.FilterHostSource", "%1  (Filters: %2)"),
+							      {nm, cnt});
 				combo_filter_host_->addItem(disp, nm);
 				if (nm == chosen_filter_host_) {
 					selected_idx = combo_filter_host_->count() - 1;
@@ -1160,9 +1197,10 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 			btn_use_current_to_->setEnabled(false);
 			chk_filter_bypass_->setEnabled(false);
 			lbl_filter_limits_note_->clear();
-			step2_empty_filter_note_->setText(QStringLiteral(
-				"No sources or scenes have filters yet. Right-click a source or scene in OBS, "
-				"choose Filters, add an effect, and it will appear here automatically."));
+			step2_empty_filter_note_->setText(
+				mfdText("Setup.NoFilterHosts",
+					"No sources or scenes have filters yet. Right-click a source or scene in OBS, "
+					"choose Filters, add an effect, and it will appear here automatically."));
 			step2_empty_filter_note_->show();
 		}
 	}
@@ -1193,8 +1231,9 @@ void MfdSetupSheetDialog::repopulate_filter_combos_for_host(bool preserve_range)
 		chk_filter_bypass_->setEnabled(false);
 		lbl_filter_limits_note_->clear();
 		step2_empty_filter_note_->setText(
-			QStringLiteral("No filters were found on '%1'. Add a filter in OBS Filters first.")
-				.arg(chosen_filter_host_));
+			mfdFill(mfdText("Setup.NoFiltersOnHost",
+					"No filters were found on '%1'. Add a filter in OBS Filters first."),
+				{chosen_filter_host_}));
 		step2_empty_filter_note_->show();
 		updating_widgets_ = prev_upd;
 		return;
@@ -1244,8 +1283,9 @@ void MfdSetupSheetDialog::repopulate_prop_combo_for_filter(bool preserve_range)
 		chk_filter_bypass_->setEnabled(false);
 		lbl_filter_limits_note_->clear();
 		step2_empty_filter_note_->setText(
-			QStringLiteral("Filter '%1' has no numeric settings that Midi Fadester can sweep.")
-				.arg(chosen_filter_name_));
+			mfdFill(mfdText("Setup.NoNumericSettings",
+					"Filter '%1' has no numeric settings that Midi Fadester can sweep."),
+				{chosen_filter_name_}));
 		step2_empty_filter_note_->show();
 		updating_widgets_ = prev_upd;
 		return;
@@ -1256,7 +1296,8 @@ void MfdSetupSheetDialog::repopulate_prop_combo_for_filter(bool preserve_range)
 		const struct mfd_filter_prop_info &pi = fe->props[i];
 		const QString pnm = QString::fromUtf8(pi.name);
 		const QString plbl = (pi.label[0] != '\0') ? QString::fromUtf8(pi.label) : pnm;
-		const QString disp = (plbl != pnm) ? QStringLiteral("%1  (%2)").arg(plbl, pnm) : pnm;
+		const QString disp = (plbl != pnm) ? mfdFill(mfdText("Setup.SettingItem", "%1  (%2)"), {plbl, pnm})
+						   : pnm;
 		combo_filter_prop_->addItem(disp, pnm);
 		if (pnm == chosen_filter_prop_) {
 			selected_idx = static_cast<int>(i);
@@ -1329,15 +1370,16 @@ void MfdSetupSheetDialog::configure_spinboxes_for_prop(bool preserve_range)
 	char cur_buf[64] = {0};
 	char min_buf[64] = {0};
 	char max_buf[64] = {0};
-	mfd_filter_format_display_value(0.0f, pmin, pmax, pmin, pmax, pi->is_int, pi->step, pi->suffix, false, min_buf,
-					sizeof(min_buf));
-	mfd_filter_format_display_value(1.0f, pmin, pmax, pmin, pmax, pi->is_int, pi->step, pi->suffix, false, max_buf,
-					sizeof(max_buf));
-	mfd_filter_format_display_value(0.0f, pi->current_val, pi->current_val, pmin, pmax, pi->is_int, pi->step,
-					pi->suffix, false, cur_buf, sizeof(cur_buf));
+	mfd_filter_format_display_value_ex(0.0f, pmin, pmax, pmin, pmax, pi->is_int, pi->step, pi->suffix, false, true,
+					   min_buf, sizeof(min_buf));
+	mfd_filter_format_display_value_ex(1.0f, pmin, pmax, pmin, pmax, pi->is_int, pi->step, pi->suffix, false, true,
+					   max_buf, sizeof(max_buf));
+	mfd_filter_format_display_value_ex(0.0f, pi->current_val, pi->current_val, pmin, pmax, pi->is_int, pi->step,
+					   pi->suffix, false, true, cur_buf, sizeof(cur_buf));
 	lbl_filter_limits_note_->setText(
-		QStringLiteral("Allowed range: %1 to %2  \xC2\xB7  Current OBS value: %3 (inverted ranges supported)")
-			.arg(QString::fromUtf8(min_buf), QString::fromUtf8(max_buf), QString::fromUtf8(cur_buf)));
+		mfdFill(mfdText("Setup.FilterLimits",
+				"Allowed range: %1 to %2  \xC2\xB7  Current OBS value: %3 (inverted ranges supported)"),
+			{QString::fromUtf8(min_buf), QString::fromUtf8(max_buf), QString::fromUtf8(cur_buf)}));
 
 	updating_widgets_ = prev_upd;
 }
@@ -1402,13 +1444,13 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 	if (chosen_mode_ == MFD_TARGET_TBAR) {
 		const bool studio_on = snap_.studio_mode_active;
 		if (studio_on) {
-			step2_tbar_info_->setText(
-				QStringLiteral("Studio Mode is on. Ready to fade Preview into Program."));
+			step2_tbar_info_->setText(mfdText("Setup.StudioModeOn",
+							  "Studio Mode is on. Ready to fade Preview into Program."));
 			step2_tbar_info_->setStyleSheet(
 				QStringLiteral("color: #6ee7b7; font-size: 14px; font-weight: bold;"));
 			step2_turn_on_studio_btn_->hide();
 		} else {
-			step2_tbar_info_->setText(QStringLiteral("Studio Mode is off."));
+			step2_tbar_info_->setText(mfdText("Msg.StudioModeOff", "Studio Mode is off."));
 			step2_tbar_info_->setStyleSheet(
 				QStringLiteral("color: #fde68a; font-size: 14px; font-weight: bold;"));
 			step2_turn_on_studio_btn_->show();
@@ -1475,9 +1517,9 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 		if (!chosen_filter_host_.isEmpty() && !chosen_filter_name_.isEmpty() &&
 		    !chosen_filter_prop_.isEmpty()) {
 			struct mfd_setup_candidate cand = build_candidate();
-			char rsn[192] = {0};
-			if (!mfd_engine_validate_setup_candidate(eng_, &cand, rsn, sizeof(rsn)) && rsn[0] != '\0') {
-				filter_validation_refusal_->setText(QString::fromUtf8(rsn));
+			struct mfd_msg rsn;
+			if (!mfd_engine_validate_setup_candidate_msg(eng_, &cand, &rsn) && rsn.code != MFD_MSG_NONE) {
+				filter_validation_refusal_->setText(msg_text(rsn));
 				filter_validation_refusal_->show();
 			} else {
 				filter_validation_refusal_->clear();
@@ -1493,19 +1535,22 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 	if (catalog_) {
 		if (chosen_mode_ == MFD_TARGET_AUDIO_VOLUME) {
 			truncated = catalog_->audio_truncated;
-			catalog_truncated_note_->setText(QStringLiteral(
-				"Showing the first 48 scenes/layers or 64 audio sources in this collection."));
+			catalog_truncated_note_->setText(
+				mfdText("Setup.CatalogTruncated",
+					"Showing the first 48 scenes/layers or 64 audio sources in this collection."));
 		} else if (chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX || chosen_mode_ == MFD_TARGET_SINGLE_LAYER) {
 			const struct mfd_ui_scene_entry *se = find_catalog_scene(chosen_scene_);
 			truncated = catalog_->scenes_truncated || (se && se->layers_truncated);
-			catalog_truncated_note_->setText(QStringLiteral(
-				"Showing the first 48 scenes/layers or 64 audio sources in this collection."));
+			catalog_truncated_note_->setText(
+				mfdText("Setup.CatalogTruncated",
+					"Showing the first 48 scenes/layers or 64 audio sources in this collection."));
 		} else if (chosen_mode_ == MFD_TARGET_FILTER_PARAM) {
 			const struct mfd_filter_entry_info *fe = find_selected_filter_entry();
 			truncated = catalog_->filter_hosts_truncated ||
 				    (filter_cat_ && filter_cat_->filters_truncated) || (fe && fe->props_truncated);
-			catalog_truncated_note_->setText(QStringLiteral(
-				"Showing the first 128 filter hosts, 32 filters, or 64 numeric settings."));
+			catalog_truncated_note_->setText(
+				mfdText("Setup.FilterCatalogTruncated",
+					"Showing the first 128 filter hosts, 32 filters, or 64 numeric settings."));
 		}
 	}
 	catalog_truncated_note_->setVisible(truncated);
@@ -1552,21 +1597,26 @@ void MfdSetupSheetDialog::update_step3_controls()
 			psfx = sel_pi->suffix;
 		}
 		char sim_disp[64] = {0};
-		mfd_filter_format_display_value(snap_.setup.candidate_raw_norm, chosen_filter_from_, chosen_filter_to_,
-						pmin, pmax, is_int, pstep, psfx, chosen_filter_bypass_, sim_disp,
-						sizeof(sim_disp));
+		mfd_filter_format_display_value_ex(snap_.setup.candidate_raw_norm, chosen_filter_from_,
+						   chosen_filter_to_, pmin, pmax, is_int, pstep, psfx,
+						   chosen_filter_bypass_, true, sim_disp, sizeof(sim_disp));
+		const QStringList values = {QString::number(meter_pct), QString::fromUtf8(sim_disp)};
 		if (snap_.setup.has_candidate_input) {
-			candidate_meter_->setFormat(
-				QString::asprintf("Hardware test: %d%% \xC2\xB7 %s", meter_pct, sim_disp));
+			candidate_meter_->setFormat(progress_format(
+				mfdFill(mfdText("Setup.MeterTestValue", "Hardware test: %1% \xC2\xB7 %2"), values)));
 		} else {
-			candidate_meter_->setFormat(QString::asprintf(
-				"Move control on your controller to test (%d%% \xC2\xB7 %s)", meter_pct, sim_disp));
+			candidate_meter_->setFormat(progress_format(
+				mfdFill(mfdText("Setup.MeterWaitValue",
+						"Move control on your controller to test (%1% \xC2\xB7 %2)"),
+					values)));
 		}
 	} else if (snap_.setup.has_candidate_input) {
-		candidate_meter_->setFormat(QString::asprintf("Hardware test: %d%%", meter_pct));
+		candidate_meter_->setFormat(progress_format(
+			mfdFill(mfdText("Setup.MeterTest", "Hardware test: %1%"), {QString::number(meter_pct)})));
 	} else {
-		candidate_meter_->setFormat(
-			QString::asprintf("Move the fader on your controller to test (%d%%)", meter_pct));
+		candidate_meter_->setFormat(progress_format(
+			mfdFill(mfdText("Setup.MeterWait", "Move the fader on your controller to test (%1%)"),
+				{QString::number(meter_pct)})));
 	}
 
 	feel_box_->setVisible(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX);
@@ -1593,13 +1643,13 @@ void MfdSetupSheetDialog::update_step3_controls()
 
 	candidate_addr_label_->setText(format_plain_midi_addr(snap_.setup.candidate_addr));
 	if (snap_.setup.learning) {
-		btn_setup_learn_->setText(QStringLiteral("Move control... (Cancel)"));
+		btn_setup_learn_->setText(mfdText("Setup.LearnListening", "Move control... (Cancel)"));
 		btn_setup_learn_->setStyleSheet(
 			QStringLiteral("QPushButton { background-color: #b45309; color: #ffffff; font-weight: bold; "
 				       "border-radius: 5px; padding: 6px 12px; }"));
 		hw_panel_->show();
 	} else {
-		btn_setup_learn_->setText(QStringLiteral("Learn"));
+		btn_setup_learn_->setText(mfdText("Learn.Button", "Learn"));
 		btn_setup_learn_->setStyleSheet(QStringLiteral(
 			"QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; "
 			"border-radius: 5px; padding: 6px 12px; font-weight: bold; }"));
@@ -1616,8 +1666,9 @@ void MfdSetupSheetDialog::update_step3_controls()
 			owner_titles.append(QString::fromUtf8(ot));
 		}
 		collision_notice_->setText(
-			QStringLiteral("Currently assigned to strip %1. Pressing Done will move it to this strip.")
-				.arg(owner_titles.join(QStringLiteral(", "))));
+			mfdFill(mfdText("Setup.AddressInUse",
+					"Currently assigned to strip %1. Pressing Done will move it to this strip."),
+				{owner_titles.join(mfdText("Setup.ListSeparator", ", "))}));
 		collision_notice_->show();
 		hw_panel_->show();
 	} else {
@@ -1633,8 +1684,8 @@ void MfdSetupSheetDialog::update_footer_buttons()
 	char strip_title[64] = {0};
 	mfd_ui_strip_title(slot_index_, snap_.slots[slot_index_].label, strip_title, sizeof(strip_title));
 	const int page = stack_->currentIndex();
-	title_label_->setText(QStringLiteral("Set up %1 \xE2\x80\x94 Step %2 of 3")
-				      .arg(QString::fromUtf8(strip_title), QString::number(page + 1)));
+	title_label_->setText(mfdFill(mfdText("Setup.TitleStep", "Set up %1 \xE2\x80\x94 Step %2 of 3"),
+				      {QString::fromUtf8(strip_title), QString::number(page + 1)}));
 
 	btn_back_->setVisible(page > 0);
 	btn_next_->setVisible(page < 2);
@@ -1655,8 +1706,8 @@ void MfdSetupSheetDialog::update_footer_buttons()
 void MfdSetupSheetDialog::on_done_clicked()
 {
 	struct mfd_setup_candidate cand = build_candidate();
-	char err_buf[192] = {0};
-	if (mfd_engine_commit_setup_session(eng_, &cand, err_buf, sizeof(err_buf))) {
+	struct mfd_msg err_msg;
+	if (mfd_engine_commit_setup_session_msg(eng_, &cand, &err_msg)) {
 		committed_or_unassigned_ = true;
 		accept();
 		return;
@@ -1668,7 +1719,7 @@ void MfdSetupSheetDialog::on_done_clicked()
 		last_topology_rev_ = catalog_->config_topology_rev;
 	}
 
-	error_banner_->setText(QString::fromUtf8(err_buf));
+	error_banner_->setText(msg_text(err_msg));
 	error_banner_->show();
 
 	char val_rsn[160] = {0};
