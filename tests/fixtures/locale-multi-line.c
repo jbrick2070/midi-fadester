@@ -5,6 +5,8 @@
  */
 
 /* A call as clang-format may wrap it: key and English on their own lines, the English in two literals. */
+/* the layout is what this fixture tests, so clang-format keeps out */
+/* clang-format off */
 const char *fixture_multi_line(bool translate)
 {
 	return translate ? mfdText(
@@ -13,3 +15,4 @@ const char *fixture_multi_line(bool translate)
 				   "Fadester")
 			 : mfd_text_or_english(translate, "PluginDisplayName", "Midi \x46" "adester");
 }
+/* clang-format on */

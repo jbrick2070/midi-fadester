@@ -172,7 +172,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	card_tbar_ = create_mode_card_button(page1, QStringLiteral("mfdCardSwitchScenes"), MFD_TARGET_TBAR,
 					     mfdText("Setup.Card.Tbar", "Switch scenes"),
 					     mfdText("Setup.Card.Tbar.Description",
-						     "Fade Program to Preview, like OBS's T-bar."));
+						     "Fade Preview into Program, like OBS's T-bar."));
 	card_mix_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardMixTwoLayers"), MFD_TARGET_TWO_SOURCE_MIX,
 		mfdText("Setup.Card.Mix", "Mix two layers"),

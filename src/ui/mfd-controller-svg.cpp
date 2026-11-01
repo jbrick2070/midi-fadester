@@ -411,9 +411,10 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		svg.append(svg_text(
 			QStringLiteral("x='489' y='115' fill='#94a3b8' %1 font-size='11.5' text-anchor='middle'")
 				.arg(font),
-			elide_px(mfdText("Map.CustomHint", "Open Set up (Step 3 \xE2\x86\x92 Wrong fader?) or "
-							   "Advanced \xE2\x86\x92 Learn to bind any physical "
-							   "fader or knob."),
+			elide_px(mfdText("Map.CustomHint",
+					 "Open Set up (Step 3 \xE2\x86\x92 Which hardware control?) or "
+					 "Advanced \xE2\x86\x92 Learn to bind any physical "
+					 "fader or knob."),
 				 12, false, 880)));
 		break;
 	}

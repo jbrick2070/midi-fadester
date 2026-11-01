@@ -25,6 +25,7 @@ Midi Fadester turns the faders and knobs on a MIDI controller into live controls
 - [Control it from scripts and other programs](#control-it-from-scripts-and-other-programs)
 - [Where settings live](#where-settings-live)
 - [If something is wrong](#if-something-is-wrong)
+- [Languages](#languages)
 - [Not yet](#not-yet)
 - [Releases](#releases)
 - [Building from source](#building-from-source)
@@ -243,6 +244,16 @@ The dialog says what is wrong in a sentence, next to the strip it concerns, and 
 
 The OBS log (**Help → Log Files → Show Log Files**) has every Midi Fadester line prefixed with `[midi-fadester]`.
 
+## Languages
+
+Midi Fadester follows the language OBS runs in (Settings > General > Language; OBS needs a restart to change it).
+Besides English it speaks Simplified Chinese, Spanish, Brazilian Portuguese, Russian, Japanese, German, French,
+Korean, Traditional Chinese and Turkish. A few strings start from OBS's own translation; the rest was drafted by an
+AI model (Claude), and every file was reviewed by a second one (Gemini), whose corrections were taken. No native
+speaker has checked them yet. If something reads wrong in your language, please open an issue or a pull request: the
+files are in `data/locale/`, one per language, and `en-US.ini` is the English source. Log lines and the obs-websocket
+vendor API stay English, so the Stream Deck plugin and your scripts keep working the same in every language.
+
 ## Not yet
 
 - Windows only. The MIDI layer uses the Windows multimedia API, and no macOS or Linux build exists.
@@ -274,7 +285,7 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 
 The built plugin lands in `build_x64\rundir\RelWithDebInfo\midi-fadester\`; copy that folder into your OBS `plugins` folder.
 
-- **Tests.** Fifteen `ctest` targets run in a few seconds without OBS or hardware: the MIDI parser and queue, the smoother, pick-up, the crossfade curves, the T-bar state machine, the filter math, every UI sentence, the vendor API with a fake websocket, a real Qt6 dialog that renders the twelve screenshots in `docs/screenshots/`, and repository hygiene (UTF-8 without BOM, no timers, every locale key present).
+- **Tests.** Thirty-two `ctest` targets run in a few seconds without OBS or hardware: the MIDI parser and queue, the smoother, pick-up, the crossfade curves, the T-bar state machine, the filter math, every UI sentence, the vendor API with a fake websocket, a real Qt6 dialog that renders the twelve screenshots in `docs/screenshots/`, and repository hygiene (UTF-8 without BOM, no timers, every locale key present).
 - **Live self-test.** `scripts\run-live-selftest.ps1` boots a dedicated portable OBS 33 with a loopMIDI port, throws the T-bar eight ways, checks GPU pixels through `GetSourceScreenshot`, and exits with zero leaks. [TESTING.md](TESTING.md) explains the setup.
 - **Formatting.** CI checks C and C++ with clang-format 17 and CMake with gersemi, using the repository's `.clang-format` and `.gersemirc`.
 - **Design.** The MIDI input thread is lock-free and never calls OBS; the engine has no timers and runs on MIDI and OBS events. [PLAN.md](PLAN.md) has the thread contract.
