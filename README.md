@@ -55,7 +55,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** The code on `main`, version 0.6.0. The only download so far, 0.1.0, is the Phase 1 build: one settings table and ten slots, with no Strips screen, Set up sheet, FX & Knobs bank, Clean / All FX Off or Stream Deck link. Until the next release, following *The first five minutes* needs a [build from source](#building-from-source); with 0.1.0 you set up faders in its one table, which is now the Advanced tab. See [Releases](#releases).
+> **Which version is this page about?** Version 0.6.0, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -174,7 +174,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 
 ## Works with
 
-- **[Fadester for OBS](https://github.com/jbrick2070/streamdeck-fadester)**, a plugin for the Stream Deck and Stream Deck +. Its dials and keys move the same slots: a dial nudges a fader or an FX knob, a key starts a timed fade or presses Clean / All FX Off, and the dial screens show the live values. It talks to Midi Fadester through the obs-websocket server, not MIDI, so it never takes the MIDI port; turn the server on in OBS (**Tools → WebSocket Server Settings**) and give the Stream Deck plugin the password. The Midi Fadester dialog shows a *Use a Stream Deck?* card until you click **Hide**, and keeps a **Stream Deck companion...** button on the Strips screen. Midi Fadester works without a Stream Deck, and the FX bank and Clean / All FX Off need a Midi Fadester build newer than 0.1.0.
+- **[Fadester for OBS](https://github.com/jbrick2070/streamdeck-fadester)**, a plugin for the Stream Deck and Stream Deck +. Its dials and keys move the same slots: a dial nudges a fader or an FX knob, a key starts a timed fade or presses Clean / All FX Off, and the dial screens show the live values. It talks to Midi Fadester through the obs-websocket server, not MIDI, so it never takes the MIDI port; turn the server on in OBS (**Tools → WebSocket Server Settings**) and give the Stream Deck plugin the password. The Midi Fadester dialog shows a *Use a Stream Deck?* card until you click **Hide**, and keeps a **Stream Deck companion...** button on the Strips screen. Midi Fadester works without a Stream Deck, and the FX bank and Clean / All FX Off need Midi Fadester 0.6.0 or later.
 - **[Visual Sidechain](https://github.com/jbrick2070/visual-sidechain)**, an audio-reactive filter suite. An FX knob can trim its reactivity amount like any other filter setting, and Visual Sidechain can read the fader values inside OBS to drive its shaders.
 
 ## Control it from scripts and other programs
@@ -270,9 +270,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.1.0** (October 2026) is the only release so far. It is the Phase 1 build: the crossfader as T-bar (with the guard against OBS 33's crash when Studio Mode is off, and the workaround for its cancel-on-release bug), two-layer mix, layer fade, volume, smoothing, pick-up, calibrated rails, the APC40 mkII layout, MIDI Learn, and the first six API requests. Its dialog is the table that is now the Advanced tab.
+**0.6.0** (November 2026) is the current release. Compared with 0.1.0 it adds the Strips screen and the three-step Set up sheet, the first-run offer, the live controller picture, the FX & Knobs bank with Clean / All FX Off, the filter-setting job, the four Beta desk layouts, `get_catalog` and `reset_fx`, the Stream Deck companion and translations. Visual Sidechain uses the same number; Fadester for OBS is versioned separately.
 
-The code on `main` is **0.6.0** (Visual Sidechain uses the same number; Fadester for OBS is versioned separately). Compared with 0.1.0 it adds the Strips screen and the three-step Set up sheet, the first-run offer, the live controller picture, the FX & Knobs bank with Clean / All FX Off, the filter-setting job, the four Beta desk layouts, `get_catalog` and `reset_fx`, and the Stream Deck companion. Those arrive with the next release; until then they need a [build from source](#building-from-source).
+**0.1.0** (October 2026) was the Phase 1 build: the crossfader as T-bar (with the guard against OBS 33's crash when Studio Mode is off, and the workaround for its cancel-on-release bug), two-layer mix, layer fade, volume, smoothing, pick-up, calibrated rails, the APC40 mkII layout, MIDI Learn, and the first six API requests. Its dialog is the table that is now the Advanced tab.
 
 ## Building from source
 
