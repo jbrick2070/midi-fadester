@@ -25,6 +25,22 @@
  *   and show changes to its own browser thread without waiting.
  * - mutex covers the deck's state. It is held only for short decisions and is never held across a call into OBS,
  *   because the listener thread takes its own lock and then this one.
+ *
+ * Hotkeys (D-10). The owning deck registers its hotkeys on the Browser source in the settings check, on the UI thread,
+ * because registering reads the source's saved bindings, which saving the scene collection replaces there. They are
+ * registered, unregistered and saved with attach_mutex held, so the full order is attach_mutex, then libobs's hotkey
+ * lock, then mutex. A hotkey callback runs with that hotkey lock held and hands the change to the UI thread. From an
+ * obs-websocket thread the hand-off is queued; for a key press the frontend already calls back on the UI thread, where
+ * obs_queue_task runs the task at once, still under the hotkey lock. So the task may take mutex (nothing that holds
+ * mutex ever waits for the hotkey lock) and may update the deck's own settings (a video filter's update is only marked,
+ * and applied at the next tick), but it must never take attach_mutex or call into the parent. The deck's memory
+ * outlives every callback, because the hotkeys are unregistered when the deck lets its parent go, before destroy frees
+ * it. When libobs saves a Browser source (which always has hotkeys of its own), the bindings it writes cover only the
+ * hotkeys registered at that moment, so the deck also keeps a copy in its own settings (deck_save) and restores it when
+ * it registers again.
+ *
+ * The Speed Fader (R-SPD-5) is read from Visual Sidechain's Midi Fadester bridge at the start of each tick, with no
+ * deck lock held.
  */
 
 #include "tubester/deck-filter.h"
@@ -34,6 +50,7 @@
 #include "tubester/random.h"
 #include "tubester/speed.h"
 #include "tubester/tape-url.h"
+#include "core/fader-bridge.h"
 #include "obs/property-status.h"
 #include "obs/text.h"
 #include "plugin-support.h"
@@ -61,6 +78,17 @@
 #define TUB_REGISTER_RETRY_MAX_NS 30000000000ULL
 /* One deck per Browser source; as many sources as the listener has decks */
 #define TUB_OWNERS_MAX 64
+#define S_SPEED_FADER_STATUS "tubester_speed_fader_status"
+#define S_SPEED_FADER_CLEAR "tubester_speed_fader_clear"
+
+/* The hotkeys on the deck's Browser source (R-CTL-3). Their names are the keys of the saved bindings, so they never
+ * change. */
+enum hotkey_action {
+	HOTKEY_SPEED_UP,
+	HOTKEY_SPEED_DOWN,
+	HOTKEY_NORMAL_SPEED,
+	TUB_HOTKEY_COUNT,
+};
 
 enum tape_status {
 	TAPE_NONE,     /* no file chosen */
@@ -92,6 +120,8 @@ struct tub_deck_filter {
 	signal_handler_t *parent_signals;
 	bool showing_held;
 	bool waiting_logged;
+	obs_hotkey_id hotkeys[TUB_HOTKEY_COUNT];
+	bool hotkeys_registered;
 
 	char *page_url; /* file:/// address of data/deck.html, or NULL when the data folder is missing; set at create */
 
@@ -113,6 +143,16 @@ struct tub_deck_filter {
 	bool tape_pitch;
 	bool loop;
 	double start_seconds;
+	int fader_slot; /* VS_FADER_SLOT_NONE, or a Fadester slot index */
+	int fader_min_pct;
+	int fader_max_pct;
+
+	/* the speed the deck wants now: the Speed Fader's while it is live, else speed_pct (R-SPD-5) */
+	int want_pct;
+	bool fader_live;
+	/* every speed change passes the coalescer, so the page gets at most one per interval and always the last (R-SPD-3) */
+	struct tub_coalesce coalesce;
+	int offered_pct; /* the last speed offered to it, 0 before any */
 
 	/* the parent's settings must be checked: after attach and after each parent update */
 	bool recheck_parent;
@@ -285,12 +325,23 @@ static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings
 		f->last_position = 0.0;
 	}
 
+	/* a new speed reaches the page through the coalescer in the tick; a pitch change is sent at once */
 	int speed = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED));
 	bool pitch = obs_data_get_bool(settings, TUB_SETTING_TAPE_PITCH);
-	if (speed != f->speed_pct || pitch != f->tape_pitch)
+	if (pitch != f->tape_pitch)
 		f->send_rate = true;
 	f->speed_pct = speed;
 	f->tape_pitch = pitch;
+
+	long long slot = obs_data_get_int(settings, TUB_SETTING_SPEED_FADER);
+	f->fader_slot = (slot >= 0 && slot < VS_FADER_SLOT_COUNT) ? (int)slot : VS_FADER_SLOT_NONE;
+	f->fader_min_pct = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MIN));
+	f->fader_max_pct = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MAX));
+	/* the tick works out the fader's speed; without a live fader the slider's applies from now on */
+	if (f->fader_slot == VS_FADER_SLOT_NONE)
+		f->fader_live = false;
+	if (!f->fader_live)
+		f->want_pct = speed;
 
 	bool loop = obs_data_get_bool(settings, TUB_SETTING_LOOP);
 	if (loop != f->loop)
@@ -319,6 +370,9 @@ static void deck_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, TUB_SETTING_TAPE_PITCH, true);
 	obs_data_set_default_bool(settings, TUB_SETTING_LOOP, true);
 	obs_data_set_default_double(settings, TUB_SETTING_START, 0.0);
+	obs_data_set_default_int(settings, TUB_SETTING_SPEED_FADER, VS_FADER_SLOT_NONE);
+	obs_data_set_default_int(settings, TUB_SETTING_SPEED_FADER_MIN, TUB_SPEED_FADER_MIN_DEFAULT);
+	obs_data_set_default_int(settings, TUB_SETTING_SPEED_FADER_MAX, TUB_SPEED_FADER_MAX_DEFAULT);
 }
 
 /* True when the page's latest report is about the tape the deck wants: the latest command's generation, with no newer
@@ -421,6 +475,201 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 	pthread_mutex_unlock(&f->mutex);
 }
 
+/* ---- hotkeys (R-CTL-3, D-10) ---- */
+
+struct hotkey_task {
+	obs_weak_source_t *filter;
+	enum hotkey_action action;
+};
+
+static void hotkey_on_ui_thread(void *param);
+static void on_hotkey_speed_up(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
+static void on_hotkey_speed_down(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
+static void on_hotkey_normal_speed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
+
+static const struct {
+	const char *name; /* saved with the Browser source's bindings */
+	const char *text_key;
+	const char *log_name;
+	obs_hotkey_func func;
+} k_hotkeys[TUB_HOTKEY_COUNT] = {
+	{"tubester_deck.speed_up", "Tubester.Hotkey.SpeedUp", "Speed Up", on_hotkey_speed_up},
+	{"tubester_deck.speed_down", "Tubester.Hotkey.SpeedDown", "Speed Down", on_hotkey_speed_down},
+	{"tubester_deck.normal_speed", "Tubester.Hotkey.NormalSpeed", "Normal Speed", on_hotkey_normal_speed},
+};
+
+/* Runs with libobs's hotkey lock held, on the UI thread or an obs-websocket thread. It takes no deck lock and hands the
+ * change to the UI thread, where it may run at once (see the file comment). f is alive: its hotkeys are unregistered
+ * before it is freed. */
+static void hotkey_pressed(void *data, enum hotkey_action action, bool pressed)
+{
+	struct tub_deck_filter *f = data;
+	if (!pressed || !f || !f->context)
+		return;
+	struct hotkey_task *t = bzalloc(sizeof(*t));
+	t->filter = obs_source_get_weak_source(f->context);
+	t->action = action;
+	obs_queue_task(OBS_TASK_UI, hotkey_on_ui_thread, t, false);
+}
+
+static void on_hotkey_speed_up(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	hotkey_pressed(data, HOTKEY_SPEED_UP, pressed);
+}
+
+static void on_hotkey_speed_down(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	hotkey_pressed(data, HOTKEY_SPEED_DOWN, pressed);
+}
+
+static void on_hotkey_normal_speed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	hotkey_pressed(data, HOTKEY_NORMAL_SPEED, pressed);
+}
+
+/* The speed hotkeys move the Speed setting along the ladder, as the Speed slider would. While a Speed Fader is live it
+ * keeps driving the speed, and the new setting applies once the fader is cleared (R-SPD-5). For a key press this runs
+ * inside the hotkey callback, under libobs's hotkey lock: it may take mutex and update the deck's own settings, and
+ * must never take attach_mutex or call into the parent. */
+static void hotkey_on_ui_thread(void *param)
+{
+	struct hotkey_task *t = param;
+	enum hotkey_action action = t->action;
+	obs_source_t *source = obs_weak_source_get_source(t->filter);
+	obs_weak_source_release(t->filter);
+	bfree(t);
+	if (!source)
+		return;
+	struct tub_deck_filter *f = obs_obj_get_data(source);
+	if (!f) {
+		obs_source_release(source);
+		return;
+	}
+
+	obs_data_t *settings = obs_source_get_settings(source);
+	int pct = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED));
+	obs_data_release(settings);
+	int next = TUB_SPEED_NORMAL_PCT;
+	if (action == HOTKEY_SPEED_UP)
+		next = tub_speed_step_pct(pct, 1);
+	else if (action == HOTKEY_SPEED_DOWN)
+		next = tub_speed_step_pct(pct, -1);
+	if (next != pct) {
+		obs_data_t *patch = obs_data_create();
+		obs_data_set_int(patch, TUB_SETTING_SPEED, next);
+		obs_source_update(source, patch);
+		obs_data_release(patch);
+	}
+
+	pthread_mutex_lock(&f->mutex);
+	bool fader_live = f->fader_live;
+	pthread_mutex_unlock(&f->mutex);
+	obs_log(LOG_INFO, "tape deck %s: %s hotkey; the Speed setting is %d%%%s", f->deck_id,
+		k_hotkeys[action].log_name, next,
+		fader_live ? " (the Speed Fader drives the speed while it is live)" : "");
+	obs_source_release(source);
+}
+
+/* A hotkey libobs gave no bindings takes them from the deck's own copy (see deck_save), when the copy belongs to this
+ * Browser source. Returns how many hotkeys took bindings. attach_mutex held, on the UI thread. */
+static size_t restore_hotkey_bindings(struct tub_deck_filter *f, obs_source_t *parent)
+{
+	size_t restored = 0;
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	obs_data_t *copy = settings ? obs_data_get_obj(settings, TUB_SETTING_HOTKEY_COPY) : NULL;
+	const char *uuid = obs_source_get_uuid(parent);
+	if (copy && uuid && strcmp(obs_data_get_string(copy, "source_uuid"), uuid) == 0) {
+		for (size_t i = 0; i < TUB_HOTKEY_COUNT; i++) {
+			if (f->hotkeys[i] == OBS_INVALID_HOTKEY_ID)
+				continue;
+			obs_data_array_t *now = obs_hotkey_save(f->hotkeys[i]);
+			bool unbound = obs_data_array_count(now) == 0;
+			obs_data_array_release(now);
+			obs_data_array_t *saved = obs_data_get_array(copy, k_hotkeys[i].name);
+			if (unbound && obs_data_array_count(saved) > 0) {
+				obs_hotkey_load(f->hotkeys[i], saved);
+				restored++;
+			}
+			obs_data_array_release(saved);
+		}
+	}
+	obs_data_release(copy);
+	obs_data_release(settings);
+	return restored;
+}
+
+/* attach_mutex held, on the UI thread (see the file comment) */
+static void register_hotkeys(struct tub_deck_filter *f, obs_source_t *parent)
+{
+	if (f->hotkeys_registered)
+		return;
+	for (size_t i = 0; i < TUB_HOTKEY_COUNT; i++)
+		f->hotkeys[i] = obs_hotkey_register_source(
+			parent, k_hotkeys[i].name, obs_module_text(k_hotkeys[i].text_key), k_hotkeys[i].func, f);
+	f->hotkeys_registered = true;
+	size_t restored = restore_hotkey_bindings(f, parent);
+	const char *name = obs_source_get_name(parent);
+	obs_log(LOG_INFO, "tape deck %s: its hotkeys are in Settings > Hotkeys under the Browser source '%s'",
+		f->deck_id, name ? name : "");
+	if (restored)
+		obs_log(LOG_INFO, "tape deck %s: %zu hotkey binding(s) brought back from the deck's own copy",
+			f->deck_id, restored);
+}
+
+/* Keeps a copy of the hotkey bindings in the deck's own settings, refreshed at every save while the deck has its
+ * hotkeys. libobs saves a Browser source's bindings only for the hotkeys registered at that moment, so without the copy
+ * a deck removed and put back with Undo would return unbound. A deck without its hotkeys leaves its last copy as it is. The copy names its Browser source, so a pasted or duplicated deck
+ * does not take another source's keys. A waiting deck that takes over has no copy of the other deck's bindings: it
+ * starts with whatever the source saved. Called from obs_source_save (the UI thread, for a project save or an undo
+ * snapshot). */
+static void deck_save(void *data, obs_data_t *settings)
+{
+	struct tub_deck_filter *f = data;
+	if (!f || !settings)
+		return;
+	pthread_mutex_lock(&f->attach_mutex);
+	obs_source_t *parent = (f->hotkeys_registered && f->parent) ? obs_weak_source_get_source(f->parent) : NULL;
+	if (parent) {
+		obs_data_t *copy = obs_data_create();
+		const char *uuid = obs_source_get_uuid(parent);
+		obs_data_set_string(copy, "source_uuid", uuid ? uuid : "");
+		for (size_t i = 0; i < TUB_HOTKEY_COUNT; i++) {
+			obs_data_array_t *bindings =
+				f->hotkeys[i] != OBS_INVALID_HOTKEY_ID ? obs_hotkey_save(f->hotkeys[i]) : NULL;
+			if (bindings) {
+				obs_data_set_array(copy, k_hotkeys[i].name, bindings);
+				obs_data_array_release(bindings);
+			}
+		}
+		obs_data_set_obj(settings, TUB_SETTING_HOTKEY_COPY, copy);
+		obs_data_release(copy);
+	}
+	pthread_mutex_unlock(&f->attach_mutex);
+	/* with no lock held, as in the tick */
+	if (parent)
+		obs_source_release(parent);
+}
+
+/* attach_mutex held, mutex not held: waits for a hotkey callback in flight, which never takes attach_mutex */
+static void unregister_hotkeys(struct tub_deck_filter *f)
+{
+	if (!f->hotkeys_registered)
+		return;
+	for (size_t i = 0; i < TUB_HOTKEY_COUNT; i++) {
+		/* an id the parent's own destruction already removed is ignored */
+		if (f->hotkeys[i] != OBS_INVALID_HOTKEY_ID)
+			obs_hotkey_unregister(f->hotkeys[i]);
+		f->hotkeys[i] = OBS_INVALID_HOTKEY_ID;
+	}
+	f->hotkeys_registered = false;
+}
+
 /* ---- the parent ---- */
 
 /* The parent applied new settings (on the graphics thread, right after its own update read them). Flags only: this
@@ -457,8 +706,8 @@ static bool setup_parent(struct tub_deck_filter *f, obs_source_t *parent)
 	return true;
 }
 
-/* Checks and repairs the parent's settings. Runs on the UI thread: the Browser source's Properties dialog writes those
- * same settings there, and libobs's settings object has no lock of its own. */
+/* Checks and repairs the parent's settings, and gives the owning deck its hotkeys. Runs on the UI thread: the Browser
+ * source's Properties dialog writes those same settings there, and libobs's settings object has no lock of its own. */
 static void run_setup(struct tub_deck_filter *f)
 {
 	pthread_mutex_lock(&f->attach_mutex);
@@ -468,6 +717,8 @@ static void run_setup(struct tub_deck_filter *f)
 	pthread_mutex_lock(&f->mutex);
 	f->setup_queued = false;
 	pthread_mutex_unlock(&f->mutex);
+	if (parent)
+		register_hotkeys(f, parent);
 	bool changed = parent && setup_parent(f, parent);
 	pthread_mutex_lock(&f->mutex);
 	if (changed) {
@@ -606,11 +857,27 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 		if (f->link.gen > 0)
 			build_tape_or_eject_locked(f, f->link.gen, now, c);
 	}
-	if (f->send_rate) {
-		f->send_rate = false;
-		c->rate = tub_command_rate(tub_speed_pct_to_rate(f->speed_pct), f->tape_pitch);
+	/* Every speed change passes the coalescer (R-SPD-3). A forced send (a new tape or page, a pitch change, a repair)
+	 * goes at once with the latest speed and counts as the interval's send. */
+	bool forced = f->send_rate;
+	f->send_rate = false;
+	int want = f->want_pct;
+	bool send_speed = false;
+	if (forced) {
+		tub_coalesce_note_sent(&f->coalesce, now);
+		send_speed = true;
+	} else if (want != f->offered_pct) {
+		send_speed = tub_coalesce_offer(&f->coalesce, want, now);
+	} else {
+		/* a held value is the last one offered, which is want */
+		int held;
+		send_speed = tub_coalesce_flush(&f->coalesce, now, &held);
+	}
+	f->offered_pct = want;
+	if (send_speed) {
+		c->rate = tub_command_rate(tub_speed_pct_to_rate(want), f->tape_pitch);
 		if (c->rate) {
-			f->sent_pct = f->speed_pct;
+			f->sent_pct = want;
 			f->last_rate_sent_ns = now;
 			f->rate_mismatch_streak = 0;
 		}
@@ -635,6 +902,30 @@ static void log_state_change_locked(struct tub_deck_filter *f)
 	f->logged_valid = true;
 }
 
+/* The speed the deck wants: the Speed Fader's while one is bound and Midi Fadester is loaded, else the Speed setting's
+ * (R-SPD-5). The bridge is asked with no deck lock held. */
+static void update_wanted_speed(struct tub_deck_filter *f)
+{
+	pthread_mutex_lock(&f->mutex);
+	int slot = f->fader_slot;
+	pthread_mutex_unlock(&f->mutex);
+
+	bool live = false;
+	float value = 0.0f;
+	if (slot >= 0 && slot < VS_FADER_SLOT_COUNT) {
+		/* one slot per call, in turn; Midi Fadester also pushes each change as it happens */
+		vs_fader_bridge_poll_once();
+		live = vs_fader_bridge_is_midi_fadester_loaded();
+		value = vs_fader_bridge_get_slot(slot);
+	}
+
+	pthread_mutex_lock(&f->mutex);
+	/* a binding changed meanwhile is taken up on the next tick */
+	f->fader_live = live && f->fader_slot == slot;
+	f->want_pct = f->fader_live ? tub_speed_from_fader(value, f->fader_min_pct, f->fader_max_pct) : f->speed_pct;
+	pthread_mutex_unlock(&f->mutex);
+}
+
 static void deck_video_tick(void *data, float seconds)
 {
 	struct tub_deck_filter *f = data;
@@ -643,6 +934,7 @@ static void deck_video_tick(void *data, float seconds)
 
 	uint64_t now = os_gettime_ns();
 	retry_registration(f, now);
+	update_wanted_speed(f);
 	/* asked before any lock: the listener thread takes its own lock and then a deck's */
 	int port = tub_listener_port();
 	struct page_commands c = {0};
@@ -776,6 +1068,7 @@ static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_nu
 	if (f->parent_signals)
 		signal_handler_disconnect(f->parent_signals, "update", on_parent_update, f);
 	f->parent_signals = NULL;
+	unregister_hotkeys(f);
 	bool held = f->showing_held;
 	f->showing_held = false;
 	f->waiting_logged = false;
@@ -822,6 +1115,10 @@ static void *deck_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct tub_deck_filter *f = bzalloc(sizeof(*f));
 	f->context = source;
+	for (size_t i = 0; i < TUB_HOTKEY_COUNT; i++)
+		f->hotkeys[i] = OBS_INVALID_HOTKEY_ID;
+	f->fader_slot = VS_FADER_SLOT_NONE;
+	tub_coalesce_init(&f->coalesce);
 	if (pthread_mutex_init_recursive(&f->attach_mutex) != 0) {
 		bfree(f);
 		return NULL;
@@ -985,6 +1282,114 @@ static bool refresh_status_clicked(obs_properties_t *props, obs_property_t *prop
 	return false;
 }
 
+/* the slot names the shader filter and the Modulator use */
+static const char *const k_fader_text_keys[VS_FADER_SLOT_COUNT] = {
+	"Signal.FaderCrossfader", "Signal.Fader1",   "Signal.Fader2",   "Signal.Fader3",   "Signal.Fader4",
+	"Signal.Fader5",          "Signal.Fader6",   "Signal.Fader7",   "Signal.Fader8",   "Signal.FaderMaster",
+	"Signal.FaderFx1",        "Signal.FaderFx2", "Signal.FaderFx3", "Signal.FaderFx4", "Signal.FaderFx5",
+	"Signal.FaderFx6",        "Signal.FaderFx7", "Signal.FaderFx8",
+};
+
+/* The Speed Fader's status line. It names no speeds, so dragging the two speed sliders never needs a rebuild. */
+static void refresh_speed_fader_status(obs_properties_t *props, obs_data_t *settings)
+{
+	obs_property_t *status = props ? obs_properties_get(props, S_SPEED_FADER_STATUS) : NULL;
+	if (!status || !settings)
+		return;
+	long long slot = obs_data_get_int(settings, TUB_SETTING_SPEED_FADER);
+	if (slot < 0 || slot >= VS_FADER_SLOT_COUNT) {
+		vs_property_info_set_text(status, obs_module_text("Tubester.SpeedFader.StatusFixed"));
+		return;
+	}
+	const char *name = obs_module_text(k_fader_text_keys[slot]);
+	char line[512];
+	if (vs_fader_bridge_is_midi_fadester_loaded())
+		snprintf(line, sizeof(line),
+			 vs_text_format("Tubester.SpeedFader.StatusMapped",
+					"%s drives the speed, from Speed at Fader Bottom to Speed at Fader Top."),
+			 name);
+	else
+		snprintf(line, sizeof(line),
+			 vs_text_format(
+				 "Tubester.SpeedFader.StatusNotLoaded",
+				 "%s is assigned, but Midi Fadester is not loaded: the Speed slider sets the speed."),
+			 name);
+	vs_property_info_set_text(status, line);
+}
+
+static bool speed_fader_modified(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(priv);
+	UNUSED_PARAMETER(property);
+	refresh_speed_fader_status(props, settings);
+	return true;
+}
+
+static bool clear_speed_fader_clicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	UNUSED_PARAMETER(property);
+	struct tub_deck_filter *f = data;
+	if (!f || !f->context)
+		return false;
+	obs_data_t *patch = obs_data_create();
+	obs_data_set_int(patch, TUB_SETTING_SPEED_FADER, VS_FADER_SLOT_NONE);
+	obs_source_update(f->context, patch);
+	obs_data_release(patch);
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	refresh_speed_fader_status(props, settings);
+	obs_data_release(settings);
+	/* redraws the properties already built: the list shows None, the status line its new text */
+	return true;
+}
+
+static void add_speed_fader_group(obs_properties_t *props, struct tub_deck_filter *f)
+{
+	/* ask Midi Fadester once for the whole build */
+	vs_fader_bridge_poll_once();
+	bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+
+	obs_properties_t *grp = obs_properties_create();
+	obs_property_t *p_slot = obs_properties_add_list(grp, TUB_SETTING_SPEED_FADER,
+							 obs_module_text("Tubester.SpeedFader"), OBS_COMBO_TYPE_LIST,
+							 OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p_slot, obs_module_text("Tubester.SpeedFader.None"), VS_FADER_SLOT_NONE);
+	const char *not_loaded = obs_module_text("Modulator.MidiFadesterNotLoaded");
+	char label[160];
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++) {
+		const char *base = obs_module_text(k_fader_text_keys[i]);
+		if (fadester_loaded) {
+			obs_property_list_add_int(p_slot, base, i);
+		} else {
+			snprintf(label, sizeof(label), "%s - %s", base, not_loaded);
+			obs_property_list_add_int(p_slot, label, i);
+		}
+	}
+	obs_property_set_long_description(p_slot, obs_module_text("Tubester.SpeedFader.Tooltip"));
+	obs_property_set_modified_callback2(p_slot, speed_fader_modified, f);
+
+	obs_property_t *p_min = obs_properties_add_int_slider(grp, TUB_SETTING_SPEED_FADER_MIN,
+							      obs_module_text("Tubester.SpeedFader.Min"),
+							      TUB_SPEED_MIN_PCT, TUB_SPEED_MAX_PCT, 1);
+	obs_property_int_set_suffix(p_min, "%");
+	obs_property_t *p_max = obs_properties_add_int_slider(grp, TUB_SETTING_SPEED_FADER_MAX,
+							      obs_module_text("Tubester.SpeedFader.Max"),
+							      TUB_SPEED_MIN_PCT, TUB_SPEED_MAX_PCT, 1);
+	obs_property_int_set_suffix(p_max, "%");
+
+	vs_properties_add_info(grp, S_SPEED_FADER_STATUS, "");
+	obs_properties_add_button2(grp, S_SPEED_FADER_CLEAR, obs_module_text("Tubester.SpeedFader.Clear"),
+				   clear_speed_fader_clicked, f);
+	obs_properties_add_group(props, "tubester_speed_fader_group", obs_module_text("Tubester.SpeedFaderGroup"),
+				 OBS_GROUP_NORMAL, grp);
+
+	/* the modified callback writes it too, whenever OBS applies the settings */
+	if (f && f->context) {
+		obs_data_t *settings = obs_source_get_settings(f->context);
+		refresh_speed_fader_status(props, settings);
+		obs_data_release(settings);
+	}
+}
+
 static obs_properties_t *deck_get_properties(void *data)
 {
 	struct tub_deck_filter *f = data;
@@ -1024,6 +1429,7 @@ static obs_properties_t *deck_get_properties(void *data)
 	obs_property_float_set_suffix(p_start, " s");
 	obs_property_set_long_description(p_start, obs_module_text("Tubester.StartSeconds.Tooltip"));
 
+	add_speed_fader_group(props, f);
 	return props;
 }
 
@@ -1037,6 +1443,7 @@ struct obs_source_info tub_deck_filter_info = {
 	.get_defaults = deck_get_defaults,
 	.get_properties = deck_get_properties,
 	.update = deck_update,
+	.save = deck_save,
 	.video_tick = deck_video_tick,
 	.video_render = deck_video_render,
 	.filter_add = deck_filter_add,
@@ -1096,6 +1503,16 @@ void tub_decks_describe(obs_data_t *out)
 		obs_data_set_string(item, "state", tub_deck_state_name(state));
 		obs_data_set_string(item, "tape", f->tape ? f->tape : "");
 		obs_data_set_int(item, "speed_percent", f->speed_pct);
+		obs_data_set_int(item, "effective_speed_percent", f->want_pct);
+		obs_data_t *fader = obs_data_create();
+		const char *slot_id = vs_fader_slot_id(f->fader_slot);
+		obs_data_set_int(fader, "slot", f->fader_slot);
+		obs_data_set_string(fader, "slot_id", slot_id ? slot_id : "");
+		obs_data_set_int(fader, "min_percent", f->fader_min_pct);
+		obs_data_set_int(fader, "max_percent", f->fader_max_pct);
+		obs_data_set_bool(fader, "live", f->fader_live);
+		obs_data_set_obj(item, "speed_fader", fader);
+		obs_data_release(fader);
 		obs_data_set_bool(item, "tape_pitch", f->tape_pitch);
 		obs_data_set_bool(item, "loop", f->loop);
 		obs_data_set_double(item, "start_seconds", f->start_seconds);

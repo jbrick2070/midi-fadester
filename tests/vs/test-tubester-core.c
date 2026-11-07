@@ -1,5 +1,5 @@
 /*
- * Tubester - tape path and speed unit tests (REQUIREMENTS R-TAP-3, R-SPD-1, R-SPD-3, R-SPD-4)
+ * Tubester - tape path and speed unit tests (REQUIREMENTS R-TAP-3, R-SPD-1, R-SPD-3, R-SPD-4, R-SPD-5)
  * Copyright (C) 2026 Jeffrey A. Brick
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
@@ -17,6 +17,7 @@
 #include "tubester/tape-url.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -172,7 +173,58 @@ static void test_coalesce(void)
 			sent++;
 	}
 	assert(sent == 160);
+	/* a forced send counts as the interval's send and replaces a pending value */
+	tub_coalesce_init(&c);
+	assert(tub_coalesce_offer(&c, 120, 1000));
+	assert(!tub_coalesce_offer(&c, 130, 1000 + 10000000));
+	tub_coalesce_note_sent(&c, 1000 + 20000000);
+	assert(!tub_coalesce_flush(&c, 1000 + 20000000 + TUB_COALESCE_INTERVAL_NS, &pct));
+	assert(!tub_coalesce_offer(&c, 140, 1000 + 30000000));
+	assert(!tub_coalesce_flush(&c, 1000 + 20000000 + TUB_COALESCE_INTERVAL_NS - 1, &pct));
+	assert(tub_coalesce_flush(&c, 1000 + 20000000 + TUB_COALESCE_INTERVAL_NS, &pct));
+	assert(pct == 140);
+	/* before any offer, a forced send still starts the interval */
+	tub_coalesce_init(&c);
+	tub_coalesce_note_sent(&c, 5000);
+	assert(!tub_coalesce_offer(&c, 100, 5000 + 1));
 	printf("  test_coalesce: PASS\n");
+}
+
+static void test_speed_from_fader(void)
+{
+	/* the ends, and the middle of a ratio scale (R-SPD-5) */
+	assert(tub_speed_from_fader(0.0f, 50, 200) == 50);
+	assert(tub_speed_from_fader(1.0f, 50, 200) == 200);
+	assert(tub_speed_from_fader(0.5f, 50, 200) == 100);
+	assert(tub_speed_from_fader(0.25f, 50, 200) == 71);
+	assert(tub_speed_from_fader(0.5f, 25, 800) == 141);
+	assert(tub_speed_from_fader(0.75f, 25, 800) == 336);
+	/* min above max turns the fader round */
+	assert(tub_speed_from_fader(0.0f, 200, 50) == 200);
+	assert(tub_speed_from_fader(1.0f, 200, 50) == 50);
+	assert(tub_speed_from_fader(0.5f, 200, 50) == 100);
+	/* equal ends give one speed */
+	assert(tub_speed_from_fader(0.3f, 100, 100) == 100);
+	/* ends outside the speed range are clamped first */
+	assert(tub_speed_from_fader(0.0f, 10, 2000) == 25);
+	assert(tub_speed_from_fader(1.0f, 10, 2000) == 800);
+	assert(tub_speed_from_fader(0.5f, 10, 2000) == 141);
+	assert(tub_speed_from_fader(0.5f, -40, 0) == 25);
+	/* a value outside 0 to 1 counts as the nearer end; not a number counts as 0 */
+	assert(tub_speed_from_fader(-1.0f, 50, 200) == 50);
+	assert(tub_speed_from_fader(2.0f, 50, 200) == 200);
+	assert(tub_speed_from_fader(NAN, 50, 200) == 50);
+	assert(tub_speed_from_fader(INFINITY, 50, 200) == 200);
+	assert(tub_speed_from_fader(-INFINITY, 50, 200) == 50);
+	/* the whole travel never steps backwards and stays in range */
+	int last = 0;
+	for (int i = 0; i <= 1000; i++) {
+		int pct = tub_speed_from_fader((float)i / 1000.0f, 25, 800);
+		assert(pct >= last && pct >= 25 && pct <= 800);
+		last = pct;
+	}
+	assert(last == 800);
+	printf("  test_speed_from_fader: PASS\n");
 }
 
 int main(void)
@@ -183,6 +235,7 @@ int main(void)
 	test_speed_range();
 	test_speed_ladder();
 	test_coalesce();
+	test_speed_from_fader();
 	printf("test-tubester-core: ALL PASS\n");
 	return 0;
 }

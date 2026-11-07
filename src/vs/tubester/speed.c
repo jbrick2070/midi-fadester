@@ -11,6 +11,7 @@
 
 #include "tubester/speed.h"
 
+#include <math.h>
 #include <string.h>
 
 static const int ladder[] = {25, 50, 75, 100, 125, 150, 200, 300, 400, 600, 800};
@@ -28,6 +29,19 @@ int tub_speed_clamp_pct(int pct)
 double tub_speed_pct_to_rate(int pct)
 {
 	return (double)tub_speed_clamp_pct(pct) / 100.0;
+}
+
+int tub_speed_from_fader(float value, int min_pct, int max_pct)
+{
+	double v = (double)value;
+	if (!(v > 0.0)) /* also not a number */
+		v = 0.0;
+	else if (v > 1.0)
+		v = 1.0;
+	double lo = (double)tub_speed_clamp_pct(min_pct);
+	double hi = (double)tub_speed_clamp_pct(max_pct);
+	/* both ends are at least 25, so the ratio is finite and positive */
+	return tub_speed_clamp_pct((int)lround(lo * pow(hi / lo, v)));
 }
 
 int tub_speed_step_pct(int pct, int direction)
@@ -71,6 +85,13 @@ bool tub_coalesce_offer(struct tub_coalesce *c, int pct, uint64_t now_ns)
 	c->pending_pct = pct;
 	c->has_pending = true;
 	return false;
+}
+
+void tub_coalesce_note_sent(struct tub_coalesce *c, uint64_t now_ns)
+{
+	c->last_sent_ns = now_ns;
+	c->ever_sent = true;
+	c->has_pending = false;
 }
 
 bool tub_coalesce_flush(struct tub_coalesce *c, uint64_t now_ns, int *pct)
