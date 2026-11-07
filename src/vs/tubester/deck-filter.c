@@ -288,7 +288,7 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 		f->send_tape = true;
 		f->send_rate = true;
 		f->send_loop = true;
-		obs_log(LOG_INFO, "[tubester] deck %s: page connected", f->deck_id);
+		obs_log(LOG_INFO, "tape deck %s: page connected", f->deck_id);
 		break;
 	case TUB_REPORT_ACCEPTED:
 		/* A position counts only once the page knows the tape (before its metadata it reports 0 whatever the
@@ -300,19 +300,18 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 		}
 		if (strcmp(f->link.last.event, "watchdog") == 0) {
 			obs_log(LOG_WARNING,
-				"[tubester] deck %s: the tape had stopped moving; recovered with a seek (R-DCK-8)",
+				"tape deck %s: the tape had stopped moving; recovered with a seek (R-DCK-8)",
 				f->deck_id);
 		} else if (strcmp(f->link.last.event, "error") == 0) {
-			obs_log(LOG_WARNING, "[tubester] deck %s: the page cannot play this file (media error %d)",
+			obs_log(LOG_WARNING, "tape deck %s: the page cannot play this file (media error %d)",
 				f->deck_id, f->link.last.error_code);
 		} else if (strcmp(f->link.last.event, "nopicture") == 0) {
-			obs_log(LOG_WARNING, "[tubester] deck %s: this file has sound but no picture", f->deck_id);
+			obs_log(LOG_WARNING, "tape deck %s: this file has sound but no picture", f->deck_id);
 		}
 		break;
 	case TUB_REPORT_BAD_TOKEN:
 		if (f->link.bad_token_count == 1)
-			obs_log(LOG_WARNING, "[tubester] deck %s: a report with the wrong token was dropped",
-				f->deck_id);
+			obs_log(LOG_WARNING, "tape deck %s: a report with the wrong token was dropped", f->deck_id);
 		break;
 	case TUB_REPORT_OLD_GENERATION:
 	case TUB_REPORT_STALE:
@@ -381,7 +380,7 @@ static void run_setup(struct tub_deck_filter *f)
 	pthread_mutex_unlock(&f->mutex);
 	pthread_mutex_unlock(&f->attach_mutex);
 	if (changed)
-		obs_log(LOG_INFO, "[tubester] deck %s: Browser source set up for the deck page", f->deck_id);
+		obs_log(LOG_INFO, "tape deck %s: Browser source set up for the deck page", f->deck_id);
 	if (parent)
 		obs_source_release(parent);
 }
@@ -437,7 +436,7 @@ static void retry_registration(struct tub_deck_filter *f, uint64_t now)
 		return;
 	f->registered = tub_listener_register(f->deck_id, on_report, f);
 	if (f->registered) {
-		obs_log(LOG_INFO, "[tubester] deck %s: the report listener is up; the deck can link", f->deck_id);
+		obs_log(LOG_INFO, "tape deck %s: the report listener is up; the deck can link", f->deck_id);
 		f->register_backoff_ns = 0;
 		return;
 	}
@@ -474,7 +473,7 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 			double at = f->tape_from_start ? f->start_seconds : f->last_position;
 			c->tape = tub_command_tape(gen, f->tape_url, at, f->loop);
 			if (!c->tape)
-				obs_log(LOG_WARNING, "[tubester] deck %s: the tape address cannot be sent; ejecting",
+				obs_log(LOG_WARNING, "tape deck %s: the tape address cannot be sent; ejecting",
 					f->deck_id);
 		}
 		if (c->tape) {
@@ -509,7 +508,7 @@ static bool status_changed_locked(struct tub_deck_filter *f, uint64_t now)
 	if (now - f->last_properties_refresh_ns < TUB_PROPERTIES_REFRESH_NS)
 		return false;
 	if (f->shown_valid && state != f->shown_state && f->role == ROLE_OWNER)
-		obs_log(LOG_INFO, "[tubester] deck %s: %s", f->deck_id, tub_deck_state_name(state));
+		obs_log(LOG_INFO, "tape deck %s: %s", f->deck_id, tub_deck_state_name(state));
 	f->shown_state = state;
 	f->shown_tape_status = f->tape_status;
 	f->shown_role = f->role;
@@ -536,8 +535,7 @@ static void deck_video_tick(void *data, float seconds)
 		/* a remove raced the add (libobs calls them outside its filter lock) and left this attachment behind; the
 		 * parent no longer lists this filter, so let it go */
 		pthread_mutex_unlock(&f->attach_mutex);
-		obs_log(LOG_WARNING, "[tubester] deck %s: released an attachment its source had already dropped",
-			f->deck_id);
+		obs_log(LOG_WARNING, "tape deck %s: released an attachment its source had already dropped", f->deck_id);
 		release_parent(f, NULL);
 		return;
 	}
@@ -555,12 +553,11 @@ static void deck_video_tick(void *data, float seconds)
 		pthread_mutex_unlock(&f->mutex);
 		if (claimed && f->waiting_logged) {
 			f->waiting_logged = false;
-			obs_log(LOG_INFO, "[tubester] deck %s: the other deck is gone; this one now drives the source",
+			obs_log(LOG_INFO, "tape deck %s: the other deck is gone; this one now drives the source",
 				f->deck_id);
 		} else if (!claimed && !f->waiting_logged) {
 			f->waiting_logged = true;
-			obs_log(LOG_WARNING,
-				"[tubester] deck %s: another deck already drives this Browser source; waiting",
+			obs_log(LOG_WARNING, "tape deck %s: another deck already drives this Browser source; waiting",
 				f->deck_id);
 		}
 	}
@@ -648,12 +645,10 @@ static void deck_filter_add(void *data, obs_source_t *parent)
 	pthread_mutex_unlock(&f->attach_mutex);
 
 	if (!is_browser) {
-		obs_log(LOG_WARNING,
-			"[tubester] deck %s: added to a '%s' source; a deck needs a Browser source (R-DCK-1)",
+		obs_log(LOG_WARNING, "tape deck %s: added to a '%s' source; a deck needs a Browser source (R-DCK-1)",
 			f->deck_id, id ? id : "?");
 	} else if (!f->page_url) {
-		obs_log(LOG_ERROR, "[tubester] deck %s: data/deck.html was not found; the deck cannot start",
-			f->deck_id);
+		obs_log(LOG_ERROR, "tape deck %s: data/deck.html was not found; the deck cannot start", f->deck_id);
 	}
 }
 
@@ -731,15 +726,14 @@ static void *deck_create(obs_data_t *settings, obs_source_t *source)
 	if (tub_random_hex(f->token, TUB_TOKEN_LEN) && tub_link_init(&f->link, f->token)) {
 		f->registered = tub_listener_register(f->deck_id, on_report, f);
 		if (!f->registered) {
-			obs_log(LOG_ERROR, "[tubester] deck %s: the report listener did not start; retrying",
-				f->deck_id);
+			obs_log(LOG_ERROR, "tape deck %s: the report listener did not start; retrying", f->deck_id);
 			f->register_backoff_ns = TUB_REGISTER_RETRY_MIN_NS;
 			f->register_retry_ns = os_gettime_ns() + f->register_backoff_ns;
 		}
 	} else {
 		f->token[0] = '\0';
 		tub_link_init(&f->link, NULL);
-		obs_log(LOG_ERROR, "[tubester] deck %s: no random token; the deck cannot link to its page", f->deck_id);
+		obs_log(LOG_ERROR, "tape deck %s: no random token; the deck cannot link to its page", f->deck_id);
 	}
 
 	/* OBS may give the data file as a path relative to its working directory (portable OBS does); the page needs a
@@ -753,7 +747,7 @@ static void *deck_create(obs_data_t *settings, obs_source_t *source)
 		if (tub_path_to_file_url(page_path, f->page_url, cap) == 0) {
 			bfree(f->page_url);
 			f->page_url = NULL;
-			obs_log(LOG_ERROR, "[tubester] deck %s: the deck page path cannot be used: %s", f->deck_id,
+			obs_log(LOG_ERROR, "tape deck %s: the deck page path cannot be used: %s", f->deck_id,
 				page_path);
 		}
 	}

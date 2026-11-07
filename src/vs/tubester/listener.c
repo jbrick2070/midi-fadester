@@ -28,7 +28,7 @@
 
 /* The blog of the host, so this file does not depend on the plugin-support target: tests link it alone. */
 #include <util/base.h>
-#define LISTENER_LOG(level, ...) blog(level, "[visual-sidechain] [tubester] " __VA_ARGS__)
+#define LISTENER_LOG(level, ...) blog(level, "[visual-sidechain] tape deck " __VA_ARGS__)
 
 #define TUB_DECK_ID_MAX 64
 #define TUB_DECKS_MAX 64
