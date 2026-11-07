@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Tubester deck</title>
+<!--
+  Tubester - the deck page, loaded into a Browser source by the Deck filter
+  Copyright (C) 2026 Jeffrey A. Brick
+  SPDX-License-Identifier: GPL-2.0-or-later
+
+  Nothing about the deck is in this page's address. The filter sends a "tubester" event with the deck id, the report
+  port and the token about once a second, then the tape, rate and loop; the page reports back with POST to
+  127.0.0.1. One file, no build step, no network beyond the loopback.
+-->
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+</style>
+<video id="v" playsinline></video>
+<script>
+(function () {
+  'use strict';
+  var v = document.getElementById('v');
+  var inc = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  var link = null;
+  var gen = 0;
+  var seq = 0;
+  var nopic = false;
+  var pendingAt = 0; /* where the tape being loaded starts; applied once its metadata is known */
+  var wdLast = -1, wdSame = 0;
+
+  /* The tape the player holds. Chromium keeps currentSrc after an eject removes the src attribute, so the attribute
+     decides whether there is a tape at all. */
+  function hasTape() {
+    return !!v.getAttribute('src');
+  }
+
+  /* The file name, cut to 200 characters by code point, so a long name never ends in half an emoji: a lone surrogate
+     would make every report unreadable to the filter. */
+  function tapeName() {
+    var name = (v.currentSrc || '').split('/').pop();
+    try { name = decodeURIComponent(name); } catch (x) { /* a malformed escape: keep the raw name */ }
+    return Array.from(name).slice(0, 200).join('');
+  }
+
+  function post(ev) {
+    if (!link) return;
+    var r = {
+      token: link.token, deck: link.deck, inc: inc, gen: gen, seq: ++seq, ev: ev,
+      ct: +v.currentTime.toFixed(3), rs: v.readyState, paused: v.paused, ended: v.ended,
+      rate: v.playbackRate, vw: v.videoWidth, vh: v.videoHeight,
+      src: hasTape() ? tapeName() : '',
+      err: v.error ? v.error.code : 0, nopic: nopic
+    };
+    fetch(link.url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(r) }).catch(function () {});
+  }
+
+  ['canplay', 'playing', 'pause', 'waiting', 'seeked', 'ended', 'ratechange'].forEach(function (e) {
+    v.addEventListener(e, function () { post(e); });
+  });
+  /* One handler for every tape: the start position goes on before the first report about the new tape, so the
+     filter never reads a position of 0 while the tape is really starting further in. */
+  v.addEventListener('loadedmetadata', function () {
+    if (pendingAt > 0) {
+      var at = pendingAt;
+      pendingAt = 0;
+      v.currentTime = at;
+    }
+    nopic = v.videoWidth === 0;
+    post(nopic ? 'nopicture' : 'loadedmetadata');
+  });
+  v.addEventListener('error', function () {
+    pendingAt = 0;
+    post('error');
+  });
+
+  function play() {
+    var p = v.play();
+    if (p && p.catch) p.catch(function () { post('playfail'); });
+  }
+
+  function resetPlayerState() {
+    nopic = false;
+    pendingAt = 0;
+    wdLast = -1;
+    wdSame = 0;
+  }
+
+  window.addEventListener('tubester', function (e) {
+    var d = e.detail || {};
+    if (d.hello) {
+      var fresh = !link || link.token !== d.token || link.deck !== d.deck;
+      link = { deck: d.deck, token: d.token, url: 'http://127.0.0.1:' + d.port + '/report' };
+      if (fresh) post('hello');
+      return;
+    }
+    if (d.gen !== undefined) {
+      if (d.gen < gen) return; /* an older tape command, overtaken */
+      gen = d.gen;
+    }
+    if (d.eject) {
+      resetPlayerState();
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+      post('eject');
+      return;
+    }
+    if (d.tape !== undefined) {
+      resetPlayerState();
+      pendingAt = d.at > 0 ? d.at : 0;
+      if (d.loop !== undefined) v.loop = !!d.loop;
+      /* Loading runs the media load algorithm, which puts playbackRate back to defaultPlaybackRate; the rate command
+         sets both, so the speed survives every load */
+      v.src = d.tape;
+      v.load();
+      play();
+    } else if (d.loop !== undefined) {
+      v.loop = !!d.loop;
+    }
+    if (d.rate !== undefined) {
+      v.preservesPitch = !!d.keepPitch;
+      v.defaultPlaybackRate = d.rate;
+      v.playbackRate = d.rate;
+    }
+    if (d.seek !== undefined) v.currentTime = d.seek;
+    if (d.play) play();
+    if (d.pause) v.pause();
+  });
+
+  v.loop = true;
+  v.preservesPitch = false;
+
+  setInterval(function () {
+    post('tick');
+    /* Watchdog (R-DCK-8): a tape that should be moving has sat still for a full second; a seek to the same place
+       restarts the decoder. Below HAVE_CURRENT_DATA (2) the tape is still loading and a still position is expected
+       (a slow file on a network share), so the watchdog waits. The measured freezes (REQUIREMENTS F-5) all sat at
+       readyState 2, so the gate must stay at 2, not 3. */
+    if (v.paused || v.seeking || v.ended || !hasTape() || v.error || v.readyState < 2) {
+      wdSame = 0; wdLast = -1; return;
+    }
+    if (v.currentTime === wdLast) {
+      if (++wdSame >= 2) {
+        wdSame = 0;
+        post('watchdog');
+        v.currentTime = v.currentTime;
+      }
+    } else {
+      wdSame = 0; wdLast = v.currentTime;
+    }
+  }, 500);
+})();
+</script>
+</html>

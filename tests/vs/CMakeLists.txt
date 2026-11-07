@@ -96,6 +96,18 @@ visual_sidechain_add_test(
   "${_tubester}/command.c"
   "${_tubester}/speed.c"
 )
+# The report listener (R-LNK-2): request parsing and the token source alone, then the listener over a real loopback
+# socket. Both are Windows-only, like the plugin (R-PLAT-9).
+visual_sidechain_add_test(test-tubester-http test-tubester-http.c "${_tubester}/http-parse.c" "${_tubester}/random.c")
+target_link_libraries(test-tubester-http PRIVATE bcrypt)
+visual_sidechain_add_test(
+  test-tubester-listener
+  test-tubester-listener.c
+  "${_tubester}/listener.c"
+  "${_tubester}/http-parse.c"
+  "${_tubester}/deck-link.c"
+)
+target_link_libraries(test-tubester-listener PRIVATE ws2_32)
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(

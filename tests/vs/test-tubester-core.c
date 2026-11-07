@@ -30,6 +30,11 @@ static void test_path_usable(void)
 	assert(!tub_path_is_usable(NULL));
 	assert(!tub_path_is_usable(""));
 	assert(!tub_path_is_usable("C:"));
+	/* a drive root alone names no file */
+	assert(!tub_path_is_usable("C:\\"));
+	assert(!tub_path_is_usable("C:/"));
+	assert(!tub_path_is_usable("C:\\\\/"));
+	assert(tub_path_is_usable("C:\\a"));
 	assert(!tub_path_is_usable("reel.mp4"));
 	assert(!tub_path_is_usable("\\reel.mp4"));
 	assert(!tub_path_is_usable("/tapes/reel.mp4"));

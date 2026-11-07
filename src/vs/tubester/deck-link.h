@@ -23,6 +23,8 @@ extern "C" {
 #define TUB_TOKEN_LEN 32
 #define TUB_INCARNATION_MAX 32
 #define TUB_SRC_MAX 260
+/* Pages replaced by a reload, remembered so their late reports cannot take the link back (R-LNK-3). */
+#define TUB_RETIRED_MAX 16
 
 /* A deck's report has not arrived for this long: No connection (R-DCK-7). */
 #define TUB_LINK_TIMEOUT_NS 3000000000ULL
@@ -67,7 +69,8 @@ enum tub_report_verdict {
 struct tub_link {
 	char token[TUB_TOKEN_LEN + 1];
 	char incarnation[TUB_INCARNATION_MAX];
-	char previous_incarnation[TUB_INCARNATION_MAX];
+	char retired[TUB_RETIRED_MAX][TUB_INCARNATION_MAX];
+	unsigned retired_next;
 	struct tub_report last;
 	uint64_t gen;
 	uint64_t seq;
@@ -89,8 +92,10 @@ bool tub_link_parse_body(const char *body, size_t len, obs_data_t **out);
 /* Fills r from a parsed report. Returns false when a required field (inc, seq, ev) is missing. */
 bool tub_report_read(obs_data_t *data, struct tub_report *r);
 
-/* Checks the token and the ordering, then records the report as the deck's latest when accepted. A report from the
- * page before the last reload is stale. On a new page whose generation is ahead, the link's generation catches up. */
+/* Checks the token and the ordering, then records the report as the deck's latest when accepted. A report from a page
+ * that a reload replaced is stale while the current page is alive; once the current page has been silent for longer
+ * than TUB_LINK_TIMEOUT_NS, whichever page reports becomes the deck's page, so the link always returns to the page
+ * that keeps reporting. On a new page whose generation is ahead, the link's generation catches up. */
 enum tub_report_verdict tub_link_accept(struct tub_link *l, obs_data_t *data, uint64_t now_ns);
 
 /* The deck state to show, from the latest accepted report and the time since it arrived (R-DCK-7). */

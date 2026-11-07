@@ -105,6 +105,23 @@ char *tub_command_rate(double rate, bool tape_pitch)
 	return finish(d);
 }
 
+char *tub_command_eject(uint64_t gen)
+{
+	if (gen == 0)
+		return NULL;
+	obs_data_t *d = obs_data_create();
+	obs_data_set_int(d, "gen", (long long)gen);
+	obs_data_set_bool(d, "eject", true);
+	return finish(d);
+}
+
+char *tub_command_loop(bool loop)
+{
+	obs_data_t *d = obs_data_create();
+	obs_data_set_bool(d, "loop", loop);
+	return finish(d);
+}
+
 char *tub_command_seek(double seconds)
 {
 	if (!isfinite(seconds) || seconds < 0)

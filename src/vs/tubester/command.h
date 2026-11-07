@@ -26,7 +26,13 @@ extern "C" {
  * text is checked before it is returned: obs-browser splices it into page code, so it holds no raw line terminator. */
 char *tub_command_hello(const char *deck_id, int port, const char *token);
 char *tub_command_tape(uint64_t gen, const char *file_url, double start_seconds, bool loop);
+/* Takes the tape out: the page empties its player, so the deck reads Ready with no tape. It carries a new generation,
+ * like a tape command, so reports about the old tape stop counting at once. */
+char *tub_command_eject(uint64_t gen);
 char *tub_command_rate(double rate, bool tape_pitch);
+/* Changes looping on the tape that is loaded. The tape command carries loop for a new load; this one is for a change
+ * in between, so the tape is not reloaded. */
+char *tub_command_loop(bool loop);
 char *tub_command_seek(double seconds);
 char *tub_command_play(void);
 char *tub_command_pause(void);

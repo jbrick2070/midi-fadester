@@ -45,6 +45,14 @@ bool tub_path_is_usable(const char *path)
 	bool drive = is_drive_letter(path[0]) && path[1] == ':' && is_separator(path[2]);
 	if (!drive && !is_unc(path))
 		return false;
+	if (drive) {
+		/* a drive root alone (C:\) names no file */
+		bool named = false;
+		for (size_t i = 3; i < len && !named; i++)
+			named = !is_separator(path[i]);
+		if (!named)
+			return false;
+	}
 	for (size_t i = 0; i < len; i++) {
 		unsigned char c = (unsigned char)path[i];
 		if (c < 0x20 || c == 0x7f || c == '?' || c == '*' || c == '<' || c == '>' || c == '|' || c == '"')

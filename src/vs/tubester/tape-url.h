@@ -22,9 +22,9 @@ extern "C" {
  * prefix; a tape longer than this is refused rather than truncated. */
 #define TUB_PATH_MAX 32000
 
-/* True when the path can name a tape (R-TAP-3): absolute on a drive (C:\... or C:/...) or a UNC share
- * (\\server\share\...), no control characters, none of ? * < > | ", not longer than TUB_PATH_MAX. Device paths such as
- * \\.\ and \\?\ are refused. Whether the file exists is not checked here. */
+/* True when the path can name a tape (R-TAP-3): absolute on a drive (C:\... or C:/..., with something after the root)
+ * or a UNC share (\\server\share\...), no control characters, none of ? * < > | ", not longer than TUB_PATH_MAX.
+ * Device paths such as \\.\ and \\?\ are refused. Whether the file exists is not checked here. */
 bool tub_path_is_usable(const char *path);
 
 /* Writes "file:///C:/a/b%20c.mp4" for a drive path, or "file://server/share/x.mp4" for a UNC path. Every byte outside

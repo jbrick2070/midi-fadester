@@ -85,6 +85,57 @@ static void test_parse_body(void)
 	memset(huge, ' ', 69999);
 	assert(!tub_link_parse_body(huge, 69999, &d));
 	bfree(huge);
+	/* anything that is not exactly one JSON object is refused before the libobs reader sees it, so nothing is logged */
+	static const char *const bad[] = {
+		"{xyz}",
+		"{\"inc\":\"a\",}",
+		"{\"inc\":01}",
+		"{\"inc\":\"\\x\"}",
+		"{\"inc\":\"a\"",
+		"{\"inc\":\"a\"}}",
+		"{\"inc\":tru}",
+		"{\"inc\":\"a\" \"b\"}",
+		"{\"inc\":1e400}",
+		"{\"inc\":12345678901234567890}",
+		"{\"inc\":\"\x01\"}",
+		"{\"inc\":-}",
+		"{\"inc\":1.}",
+		"{\"inc\":\"\\u12g4\"}",
+		"not json",
+		"\"text\"",
+	};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+		assert(!tub_link_parse_body(bad[i], strlen(bad[i]), &d) && !d);
+	/* nor anything the libobs reader would refuse with a log line, or that no report has */
+	static const char *const odd[] = {
+		"{\"inc\":\"a\",\"inc\":\"b\"}",       /* a key twice (libobs reads with JSON_REJECT_DUPLICATES) */
+		"{\"inc\":\"a\",\"\\u0069nc\":\"b\"}", /* an escaped key */
+		"{\"inc\":\"a\",\"x\":{\"y\":1}}",     /* nested object */
+		"{\"inc\":\"a\",\"x\":[1]}",           /* nested array */
+		"{\"inc\":\"a\\u0000\"}",              /* \u0000 */
+		"{\"inc\":\"a\\ud800\"}",              /* a lone surrogate escape */
+		"{\"inc\":\"a\\udc00\\ud800\"}",
+		"{\"inc\":\"\xC3\x28\"}",         /* invalid UTF-8 */
+		"{\"inc\":\"\xC0\xAF\"}",         /* overlong */
+		"{\"inc\":\"\xED\xA0\x80\"}",     /* an encoded surrogate */
+		"{\"inc\":\"\xF4\x90\x80\x80\"}", /* past U+10FFFF */
+		"{\"inc\":\"\xE2\x82\"}",         /* cut short */
+	};
+	for (size_t i = 0; i < sizeof(odd) / sizeof(odd[0]); i++)
+		assert(!tub_link_parse_body(odd[i], strlen(odd[i]), &d) && !d);
+	char nul_body[] = "{\"inc\":\"a\"}\0";
+	assert(!tub_link_parse_body(nul_body, sizeof(nul_body) - 1, &d));
+	char deep[128] = "{\"inc\":\"a\",\"x\":";
+	for (int i = 0; i < 40; i++)
+		strcat(deep, "[");
+	assert(!tub_link_parse_body(deep, strlen(deep), &d));
+	/* and every valid shape a page sends is still read */
+	const char *ok =
+		" {\"inc\":\"a\\u00e9\\n\xC3\xBC\xE6\x97\xA5\xF0\x9F\x8E\x9E\",\"seq\":1,\"ct\":-0.5e-3,\"rate\":1.25,"
+		"\"paused\":true,\"x\":null,\"src\":\"it's 100% #1.mp4\"} ";
+	assert(tub_link_parse_body(ok, strlen(ok), &d) && d);
+	assert(obs_data_get_double(d, "rate") == 1.25);
+	obs_data_release(d);
 	printf("  test_parse_body: PASS\n");
 }
 
@@ -174,16 +225,19 @@ static void test_accept_ordering(void)
 	assert(accept(&l, report(TOKEN, "page1", 2, 99, "playing", NULL), 15 * SEC) == TUB_REPORT_STALE);
 	assert(accept(&l, report(TOKEN, "page1", 2, 98, "playing", NULL), 15 * SEC) == TUB_REPORT_STALE);
 	assert(strcmp(l.incarnation, "page2") == 0 && l.seq == 1);
-	/* but a third page is new again, and then page2 is the stale one */
+	/* a third page is new again, and then page2 is retired too */
 	assert(accept(&l, report(TOKEN, "page3", 0, 1, "hello-ok", NULL), 16 * SEC) == TUB_REPORT_NEW_PAGE);
 	assert(accept(&l, report(TOKEN, "page2", 0, 2, "tick", NULL), 16 * SEC) == TUB_REPORT_STALE);
-	assert(accept(&l, report(TOKEN, "page1", 2, 100, "tick", NULL), 16 * SEC) == TUB_REPORT_NEW_PAGE);
+	/* a late report from the first page, two reloads ago, cannot take the link back from the live page3 */
+	assert(accept(&l, report(TOKEN, "page1", 2, 100, "tick", NULL), 16 * SEC) == TUB_REPORT_STALE);
+	assert(strcmp(l.incarnation, "page3") == 0);
+	assert(accept(&l, report(TOKEN, "page3", 2, 2, "tick", NULL), 16 * SEC) == TUB_REPORT_ACCEPTED);
 
 	/* malformed reports change nothing */
 	obs_data_t *d = obs_data_create_from_json("{\"token\":\"" TOKEN "\",\"inc\":\"page1\"}");
 	assert(accept(&l, d, 17 * SEC) == TUB_REPORT_MALFORMED);
 	assert(tub_link_accept(&l, NULL, 17 * SEC) == TUB_REPORT_MALFORMED);
-	assert(l.seq == 100);
+	assert(l.seq == 2);
 	printf("  test_accept_ordering: PASS\n");
 }
 
@@ -203,6 +257,41 @@ static void test_page_outlives_filter(void)
 	       TUB_REPORT_ACCEPTED);
 	assert(tub_link_state(&l, 3 * SEC) == TUB_STATE_PLAYING);
 	printf("  test_page_outlives_filter: PASS\n");
+}
+
+static void test_retired_pages_and_self_heal(void)
+{
+	struct tub_link l;
+	assert(tub_link_init(&l, TOKEN));
+	assert(accept(&l, report(TOKEN, "A", 0, 1, "hello", NULL), 1 * SEC) == TUB_REPORT_NEW_PAGE);
+	assert(accept(&l, report(TOKEN, "B", 0, 1, "hello", NULL), 2 * SEC) == TUB_REPORT_NEW_PAGE);
+	assert(accept(&l, report(TOKEN, "C", 0, 1, "hello", NULL), 3 * SEC) == TUB_REPORT_NEW_PAGE);
+	/* reloads A, B, C, then a delayed report from A: it must not make A current and lock out the live C */
+	assert(accept(&l, report(TOKEN, "A", 0, 50, "tick", NULL), 3 * SEC + 100) == TUB_REPORT_STALE);
+	assert(accept(&l, report(TOKEN, "B", 0, 50, "tick", NULL), 3 * SEC + 200) == TUB_REPORT_STALE);
+	assert(strcmp(l.incarnation, "C") == 0);
+	assert(accept(&l, report(TOKEN, "C", 0, 2, "tick", NULL), 3 * SEC + 300) == TUB_REPORT_ACCEPTED);
+
+	/* sixteen more reloads push A and B out of the ring of retired pages */
+	char inc[8];
+	uint64_t t = 4 * SEC;
+	for (int i = 0; i < TUB_RETIRED_MAX; i++) {
+		snprintf(inc, sizeof(inc), "R%d", i);
+		assert(accept(&l, report(TOKEN, inc, 0, 1, "hello", NULL), t) == TUB_REPORT_NEW_PAGE);
+		t += SEC / 10;
+	}
+	snprintf(inc, sizeof(inc), "R%d", TUB_RETIRED_MAX - 1);
+	/* a report from an evicted page looks new and takes the link... */
+	assert(accept(&l, report(TOKEN, "A", 0, 60, "tick", NULL), t) == TUB_REPORT_NEW_PAGE);
+	/* ...the live page is refused while that report is fresh... */
+	assert(accept(&l, report(TOKEN, inc, 0, 2, "tick", NULL), t + SEC) == TUB_REPORT_STALE);
+	assert(strcmp(l.incarnation, "A") == 0);
+	/* ...and wins the link back once nothing has been accepted for longer than the timeout: it heals by itself */
+	assert(accept(&l, report(TOKEN, inc, 0, 3, "tick", NULL), t + TUB_LINK_TIMEOUT_NS + 1) == TUB_REPORT_NEW_PAGE);
+	assert(strcmp(l.incarnation, inc) == 0);
+	/* and A, retired again, is stale while that page lives */
+	assert(accept(&l, report(TOKEN, "A", 0, 61, "tick", NULL), t + TUB_LINK_TIMEOUT_NS + 2) == TUB_REPORT_STALE);
+	printf("  test_retired_pages_and_self_heal: PASS\n");
 }
 
 static void test_states(void)
@@ -302,6 +391,10 @@ static void test_commands(void)
 	assert(!tub_command_seek(-0.5));
 	check_json(tub_command_play(), "{\"play\":true}");
 	check_json(tub_command_pause(), "{\"pause\":true}");
+	check_json(tub_command_loop(true), "{\"loop\":true}");
+	check_json(tub_command_loop(false), "{\"loop\":false}");
+	check_json(tub_command_eject(7), "{\"gen\":7,\"eject\":true}");
+	assert(!tub_command_eject(0));
 	printf("  test_commands: PASS\n");
 }
 
@@ -334,6 +427,7 @@ int main(void)
 	test_report_read();
 	test_accept_ordering();
 	test_page_outlives_filter();
+	test_retired_pages_and_self_heal();
 	test_states();
 	test_commands();
 	test_command_safety();
