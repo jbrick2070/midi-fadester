@@ -35,6 +35,7 @@
 #include "tubester/speed.h"
 #include "tubester/tape-url.h"
 #include "obs/property-status.h"
+#include "obs/text.h"
 #include "plugin-support.h"
 
 #include <obs-module.h>
@@ -49,7 +50,10 @@
 #define TUB_PARENT_ID "browser_source"
 #define TUB_DECK_ID_CHARS 16
 #define TUB_HELLO_INTERVAL_S 1.0f
-#define TUB_PROPERTIES_REFRESH_NS 500000000ULL
+/* self-repair (R-DCK-10): how long a command may take to show in the reports, and how far a reported rate may be off */
+#define TUB_REPAIR_GRACE_NS 1000000000ULL
+#define TUB_RATE_TOLERANCE_PCT 0.6
+#define TUB_COMMAND_RESEND_NS 3000000000ULL
 /* After setup changes the Browser source, nothing goes to the page until the source has applied the change; this is a
  * safety net in case its update signal never arrives. */
 #define TUB_AWAIT_UPDATE_MAX_NS 5000000000ULL
@@ -128,12 +132,19 @@ struct tub_deck_filter {
 	double last_position; /* the last position the page confirmed on the current tape */
 	float hello_accum;
 
-	/* the status line shown in Properties; refreshed when it would change */
-	enum tub_deck_state shown_state;
-	enum tape_status shown_tape_status;
-	enum deck_role shown_role;
-	bool shown_valid;
-	uint64_t last_properties_refresh_ns;
+	/* self-repair from the reports (R-DCK-10) */
+	int sent_pct; /* the speed in the last rate command, 0 before any */
+	uint64_t last_rate_sent_ns;
+	int rate_mismatch_streak;
+	bool rate_repair_logged;
+	bool current_cmd_is_eject;     /* the command that set link.gen was an eject, not a tape */
+	uint64_t pending_cmd_since_ns; /* when that command was last sent; 0 before any */
+	bool resend_current;           /* the page never acknowledged it: send it again with the same generation */
+	bool resend_logged;
+
+	/* the state last written to the log, so each change is logged once */
+	enum tub_deck_state logged_state;
+	bool logged_valid;
 };
 
 static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_null);
@@ -181,6 +192,42 @@ static void release_claim(struct tub_deck_filter *f)
 		}
 	}
 	pthread_mutex_unlock(&g_owner_mutex);
+}
+
+/* ---- every deck, for get_decks (R-INT-4) ---- */
+
+/* Lock order: g_decks_mutex, then a deck's mutex. A deck leaves the list at the start of destroy, so a deck found
+ * here under the lock is alive. */
+static pthread_mutex_t g_decks_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct tub_deck_filter *g_decks[TUB_OWNERS_MAX];
+static size_t g_deck_count;
+
+static void decks_add(struct tub_deck_filter *f)
+{
+	static bool full_logged = false;
+	pthread_mutex_lock(&g_decks_mutex);
+	if (g_deck_count < TUB_OWNERS_MAX) {
+		g_decks[g_deck_count++] = f;
+	} else if (!full_logged) {
+		/* far past the two decks Tubester is for; the deck works, it is only missing from get_decks */
+		full_logged = true;
+		obs_log(LOG_WARNING, "tape deck %s: %d decks already listed; this one is left out of get_decks",
+			f->deck_id, TUB_OWNERS_MAX);
+	}
+	pthread_mutex_unlock(&g_decks_mutex);
+}
+
+static void decks_remove(struct tub_deck_filter *f)
+{
+	pthread_mutex_lock(&g_decks_mutex);
+	for (size_t i = 0; i < g_deck_count; i++) {
+		if (g_decks[i] == f) {
+			g_decks[i] = g_decks[--g_deck_count];
+			g_decks[g_deck_count] = NULL;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_decks_mutex);
 }
 
 /* ---- locale ---- */
@@ -274,7 +321,37 @@ static void deck_get_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, TUB_SETTING_START, 0.0);
 }
 
+/* True when the page's latest report is about the tape the deck wants: the latest command's generation, with no newer
+ * tape queued. Only then do its position, speed and length describe the deck's tape. */
+static bool report_is_current_locked(const struct tub_deck_filter *f)
+{
+	return f->link.linked && f->link.last.gen == f->link.gen && !f->send_tape;
+}
+
 /* ---- reports, on the listener thread ---- */
+
+/* A rate the page did not take (a command lost while the page was busy, a player that reset itself) is sent again:
+ * after the grace period, two reports in a row that disagree with the last rate sent. Logged once per occurrence. */
+static void check_rate_locked(struct tub_deck_filter *f, uint64_t now)
+{
+	if (f->sent_pct <= 0 || now < f->last_rate_sent_ns || now - f->last_rate_sent_ns < TUB_REPAIR_GRACE_NS)
+		return;
+	double reported_pct = f->link.last.rate * 100.0;
+	if (fabs(reported_pct - (double)f->sent_pct) <= TUB_RATE_TOLERANCE_PCT) {
+		f->rate_mismatch_streak = 0;
+		f->rate_repair_logged = false;
+		return;
+	}
+	if (++f->rate_mismatch_streak < 2)
+		return;
+	f->rate_mismatch_streak = 0;
+	f->send_rate = true;
+	if (!f->rate_repair_logged) {
+		f->rate_repair_logged = true;
+		obs_log(LOG_WARNING, "tape deck %s: the page plays at %.0f%%, not %d%%; sending the speed again",
+			f->deck_id, reported_pct, f->sent_pct);
+	}
+}
 
 static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 {
@@ -288,15 +365,23 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 		f->send_tape = true;
 		f->send_rate = true;
 		f->send_loop = true;
+		f->resend_current = false;
 		obs_log(LOG_INFO, "tape deck %s: page connected", f->deck_id);
 		break;
 	case TUB_REPORT_ACCEPTED:
 		/* A position counts only once the page knows the tape (before its metadata it reports 0 whatever the
 		 * start), only for the latest tape command, and not while a newer tape waits to be sent. Until then a
 		 * resend after a reload starts at start_seconds again. */
-		if (f->link.last.ready_state >= 1 && f->link.last.gen == f->link.gen && !f->send_tape) {
-			f->last_position = f->link.last.current_time;
-			f->tape_from_start = false;
+		if (f->link.last.gen == f->link.gen) {
+			/* the latest command arrived: nothing to send again, and the resend clock stops */
+			f->resend_current = false;
+			f->resend_logged = false;
+			f->pending_cmd_since_ns = 0;
+			if (f->link.last.ready_state >= 1 && report_is_current_locked(f)) {
+				f->last_position = f->link.last.current_time;
+				f->tape_from_start = false;
+				check_rate_locked(f, now_ns);
+			}
 		}
 		if (strcmp(f->link.last.event, "watchdog") == 0) {
 			obs_log(LOG_WARNING,
@@ -314,6 +399,21 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 			obs_log(LOG_WARNING, "tape deck %s: a report with the wrong token was dropped", f->deck_id);
 		break;
 	case TUB_REPORT_OLD_GENERATION:
+		/* The page is alive but still reports an earlier generation: the latest tape or eject command did not
+		 * reach it (an event dropped while its browser was busy). After a while it is sent again. */
+		/* not while a newer command is queued: the tick sends that one with a new generation anyway */
+		if (!f->send_tape && f->pending_cmd_since_ns && now_ns > f->pending_cmd_since_ns &&
+		    now_ns - f->pending_cmd_since_ns > TUB_COMMAND_RESEND_NS) {
+			f->resend_current = true;
+			f->pending_cmd_since_ns = now_ns;
+			if (!f->resend_logged) {
+				f->resend_logged = true;
+				obs_log(LOG_WARNING,
+					"tape deck %s: the page missed the last %s command; sending it again",
+					f->deck_id, f->current_cmd_is_eject ? "eject" : "tape");
+			}
+		}
+		break;
 	case TUB_REPORT_STALE:
 	case TUB_REPORT_MALFORMED:
 		break;
@@ -454,7 +554,37 @@ struct page_commands {
 	char *loop;
 };
 
-static void build_commands_locked(struct tub_deck_filter *f, int port, float seconds, struct page_commands *c)
+/* The tape command for generation gen, or an eject when no tape can be sent. Records what was sent so a missed
+ * command can be sent again (R-DCK-10). */
+static void build_tape_or_eject_locked(struct tub_deck_filter *f, uint64_t gen, uint64_t now, struct page_commands *c)
+{
+	if (f->tape_status == TAPE_SET) {
+		double at = f->tape_from_start ? f->start_seconds : f->last_position;
+		c->tape = tub_command_tape(gen, f->tape_url, at, f->loop);
+		if (!c->tape)
+			obs_log(LOG_WARNING, "tape deck %s: the tape address cannot be sent; ejecting", f->deck_id);
+	}
+	if (c->tape) {
+		f->link.gen = gen;
+		f->current_cmd_is_eject = false;
+		/* the tape command carries the loop; loading resets the player's rate, so the rate follows it */
+		f->send_loop = false;
+		f->send_rate = true;
+	} else {
+		/* no usable tape: the page empties its player and the deck reads Ready with no tape */
+		c->eject = tub_command_eject(gen);
+		if (c->eject) {
+			f->link.gen = gen;
+			f->current_cmd_is_eject = true;
+		}
+		f->last_position = 0.0;
+	}
+	if (c->tape || c->eject)
+		f->pending_cmd_since_ns = now;
+}
+
+static void build_commands_locked(struct tub_deck_filter *f, int port, float seconds, uint64_t now,
+				  struct page_commands *c)
 {
 	if (f->awaiting_parent_update)
 		return;
@@ -467,31 +597,23 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 		return;
 	if (f->send_tape) {
 		f->send_tape = false;
+		f->resend_current = false;
 		/* a generation is used only by a command that is really sent, so the page never falls behind the link */
-		uint64_t gen = f->link.gen + 1;
-		if (f->tape_status == TAPE_SET) {
-			double at = f->tape_from_start ? f->start_seconds : f->last_position;
-			c->tape = tub_command_tape(gen, f->tape_url, at, f->loop);
-			if (!c->tape)
-				obs_log(LOG_WARNING, "tape deck %s: the tape address cannot be sent; ejecting",
-					f->deck_id);
-		}
-		if (c->tape) {
-			f->link.gen = gen;
-			/* the tape command carries the loop; loading resets the player's rate, so the rate follows it */
-			f->send_loop = false;
-			f->send_rate = true;
-		} else {
-			/* no usable tape: the page empties its player and the deck reads Ready with no tape */
-			c->eject = tub_command_eject(gen);
-			if (c->eject)
-				f->link.gen = gen;
-			f->last_position = 0.0;
-		}
+		build_tape_or_eject_locked(f, f->link.gen + 1, now, c);
+	} else if (f->resend_current) {
+		/* the page never acknowledged the latest command: the same command, the same generation */
+		f->resend_current = false;
+		if (f->link.gen > 0)
+			build_tape_or_eject_locked(f, f->link.gen, now, c);
 	}
 	if (f->send_rate) {
 		f->send_rate = false;
 		c->rate = tub_command_rate(tub_speed_pct_to_rate(f->speed_pct), f->tape_pitch);
+		if (c->rate) {
+			f->sent_pct = f->speed_pct;
+			f->last_rate_sent_ns = now;
+			f->rate_mismatch_streak = 0;
+		}
 	}
 	if (f->send_loop) {
 		f->send_loop = false;
@@ -499,22 +621,18 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 	}
 }
 
-static bool status_changed_locked(struct tub_deck_filter *f, uint64_t now)
+/* Each change of an owning deck's state goes to the log once. Properties is not rebuilt for it: a rebuild takes the
+ * focus from whatever is being edited, so the status there is a snapshot with a Refresh Status button (D-12). */
+static void log_state_change_locked(struct tub_deck_filter *f)
 {
-	enum tub_deck_state state = tub_link_state(&f->link, now);
-	if (f->shown_valid && state == f->shown_state && f->tape_status == f->shown_tape_status &&
-	    f->role == f->shown_role)
-		return false;
-	if (now - f->last_properties_refresh_ns < TUB_PROPERTIES_REFRESH_NS)
-		return false;
-	if (f->shown_valid && state != f->shown_state && f->role == ROLE_OWNER)
+	/* the clock is read under the lock: a report stamped after an earlier reading would look like no connection */
+	enum tub_deck_state state = tub_link_state(&f->link, os_gettime_ns());
+	if (f->logged_valid && state == f->logged_state)
+		return;
+	if (f->logged_valid && f->role == ROLE_OWNER)
 		obs_log(LOG_INFO, "tape deck %s: %s", f->deck_id, tub_deck_state_name(state));
-	f->shown_state = state;
-	f->shown_tape_status = f->tape_status;
-	f->shown_role = f->role;
-	f->shown_valid = true;
-	f->last_properties_refresh_ns = now;
-	return true;
+	f->logged_state = state;
+	f->logged_valid = true;
 }
 
 static void deck_video_tick(void *data, float seconds)
@@ -590,7 +708,7 @@ static void deck_video_tick(void *data, float seconds)
 		}
 
 		pthread_mutex_lock(&f->mutex);
-		build_commands_locked(f, port, seconds, &c);
+		build_commands_locked(f, port, seconds, now, &c);
 		pthread_mutex_unlock(&f->mutex);
 
 		send_to_page(parent, c.hello);
@@ -600,12 +718,10 @@ static void deck_video_tick(void *data, float seconds)
 		send_to_page(parent, c.loop);
 	}
 	pthread_mutex_lock(&f->mutex);
-	bool refresh_properties = status_changed_locked(f, now);
+	log_state_change_locked(f);
 	pthread_mutex_unlock(&f->mutex);
 	pthread_mutex_unlock(&f->attach_mutex);
 
-	if (refresh_properties)
-		obs_source_update_properties(f->context);
 	/* last, with no lock held: if this was the parent's final reference, its destruction removes this filter */
 	if (parent)
 		obs_source_release(parent);
@@ -640,7 +756,7 @@ static void deck_filter_add(void *data, obs_source_t *parent)
 	f->recheck_parent = true;
 	f->awaiting_parent_update = false;
 	f->hello_accum = TUB_HELLO_INTERVAL_S;
-	f->shown_valid = false;
+	f->logged_valid = false;
 	pthread_mutex_unlock(&f->mutex);
 	pthread_mutex_unlock(&f->attach_mutex);
 
@@ -673,7 +789,7 @@ static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_nu
 	f->role = ROLE_DETACHED;
 	f->recheck_parent = false;
 	f->awaiting_parent_update = false;
-	f->shown_valid = false;
+	f->logged_valid = false;
 	pthread_mutex_unlock(&f->mutex);
 
 	obs_source_t *promoted = NULL;
@@ -755,6 +871,7 @@ static void *deck_create(obs_data_t *settings, obs_source_t *source)
 	bfree(page);
 
 	deck_update(f, settings);
+	decks_add(f);
 	return f;
 }
 
@@ -763,7 +880,8 @@ static void deck_destroy(void *data)
 	struct tub_deck_filter *f = data;
 	if (!f)
 		return;
-	/* first: no report callback may run on this memory after this line */
+	/* first: neither get_decks nor a report callback may reach this memory after these lines */
+	decks_remove(f);
 	if (f->registered)
 		tub_listener_unregister(f);
 	/* libobs calls filter_remove before destroy, so this normally finds nothing left to release */
@@ -792,6 +910,19 @@ static const char *deck_get_name(void *unused)
 
 /* ---- properties ---- */
 
+/* m:ss, or h:mm:ss from an hour on */
+static void format_time(double seconds, char *out, size_t size)
+{
+	if (!isfinite(seconds) || seconds < 0.0)
+		seconds = 0.0;
+	long long total = (long long)seconds;
+	long long h = total / 3600, m = (total / 60) % 60, s = total % 60;
+	if (h > 0)
+		snprintf(out, size, "%lld:%02lld:%02lld", h, m, s);
+	else
+		snprintf(out, size, "%lld:%02lld", m, s);
+}
+
 static void status_text(struct tub_deck_filter *f, struct dstr *out)
 {
 	pthread_mutex_lock(&f->mutex);
@@ -799,6 +930,11 @@ static void status_text(struct tub_deck_filter *f, struct dstr *out)
 	bool no_page = f->parent_is_browser && !f->page_url;
 	enum tape_status tape = f->tape_status;
 	enum tub_deck_state state = tub_link_state(&f->link, os_gettime_ns());
+	/* the page's own figures, once it knows the current tape (R-DCK-9); a tape still waiting to be sent reads Ready */
+	bool known = report_is_current_locked(f) && f->link.last.ready_state >= 1;
+	if (f->link.linked && f->send_tape && state != TUB_STATE_NO_CONNECTION)
+		state = TUB_STATE_READY;
+	double position = f->link.last.current_time, duration = f->link.last.duration, rate = f->link.last.rate;
 	pthread_mutex_unlock(&f->mutex);
 
 	if (role == ROLE_WRONG_PARENT) {
@@ -820,7 +956,33 @@ static void status_text(struct tub_deck_filter *f, struct dstr *out)
 	} else if (tape == TAPE_UNUSABLE) {
 		dstr_cat(out, " ");
 		dstr_cat(out, obs_module_text("Tubester.Status.BadPath"));
+	} else if (known && (state == TUB_STATE_PLAYING || state == TUB_STATE_PAUSED || state == TUB_STATE_ENDED)) {
+		char pos[32], len[32], line[256];
+		int pct = (int)lround(rate * 100.0);
+		format_time(position, pos, sizeof(pos));
+		if (duration > 0.0) {
+			format_time(duration, len, sizeof(len));
+			snprintf(line, sizeof(line),
+				 vs_text_format("Tubester.Status.Progress", "Speed %d%%, at %s of %s."), pct, pos, len);
+		} else {
+			snprintf(line, sizeof(line),
+				 vs_text_format("Tubester.Status.ProgressNoLength", "Speed %d%%, at %s."), pct, pos);
+		}
+		dstr_cat(out, " ");
+		dstr_cat(out, line);
 	}
+}
+
+static bool refresh_status_clicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(property);
+	/* A true return only redraws the properties already built; asking OBS to rebuild them calls get_properties,
+	 * which writes a fresh status (the shader filter's Reload button does the same) */
+	struct tub_deck_filter *f = data;
+	if (f && f->context)
+		obs_source_update_properties(f->context);
+	return false;
 }
 
 static obs_properties_t *deck_get_properties(void *data)
@@ -833,6 +995,8 @@ static obs_properties_t *deck_get_properties(void *data)
 		status_text(f, &status);
 	vs_properties_add_info(props, "tubester_status", status.array ? status.array : "");
 	dstr_free(&status);
+	obs_properties_add_button2(props, "tubester_refresh", obs_module_text("Tubester.RefreshStatus"),
+				   refresh_status_clicked, f);
 
 	struct dstr filter = {0};
 	dstr_cat(&filter, obs_module_text("Tubester.FileFilter.Videos"));
@@ -882,4 +1046,101 @@ struct obs_source_info tub_deck_filter_info = {
 void tub_register_deck_filter(void)
 {
 	obs_register_source(&tub_deck_filter_info);
+}
+
+static const char *role_name(enum deck_role role)
+{
+	switch (role) {
+	case ROLE_DETACHED:
+		return "detached";
+	case ROLE_WRONG_PARENT:
+		return "wrong_parent";
+	case ROLE_PENDING:
+		return "pending";
+	case ROLE_WAITING:
+		return "waiting";
+	case ROLE_OWNER:
+		return "owner";
+	}
+	return "unknown";
+}
+
+void tub_decks_describe(obs_data_t *out)
+{
+	if (!out)
+		return;
+	struct {
+		obs_weak_source_t *parent;
+		obs_data_t *item;
+	} found[TUB_OWNERS_MAX];
+	size_t count = 0;
+
+	pthread_mutex_lock(&g_decks_mutex);
+	for (size_t i = 0; i < g_deck_count && count < TUB_OWNERS_MAX; i++) {
+		struct tub_deck_filter *f = g_decks[i];
+		obs_data_t *item = obs_data_create();
+		const char *filter_name = obs_source_get_name(f->context);
+		obs_data_set_string(item, "filter", filter_name ? filter_name : "");
+		obs_data_set_string(item, "deck_id", f->deck_id);
+
+		pthread_mutex_lock(&f->mutex);
+		obs_weak_source_t *parent = f->parent;
+		if (parent)
+			obs_weak_source_addref(parent);
+		obs_data_set_string(item, "role", role_name(f->role));
+		/* the clock read under the deck's lock, so a report that just landed is not taken for silence; a tape still
+		 * waiting to be sent reads Ready, as in Properties */
+		enum tub_deck_state state = tub_link_state(&f->link, os_gettime_ns());
+		if (f->link.linked && f->send_tape && state != TUB_STATE_NO_CONNECTION)
+			state = TUB_STATE_READY;
+		obs_data_set_string(item, "state", tub_deck_state_name(state));
+		obs_data_set_string(item, "tape", f->tape ? f->tape : "");
+		obs_data_set_int(item, "speed_percent", f->speed_pct);
+		obs_data_set_bool(item, "tape_pitch", f->tape_pitch);
+		obs_data_set_bool(item, "loop", f->loop);
+		obs_data_set_double(item, "start_seconds", f->start_seconds);
+		obs_data_set_bool(item, "linked", f->link.linked);
+		if (f->link.linked) {
+			/* what the page last said, as it said it (R-DCK-7): an earlier tape's report is marked as such */
+			const struct tub_report *r = &f->link.last;
+			obs_data_t *reported = obs_data_create();
+			obs_data_set_bool(reported, "current_tape", report_is_current_locked(f));
+			obs_data_set_double(reported, "rate", r->rate);
+			obs_data_set_double(reported, "position", r->current_time);
+			obs_data_set_double(reported, "duration", r->duration);
+			obs_data_set_bool(reported, "paused", r->paused);
+			obs_data_set_bool(reported, "ended", r->ended);
+			obs_data_set_int(reported, "ready_state", r->ready_state);
+			obs_data_set_int(reported, "error", r->error_code);
+			obs_data_set_bool(reported, "no_picture", r->no_picture);
+			obs_data_set_obj(item, "reported", reported);
+			obs_data_release(reported);
+		}
+		pthread_mutex_unlock(&f->mutex);
+
+		found[count].parent = parent;
+		found[count].item = item;
+		count++;
+	}
+	pthread_mutex_unlock(&g_decks_mutex);
+
+	/* the Browser source's name, read with no lock of ours held */
+	obs_data_array_t *decks = obs_data_array_create();
+	for (size_t i = 0; i < count; i++) {
+		const char *source_name = "";
+		obs_source_t *source = found[i].parent ? obs_weak_source_get_source(found[i].parent) : NULL;
+		if (source && obs_source_get_name(source))
+			source_name = obs_source_get_name(source);
+		obs_data_set_string(found[i].item, "source", source_name);
+		if (source)
+			obs_source_release(source);
+		if (found[i].parent)
+			obs_weak_source_release(found[i].parent);
+		obs_data_array_push_back(decks, found[i].item);
+		obs_data_release(found[i].item);
+	}
+	obs_data_set_bool(out, "success", true);
+	obs_data_set_int(out, "api_version", 1);
+	obs_data_set_array(out, "decks", decks);
+	obs_data_array_release(decks);
 }

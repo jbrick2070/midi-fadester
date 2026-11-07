@@ -28,6 +28,7 @@ void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct v
 			   bool is_primary_track);
 
 void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 
 #ifdef __cplusplus
 }

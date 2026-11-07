@@ -12,6 +12,7 @@
 #include "tubester/deck-link.h"
 
 #include <util/bmem.h>
+#include <math.h>
 #include <string.h>
 
 static bool is_hex(char c)
@@ -288,6 +289,8 @@ bool tub_report_read(obs_data_t *data, struct tub_report *r)
 	r->gen = (uint64_t)gen;
 	r->seq = (uint64_t)seq;
 	r->current_time = obs_data_get_double(data, "ct");
+	double duration = obs_data_get_double(data, "dur");
+	r->duration = (isfinite(duration) && duration > 0.0) ? duration : 0.0;
 	r->rate = obs_data_get_double(data, "rate");
 	r->ready_state = (int)obs_data_get_int(data, "rs");
 	r->video_width = (int)obs_data_get_int(data, "vw");

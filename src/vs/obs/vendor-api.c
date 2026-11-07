@@ -10,6 +10,7 @@
  */
 
 #include "vendor-api.h"
+#include "tubester/deck-filter.h"
 
 #include <obs-module.h>
 #include <plugin-support.h>
@@ -71,6 +72,15 @@ void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response
 
 	obs_data_set_bool(response_data, "success", true);
 	fill_signals_data(response_data, &frame);
+}
+
+/* Every Tape Deck as its page last reported it (Tubester R-INT-4): read-only, for tools that show deck state. */
+void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(request_data);
+	UNUSED_PARAMETER(priv_data);
+	if (response_data)
+		tub_decks_describe(response_data);
 }
 
 void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
@@ -155,7 +165,9 @@ bool vs_vendor_api_register(void)
 	g_vendor = vendor;
 
 	const bool r1 = register_one_vendor_request(ws_ph, vendor, "get_signals", vs_vendor_handle_get_signals, NULL);
+	const bool r2 = register_one_vendor_request(ws_ph, vendor, "get_decks", vs_vendor_handle_get_decks, NULL);
 
-	obs_log(LOG_INFO, "Registered obs-websocket vendor '%s' (get_signals=%d)", VS_VENDOR_NAME, (int)r1);
-	return r1;
+	obs_log(LOG_INFO, "Registered obs-websocket vendor '%s' (get_signals=%d, get_decks=%d)", VS_VENDOR_NAME,
+		(int)r1, (int)r2);
+	return r1 && r2;
 }

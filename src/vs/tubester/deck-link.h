@@ -47,6 +47,7 @@ struct tub_report {
 	uint64_t gen;
 	uint64_t seq;
 	double current_time;
+	double duration; /* the tape's length in seconds, 0 while unknown */
 	double rate;
 	int ready_state;
 	int video_width;

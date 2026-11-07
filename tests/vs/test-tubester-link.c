@@ -144,14 +144,19 @@ static void test_report_read(void)
 	struct tub_report r;
 	obs_data_t *d = report(
 		TOKEN, "page1", 3, 7, "playing",
-		"\"ct\":12.5,\"rate\":1.5,\"rs\":4,\"vw\":1920,\"vh\":1080,\"paused\":false,\"src\":\"reel.mp4\"");
+		"\"ct\":12.5,\"dur\":122.56,\"rate\":1.5,\"rs\":4,\"vw\":1920,\"vh\":1080,\"paused\":false,\"src\":\"reel.mp4\"");
 	assert(tub_report_read(d, &r));
+	assert(r.duration == 122.56);
 	assert(strcmp(r.incarnation, "page1") == 0 && r.gen == 3 && r.seq == 7);
 	assert(strcmp(r.event, "playing") == 0 && strcmp(r.src, "reel.mp4") == 0);
 	assert(r.current_time == 12.5 && r.rate == 1.5 && r.ready_state == 4 && r.video_width == 1920);
 	assert(r.video_height == 1080 && !r.paused && !r.ended && !r.no_picture && r.error_code == 0);
 	obs_data_release(d);
 	/* missing fields and negative numbers are refused; long strings are cut, never overrun */
+	/* a length the page could not know (a stream, a broken file) reads 0 */
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"ev\":\"tick\",\"dur\":-3}");
+	assert(tub_report_read(d, &r) && r.duration == 0.0);
+	obs_data_release(d);
 	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1}");
 	assert(!tub_report_read(d, &r));
 	obs_data_release(d);

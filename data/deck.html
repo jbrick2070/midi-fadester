@@ -46,7 +46,8 @@
     if (!link) return;
     var r = {
       token: link.token, deck: link.deck, inc: inc, gen: gen, seq: ++seq, ev: ev,
-      ct: +v.currentTime.toFixed(3), rs: v.readyState, paused: v.paused, ended: v.ended,
+      ct: +v.currentTime.toFixed(3), dur: isFinite(v.duration) ? +v.duration.toFixed(3) : 0,
+      rs: v.readyState, paused: v.paused, ended: v.ended,
       rate: v.playbackRate, vw: v.videoWidth, vh: v.videoHeight,
       src: hasTape() ? tapeName() : '',
       err: v.error ? v.error.code : 0, nopic: nopic
