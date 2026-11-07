@@ -86,6 +86,17 @@ visual_sidechain_add_test(
 )
 target_link_libraries(test-modulator-properties PRIVATE plugin-support)
 
+# Tubester's core (docs/tubester/REQUIREMENTS.md): pure C, no OBS running
+set(_tubester "${CMAKE_SOURCE_DIR}/src/tubester")
+visual_sidechain_add_test(test-tubester-core test-tubester-core.c "${_tubester}/tape-url.c" "${_tubester}/speed.c")
+visual_sidechain_add_test(
+  test-tubester-link
+  test-tubester-link.c
+  "${_tubester}/deck-link.c"
+  "${_tubester}/command.c"
+  "${_tubester}/speed.c"
+)
+
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
   NAME check-locale-keys
