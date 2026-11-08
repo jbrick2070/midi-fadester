@@ -180,6 +180,11 @@ try {
     if ($finalLog -notmatch 'fx_filter_pass=1') {
         throw "Self-test did not confirm fx_filter_pass=1"
     }
+    foreach ($field in @('bridge_pass', 'build_ok', 'tbar_mid_ok', 'tbar_end_ok', 'tbar_completed')) {
+        if ($finalLog -notmatch "$field=1") {
+            throw "Self-test did not confirm $field=1"
+        }
+    }
     if ($finalLog -notmatch 'Number of memory leaks: 0') {
         throw "OBS reported non-zero memory leaks"
     }

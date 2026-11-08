@@ -86,6 +86,12 @@ enum mfd_controller_profile mfd_profile_match_device_name(const char *device_nam
 
 bool mfd_is_apc40_mk2_name(const char *device_name);
 enum mfd_controller_profile mfd_profile_for_device(const char *configured_name, bool is_open, const char *opened_name);
+/* Whether picking a MIDI port should switch the layout, and to which. A Reconnect or re-pick of the same named port
+ * never does (learned bindings stay). Auto-Detect, picked or rescanned, follows a newly detected known desk and keeps
+ * the layout when it finds none. A newly picked known desk gets its layout; any other newly picked port gets Generic. */
+bool mfd_profile_for_port_change(const char *prev_port, const char *chosen_port, bool connected,
+				 const char *opened_name, enum mfd_controller_profile current,
+				 enum mfd_controller_profile *out_profile);
 size_t mfd_apc40_get_default_slots(struct mfd_apc40_default_slot *out_slots, size_t max_slots);
 
 int mfd_slot_index_for_id(const char *slot_id);

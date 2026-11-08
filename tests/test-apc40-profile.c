@@ -40,6 +40,30 @@ int main(void)
 	REQUIRE(mfd_profile_for_device("", true, "loopMIDI Port") == MFD_PROFILE_GENERIC);
 	REQUIRE(mfd_profile_for_device("", false, "") == MFD_PROFILE_GENERIC);
 
+	/* Picking a port: Reconnect keeps learned bindings; a new desk gets its layout, any other new port Generic */
+	enum mfd_controller_profile port_prof = MFD_PROFILE_APC40_MK2;
+	REQUIRE(!mfd_profile_for_port_change("APC40 mkII", "APC40 mkII", true, "APC40 mkII", MFD_PROFILE_APC40_MK2,
+					     &port_prof));
+	port_prof = MFD_PROFILE_APC40_MK2;
+	REQUIRE(mfd_profile_for_port_change("APC40 mkII", "loopMIDI Port", true, "loopMIDI Port", MFD_PROFILE_APC40_MK2,
+					    &port_prof));
+	REQUIRE(port_prof == MFD_PROFILE_GENERIC);
+	REQUIRE(!mfd_profile_for_port_change("APC40 mkII", "", false, "", MFD_PROFILE_APC40_MK2, &port_prof));
+	port_prof = MFD_PROFILE_APC40_MK2;
+	REQUIRE(mfd_profile_for_port_change("", "MIDI Mix", true, "MIDI Mix", MFD_PROFILE_APC40_MK2, &port_prof));
+	REQUIRE(port_prof == MFD_PROFILE_AKAI_MIDIMIX);
+	REQUIRE(!mfd_profile_for_port_change("", "APC40 mkII", true, "APC40 mkII", MFD_PROFILE_APC40_MK2, &port_prof));
+
+	/* Auto-Detect picked again or rescanned follows a hot-swapped known desk; finding none keeps the layout */
+	port_prof = MFD_PROFILE_APC40_MK2;
+	REQUIRE(mfd_profile_for_port_change("", "", true, "MIDI Mix", MFD_PROFILE_APC40_MK2, &port_prof));
+	REQUIRE(port_prof == MFD_PROFILE_AKAI_MIDIMIX);
+	port_prof = MFD_PROFILE_APC40_MK2;
+	REQUIRE(!mfd_profile_for_port_change("", "", true, "APC40 mkII", MFD_PROFILE_APC40_MK2, &port_prof));
+	REQUIRE(!mfd_profile_for_port_change("", "", false, "", MFD_PROFILE_AKAI_MIDIMIX, &port_prof));
+	REQUIRE(!mfd_profile_for_port_change("", "", true, "loopMIDI Port", MFD_PROFILE_AKAI_MIDIMIX, &port_prof));
+	REQUIRE(port_prof == MFD_PROFILE_APC40_MK2);
+
 	/* Registry enumeration, slug lookup, support tiers, and uniqueness */
 	REQUIRE(mfd_profile_count() == 6U);
 	REQUIRE(mfd_profile_get_by_index(6U) == NULL);

@@ -20,7 +20,7 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 | # | Target | Scope & Verified Invariants |
 |---|---|---|
 | 1 | `test-midi-queue` | Lock-free SPSC ring buffer (`os_atomic_load_long` / `os_atomic_store_long` acquire/release ordering), wrap-around, overflow drop accounting, and 2-thread producer/consumer sequential order + payload integrity stress. |
-| 2 | `test-midi-parser` | Running-status MIDI byte parser, 7-bit CC (`0..127`), 14-bit Pitch Bend (`0..16383`), Note On/Off, SysEx skip, and real-time status interleaving. |
+| 2 | `test-midi-parser` | Running-status MIDI byte parser, 7-bit CC (`0..127`), 14-bit Pitch Bend (`0..16383`), Note On/Off, SysEx skip, and real-time status interleaving. 14-bit CC pairing guards: a CC `32..63` bound as its own control never pairs, a first pair needs the LSB within `3 ms` of its MSB, Learn captures an LSB-numbered control as itself, and a new device or layout forgets the pairing. |
 | 3 | `test-smoother` | First-order exponential smoother (`tau_ms`), instant snap at `tau_ms = 0`, frame-rate independence, and rail convergence. |
 | 4 | `test-takeover` | Soft Takeover state machine (`UNINITIALIZED`, `PICKUP_WAITING`, `CAPTURED`), calibrated `[raw_min, raw_max]` auto-widening, directional pickup hints (`ABOVE` / `BELOW`), polarity reversal, and mode-switch reset to `Idle`. |
 | 5 | `test-mixer-math` | Crossfade laws (`Dip-free`, `Full-center`, `Equal power`, `Linear`, `Cut`), `[-60 dB, 0 dB]` audio deflection taper, and top/bottom layer alpha inversion when OBS scene stack order flips. |
@@ -157,6 +157,9 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
   - **Case 8:** Mode-switch Soft Takeover reset to `Idle` and clean teardown (`Number of memory leaks: 0`).
 - **Live Filter Parameter & Shared Lease Suite (`FX FILTER LIVE CHECK`):**
   - Calls `get_catalog` against a live OBS `color_filter_v2`, binds `fx_1` (`filter_param`, `brightness` `[0.0 .. -1.0]`, `bypass_at_zero = true`), verifies GPU pixel darkening via `GetSourceScreenshot`, verifies external `obs_source_update` emits `fader_changed` with `origin == "obs"` + `display_value` and engages Soft Takeover, exercises live `"enable"` / `"update_properties"` / filter & host rename / filter remove + re-add signals, runs `reset_fx({ ms: 0 })` verifying pixel restoration and `obs_source_enabled == false`, and unbinds `fx_1` verifying `pre_mfd_enabled` lease restoration (`obs_source_enabled == true`).
+- **In-Process Bridge (`bridge_pass`):** sets `fader_2` to `0.65` through the `midi_fadester_set_fader_value` proc, reads it back through `midi_fadester_get_slot_value`, and requires the `midi_fadester_fader_changed` signal to report `fader_2` at `0.65`.
+
+`scripts/run-live-selftest.ps1` fails the run unless the `SELF-TEST RESULT` line shows `screenshot_all_pass`, `loopmidi_pass`, `studio_off`, `fx_filter_pass`, `bridge_pass`, `build_ok`, `tbar_mid_ok`, `tbar_end_ok` and `tbar_completed` all at `1`, and OBS reports zero memory leaks.
 
 ## Translations (0.6.0, 2026-11-01)
 

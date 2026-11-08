@@ -782,6 +782,26 @@ enum mfd_controller_profile mfd_profile_for_device(const char *configured_name, 
 	return MFD_PROFILE_GENERIC;
 }
 
+bool mfd_profile_for_port_change(const char *prev_port, const char *chosen_port, bool connected,
+				 const char *opened_name, enum mfd_controller_profile current,
+				 enum mfd_controller_profile *out_profile)
+{
+	const char *prev = prev_port ? prev_port : "";
+	const char *chosen = chosen_port ? chosen_port : "";
+	const bool auto_detect = chosen[0] == '\0';
+	if (!auto_detect && strcmp(prev, chosen) == 0) {
+		return false;
+	}
+	enum mfd_controller_profile detected = mfd_profile_for_device(chosen, connected, opened_name);
+	if (detected == current || (auto_detect && detected == MFD_PROFILE_GENERIC)) {
+		return false;
+	}
+	if (out_profile) {
+		*out_profile = detected;
+	}
+	return true;
+}
+
 size_t mfd_apc40_get_default_slots(struct mfd_apc40_default_slot *out_slots, size_t max_slots)
 {
 	if (!out_slots || max_slots == 0U) {

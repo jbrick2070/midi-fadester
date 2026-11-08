@@ -98,6 +98,54 @@ int main(void)
 	REQUIRE(strcmp(mfd_learn_button_text(false), "Learn") == 0);
 	REQUIRE(strcmp(mfd_learn_button_text(true), "Move a control...") == 0);
 
+	/* 5. A CC 32..63 bound as its own 7-bit control never pairs with CC n-32 (MIDImix Master CC 62 vs FX 4 CC 30) */
+	mfd_midi_parser_init(&p);
+	mfd_midi_parser_set_lsb_independent(&p, 0U, 62U, true);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 30U, 64U), 100U, &dec));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 62U, 100U), 100U, &dec));
+	REQUIRE(dec.addr.type == MFD_MIDI_CC);
+	REQUIRE(dec.addr.number == 62U);
+	REQUIRE(!dec.addr.is_14bit);
+	REQUIRE(dec.raw_value == 100U);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 30U, 65U), 101U, &dec));
+	REQUIRE(dec.addr.number == 30U);
+	REQUIRE(!dec.addr.is_14bit);
+	REQUIRE(dec.raw_value == 65U);
+
+	/* 6. A first pairing needs the LSB right behind its MSB; once paired, a late LSB still pairs */
+	mfd_midi_parser_init(&p);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 16U, 10U), 1000U, &dec));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 48U, 20U), 1500U, &dec));
+	REQUIRE(dec.addr.number == 48U);
+	REQUIRE(!dec.addr.is_14bit);
+	REQUIRE(dec.raw_value == 20U);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 15U, 0x40U), 2000U, &dec));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 47U, 0x2AU), 2001U, &dec));
+	REQUIRE(dec.addr.number == 15U);
+	REQUIRE(dec.addr.is_14bit);
+	REQUIRE(dec.raw_value == ((0x40U << 7U) | 0x2AU));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 47U, 0x10U), 9000U, &dec));
+	REQUIRE(dec.addr.number == 15U);
+	REQUIRE(dec.addr.is_14bit);
+	REQUIRE(dec.raw_value == ((0x40U << 7U) | 0x10U));
+
+	/* 7. A new device or layout forgets the pairing history: the same LSB alone is its own 7-bit control */
+	mfd_midi_parser_reset_cc_state(&p);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 47U, 0x2AU), 9100U, &dec));
+	REQUIRE(dec.addr.number == 47U);
+	REQUIRE(!dec.addr.is_14bit);
+	REQUIRE(dec.raw_value == 0x2AU);
+
+	/* 8. Learn captures an LSB-numbered control as itself, even right behind its MSB partner */
+	mfd_midi_parser_init(&p);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 16U, 10U), 100U, &dec));
+	mfd_midi_parser_start_learn(&p);
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 48U, 20U), 101U, &dec));
+	REQUIRE(mfd_midi_parser_pop_learned(&p, &learned));
+	REQUIRE(learned.type == MFD_MIDI_CC);
+	REQUIRE(learned.number == 48U);
+	REQUIRE(!learned.is_14bit);
+
 	printf("test-midi-parser: PASS\n");
 	return 0;
 }

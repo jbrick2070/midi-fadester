@@ -632,6 +632,7 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 		slot->mix_request_id[0] = '\0';
 		slot->mix_delivery = MFD_MIX_IDLE;
 		slot->mix_sent_ns = 0;
+		slot->mix_pending = false;
 	}
 	if (prev_target == new_target) {
 		configure_slot_takeover_mode(eng, slot);
@@ -729,6 +730,7 @@ bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controlle
 		mfd_engine_detach_filter_binding_locked(eng, k);
 	}
 	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
+	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	if (!eng->has_last_midi) {
 		eng->last_moved_slot_index = -1;
 	}
@@ -783,13 +785,16 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 
 	mfd_engine_lock(eng);
 	mfd_engine_cancel_setup_session(eng);
+	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	if (reset_targets) {
 		mfd_engine_load_profile_defaults(eng, prof);
 	} else {
+		const enum mfd_controller_profile prev_profile = mfd_engine_get_active_profile(eng);
 		snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
 		if (def->id == MFD_PROFILE_GENERIC) {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS && (size_t)i < MFD_APC40_DEFAULT_SLOT_COUNT; ++i) {
-				if (mfd_slot_is_fx_bank(i)) {
+				/* FX always; slots the previous desk lacked return as Not used. Bindings are kept. */
+				if (mfd_slot_is_fx_bank(i) || !mfd_profile_has_physical_slot(prev_profile, i)) {
 					eng->fader_slots[i].enabled = true;
 				}
 			}
@@ -1969,7 +1974,9 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 	bool a_above_b = slot ? slot->a_is_above_b : false;
 
 	if (slot) {
-		snprintf(res_scene, sizeof(res_scene), "%s", slot->resolved_scene_name);
+		if (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX || slot->target_type == MFD_TARGET_SINGLE_LAYER) {
+			snprintf(res_scene, sizeof(res_scene), "%s", slot->resolved_scene_name);
+		}
 		if (!slot->enabled) {
 			snprintf(lbl, sizeof(lbl), "Disabled");
 			avail = false;
@@ -3585,6 +3592,27 @@ static bool sg_output_source_name(const struct mfd_engine *eng, uint32_t channel
 	return out[0] != '\0';
 }
 
+static bool sg_get_source_volume(const struct mfd_engine *eng, const char *source_name, float *out_mul)
+{
+	if (!source_name || source_name[0] == '\0' || !out_mul) {
+		return false;
+	}
+	if (eng && eng->scene_graph_ops) {
+		return eng->scene_graph_ops->get_volume &&
+		       eng->scene_graph_ops->get_volume(source_name, out_mul, eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_source_by_name(source_name);
+	if (!src) {
+		return false;
+	}
+	*out_mul = obs_source_get_volume(src);
+	obs_source_release(src);
+	return true;
+}
+
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -3769,7 +3797,8 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 			s->resolved_scene_name[0] = '\0';
 		}
 	} else if (edit->target_type == MFD_TARGET_TBAR || edit->target_type == MFD_TARGET_AUDIO_VOLUME ||
-		   edit->target_type == MFD_TARGET_FILTER_PARAM || edit->target_type == MFD_TARGET_UNASSIGNED) {
+		   edit->target_type == MFD_TARGET_FILTER_PARAM || edit->target_type == MFD_TARGET_UNASSIGNED ||
+		   edit->target_type == MFD_TARGET_MIX_MASTER) {
 		s->scene_name[0] = '\0';
 		s->resolved_scene_name[0] = '\0';
 	} else if (s->scene_name[0] != '\0') {
@@ -4234,10 +4263,9 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 	case MFD_TARGET_MIX_MASTER: {
 		int index = (int)(slot - eng->fader_slots);
 		slot->last_applied_val = val; /* Local control position; provider replies carry the applied gain. */
-		eng->mix_slot = index;
-		eng->mix_slot_rev = eng->slot_config_rev[index];
-		eng->mix_db = fmaxf(-100.0f, mfd_deflection_to_db(val));
-		eng->mix_pending = true;
+		slot->mix_pending = true;
+		slot->mix_pending_db = fmaxf(-100.0f, mfd_deflection_to_db(val));
+		slot->mix_pending_rev = eng->slot_config_rev[index];
 		break;
 	}
 	case MFD_TARGET_FILTER_PARAM:
@@ -4424,16 +4452,64 @@ static float normalize_decoded_sample(struct mfd_engine *eng, struct mfd_midi_ad
 				}
 			}
 		}
-		if (mfd_calibration_observe_and_widen(cal, (int)dec->raw_value)) {
+		int raw = (int)dec->raw_value;
+		if (dec->addr.type == MFD_MIDI_CC && !dec->addr.is_14bit && slot_addr->is_14bit) {
+			raw <<= 7; /* High byte alone on a 14-bit binding: scale it into the 14-bit range. */
+		}
+		if (mfd_calibration_observe_and_widen(cal, raw)) {
 			store_persisted_calibration(eng, effective_profile_name(eng), slot_addr, cal);
 			if (obs_initialized()) {
 				eng->pending_config_save = true;
 			}
 			mfd_engine_notify_state_changed(eng);
 		}
-		return mfd_calibration_normalize(cal, (int)dec->raw_value, invert);
+		return mfd_calibration_normalize(cal, raw, invert);
 	}
 	return invert ? (1.0f - dec->normalized) : dec->normalized;
+}
+
+/* CC 32..63 bound as their own 7-bit control is never read as the low half of a 14-bit pair, even on a strip that is
+ * switched off. */
+static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
+{
+	mfd_midi_parser_clear_lsb_independent(&eng->midi_parser);
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_midi_addr *a = &eng->fader_slots[i].addr;
+		if (a->type == MFD_MIDI_CC && !a->is_14bit && a->number >= 32U && a->number < 64U) {
+			mfd_midi_parser_set_lsb_independent(&eng->midi_parser, a->channel, a->number, true);
+		}
+	}
+	const struct mfd_midi_addr *c = &eng->setup_session.candidate_addr;
+	if (eng->setup_session.active && c->type == MFD_MIDI_CC && !c->is_14bit && c->number >= 32U &&
+	    c->number < 64U) {
+		mfd_midi_parser_set_lsb_independent(&eng->midi_parser, c->channel, c->number, true);
+	}
+}
+
+/* A volume moved without the fader (OBS mixer, script, scene collection): pick up instead of jumping. With two Volume
+ * slots on one source, one fader's write is an outside change to the other, which then waits to pick up. */
+static void sync_volume_slots_from_live_locked(struct mfd_engine *eng)
+{
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (!s->enabled || !s->cached_available || s->target_type != MFD_TARGET_AUDIO_VOLUME ||
+		    s->source_a_name[0] == '\0') {
+			continue;
+		}
+		float live = 0.0f;
+		if (!sg_get_source_volume(eng, s->source_a_name, &live) || fabsf(live - s->last_audio_mul) <= 1e-5f) {
+			continue;
+		}
+		float t = mfd_mul_to_deflection(live);
+		s->auto_fade_active = false;
+		s->last_applied_val = t;
+		s->last_audio_mul = live;
+		s->last_audio_db = mfd_deflection_to_db(t);
+		mfd_smoother_reset(&s->smoother, t);
+		mfd_takeover_sync_external(&s->takeover, t);
+		mfd_engine_notify_fader_changed(eng, i, "obs");
+		mfd_engine_mark_ui_dirty(eng, false);
+	}
 }
 
 void mfd_engine_tick(struct mfd_engine *eng, float seconds)
@@ -4447,6 +4523,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
 		mfd_engine_mark_ui_dirty(eng, true);
 	}
+	sync_volume_slots_from_live_locked(eng);
 
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		eng->fader_slots[i].sec_since_last_fader_event += seconds;
@@ -4459,10 +4536,11 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		}
 	}
 
+	sync_parser_lsb_independence_locked(eng);
 	struct mfd_midi_raw_event raw;
 	while (mfd_midi_queue_pop(&eng->midi_queue, &raw)) {
 		struct mfd_midi_decoded dec;
-		if (!mfd_midi_parser_feed(&eng->midi_parser, raw.raw_msg, &dec)) {
+		if (!mfd_midi_parser_feed_at(&eng->midi_parser, raw.raw_msg, raw.timestamp_ms, &dec)) {
 			continue;
 		}
 		eng->last_midi_decoded = dec;
@@ -4771,17 +4849,30 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	}
 
 	eng->mix_send_wait = fmaxf(0.0f, eng->mix_send_wait - seconds);
-	bool send_mix = eng->mix_pending && eng->mix_send_wait <= 0.0f;
-	int mix_slot = eng->mix_slot;
-	uint64_t mix_revision = eng->mix_slot_rev;
-	float mix_db = eng->mix_db;
-	if (send_mix) {
-		eng->mix_pending = false;
-		eng->mix_send_wait = 0.05f;
+	int mix_count = 0;
+	int mix_slots[MFD_MAX_FADER_SLOTS];
+	uint64_t mix_revs[MFD_MAX_FADER_SLOTS];
+	float mix_dbs[MFD_MAX_FADER_SLOTS];
+	if (eng->mix_send_wait <= 0.0f) {
+		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+			struct mfd_fader_slot *ms = &eng->fader_slots[i];
+			if (!ms->mix_pending) {
+				continue;
+			}
+			ms->mix_pending = false;
+			mix_slots[mix_count] = i;
+			mix_revs[mix_count] = ms->mix_pending_rev;
+			mix_dbs[mix_count] = ms->mix_pending_db;
+			++mix_count;
+		}
+		if (mix_count > 0) {
+			eng->mix_send_wait = 0.05f;
+		}
 	}
 	mfd_engine_unlock(eng);
-	if (send_mix)
-		mfd_vendor_send_mix_set(eng, mix_slot, mix_revision, mix_db);
+	for (int k = 0; k < mix_count; ++k) {
+		mfd_vendor_send_mix_set(eng, mix_slots[k], mix_revs[k], mix_dbs[k]);
+	}
 }
 
 static void mfd_engine_video_tick(void *param, float seconds)
@@ -5388,6 +5479,7 @@ static void deserialize_calibrations(struct mfd_engine *eng, obs_data_t *root)
 	if (!arr) {
 		return;
 	}
+	memset(eng->cal_entries, 0, sizeof(eng->cal_entries)); /* Import replaces the learned ranges */
 	size_t count = obs_data_array_count(arr);
 	for (size_t i = 0U; i < count; ++i) {
 		obs_data_t *item = obs_data_array_item(arr, i);
@@ -5759,6 +5851,26 @@ bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
 	return true;
 }
 
+/* Dialog Import: load the file, then open the port it names. Layout and bindings stay as imported. */
+bool mfd_engine_import_config_file_and_reopen(struct mfd_engine *eng, const char *filepath)
+{
+	if (!mfd_engine_import_config_file(eng, filepath)) {
+		return false;
+	}
+	mfd_engine_lock(eng);
+	const bool same_port = eng->midi_dev.is_open && eng->configured_device_name[0] != '\0' &&
+			       strcmp(eng->configured_device_name, eng->midi_dev.opened_name) == 0;
+	if (same_port) {
+		/* No reopen: the imported layout still starts with clean pairing history. */
+		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
+	}
+	mfd_engine_unlock(eng);
+	if (!same_port) {
+		(void)mfd_engine_reconnect_midi(eng, NULL); /* NULL keeps the imported configured_device_name */
+	}
+	return true;
+}
+
 bool mfd_engine_save_global_config(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -5812,6 +5924,7 @@ bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)
 	if (device_name) {
 		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", device_name);
 	}
+	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	bool ok = mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name);
 	refresh_apc40_detected_locked(eng);
 	mfd_engine_notify_state_changed(eng);
@@ -5922,6 +6035,7 @@ void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
 	}
 
 	if (candidate_present) {
+		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 		if (mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name)) {
 			refresh_apc40_detected_locked(eng);
 			mfd_engine_notify_state_changed(eng);

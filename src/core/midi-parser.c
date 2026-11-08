@@ -74,6 +74,12 @@ bool mfd_midi_addr_matches(const struct mfd_midi_addr *binding, const struct mfd
 
 bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mfd_midi_decoded *out_decoded)
 {
+	return mfd_midi_parser_feed_at(p, raw_msg, 0U, out_decoded);
+}
+
+bool mfd_midi_parser_feed_at(struct mfd_midi_parser *p, uint32_t raw_msg, uint32_t timestamp_ms,
+			     struct mfd_midi_decoded *out_decoded)
+{
 	if (!p || !out_decoded) {
 		return false;
 	}
@@ -96,6 +102,7 @@ bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mf
 		if (data1 < 32U) {
 			p->cc_msb[channel][data1] = data2;
 			p->cc_has_msb[channel][data1] = true;
+			p->cc_msb_time_ms[channel][data1] = timestamp_ms;
 			out_decoded->addr.number = data1;
 			if (p->cc_14bit_active[channel][data1]) {
 				uint16_t val14 = (uint16_t)((uint16_t)data2 << 7U);
@@ -109,7 +116,13 @@ bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mf
 			}
 		} else if (data1 < 64U) {
 			uint8_t base_cc = (uint8_t)(data1 - 32U);
-			if (p->cc_has_msb[channel][base_cc]) {
+			bool pair = p->cc_has_msb[channel][base_cc] && !p->cc_lsb_independent[channel][base_cc];
+			if (pair && !p->cc_14bit_active[channel][base_cc]) {
+				/* A first pairing needs the LSB right behind its MSB, and never starts while Learn listens. */
+				uint32_t since_msb = timestamp_ms - p->cc_msb_time_ms[channel][base_cc];
+				pair = !p->learning && since_msb <= MFD_MIDI_14BIT_PAIR_WINDOW_MS;
+			}
+			if (pair) {
 				uint16_t val14 = (uint16_t)(((uint16_t)p->cc_msb[channel][base_cc] << 7U) | data2);
 				p->cc_14bit_active[channel][base_cc] = true;
 				out_decoded->addr.number = base_cc;
@@ -168,6 +181,36 @@ bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mf
 	}
 
 	return true;
+}
+
+void mfd_midi_parser_set_lsb_independent(struct mfd_midi_parser *p, uint8_t channel, uint8_t cc, bool independent)
+{
+	if (!p || channel > 15U || cc < 32U || cc > 63U) {
+		return;
+	}
+	p->cc_lsb_independent[channel][cc - 32U] = independent;
+	if (independent) {
+		p->cc_14bit_active[channel][cc - 32U] = false;
+	}
+}
+
+void mfd_midi_parser_clear_lsb_independent(struct mfd_midi_parser *p)
+{
+	if (p) {
+		memset(p->cc_lsb_independent, 0, sizeof(p->cc_lsb_independent));
+	}
+}
+
+/* Forget pairing history (new device or layout); keeps Learn state and the independence mask. */
+void mfd_midi_parser_reset_cc_state(struct mfd_midi_parser *p)
+{
+	if (!p) {
+		return;
+	}
+	memset(p->cc_msb, 0, sizeof(p->cc_msb));
+	memset(p->cc_has_msb, 0, sizeof(p->cc_has_msb));
+	memset(p->cc_14bit_active, 0, sizeof(p->cc_14bit_active));
+	memset(p->cc_msb_time_ms, 0, sizeof(p->cc_msb_time_ms));
 }
 
 void mfd_format_last_midi_readout(bool has_event, const struct mfd_midi_decoded *ev, char *out_buf, size_t out_size)

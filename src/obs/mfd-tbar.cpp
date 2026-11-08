@@ -2270,9 +2270,15 @@ static void run_live_selftest_worker(void)
 		calldata_free(&cd);
 	}
 
+	/* A rate-limited fader_changed is emitted on the next engine tick; let it arrive before disconnecting. */
+	std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
 	if (sh) {
 		signal_handler_disconnect(sh, "midi_fadester_fader_changed", on_selftest_fader_signal, &sig_cap);
 	}
+	const bool bridge_pass = bridge_set_ok && bridge_get_ok && std::fabs(bridge_get_val - 0.65f) < 0.01f &&
+				 sig_cap.count >= 1 && std::strcmp(sig_cap.slot, "fader_2") == 0 &&
+				 std::fabs(sig_cap.value - 0.65f) < 0.01f;
 
 	/* Verify Visual Sidechain (commit 26d9089) receives fader_2=0.65 via in-process bridge and modulates sibling filter */
 	obs_source_t *vs_test_src = obs_source_create("color_source", "__mfd_vs_bridge_src__", nullptr, nullptr);
@@ -2686,11 +2692,11 @@ static void run_live_selftest_worker(void)
 	base_set_log_handler(g_orig_log_handler, g_orig_log_param);
 
 	obs_log(LOG_INFO,
-		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d studio_off=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) vs_received_fader_2=%.2f fx_filter_pass=%d",
+		"SELF-TEST RESULT: build_ok=%d slot_avail=%d filter_a=%.2f->%.2f filter_b=%.2f->%.2f screenshot_all_pass=%d loopmidi_tested=%d loopmidi_pass=%d slider_mid=%d tbar_mid_ok=%d tbar_end_ok=%d tbar_completed=%d studio_off=%d bridge_ok=%d/%.2f sig_val=%.2f(%s) bridge_pass=%d vs_received_fader_2=%.2f fx_filter_pass=%d",
 		(int)ws_build_ok, (int)slot_avail, read_a_mid, read_a_end, read_b_mid, read_b_end,
 		(int)screenshot_all_pass, (int)loopmidi_tested, (int)loopmidi_pass, slider_mid, (int)mid_ok,
 		(int)end_ok, (int)completed, (int)studio_off_after, (int)(bridge_set_ok && bridge_get_ok),
-		bridge_get_val, sig_cap.value, sig_cap.slot, vs_fader2_val, (int)fx_filter_pass);
+		bridge_get_val, sig_cap.value, sig_cap.slot, (int)bridge_pass, vs_fader2_val, (int)fx_filter_pass);
 }
 
 static std::thread g_selftest_thread;

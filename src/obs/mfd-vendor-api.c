@@ -1164,6 +1164,11 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		s->target_type = MFD_TARGET_UNASSIGNED;
 		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_FILTER_PARAM);
 	}
+	if (s->target_type != MFD_TARGET_TWO_SOURCE_MIX && s->target_type != MFD_TARGET_SINGLE_LAYER) {
+		/* Only layer jobs use a scene; a stale one would be reported, saved, and pinned again later. */
+		s->scene_name[0] = '\0';
+		s->resolved_scene_name[0] = '\0';
+	}
 
 	mfd_engine_bump_slot_rev(eng, idx);
 	mfd_engine_reevaluate_slots(eng, false);

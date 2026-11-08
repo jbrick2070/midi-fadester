@@ -1180,7 +1180,7 @@ private:
 			if (path.isEmpty()) {
 				return;
 			}
-			if (mfd_engine_import_config_file(eng_, path.toUtf8().constData())) {
+			if (mfd_engine_import_config_file_and_reopen(eng_, path.toUtf8().constData())) {
 				mfd_engine_save_global_config(eng_);
 				mfd_engine_notify_state_changed(eng_);
 				populate_device_combos();
@@ -1202,8 +1202,12 @@ private:
 
 		connect(device_combo_, QOverload<int>::of(&QComboBox::activated), this,
 			[this](int) { apply_controller_selection(device_combo_->currentData().toString()); });
-		connect(btn_reconnect, &QPushButton::clicked, this,
-			[this]() { apply_controller_selection(device_combo_->currentData().toString()); });
+		connect(btn_reconnect, &QPushButton::clicked, this, [this]() {
+			/* Rescan the configured port, never the list's entry: a named port keeps its layout and learned
+			 * bindings; Auto-Detect follows a newly plugged known desk. */
+			mfd_engine_get_ui_snapshot(eng_, &snap_);
+			apply_controller_selection(QString::fromUtf8(snap_.configured_device_name));
+		});
 
 		connect(profile_combo_, QOverload<int>::of(&QComboBox::activated), this, [this](int) {
 			const auto chosen_prof =
@@ -1271,12 +1275,16 @@ private:
 
 	void apply_controller_selection(const QString &chosen_port)
 	{
-		mfd_engine_reconnect_midi(eng_, chosen_port.toUtf8().constData());
 		mfd_engine_get_ui_snapshot(eng_, &snap_);
-		const enum mfd_controller_profile detected = mfd_profile_for_device(
-			snap_.configured_device_name, snap_.midi_connected, snap_.opened_device_name);
-		if (detected != MFD_PROFILE_GENERIC) {
-			mfd_engine_select_profile(eng_, detected, false);
+		const QByteArray prev_port(snap_.configured_device_name);
+		const enum mfd_controller_profile current = snap_.active_profile;
+		const QByteArray chosen = chosen_port.toUtf8();
+		mfd_engine_reconnect_midi(eng_, chosen.constData());
+		mfd_engine_get_ui_snapshot(eng_, &snap_);
+		enum mfd_controller_profile next = current;
+		if (mfd_profile_for_port_change(prev_port.constData(), chosen.constData(), snap_.midi_connected,
+						snap_.opened_device_name, current, &next)) {
+			mfd_engine_select_profile(eng_, next, false);
 		} else {
 			mfd_engine_save_global_config(eng_);
 			mfd_engine_notify_state_changed(eng_);

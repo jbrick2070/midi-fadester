@@ -121,6 +121,9 @@ struct mfd_fader_slot {
 	double mix_reported_db;
 	char mix_reason[80];
 	uint64_t mix_sent_ns;
+	bool mix_pending; /* this slot's latest mix request, not yet sent */
+	float mix_pending_db;
+	uint64_t mix_pending_rev;
 	uint32_t output_write_count;
 
 	/* Auto-fade state */
@@ -339,6 +342,9 @@ struct mfd_scene_graph_ops {
 	/* Optional: the name of the source on an OBS output channel (1 = Desktop Audio), so the first-run layout finds
 	 * desktop audio whatever language OBS names it in. */
 	bool (*get_output_source_name)(uint32_t channel, char *out_name, size_t out_size, void *user_data);
+
+	/* Optional: read a source's volume multiplier (headless tests). */
+	bool (*get_volume)(const char *source_name, float *out_mul, void *user_data);
 };
 
 struct mfd_engine {
@@ -349,11 +355,7 @@ struct mfd_engine {
 	bool pending_state_event;
 	bool pending_config_save;
 	struct mfd_pending_fader_emit pending_fader_emits[MFD_MAX_FADER_SLOTS];
-	/* Coalesce the most recent absolute mix request. The OBS call runs outside the slot lock. */
-	bool mix_pending;
-	int mix_slot;
-	uint64_t mix_slot_rev;
-	float mix_db;
+	/* Paces mix requests; each mix-master slot keeps its own latest one. The OBS call runs outside the slot lock. */
 	float mix_send_wait;
 
 	uint64_t config_topology_rev;
@@ -542,6 +544,7 @@ bool mfd_engine_save_global_config(struct mfd_engine *eng);
 void mfd_engine_load_global_config(struct mfd_engine *eng);
 bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath);
 bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath);
+bool mfd_engine_import_config_file_and_reopen(struct mfd_engine *eng, const char *filepath);
 
 bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_name);
 bool mfd_engine_scene_exists(const struct mfd_engine *eng, const char *scene_name);

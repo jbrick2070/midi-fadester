@@ -532,6 +532,17 @@ static void fake_op_apply_volume(const char *source_name, float mul, void *user_
 	}
 }
 
+static bool fake_op_get_volume(const char *source_name, float *out_mul, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_source *src = sg ? fake_sg_find_source(sg, source_name) : NULL;
+	if (!src || !out_mul) {
+		return false;
+	}
+	*out_mul = src->last_volume_mul;
+	return true;
+}
+
 static void fake_op_fill_catalog(struct mfd_ui_catalog *out, void *user_data)
 {
 	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
@@ -1186,6 +1197,27 @@ int main(void)
 	obs_data_release(mix_reply);
 	obs_data_release(receipt);
 	memset(mix, 0, sizeof(*mix));
+
+	/* Two master slots moved within one send interval each send their own latest request; neither is dropped. */
+	struct mfd_fader_slot *mix2 = &eng.fader_slots[8];
+	mix->enabled = mix->cached_available = true;
+	mix->target_type = MFD_TARGET_MIX_MASTER;
+	mix->addr = (struct mfd_midi_addr){.type = MFD_MIDI_CC, .number = 23};
+	mfd_calibration_set(&mix->cal, false, 0, 127);
+	mix2->enabled = mix2->cached_available = true;
+	mix2->target_type = MFD_TARGET_MIX_MASTER;
+	mix2->addr = (struct mfd_midi_addr){.type = MFD_MIDI_CC, .number = 24};
+	mfd_calibration_set(&mix2->cal, false, 0, 127);
+	const int mix_before = ws_log.mix_requests;
+	push_midi_cc(&eng, 0, 23, 64);
+	push_midi_cc(&eng, 0, 24, 127);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(ws_log.mix_requests == mix_before + 2);
+	REQUIRE(mix->mix_delivery == MFD_MIX_WAITING && mix2->mix_delivery == MFD_MIX_WAITING);
+	REQUIRE(mix->mix_request_id[0] != '\0' && mix2->mix_request_id[0] != '\0');
+	REQUIRE(strcmp(mix->mix_request_id, mix2->mix_request_id) != 0);
+	memset(mix, 0, sizeof(*mix));
+	memset(mix2, 0, sizeof(*mix2));
 
 	/* 1. load_profile across verified + beta profiles and error check on unknown profile */
 	obs_data_t *req = obs_data_create();
@@ -2150,10 +2182,23 @@ int main(void)
 	/* Export/Import round-trip preserves control_calibrations [0, 125], and CC 127 auto-widens to [0, 127] */
 	const char *tmp_cal_json = "test-mfd-cal-roundtrip.json";
 	REQUIRE(mfd_engine_export_config_file(&eng, tmp_cal_json));
-	memset(eng.cal_entries, 0, sizeof(eng.cal_entries));
+	/* A full table of another desk's learned ranges: Import replaces the table instead of merging into it */
+	for (int k = 0; k < MFD_MAX_CAL_ENTRIES; ++k) {
+		eng.cal_entries[k].in_use = true;
+		snprintf(eng.cal_entries[k].profile_name, sizeof(eng.cal_entries[k].profile_name), "%s", "zz-foreign");
+		eng.cal_entries[k].addr = (struct mfd_midi_addr){MFD_MIDI_CC, 15U, (uint8_t)k, false};
+		mfd_calibration_set(&eng.cal_entries[k].cal, false, 0, 100);
+	}
 	eng.fader_slots[0].cal.cal_max = 127;
 	REQUIRE(mfd_engine_import_config_file(&eng, tmp_cal_json));
 	remove(tmp_cal_json);
+	struct mfd_control_calibration got;
+	REQUIRE(mfd_engine_lookup_persisted_calibration(&eng, "apc40mk2",
+							&(struct mfd_midi_addr){MFD_MIDI_CC, 0U, 15U, false}, &got));
+	REQUIRE(got.cal_min == 0 && got.cal_max == 125);
+	for (int k = 0; k < MFD_MAX_CAL_ENTRIES; ++k) {
+		REQUIRE(!eng.cal_entries[k].in_use || strcmp(eng.cal_entries[k].profile_name, "zz-foreign") != 0);
+	}
 	REQUIRE(eng.fader_slots[0].cal.cal_min == 0);
 	REQUIRE(eng.fader_slots[0].cal.cal_max == 125);
 
@@ -2187,6 +2232,230 @@ int main(void)
 	REQUIRE(eng.fader_slots[1].cal.cal_max == 16383);
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - (4096.0f / 16383.0f)) < 1e-4f);
 	REQUIRE(!get_slot_parked_via_get_state(&eng, 1));
+
+	/* 12f: MIDImix Master (CC 62) survives FX 4 (CC 30). Both carry timestamp 0, so only the mask of bound
+	 * CC 32..63 controls can stop the pairing. */
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_profile_defaults(&eng, MFD_PROFILE_AKAI_MIDIMIX);
+	mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+	push_midi_cc(&eng, 0, 30, 64);
+	push_midi_cc(&eng, 0, 62, 100);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[9].last_raw_norm - 100.0f / 127.0f) < 1e-3f);
+	REQUIRE(!eng.fader_slots[13].addr.is_14bit);
+
+	/* The same with Master switched off: its CC 62 still never pairs, so FX 4 (CC 30) is not promoted to 14-bit */
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_profile_defaults(&eng, MFD_PROFILE_AKAI_MIDIMIX);
+	eng.fader_slots[9].enabled = false;
+	push_midi_cc(&eng, 0, 30, 64);
+	push_midi_cc(&eng, 0, 62, 100);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.last_midi_decoded.addr.number == 62U && !eng.last_midi_decoded.addr.is_14bit);
+	REQUIRE(!eng.fader_slots[13].addr.is_14bit);
+
+	/* 12g: A binding already promoted to 14-bit and saved reads the high byte alone over its whole travel */
+	mfd_engine_load_apc40_defaults(&eng);
+	mfd_midi_parser_init(&eng.midi_parser);
+	eng.fader_slots[1].addr.is_14bit = true;
+	mfd_calibration_set(&eng.fader_slots[1].cal, true, 0, 16383);
+	push_midi_cc(&eng, 0, 7, 127);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(eng.fader_slots[1].last_raw_norm > 0.99f);
+
+	/* 12h: A new layout forgets the old desk's pairing history (APC40 Device knob CC 16, then APC mini CC 48) */
+	mfd_midi_parser_init(&eng.midi_parser);
+	mfd_engine_load_apc40_defaults(&eng);
+	push_midi_cc(&eng, 0, 16, 64);
+	mfd_engine_tick(&eng, 0.016f);
+	mfd_engine_load_profile_defaults(&eng, MFD_PROFILE_APC_MINI_MK2);
+	REQUIRE(!eng.midi_parser.cc_has_msb[0][16]);
+	push_midi_cc(&eng, 0, 48, 100);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_raw_norm - 100.0f / 127.0f) < 1e-3f);
+
+	/* 12i: A volume moved in OBS (mixer, script) makes an engaged Volume fader pick up instead of jumping */
+	{
+		struct mfd_scene_graph_ops vol_ops = g_fake_sg_ops;
+		vol_ops.get_volume = fake_op_get_volume;
+		eng.scene_graph_ops = &vol_ops;
+		fake_sg_add_source(&fake_sg, "Mic/Aux", true);
+		mfd_engine_load_apc40_defaults(&eng);
+		mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_2");
+		obs_data_set_string(req, "target_mode", "audio_volume");
+		obs_data_set_string(req, "source_a", "Mic/Aux");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+		struct fake_sg_source *mic = fake_sg_find_source(&fake_sg, "Mic/Aux");
+		REQUIRE(mic != NULL);
+		mic->last_volume_mul = 1.0f;
+		push_midi_cc(&eng, 1, 7, 127);
+		mfd_engine_tick(&eng, 0.016f);
+		push_midi_cc(&eng, 1, 7, 102);
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.fader_slots[2].takeover.state == MFD_TAKEOVER_ENGAGED);
+		REQUIRE(fabsf(eng.fader_slots[2].last_applied_val - 102.0f / 127.0f) < 0.01f);
+
+		const int mic_writes = mic->volume_writes;
+		mic->last_volume_mul = 0.027f; /* an OBS mixer drag to 0.3 deflection (0.3 cubed) */
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.fader_slots[2].takeover.state == MFD_TAKEOVER_WAITING);
+		REQUIRE(fabsf(eng.fader_slots[2].takeover.target_obs - 0.3f) < 0.01f);
+
+		push_midi_cc(&eng, 1, 7, 100);
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(mic->volume_writes == mic_writes);
+		REQUIRE(mic->last_volume_mul == 0.027f);
+
+		/* The plugin's own state now matches OBS, so a quiet tick changes nothing (no false echo) */
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.fader_slots[2].takeover.state == MFD_TAKEOVER_WAITING);
+		REQUIRE(fabsf(eng.fader_slots[2].takeover.target_obs - 0.3f) < 0.01f);
+		REQUIRE(mic->volume_writes == mic_writes);
+		REQUIRE(mic->last_volume_mul == 0.027f);
+
+		/* An unavailable Volume strip (its source has no audio now) is not followed */
+		mic->has_audio = false;
+		mfd_engine_reevaluate_slots(&eng, false);
+		REQUIRE(!eng.fader_slots[2].cached_available);
+		mic->last_volume_mul = 0.5f;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.fader_slots[2].last_audio_mul == 0.027f);
+		REQUIRE(fabsf(eng.fader_slots[2].takeover.target_obs - 0.3f) < 0.01f);
+		mic->has_audio = true;
+		eng.scene_graph_ops = &g_fake_sg_ops;
+	}
+
+	/* 12j: Import opens the MIDI port the file names and keeps the imported bindings. No port has this name, so the
+	 * open attempt fails as "not found" and no real port is opened. */
+	{
+		char saved_dev[MFD_MIDI_DEV_NAME_MAX];
+		snprintf(saved_dev, sizeof(saved_dev), "%s", eng.configured_device_name);
+		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
+		snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "%s", "Fadester Test Port B");
+		eng.fader_slots[1].addr = (struct mfd_midi_addr){MFD_MIDI_CC, 0U, 99U, false};
+		const char *tmp_reopen_json = "test-mfd-import-reopen.json";
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_reopen_json));
+		eng.configured_device_name[0] = '\0';
+		REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_reopen_json));
+		remove(tmp_reopen_json);
+		REQUIRE(strcmp(eng.configured_device_name, "Fadester Test Port B") == 0);
+		REQUIRE(!eng.midi_dev.is_open);
+		REQUIRE(eng.midi_dev.error_kind == MFD_WINMM_ERR_CONFIGURED_NOT_FOUND);
+		REQUIRE(eng.fader_slots[1].addr.number == 99U);
+
+		/* The same port already open: no reopen, but the import still starts with clean pairing history. The open
+		 * state is set by hand (no handle), and the file has no slot list, so only this path resets the parser. */
+		const char *tmp_same_json = "test-mfd-import-same-port.json";
+		FILE *same_fp = fopen(tmp_same_json, "wb");
+		REQUIRE(same_fp != NULL);
+		fputs("{\"device_name\":\"Fadester Test Port B\",\"active_profile\":\"apc40mk2\"}\n", same_fp);
+		fclose(same_fp);
+		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
+		eng.midi_dev.is_open = true;
+		snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "%s", "Fadester Test Port B");
+		push_midi_cc(&eng, 0, 16, 64);
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.midi_parser.cc_has_msb[0][16]);
+		REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_same_json));
+		remove(tmp_same_json);
+		REQUIRE(eng.midi_dev.is_open && eng.midi_dev.error_kind == MFD_WINMM_OK);
+		REQUIRE(!eng.midi_parser.cc_has_msb[0][16]);
+
+		snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "%s", saved_dev);
+		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
+	}
+
+	/* 12k: Generic after a desk without a crossfader brings back the slots that desk lacked as Not used; a strip the
+	 * user turned off stays off, and bindings stay */
+	mfd_engine_load_profile_defaults(&eng, MFD_PROFILE_AKAI_MIDIMIX);
+	REQUIRE(!eng.fader_slots[0].enabled);
+	eng.fader_slots[2].enabled = false;
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_GENERIC, false));
+	REQUIRE(eng.fader_slots[0].enabled && eng.fader_slots[0].target_type == MFD_TARGET_UNASSIGNED);
+	REQUIRE(!eng.fader_slots[2].enabled);
+	REQUIRE(eng.fader_slots[1].addr.number == 19U);
+
+	/* 12l: Only layer jobs keep a scene; a stale one is not reported, saved, or pinned again later */
+	mfd_engine_load_apc40_defaults(&eng);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "crossfade_ab");
+	obs_data_set_string(req, "scene", "Main");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	obs_data_set_string(req, "source_b", "Loop 3");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_has_user_value(res, "error"));
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(strcmp(eng.fader_slots[1].scene_name, "Main") == 0);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "audio_volume");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_has_user_value(res, "error"));
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(eng.fader_slots[1].scene_name[0] == '\0');
+	REQUIRE(eng.fader_slots[1].resolved_scene_name[0] == '\0');
+	req = obs_data_create();
+	res = obs_data_create();
+	mfd_vendor_handle_get_state(req, res, &eng);
+	obs_data_array_t *scene_slots = obs_data_get_array(res, "slots");
+	obs_data_t *scene_item = obs_data_array_item(scene_slots, 1U);
+	REQUIRE(scene_item != NULL);
+	REQUIRE(strcmp(obs_data_get_string(scene_item, "scene"), "") == 0);
+	obs_data_release(scene_item);
+	obs_data_array_release(scene_slots);
+	obs_data_release(req);
+	obs_data_release(res);
+
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "target_mode", "layer_opacity");
+	obs_data_set_string(req, "source_a", "Cam 1");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_has_user_value(res, "error"));
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(strcmp(eng.fader_slots[1].resolved_scene_name, "Main") == 0);
+	REQUIRE(eng.fader_slots[1].scene_name[0] == '\0');
+
+	/* Pin the layer job to "Main" again, so the Advanced tab's switch to Mix master starts from a pinned scene */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_string(req, "scene", "Main");
+	mfd_vendor_handle_set_slot(req, res, &eng);
+	REQUIRE(!obs_data_has_user_value(res, "error"));
+	obs_data_release(req);
+	obs_data_release(res);
+	REQUIRE(strcmp(eng.fader_slots[1].scene_name, "Main") == 0);
+
+	struct mfd_slot_config_edit scene_edit;
+	memset(&scene_edit, 0, sizeof(scene_edit));
+	scene_edit.enabled = true;
+	scene_edit.target_type = MFD_TARGET_MIX_MASTER;
+	scene_edit.preserve_scene = true;
+	snprintf(scene_edit.source_a_name, sizeof(scene_edit.source_a_name), "%s", "Cam 1");
+	REQUIRE(mfd_engine_update_slot_config(&eng, 1, &scene_edit));
+	REQUIRE(eng.fader_slots[1].scene_name[0] == '\0');
+	REQUIRE(eng.fader_slots[1].resolved_scene_name[0] == '\0');
+
+	/* Re-evaluation never carries a resolved scene over to a job that does not use one */
+	snprintf(eng.fader_slots[1].resolved_scene_name, sizeof(eng.fader_slots[1].resolved_scene_name), "%s", "Main");
+	mfd_engine_reevaluate_slots(&eng, false);
+	REQUIRE(eng.fader_slots[1].resolved_scene_name[0] == '\0');
 
 	/*
 	 * 13. 0.1.3 Bottom-Rail 6% Hysteresis Band (R-TBAR-SM / D-8):
