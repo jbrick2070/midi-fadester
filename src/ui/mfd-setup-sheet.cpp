@@ -196,8 +196,9 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	grid->addWidget(card_volume_, 1, 1);
 	grid->addWidget(card_filter_, 2, 0);
 	card_master_mix_ = create_mode_card_button(page1, QStringLiteral("mfdCardMasterMix"), MFD_TARGET_MIX_MASTER,
-		mfdText("Target.MixMaster", "Fadester mix master"),
-		mfdText("Setup.Card.MixMaster.Description", "Ride the shared mix from silence to unity."));
+						   mfdText("Target.MixMaster", "Fadester mix master"),
+						   mfdText("Setup.Card.MixMaster.Description",
+							   "Ride the shared mix from silence to unity."));
 	grid->addWidget(card_master_mix_, 2, 1);
 	p1_lay->addLayout(grid, 1);
 
@@ -241,8 +242,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	auto *p2_prompt = new QLabel(mfdText("Setup.Step2.Prompt", "Which?"), page2);
 	p2_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p2_lay->addWidget(p2_prompt);
-	step2_master_mix_info_ = new QLabel(mfdText("Setup.MixMaster.Help",
-		"Start and enable the Fadester mix provider on this OBS connection. This fader sends absolute gain requests for its configured mix. Its readout shows the provider reply."), page2);
+	step2_master_mix_info_ = new QLabel(
+		mfdText("Setup.MixMaster.Help",
+			"Start and enable the Fadester mix provider on this OBS connection. This fader sends absolute gain requests for its configured mix. Its readout shows the provider reply."),
+		page2);
 	step2_master_mix_info_->setWordWrap(true);
 	p2_lay->addWidget(step2_master_mix_info_);
 

@@ -51,7 +51,14 @@ struct mfd_persisted_cal_entry {
 	struct mfd_control_calibration cal;
 };
 
-enum mfd_mix_delivery { MFD_MIX_IDLE, MFD_MIX_WAITING, MFD_MIX_CONFIRMED, MFD_MIX_DECLINED, MFD_MIX_UNAVAILABLE, MFD_MIX_NO_REPLY };
+enum mfd_mix_delivery {
+	MFD_MIX_IDLE,
+	MFD_MIX_WAITING,
+	MFD_MIX_CONFIRMED,
+	MFD_MIX_DECLINED,
+	MFD_MIX_UNAVAILABLE,
+	MFD_MIX_NO_REPLY
+};
 
 struct mfd_fader_slot {
 	bool enabled;

@@ -52,7 +52,8 @@ void mfd_vendor_handle_mix_reply(obs_data_t *reply, obs_data_t *response, void *
 			if (!numeric && !obs_data_get_bool(reply, "silent") && slot->mix_reported_db != -100.0)
 				break;
 			double db = numeric ? obs_data_get_double(reply, "db") : -100.0;
-			if (!isfinite(db) || db < -100.0 || db > 0.0) break;
+			if (!isfinite(db) || db < -100.0 || db > 0.0)
+				break;
 			slot->mix_reported_db = db;
 			slot->mix_delivery = MFD_MIX_CONFIRMED;
 			++slot->output_write_count;
@@ -75,10 +76,12 @@ void mfd_vendor_send_mix_set(struct mfd_engine *eng, int slot_index, uint64_t re
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS || os_atomic_load_bool(&g_vendor_shutting_down))
 		return;
 	char *id = os_generate_uuid();
-	if (!id) return;
+	if (!id)
+		return;
 	struct mfd_fader_slot *slot = &eng->fader_slots[slot_index];
 	mfd_engine_lock(eng);
-	if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER || eng->slot_config_rev[slot_index] != revision ||
+	if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER ||
+	    eng->slot_config_rev[slot_index] != revision ||
 	    (eng->setup_session.active && eng->setup_session.slot_index == slot_index)) {
 		mfd_engine_unlock(eng);
 		bfree(id);
@@ -108,7 +111,8 @@ void mfd_vendor_send_mix_set(struct mfd_engine *eng, int slot_index, uint64_t re
 	} else if (os_atomic_load_bool(&g_mix_reply_registered)) {
 		obs_data_t *request = obs_data_create();
 		obs_data_set_obj(request, "eventData", event);
-		struct obs_websocket_request_response *response = obs_websocket_call_request("BroadcastCustomEvent", request);
+		struct obs_websocket_request_response *response =
+			obs_websocket_call_request("BroadcastCustomEvent", request);
 		sent = response && response->status_code == 100;
 		obs_websocket_request_response_free(response);
 		obs_data_release(request);

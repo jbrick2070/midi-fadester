@@ -498,15 +498,26 @@ void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, 
 		const char *values[] = {db};
 		const char *label;
 		switch (slot->mix_delivery) {
-		case MFD_MIX_WAITING: label = mfd_text_or_english(translate, "Mix.Waiting", "Requested %1 dB"); break;
-		case MFD_MIX_CONFIRMED: label = mfd_text_or_english(translate, "Mix.Confirmed", "Confirmed %1 dB"); break;
+		case MFD_MIX_WAITING:
+			label = mfd_text_or_english(translate, "Mix.Waiting", "Requested %1 dB");
+			break;
+		case MFD_MIX_CONFIRMED:
+			label = mfd_text_or_english(translate, "Mix.Confirmed", "Confirmed %1 dB");
+			break;
 		case MFD_MIX_DECLINED:
 			label = mfd_text_or_english(translate, "Mix.Declined", "Declined: %1");
 			values[0] = slot->mix_reason;
 			break;
-		case MFD_MIX_NO_REPLY: label = mfd_text_or_english(translate, "Mix.NoReply", "No mix provider reply"); break;
-		case MFD_MIX_UNAVAILABLE: label = mfd_text_or_english(translate, "Mix.Unavailable", "Mix request unavailable"); break;
-		default: label = mfd_text_or_english(translate, "Readout.MixMasterIdle", "Fadester mix provider required"); break;
+		case MFD_MIX_NO_REPLY:
+			label = mfd_text_or_english(translate, "Mix.NoReply", "No mix provider reply");
+			break;
+		case MFD_MIX_UNAVAILABLE:
+			label = mfd_text_or_english(translate, "Mix.Unavailable", "Mix request unavailable");
+			break;
+		default:
+			label = mfd_text_or_english(translate, "Readout.MixMasterIdle",
+						    "Fadester mix provider required");
+			break;
 		}
 		mfd_text_fill(out, out_size, label, values, 1U);
 		break;
@@ -5599,8 +5610,8 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			}
 		} else {
 			clear_slot_filter_fields(s);
-			if (s->target_type != MFD_TARGET_TBAR && s->target_type != MFD_TARGET_MIX_MASTER && s->source_a_name[0] == '\0' &&
-			    s->source_b_name[0] == '\0') {
+			if (s->target_type != MFD_TARGET_TBAR && s->target_type != MFD_TARGET_MIX_MASTER &&
+			    s->source_a_name[0] == '\0' && s->source_b_name[0] == '\0') {
 				s->target_type = MFD_TARGET_UNASSIGNED;
 			}
 		}

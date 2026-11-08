@@ -249,8 +249,10 @@ static void format_mode_active_readout(const struct mfd_ui_strip_input *in, char
 		break;
 
 	case MFD_TARGET_MIX_MASTER:
-		snprintf(out, out_size, "%s", has_text(in->display_value) ? in->display_value :
-			 mfd_text("Readout.MixMasterIdle", "Fadester mix provider required"));
+		snprintf(out, out_size, "%s",
+			 has_text(in->display_value)
+				 ? in->display_value
+				 : mfd_text("Readout.MixMasterIdle", "Fadester mix provider required"));
 		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (in->auto_fade_active) {
@@ -591,8 +593,9 @@ void mfd_ui_format_finished_sentence_ex(int slot_index, const char *slot_label, 
 		}
 		break;
 	case MFD_TARGET_MIX_MASTER:
-		say(out, out_size, mfd_text("Finished.MixMaster", "%1 requests shared gain from the Fadester mix provider"),
-		    title, NULL, NULL, NULL);
+		say(out, out_size,
+		    mfd_text("Finished.MixMaster", "%1 requests shared gain from the Fadester mix provider"), title,
+		    NULL, NULL, NULL);
 		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (has_text(filter_name) && has_text(filter_prop_label)) {
