@@ -25,7 +25,9 @@ extern "C" {
 /* Each returns a JSON object as a string the caller frees with bfree, or NULL when an argument cannot be sent. The
  * text is checked before it is returned: obs-browser splices it into page code, so it holds no raw line terminator. */
 char *tub_command_hello(const char *deck_id, int port, const char *token);
-char *tub_command_tape(uint64_t gen, const char *file_url, double start_seconds, bool loop);
+/* Loads a tape at start_seconds; it plays at once when playing is true, else it waits paused there, so a page that
+ * reloads keeps a paused deck paused (R-CTL-4). */
+char *tub_command_tape(uint64_t gen, const char *file_url, double start_seconds, bool loop, bool playing);
 /* Takes the tape out: the page empties its player, so the deck reads Ready with no tape. It carries a new generation,
  * like a tape command, so reports about the old tape stop counting at once. */
 char *tub_command_eject(uint64_t gen);
@@ -33,8 +35,10 @@ char *tub_command_rate(double rate, bool tape_pitch);
 /* Changes looping on the tape that is loaded. The tape command carries loop for a new load; this one is for a change
  * in between, so the tape is not reloaded. */
 char *tub_command_loop(bool loop);
+/* A seek that reaches a tape still loading is kept until its length is known, then made. */
 char *tub_command_seek(double seconds);
-char *tub_command_play(void);
+/* Plays the loaded tape. A tape that has ended starts again from start_seconds rather than from 0 (D-11). */
+char *tub_command_play(double start_seconds);
 char *tub_command_pause(void);
 
 /* True when text the writer produced may be spliced into page code: it is one object, and it holds no raw U+2028,

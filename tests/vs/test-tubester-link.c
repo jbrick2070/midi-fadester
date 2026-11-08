@@ -361,28 +361,29 @@ static void test_commands(void)
 	assert(!tub_command_hello("deck", 4477, NULL));
 	assert(!tub_command_hello("deck", 4477, "0123456789abcdef0123456789abcde\""));
 
-	check_json(tub_command_tape(7, "file:///C:/tapes/reel.mp4", 0, true),
-		   "{\"gen\":7,\"tape\":\"file:///C:/tapes/reel.mp4\",\"at\":0.0,\"loop\":true}");
-	check_json(tub_command_tape(1, "file:///C:/it%27s.mp4", 12.25, false),
-		   "{\"gen\":1,\"tape\":\"file:///C:/it%27s.mp4\",\"at\":12.25,\"loop\":false}");
-	assert(!tub_command_tape(0, "file:///C:/a.mp4", 0, true));
-	assert(!tub_command_tape(1, "C:\\a.mp4", 0, true));
-	assert(!tub_command_tape(1, "http://evil/a.mp4", 0, true));
-	assert(!tub_command_tape(1, "file://", 0, true));
-	assert(!tub_command_tape(1, "file:///", 0, true));
-	assert(!tub_command_tape(1, "file:///C:", 0, true));
-	assert(!tub_command_tape(1, "file:///C:/", 0, true));
-	assert(!tub_command_tape(1, "file:///tapes/a.mp4", 0, true));
-	assert(!tub_command_tape(1, "file://nas", 0, true));
-	assert(!tub_command_tape(1, "file://nas/", 0, true));
-	check_json(tub_command_tape(2, "file://nas/share/a.mp4", 0, true),
-		   "{\"gen\":2,\"tape\":\"file://nas/share/a.mp4\",\"at\":0.0,\"loop\":true}");
+	check_json(tub_command_tape(7, "file:///C:/tapes/reel.mp4", 0, true, true),
+		   "{\"gen\":7,\"tape\":\"file:///C:/tapes/reel.mp4\",\"at\":0.0,\"loop\":true,\"playing\":true}");
+	/* a paused deck's tape loads paused (R-CTL-4) */
+	check_json(tub_command_tape(1, "file:///C:/it%27s.mp4", 12.25, false, false),
+		   "{\"gen\":1,\"tape\":\"file:///C:/it%27s.mp4\",\"at\":12.25,\"loop\":false,\"playing\":false}");
+	assert(!tub_command_tape(0, "file:///C:/a.mp4", 0, true, true));
+	assert(!tub_command_tape(1, "C:\\a.mp4", 0, true, true));
+	assert(!tub_command_tape(1, "http://evil/a.mp4", 0, true, true));
+	assert(!tub_command_tape(1, "file://", 0, true, true));
+	assert(!tub_command_tape(1, "file:///", 0, true, true));
+	assert(!tub_command_tape(1, "file:///C:", 0, true, true));
+	assert(!tub_command_tape(1, "file:///C:/", 0, true, true));
+	assert(!tub_command_tape(1, "file:///tapes/a.mp4", 0, true, true));
+	assert(!tub_command_tape(1, "file://nas", 0, true, true));
+	assert(!tub_command_tape(1, "file://nas/", 0, true, true));
+	check_json(tub_command_tape(2, "file://nas/share/a.mp4", 0, true, true),
+		   "{\"gen\":2,\"tape\":\"file://nas/share/a.mp4\",\"at\":0.0,\"loop\":true,\"playing\":true}");
 	char *odd = tub_command_rate(1.1, true);
 	assert(odd && strncmp(odd, "{\"rate\":1.1", 11) == 0);
 	bfree(odd);
-	assert(!tub_command_tape(1, NULL, 0, true));
-	assert(!tub_command_tape(1, "file:///C:/a.mp4", -1, true));
-	assert(!tub_command_tape(1, "file:///C:/a.mp4", INFINITY, true));
+	assert(!tub_command_tape(1, NULL, 0, true, true));
+	assert(!tub_command_tape(1, "file:///C:/a.mp4", -1, true, true));
+	assert(!tub_command_tape(1, "file:///C:/a.mp4", INFINITY, true, true));
 
 	check_json(tub_command_rate(1.5, true), "{\"rate\":1.5,\"keepPitch\":false}");
 	check_json(tub_command_rate(0.25, false), "{\"rate\":0.25,\"keepPitch\":true}");
@@ -394,7 +395,12 @@ static void test_commands(void)
 	check_json(tub_command_seek(61.5), "{\"seek\":61.5}");
 	check_json(tub_command_seek(0), "{\"seek\":0.0}");
 	assert(!tub_command_seek(-0.5));
-	check_json(tub_command_play(), "{\"play\":true}");
+	/* play carries the start position, where an ended tape starts again (D-11) */
+	check_json(tub_command_play(0), "{\"play\":true,\"start\":0.0}");
+	check_json(tub_command_play(42.5), "{\"play\":true,\"start\":42.5}");
+	assert(!tub_command_play(-1));
+	assert(!tub_command_play(NAN));
+	assert(!tub_command_play(INFINITY));
 	check_json(tub_command_pause(), "{\"pause\":true}");
 	check_json(tub_command_loop(true), "{\"loop\":true}");
 	check_json(tub_command_loop(false), "{\"loop\":false}");
@@ -416,9 +422,9 @@ static void test_command_safety(void)
 	assert(!tub_command_is_safe(""));
 	assert(!tub_command_is_safe(NULL));
 	/* a tape address carrying a raw line separator is refused as a command, even though it is valid JSON */
-	assert(!tub_command_tape(1, "file:///C:/a\xE2\x80\xA8.mp4", 0, true));
+	assert(!tub_command_tape(1, "file:///C:/a\xE2\x80\xA8.mp4", 0, true, true));
 	/* a quote in the address is escaped by the writer, so it cannot end the string early */
-	char *json = tub_command_tape(1, "file:///C:/a\"b.mp4", 0, true);
+	char *json = tub_command_tape(1, "file:///C:/a\"b.mp4", 0, true, true);
 	assert(json && strstr(json, "a\\\"b") != NULL);
 	bfree(json);
 	printf("  test_command_safety: PASS\n");

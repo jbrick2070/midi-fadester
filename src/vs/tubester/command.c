@@ -74,7 +74,7 @@ char *tub_command_hello(const char *deck_id, int port, const char *token)
 	return finish(d);
 }
 
-char *tub_command_tape(uint64_t gen, const char *file_url, double start_seconds, bool loop)
+char *tub_command_tape(uint64_t gen, const char *file_url, double start_seconds, bool loop, bool playing)
 {
 	/* Only what tub_path_to_file_url writes: file:///X:/... or file://server/share/... */
 	if (gen == 0 || !file_url || strncmp(file_url, "file://", 7) != 0 || !isfinite(start_seconds) ||
@@ -91,6 +91,7 @@ char *tub_command_tape(uint64_t gen, const char *file_url, double start_seconds,
 	obs_data_set_string(d, "tape", file_url);
 	obs_data_set_double(d, "at", start_seconds);
 	obs_data_set_bool(d, "loop", loop);
+	obs_data_set_bool(d, "playing", playing);
 	return finish(d);
 }
 
@@ -131,10 +132,13 @@ char *tub_command_seek(double seconds)
 	return finish(d);
 }
 
-char *tub_command_play(void)
+char *tub_command_play(double start_seconds)
 {
+	if (!isfinite(start_seconds) || start_seconds < 0)
+		return NULL;
 	obs_data_t *d = obs_data_create();
 	obs_data_set_bool(d, "play", true);
+	obs_data_set_double(d, "start", start_seconds);
 	return finish(d);
 }
 

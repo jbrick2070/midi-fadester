@@ -23,6 +23,8 @@ extern "C" {
 #define TUB_SETTING_TAPE_PITCH "tape_pitch"
 #define TUB_SETTING_LOOP "loop"
 #define TUB_SETTING_START "start_seconds"
+/* the transport (R-CTL-4, D-11): true plays, false pauses */
+#define TUB_SETTING_PLAYING "playing"
 /* Speed Fader (R-SPD-5): a Fadester slot index 0 to 17 (crossfader, faders 1 to 8, master, FX 1 to 8), or -1 for none,
  * and the speeds at the bottom and the top of the fader */
 #define TUB_SETTING_SPEED_FADER "speed_fader_slot"
@@ -39,7 +41,7 @@ extern "C" {
 void tub_register_deck_filter(void);
 
 /* Fills out with { success, api_version: 1, decks: [ { source, filter, deck_id, role, state, tape, speed_percent,
- * effective_speed_percent, speed_fader: { slot, slot_id, min_percent, max_percent, live }, tape_pitch, loop,
+ * effective_speed_percent, speed_fader: { slot, slot_id, min_percent, max_percent, live }, tape_pitch, playing, loop,
  * start_seconds, linked, reported?: { current_tape, rate, position, duration, paused, ended, ready_state, error,
  * no_picture } } ] }: every Tape Deck (up to 64) as its page last reported it (R-INT-4). speed_percent is the Speed
  * setting; effective_speed_percent is the speed the deck asks the page for, the Speed Fader's while it is live.

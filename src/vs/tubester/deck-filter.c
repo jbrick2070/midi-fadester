@@ -84,6 +84,8 @@
 /* The hotkeys on the deck's Browser source (R-CTL-3). Their names are the keys of the saved bindings, so they never
  * change. */
 enum hotkey_action {
+	HOTKEY_PLAY_PAUSE,
+	HOTKEY_CUE_TO_START,
 	HOTKEY_SPEED_UP,
 	HOTKEY_SPEED_DOWN,
 	HOTKEY_NORMAL_SPEED,
@@ -143,6 +145,7 @@ struct tub_deck_filter {
 	bool tape_pitch;
 	bool loop;
 	double start_seconds;
+	bool playing;   /* the transport (R-CTL-4): true plays, false pauses */
 	int fader_slot; /* VS_FADER_SLOT_NONE, or a Fadester slot index */
 	int fader_min_pct;
 	int fader_max_pct;
@@ -167,6 +170,8 @@ struct tub_deck_filter {
 	bool send_tape;
 	bool send_rate;
 	bool send_loop;
+	bool send_transport; /* play or pause, as playing says: a change, a repair, or play again after the end */
+	bool send_cue;       /* go to start_seconds, keeping the play state */
 	/* no position on the current tape has been confirmed yet, so a (re)sent tape command starts at start_seconds */
 	bool tape_from_start;
 	double last_position; /* the last position the page confirmed on the current tape */
@@ -177,6 +182,9 @@ struct tub_deck_filter {
 	uint64_t last_rate_sent_ns;
 	int rate_mismatch_streak;
 	bool rate_repair_logged;
+	uint64_t last_play_sent_ns; /* the last command that set the play state: a tape, a play or a pause */
+	int play_mismatch_streak;
+	bool play_repair_logged;
 	bool current_cmd_is_eject;     /* the command that set link.gen was an eject, not a tape */
 	uint64_t pending_cmd_since_ns; /* when that command was last sent; 0 before any */
 	bool resend_current;           /* the page never acknowledged it: send it again with the same generation */
@@ -348,9 +356,14 @@ static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings
 		f->send_loop = true;
 	f->loop = loop;
 
-	/* Applies to the next tape load, as the tooltip says; cueing a playing tape is a transport action (PLAN step 5) */
+	/* Applies to the next tape load, to Cue to Start and to play after the end; it never moves a tape by itself */
 	double start = obs_data_get_double(settings, TUB_SETTING_START);
 	f->start_seconds = (isfinite(start) && start >= 0.0) ? start : 0.0;
+
+	bool playing = obs_data_get_bool(settings, TUB_SETTING_PLAYING);
+	if (playing != f->playing)
+		f->send_transport = true;
+	f->playing = playing;
 }
 
 static void deck_update(void *data, obs_data_t *settings)
@@ -370,6 +383,7 @@ static void deck_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, TUB_SETTING_TAPE_PITCH, true);
 	obs_data_set_default_bool(settings, TUB_SETTING_LOOP, true);
 	obs_data_set_default_double(settings, TUB_SETTING_START, 0.0);
+	obs_data_set_default_bool(settings, TUB_SETTING_PLAYING, true);
 	obs_data_set_default_int(settings, TUB_SETTING_SPEED_FADER, VS_FADER_SLOT_NONE);
 	obs_data_set_default_int(settings, TUB_SETTING_SPEED_FADER_MIN, TUB_SPEED_FADER_MIN_DEFAULT);
 	obs_data_set_default_int(settings, TUB_SETTING_SPEED_FADER_MAX, TUB_SPEED_FADER_MAX_DEFAULT);
@@ -407,6 +421,36 @@ static void check_rate_locked(struct tub_deck_filter *f, uint64_t now)
 	}
 }
 
+/* A play state the page did not take is sent again the same way (R-DCK-10). A tape that ended, failed, or is still
+ * without its metadata is not a disagreement: Ended is a state of its own, and play after the end is the operator's
+ * call (D-11). */
+static void check_play_locked(struct tub_deck_filter *f, uint64_t now)
+{
+	const struct tub_report *r = &f->link.last;
+	if (f->tape_status != TAPE_SET || f->current_cmd_is_eject || r->ended || r->error_code != 0 ||
+	    r->ready_state < 1) {
+		f->play_mismatch_streak = 0;
+		return;
+	}
+	if (now < f->last_play_sent_ns || now - f->last_play_sent_ns < TUB_REPAIR_GRACE_NS)
+		return;
+	if (!r->paused == f->playing) {
+		f->play_mismatch_streak = 0;
+		f->play_repair_logged = false;
+		return;
+	}
+	if (++f->play_mismatch_streak < 2)
+		return;
+	f->play_mismatch_streak = 0;
+	f->send_transport = true;
+	if (!f->play_repair_logged) {
+		f->play_repair_logged = true;
+		obs_log(LOG_WARNING, "tape deck %s: the page is %s, not %s; sending %s again", f->deck_id,
+			r->paused ? "paused" : "playing", f->playing ? "playing" : "paused",
+			f->playing ? "play" : "pause");
+	}
+}
+
 static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 {
 	struct tub_deck_filter *f = deck;
@@ -432,9 +476,13 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 			f->resend_logged = false;
 			f->pending_cmd_since_ns = 0;
 			if (f->link.last.ready_state >= 1 && report_is_current_locked(f)) {
-				f->last_position = f->link.last.current_time;
-				f->tape_from_start = false;
+				/* a cue still waiting to be sent keeps its start position for a tape resend */
+				if (!f->send_cue) {
+					f->last_position = f->link.last.current_time;
+					f->tape_from_start = false;
+				}
 				check_rate_locked(f, now_ns);
+				check_play_locked(f, now_ns);
 			}
 		}
 		if (strcmp(f->link.last.event, "watchdog") == 0) {
@@ -483,20 +531,38 @@ struct hotkey_task {
 };
 
 static void hotkey_on_ui_thread(void *param);
+static void on_hotkey_play_pause(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
+static void on_hotkey_cue_to_start(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
 static void on_hotkey_speed_up(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
 static void on_hotkey_speed_down(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
 static void on_hotkey_normal_speed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
 
+/* in the order Settings > Hotkeys lists them (R-CTL-3) */
 static const struct {
 	const char *name; /* saved with the Browser source's bindings */
 	const char *text_key;
 	const char *log_name;
 	obs_hotkey_func func;
 } k_hotkeys[TUB_HOTKEY_COUNT] = {
+	{"tubester_deck.play_pause", "Tubester.Hotkey.PlayPause", "Play / Pause", on_hotkey_play_pause},
+	{"tubester_deck.cue_to_start", "Tubester.Hotkey.CueToStart", "Cue to Start", on_hotkey_cue_to_start},
 	{"tubester_deck.speed_up", "Tubester.Hotkey.SpeedUp", "Speed Up", on_hotkey_speed_up},
 	{"tubester_deck.speed_down", "Tubester.Hotkey.SpeedDown", "Speed Down", on_hotkey_speed_down},
 	{"tubester_deck.normal_speed", "Tubester.Hotkey.NormalSpeed", "Normal Speed", on_hotkey_normal_speed},
 };
+
+/* Cue to Start (R-CTL-4): the tape goes to start_seconds and keeps its play state. False when there is no tape to cue.
+ * mutex held. */
+static bool request_cue_locked(struct tub_deck_filter *f)
+{
+	if (f->tape_status != TAPE_SET)
+		return false;
+	f->send_cue = true;
+	/* a tape command that goes first (a page reload) starts there too */
+	f->tape_from_start = true;
+	f->last_position = f->start_seconds;
+	return true;
+}
 
 /* Runs with libobs's hotkey lock held, on the UI thread or an obs-websocket thread. It takes no deck lock and hands the
  * change to the UI thread, where it may run at once (see the file comment). f is alive: its hotkeys are unregistered
@@ -510,6 +576,20 @@ static void hotkey_pressed(void *data, enum hotkey_action action, bool pressed)
 	t->filter = obs_source_get_weak_source(f->context);
 	t->action = action;
 	obs_queue_task(OBS_TASK_UI, hotkey_on_ui_thread, t, false);
+}
+
+static void on_hotkey_play_pause(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	hotkey_pressed(data, HOTKEY_PLAY_PAUSE, pressed);
+}
+
+static void on_hotkey_cue_to_start(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	hotkey_pressed(data, HOTKEY_CUE_TO_START, pressed);
 }
 
 static void on_hotkey_speed_up(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
@@ -533,10 +613,57 @@ static void on_hotkey_normal_speed(void *data, obs_hotkey_id id, obs_hotkey_t *h
 	hotkey_pressed(data, HOTKEY_NORMAL_SPEED, pressed);
 }
 
-/* The speed hotkeys move the Speed setting along the ladder, as the Speed slider would. While a Speed Fader is live it
- * keeps driving the speed, and the new setting applies once the fader is cleared (R-SPD-5). For a key press this runs
- * inside the hotkey callback, under libobs's hotkey lock: it may take mutex and update the deck's own settings, and
- * must never take attach_mutex or call into the parent. */
+/* Play / Pause flips the playing setting, as the checkbox would. On a tape that has ended it plays the tape again from
+ * the start position instead (D-11). */
+static void play_pause_hotkey(struct tub_deck_filter *f, obs_source_t *source)
+{
+	obs_data_t *settings = obs_source_get_settings(source);
+	bool playing = obs_data_get_bool(settings, TUB_SETTING_PLAYING);
+	obs_data_release(settings);
+
+	pthread_mutex_lock(&f->mutex);
+	/* Ended by the latest report, with no restart or cue already on its way: a report older than the last play or tape
+	 * command, or one while a cue or play waits to be sent, does not count, so a quick second press pauses rather than
+	 * restarting again */
+	bool ended = report_is_current_locked(f) && f->link.last.ended && !f->send_cue && !f->send_transport &&
+		     f->link.last_report_ns >= f->last_play_sent_ns;
+	if (ended) {
+		/* a restart is a cue plus play: the start position holds through a page reload in between, and the play goes
+		 * whatever write of the playing setting is still waiting for the tick */
+		request_cue_locked(f);
+		f->send_transport = true;
+	}
+	pthread_mutex_unlock(&f->mutex);
+
+	bool next = ended ? true : !playing;
+	if (next != playing) {
+		obs_data_t *patch = obs_data_create();
+		obs_data_set_bool(patch, TUB_SETTING_PLAYING, next);
+		obs_source_update(source, patch);
+		obs_data_release(patch);
+	}
+	obs_log(LOG_INFO, "tape deck %s: Play / Pause hotkey; %s", f->deck_id,
+		ended  ? "the tape had ended, so it plays again from the start position"
+		: next ? "playing"
+		       : "paused");
+}
+
+static void cue_hotkey(struct tub_deck_filter *f)
+{
+	pthread_mutex_lock(&f->mutex);
+	bool cued = request_cue_locked(f);
+	double start = f->start_seconds;
+	pthread_mutex_unlock(&f->mutex);
+	if (cued)
+		obs_log(LOG_INFO, "tape deck %s: Cue to Start hotkey; to %.1f s", f->deck_id, start);
+	else
+		obs_log(LOG_INFO, "tape deck %s: Cue to Start hotkey; no tape to cue", f->deck_id);
+}
+
+/* The transport hotkeys work as the Properties controls do. The speed hotkeys move the Speed setting along the ladder,
+ * as the Speed slider would; while a Speed Fader is live it keeps driving the speed, and the new setting applies once
+ * the fader is cleared (R-SPD-5). For a key press this runs inside the hotkey callback, under libobs's hotkey lock: it
+ * may take mutex and update the deck's own settings, and must never take attach_mutex or call into the parent. */
 static void hotkey_on_ui_thread(void *param)
 {
 	struct hotkey_task *t = param;
@@ -548,6 +675,14 @@ static void hotkey_on_ui_thread(void *param)
 		return;
 	struct tub_deck_filter *f = obs_obj_get_data(source);
 	if (!f) {
+		obs_source_release(source);
+		return;
+	}
+	if (action == HOTKEY_PLAY_PAUSE || action == HOTKEY_CUE_TO_START) {
+		if (action == HOTKEY_PLAY_PAUSE)
+			play_pause_hotkey(f, source);
+		else
+			cue_hotkey(f);
 		obs_source_release(source);
 		return;
 	}
@@ -797,10 +932,13 @@ static void retry_registration(struct tub_deck_filter *f, uint64_t now)
 	f->register_retry_ns = now + f->register_backoff_ns;
 }
 
+/* sent in this order */
 struct page_commands {
 	char *hello;
 	char *tape;
 	char *eject;
+	char *seek;
+	char *transport;
 	char *rate;
 	char *loop;
 };
@@ -811,15 +949,20 @@ static void build_tape_or_eject_locked(struct tub_deck_filter *f, uint64_t gen, 
 {
 	if (f->tape_status == TAPE_SET) {
 		double at = f->tape_from_start ? f->start_seconds : f->last_position;
-		c->tape = tub_command_tape(gen, f->tape_url, at, f->loop);
+		c->tape = tub_command_tape(gen, f->tape_url, at, f->loop, f->playing);
 		if (!c->tape)
 			obs_log(LOG_WARNING, "tape deck %s: the tape address cannot be sent; ejecting", f->deck_id);
 	}
 	if (c->tape) {
 		f->link.gen = gen;
 		f->current_cmd_is_eject = false;
-		/* the tape command carries the loop; loading resets the player's rate, so the rate follows it */
+		/* the tape command carries the loop and the play state, and starts where a cue would have gone; loading
+		 * resets the player's rate, so the rate follows it */
 		f->send_loop = false;
+		f->send_transport = false;
+		f->send_cue = false;
+		f->last_play_sent_ns = now;
+		f->play_mismatch_streak = 0;
 		f->send_rate = true;
 	} else {
 		/* no usable tape: the page empties its player and the deck reads Ready with no tape */
@@ -856,6 +999,29 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 		f->resend_current = false;
 		if (f->link.gen > 0)
 			build_tape_or_eject_locked(f, f->link.gen, now, c);
+	}
+	/* Cue and play state go to the tape the page holds (R-CTL-4). With no tape there, or a tape command going now
+	 * (which carries both), there is nothing to send. */
+	if (c->tape || c->eject || f->tape_status != TAPE_SET || f->current_cmd_is_eject || f->link.gen == 0) {
+		f->send_cue = false;
+		f->send_transport = false;
+	} else {
+		if (f->send_cue) {
+			f->send_cue = false;
+			c->seek = tub_command_seek(f->start_seconds);
+			/* a playing deck plays on from there, also after the tape has ended */
+			if (f->playing)
+				f->send_transport = true;
+		}
+		if (f->send_transport) {
+			f->send_transport = false;
+			/* play carries the start position, where a tape that has ended starts again (D-11) */
+			c->transport = f->playing ? tub_command_play(f->start_seconds) : tub_command_pause();
+			if (c->transport) {
+				f->last_play_sent_ns = now;
+				f->play_mismatch_streak = 0;
+			}
+		}
 	}
 	/* Every speed change passes the coalescer (R-SPD-3). A forced send (a new tape or page, a pitch change, a repair)
 	 * goes at once with the latest speed and counts as the interval's send. */
@@ -1006,6 +1172,8 @@ static void deck_video_tick(void *data, float seconds)
 		send_to_page(parent, c.hello);
 		send_to_page(parent, c.tape);
 		send_to_page(parent, c.eject);
+		send_to_page(parent, c.seek);
+		send_to_page(parent, c.transport);
 		send_to_page(parent, c.rate);
 		send_to_page(parent, c.loop);
 	}
@@ -1270,6 +1438,23 @@ static void status_text(struct tub_deck_filter *f, struct dstr *out)
 	}
 }
 
+static bool cue_clicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(property);
+	struct tub_deck_filter *f = data;
+	if (!f)
+		return false;
+	pthread_mutex_lock(&f->mutex);
+	bool cued = request_cue_locked(f);
+	double start = f->start_seconds;
+	pthread_mutex_unlock(&f->mutex);
+	if (cued)
+		obs_log(LOG_INFO, "tape deck %s: Cue to Start; to %.1f s", f->deck_id, start);
+	/* nothing in Properties changes */
+	return false;
+}
+
 static bool refresh_status_clicked(obs_properties_t *props, obs_property_t *property, void *data)
 {
 	UNUSED_PARAMETER(props);
@@ -1413,6 +1598,13 @@ static obs_properties_t *deck_get_properties(void *data)
 	obs_property_set_long_description(p_tape, obs_module_text("Tubester.Tape.Tooltip"));
 	dstr_free(&filter);
 
+	obs_property_t *p_playing =
+		obs_properties_add_bool(props, TUB_SETTING_PLAYING, obs_module_text("Tubester.Playing"));
+	obs_property_set_long_description(p_playing, obs_module_text("Tubester.Playing.Tooltip"));
+	obs_property_t *p_cue = obs_properties_add_button2(props, "tubester_cue",
+							   obs_module_text("Tubester.CueToStart"), cue_clicked, f);
+	obs_property_set_long_description(p_cue, obs_module_text("Tubester.CueToStart.Tooltip"));
+
 	obs_property_t *p_speed = obs_properties_add_int_slider(
 		props, TUB_SETTING_SPEED, obs_module_text("Tubester.Speed"), TUB_SPEED_MIN_PCT, TUB_SPEED_MAX_PCT, 1);
 	obs_property_int_set_suffix(p_speed, "%");
@@ -1514,6 +1706,7 @@ void tub_decks_describe(obs_data_t *out)
 		obs_data_set_obj(item, "speed_fader", fader);
 		obs_data_release(fader);
 		obs_data_set_bool(item, "tape_pitch", f->tape_pitch);
+		obs_data_set_bool(item, "playing", f->playing);
 		obs_data_set_bool(item, "loop", f->loop);
 		obs_data_set_double(item, "start_seconds", f->start_seconds);
 		obs_data_set_bool(item, "linked", f->link.linked);
