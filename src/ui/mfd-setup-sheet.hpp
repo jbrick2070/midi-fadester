@@ -84,11 +84,13 @@ private:
 	QPushButton *card_mix_ = nullptr;
 	QPushButton *card_single_ = nullptr;
 	QPushButton *card_volume_ = nullptr;
+	QPushButton *card_master_mix_ = nullptr;
 	QPushButton *card_filter_ = nullptr;
 	QPushButton *btn_not_used_ = nullptr;
 
 	/* Step 2 widgets */
 	QWidget *step2_tbar_box_ = nullptr;
+	QLabel *step2_master_mix_info_ = nullptr;
 	QLabel *step2_tbar_info_ = nullptr;
 	QPushButton *step2_turn_on_studio_btn_ = nullptr;
 

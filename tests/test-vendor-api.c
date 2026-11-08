@@ -895,6 +895,9 @@ static void *mt_ui_worker(void *arg)
 }
 
 struct fake_ws_log {
+	int mix_requests;
+	char mix_id[40];
+	double mix_db;
 	int fader_changed_count;
 	int state_changed_count;
 	char last_fader_slot[32];
@@ -920,6 +923,14 @@ static void on_fake_ws_event(const char *event_name, obs_data_t *event_data, voi
 		log->last_fader_value = obs_data_get_double(event_data, "value");
 	} else if (strcmp(event_name, "state_changed") == 0) {
 		++log->state_changed_count;
+	} else if (strcmp(event_name, "CustomEvent") == 0 &&
+		   strcmp(obs_data_get_string(event_data, "client"), "midi-fadester") == 0 &&
+		   strcmp(obs_data_get_string(event_data, "namespace"), MFD_MIX_NAMESPACE) == 0 &&
+		   strcmp(obs_data_get_string(event_data, "op"), "mix.set") == 0 &&
+		   obs_data_get_int(event_data, "sentAtMs") > 0) {
+		++log->mix_requests;
+		snprintf(log->mix_id, sizeof(log->mix_id), "%s", obs_data_get_string(event_data, "id"));
+		log->mix_db = obs_data_get_double(event_data, "db");
 	}
 }
 
@@ -1136,6 +1147,45 @@ int main(void)
 	struct fake_ws_log ws_log;
 	memset(&ws_log, 0, sizeof(ws_log));
 	mfd_vendor_set_event_sink(on_fake_ws_event, &ws_log);
+
+	/* A master slot sends the latest absolute position; only a matching provider reply confirms it. */
+	struct mfd_fader_slot *mix = &eng.fader_slots[9];
+	mix->enabled = mix->cached_available = true;
+	mix->target_type = MFD_TARGET_MIX_MASTER;
+	mix->addr = (struct mfd_midi_addr){.type = MFD_MIDI_CC, .number = 23};
+	mfd_calibration_set(&mix->cal, false, 0, 127);
+	push_midi_cc(&eng, 0, 23, 64);
+	push_midi_cc(&eng, 0, 23, 127);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(ws_log.mix_requests == 1 && ws_log.mix_db == 0.0 && strlen(ws_log.mix_id) == 36U);
+	REQUIRE(mix->mix_delivery == MFD_MIX_WAITING && mix->output_write_count == 0);
+	obs_data_t *mix_reply = obs_data_create();
+	obs_data_t *receipt = obs_data_create();
+	obs_data_set_string(mix_reply, "namespace", MFD_MIX_NAMESPACE);
+	obs_data_set_string(mix_reply, "op", "reply");
+	obs_data_set_string(mix_reply, "id", "an unrelated request");
+	obs_data_set_bool(mix_reply, "ok", true);
+	obs_data_set_bool(mix_reply, "enabled", true);
+	obs_data_set_double(mix_reply, "db", 0.0);
+	mfd_vendor_handle_mix_reply(mix_reply, receipt, &eng);
+	REQUIRE(!obs_data_get_bool(receipt, "accepted") && mix->mix_delivery == MFD_MIX_WAITING);
+	obs_data_set_string(mix_reply, "id", ws_log.mix_id);
+	mfd_vendor_handle_mix_reply(mix_reply, receipt, &eng);
+	REQUIRE(obs_data_get_bool(receipt, "accepted"));
+	mfd_vendor_handle_mix_reply(mix_reply, receipt, &eng);
+	REQUIRE(!obs_data_get_bool(receipt, "accepted"));
+	REQUIRE(mix->mix_delivery == MFD_MIX_CONFIRMED && mix->output_write_count == 1);
+	push_midi_cc(&eng, 0, 23, 0);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(ws_log.mix_requests == 2 && ws_log.mix_db == -100.0 && fake_sg.total_volume_writes == 0);
+	obs_data_set_string(mix_reply, "id", ws_log.mix_id);
+	obs_data_set_bool(mix_reply, "ok", false);
+	obs_data_set_string(mix_reply, "message", "Provider is disabled");
+	mfd_vendor_handle_mix_reply(mix_reply, receipt, &eng);
+	REQUIRE(mix->mix_delivery == MFD_MIX_DECLINED && mix->output_write_count == 1);
+	obs_data_release(mix_reply);
+	obs_data_release(receipt);
+	memset(mix, 0, sizeof(*mix));
 
 	/* 1. load_profile across verified + beta profiles and error check on unknown profile */
 	obs_data_t *req = obs_data_create();

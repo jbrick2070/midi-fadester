@@ -248,6 +248,10 @@ static void format_mode_active_readout(const struct mfd_ui_strip_input *in, char
 		}
 		break;
 
+	case MFD_TARGET_MIX_MASTER:
+		snprintf(out, out_size, "%s", has_text(in->display_value) ? in->display_value :
+			 mfd_text("Readout.MixMasterIdle", "Fadester mix provider required"));
+		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (in->auto_fade_active) {
 			if (has_text(in->display_value)) {
@@ -356,6 +360,10 @@ static void format_assignment(const struct mfd_ui_strip_input *in, struct mfd_ui
 			say(as, as_size, mfd_text("Assign.VolumeUnnamed", "Volume"), NULL, NULL, NULL, NULL);
 			say(sl, sl_size, mfd_text("Svg.VolumeUnnamed", "Vol"), NULL, NULL, NULL, NULL);
 		}
+		break;
+	case MFD_TARGET_MIX_MASTER:
+		say(as, as_size, mfd_text("Target.MixMaster", "Fadester mix master"), NULL, NULL, NULL, NULL);
+		say(sl, sl_size, mfd_text("Svg.MixMaster", "Mix master"), NULL, NULL, NULL, NULL);
 		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (has_text(in->filter_name) && has_text(fp)) {
@@ -582,6 +590,10 @@ void mfd_ui_format_finished_sentence_ex(int slot_index, const char *slot_label, 
 			    NULL, NULL);
 		}
 		break;
+	case MFD_TARGET_MIX_MASTER:
+		say(out, out_size, mfd_text("Finished.MixMaster", "%1 requests shared gain from the Fadester mix provider"),
+		    title, NULL, NULL, NULL);
+		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (has_text(filter_name) && has_text(filter_prop_label)) {
 			if (has_text(sa)) {
@@ -733,6 +745,8 @@ const char *mfd_ui_target_plain_name(enum mfd_target_type target_type)
 		return mfd_text("Target.Layer", "Show or hide a layer");
 	case MFD_TARGET_AUDIO_VOLUME:
 		return mfd_text("Target.Volume", "Volume");
+	case MFD_TARGET_MIX_MASTER:
+		return mfd_text("Target.MixMaster", "Fadester mix master");
 	case MFD_TARGET_FILTER_PARAM:
 		return mfd_text("Target.Filter", "Filter or effect setting");
 	case MFD_TARGET_UNASSIGNED:

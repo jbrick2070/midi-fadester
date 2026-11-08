@@ -14,6 +14,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <util/platform.h>
 #include "obs/obs-websocket-api.h"
 #include "plugin-support.h"
 
@@ -23,6 +25,107 @@ static signal_handler_t *g_bridge_sh = NULL;
 static mfd_vendor_event_sink_fn g_event_sink = NULL;
 static void *g_event_sink_user_data = NULL;
 static volatile bool g_vendor_shutting_down = false;
+static volatile bool g_mix_reply_registered = false;
+
+void mfd_vendor_handle_mix_reply(obs_data_t *reply, obs_data_t *response, void *priv)
+{
+	struct mfd_engine *eng = priv;
+	obs_data_set_bool(response, "accepted", false);
+	if (!eng || !reply || os_atomic_load_bool(&g_vendor_shutting_down) ||
+	    strcmp(obs_data_get_string(reply, "namespace"), MFD_MIX_NAMESPACE) != 0 ||
+	    strcmp(obs_data_get_string(reply, "op"), "reply") != 0)
+		return;
+	const char *id = obs_data_get_string(reply, "id");
+	if (!*id || !obs_data_has_user_value(reply, "ok") || !obs_data_has_user_value(reply, "enabled"))
+		return;
+	mfd_engine_lock(eng);
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *slot = &eng->fader_slots[i];
+		if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER || strcmp(slot->mix_request_id, id) ||
+		    !slot->mix_sent_ns || os_gettime_ns() - slot->mix_sent_ns > 10000000000ULL)
+			continue;
+		if (obs_data_get_bool(reply, "ok") && obs_data_get_bool(reply, "enabled")) {
+			obs_data_item_t *gain = obs_data_item_byname(reply, "db");
+			bool numeric = gain && obs_data_item_gettype(gain) == OBS_DATA_NUMBER;
+			obs_data_item_release(&gain);
+			/* obs_data drops JSON null. Only treat it as silence for a silencing request or explicit silent reply. */
+			if (!numeric && !obs_data_get_bool(reply, "silent") && slot->mix_reported_db != -100.0)
+				break;
+			double db = numeric ? obs_data_get_double(reply, "db") : -100.0;
+			if (!isfinite(db) || db < -100.0 || db > 0.0) break;
+			slot->mix_reported_db = db;
+			slot->mix_delivery = MFD_MIX_CONFIRMED;
+			++slot->output_write_count;
+		} else {
+			slot->mix_delivery = MFD_MIX_DECLINED;
+			snprintf(slot->mix_reason, sizeof(slot->mix_reason), "%s",
+				 obs_data_get_string(reply, "message"));
+		}
+		slot->mix_request_id[0] = '\0';
+		slot->mix_sent_ns = 0;
+		obs_data_set_bool(response, "accepted", true);
+		mfd_engine_mark_ui_dirty(eng, false);
+		break;
+	}
+	mfd_engine_unlock(eng);
+}
+
+void mfd_vendor_send_mix_set(struct mfd_engine *eng, int slot_index, uint64_t revision, float db)
+{
+	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS || os_atomic_load_bool(&g_vendor_shutting_down))
+		return;
+	char *id = os_generate_uuid();
+	if (!id) return;
+	struct mfd_fader_slot *slot = &eng->fader_slots[slot_index];
+	mfd_engine_lock(eng);
+	if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER || eng->slot_config_rev[slot_index] != revision ||
+	    (eng->setup_session.active && eng->setup_session.slot_index == slot_index)) {
+		mfd_engine_unlock(eng);
+		bfree(id);
+		return;
+	}
+	snprintf(slot->mix_request_id, sizeof(slot->mix_request_id), "%s", id);
+	slot->mix_reported_db = db;
+	slot->mix_delivery = MFD_MIX_WAITING;
+	slot->mix_sent_ns = os_gettime_ns();
+	mfd_engine_mark_ui_dirty(eng, false);
+	mfd_engine_unlock(eng);
+
+	struct timespec now;
+	timespec_get(&now, TIME_UTC);
+	obs_data_t *event = obs_data_create();
+	obs_data_set_string(event, "namespace", MFD_MIX_NAMESPACE);
+	obs_data_set_string(event, "id", id);
+	obs_data_set_string(event, "op", "mix.set");
+	obs_data_set_string(event, "client", "midi-fadester");
+	obs_data_set_int(event, "sentAtMs", (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000);
+	obs_data_set_double(event, "db", db);
+	obs_data_set_int(event, "durationMs", 0);
+	bool sent = false;
+	if (g_event_sink) {
+		g_event_sink("CustomEvent", event, g_event_sink_user_data);
+		sent = true;
+	} else if (os_atomic_load_bool(&g_mix_reply_registered)) {
+		obs_data_t *request = obs_data_create();
+		obs_data_set_obj(request, "eventData", event);
+		struct obs_websocket_request_response *response = obs_websocket_call_request("BroadcastCustomEvent", request);
+		sent = response && response->status_code == 100;
+		obs_websocket_request_response_free(response);
+		obs_data_release(request);
+	}
+	obs_data_release(event);
+	if (!sent) {
+		mfd_engine_lock(eng);
+		if (strcmp(slot->mix_request_id, id) == 0) {
+			slot->mix_delivery = MFD_MIX_UNAVAILABLE;
+			slot->mix_request_id[0] = '\0';
+			slot->mix_sent_ns = 0;
+			mfd_engine_mark_ui_dirty(eng, false);
+		}
+		mfd_engine_unlock(eng);
+	}
+	bfree(id);
+}
 
 static float clamp01(float v)
 {
@@ -880,7 +983,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 			char msg[224];
 			snprintf(
 				msg, sizeof(msg),
-				"Invalid target_mode '%s'. Valid modes: unassigned, tbar, crossfade_ab, layer_opacity, audio_volume, filter_param.",
+				"Invalid target_mode '%s'. Valid modes: unassigned, tbar, crossfade_ab, layer_opacity, audio_volume, filter_param, mix_master.",
 				tm ? tm : "");
 			set_error_comment(response_data, "invalid_parameter", msg);
 			mfd_engine_unlock(eng);
@@ -1199,6 +1302,10 @@ bool mfd_vendor_api_register(struct mfd_engine *eng)
 		return false;
 	}
 
+	/* BroadcastCustomEvent is delivered to network clients, not native OBS event callbacks.
+	 * The provider sends the same correlated response to this fixed vendor request. */
+	bool mix_reply = obs_websocket_vendor_register_request(g_vendor, "mix_reply", mfd_vendor_handle_mix_reply, eng);
+	os_atomic_store_bool(&g_mix_reply_registered, mix_reply);
 	bool r1 = obs_websocket_vendor_register_request(g_vendor, "get_state", mfd_vendor_handle_get_state, eng);
 	bool r2 = obs_websocket_vendor_register_request(g_vendor, "set_fader_value", mfd_vendor_handle_set_fader_value,
 							eng);
@@ -1212,13 +1319,15 @@ bool mfd_vendor_api_register(struct mfd_engine *eng)
 	obs_log(LOG_INFO,
 		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d, get_catalog=%d, reset_fx=%d)",
 		MFD_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8);
-	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8;
+	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && mix_reply;
 }
 
 void mfd_vendor_api_shutdown(struct mfd_engine *eng)
 {
 	os_atomic_store_bool(&g_vendor_shutting_down, true);
+	os_atomic_store_bool(&g_mix_reply_registered, false);
 	if (g_vendor && obs_get_proc_handler()) {
+		obs_websocket_vendor_unregister_request(g_vendor, "mix_reply");
 		obs_websocket_vendor_unregister_request(g_vendor, "get_state");
 		obs_websocket_vendor_unregister_request(g_vendor, "set_fader_value");
 		obs_websocket_vendor_unregister_request(g_vendor, "nudge_fader");

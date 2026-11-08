@@ -17,6 +17,9 @@ extern "C" {
 
 #define MFD_VENDOR_NAME "midi-fadester"
 #define MFD_API_VERSION 1
+#define MFD_MIX_NAMESPACE "io.github.jbrick2070.fadester.mix.v1"
+void mfd_vendor_send_mix_set(struct mfd_engine *eng, int slot_index, uint64_t revision, float db);
+void mfd_vendor_handle_mix_reply(obs_data_t *request, obs_data_t *response, void *priv);
 
 typedef void (*mfd_vendor_event_sink_fn)(const char *event_name, obs_data_t *event_data, void *user_data);
 

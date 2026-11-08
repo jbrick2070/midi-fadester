@@ -194,7 +194,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	grid->addWidget(card_mix_, 0, 1);
 	grid->addWidget(card_single_, 1, 0);
 	grid->addWidget(card_volume_, 1, 1);
-	grid->addWidget(card_filter_, 2, 0, 1, 2);
+	grid->addWidget(card_filter_, 2, 0);
+	card_master_mix_ = create_mode_card_button(page1, QStringLiteral("mfdCardMasterMix"), MFD_TARGET_MIX_MASTER,
+		mfdText("Target.MixMaster", "Fadester mix master"),
+		mfdText("Setup.Card.MixMaster.Description", "Ride the shared mix from silence to unity."));
+	grid->addWidget(card_master_mix_, 2, 1);
 	p1_lay->addLayout(grid, 1);
 
 	auto *not_used_row = new QHBoxLayout();
@@ -216,6 +220,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 		[this]() { select_mode_and_go_step2(MFD_TARGET_SINGLE_LAYER); });
 	connect(card_volume_, &QPushButton::clicked, this,
 		[this]() { select_mode_and_go_step2(MFD_TARGET_AUDIO_VOLUME); });
+	connect(card_master_mix_, &QPushButton::clicked, this,
+		[this]() { select_mode_and_go_step2(MFD_TARGET_MIX_MASTER); });
 	connect(card_filter_, &QPushButton::clicked, this,
 		[this]() { select_mode_and_go_step2(MFD_TARGET_FILTER_PARAM); });
 	connect(btn_not_used_, &QPushButton::clicked, this, [this]() {
@@ -235,6 +241,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	auto *p2_prompt = new QLabel(mfdText("Setup.Step2.Prompt", "Which?"), page2);
 	p2_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p2_lay->addWidget(p2_prompt);
+	step2_master_mix_info_ = new QLabel(mfdText("Setup.MixMaster.Help",
+		"Start and enable the Fadester mix provider on this OBS connection. This fader sends absolute gain requests for its configured mix. Its readout shows the provider reply."), page2);
+	step2_master_mix_info_->setWordWrap(true);
+	p2_lay->addWidget(step2_master_mix_info_);
 
 	/* Step 2: Switch scenes box */
 	step2_tbar_box_ = new QWidget(page2);
@@ -908,6 +918,7 @@ void MfdSetupSheetDialog::open_for_slot(int slot_index)
 	card_mix_->setChecked(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX);
 	card_single_->setChecked(chosen_mode_ == MFD_TARGET_SINGLE_LAYER);
 	card_volume_->setChecked(chosen_mode_ == MFD_TARGET_AUDIO_VOLUME);
+	card_master_mix_->setChecked(chosen_mode_ == MFD_TARGET_MIX_MASTER);
 	card_filter_->setChecked(chosen_mode_ == MFD_TARGET_FILTER_PARAM);
 
 	hw_panel_->setVisible(snap_.setup.candidate_addr.type == MFD_MIDI_NONE);
@@ -1058,6 +1069,7 @@ void MfdSetupSheetDialog::select_mode_and_go_step2(enum mfd_target_type mode)
 	card_mix_->setChecked(mode == MFD_TARGET_TWO_SOURCE_MIX);
 	card_single_->setChecked(mode == MFD_TARGET_SINGLE_LAYER);
 	card_volume_->setChecked(mode == MFD_TARGET_AUDIO_VOLUME);
+	card_master_mix_->setChecked(mode == MFD_TARGET_MIX_MASTER);
 	card_filter_->setChecked(mode == MFD_TARGET_FILTER_PARAM);
 	error_banner_->hide();
 	repopulate_step2_pickers();
@@ -1070,6 +1082,7 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 	updating_widgets_ = true;
 
 	step2_tbar_box_->setVisible(chosen_mode_ == MFD_TARGET_TBAR);
+	step2_master_mix_info_->setVisible(chosen_mode_ == MFD_TARGET_MIX_MASTER);
 	step2_scene_box_->setVisible(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX ||
 				     chosen_mode_ == MFD_TARGET_SINGLE_LAYER);
 	step2_audio_box_->setVisible(chosen_mode_ == MFD_TARGET_AUDIO_VOLUME);

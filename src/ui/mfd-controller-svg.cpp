@@ -161,6 +161,7 @@ QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
 				elide_px(mfdText("Map.ModeFilter", "FX / Filter"), 10, true, 100));
 		break;
 
+	case MFD_TARGET_MIX_MASTER:
 	case MFD_TARGET_AUDIO_VOLUME:
 	default:
 		svg += QStringLiteral(

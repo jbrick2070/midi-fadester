@@ -1866,6 +1866,8 @@ private:
 					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
 			target_combo->addItem(mfdText("Target.Filter", "Filter or effect setting"),
 					      static_cast<int>(MFD_TARGET_FILTER_PARAM));
+			target_combo->addItem(mfdText("Target.MixMaster", "Fadester mix master"),
+					      static_cast<int>(MFD_TARGET_MIX_MASTER));
 			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot.target_type)));
 			adv_mode_combos_[row] = target_combo;
 			table_->setCellWidget(row, 4, target_combo);

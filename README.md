@@ -16,7 +16,7 @@ Midi Fadester turns the faders and knobs on a MIDI controller into live controls
 - [You need](#you-need)
 - [Install](#install)
 - [The first five minutes](#the-first-five-minutes)
-- [The five jobs a fader can do](#the-five-jobs-a-fader-can-do)
+- [Fader assignments](#fader-assignments)
 - [Switch scenes or Mix two layers?](#switch-scenes-or-mix-two-layers)
 - [FX & Knobs and Clean / All FX Off](#fx--knobs-and-clean--all-fx-off)
 - [Controllers](#controllers)
@@ -88,7 +88,7 @@ Either way you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 
 The jobs are saved with the scene collection and the controller settings per Windows user; both come back the next time OBS starts.
 
-## The five jobs a fader can do
+## Fader assignments
 
 | Job | What the fader does | What it needs |
 |---|---|---|
@@ -96,6 +96,7 @@ The jobs are saved with the scene collection and the controller settings per Win
 | **Mix two layers** | Crossfades the Left layer and the Right layer inside one scene. Left end shows Left, right end shows Right. | Both layers in the same scene. Which one is on top is detected automatically. |
 | **Show or hide a layer** | Fades one layer from invisible to fully visible. | The layer in a scene. |
 | **Volume** | Sets one audio source's volume on a cubic curve (volume = position cubed); the strip shows the dB value. OBS's own mixer slider uses a log curve, so the same position reads a different dB there. | A source that has audio. |
+| **Fadester mix master** | Requests absolute shared mix gain from silence to 0 dB using the same cubic fader curve. The strip displays a request until the provider confirms or declines it. | The Fadester mix provider running and explicitly enabled on the same OBS connection. |
 | **Filter or effect setting** | Sweeps one numeric setting of one filter between a value *At 0 %* and a value *At 100 %*. | The filter already added to the source or scene in OBS. |
 
 A strip can also be **Not used**. Its hardware control stays bound, so you can give it a job later.
@@ -191,6 +192,15 @@ Midi Fadester registers an obs-websocket 5 vendor API. Call it with `CallVendorR
 | `load_profile` | Loads a controller layout: `apc40mk2`, `apcminimk2`, `midimix`, `nanokontrol2`, `launchcontrolxl` or `generic`. Replaces all 18 slots. |
 | `get_catalog` | Lists scenes, layers, audio sources, filters and their numeric settings with ranges and current values, so a client can build pickers. |
 | `reset_fx` | Clean / All FX Off, instant or over a timed ramp. |
+| `mix_reply` | Accepts a shared mix provider's reply only while its matching request UUID is pending. The response includes `accepted`. |
+
+### Set up the shared mix for MIDI
+
+1. Open the **Fadester for TourBox** Windows companion on the OBS computer. It supplies the shared mix service and works with a MIDI controller alone. In OBS, enable **Tools → WebSocket Server Settings** with authentication, then use the same local port in the companion. It can read OBS’s saved password, or you can enter the password shown by OBS.
+2. In the companion’s **Setup** tab, check **Enable All OBS mixer inputs**. For MIDI use, check **Run for Stream Deck, OpenDeck or MIDI only (no TourBox shortcuts)**. Click **Save & start controls** and leave the companion running. This service moves the public mixer inputs together, preserving their relative levels.
+3. In **OBS → Tools → Midi Fadester**, choose **Master → Set up → Fadester mix master**, then learn the fader if needed. The same assignment is available per slot under **Advanced**. **Volume** continues to operate one chosen OBS source directly.
+
+The bottom stop requests silence, midpoint requests about −18.1 dB, and the top requests unity. **Requested** means the strip is waiting for the provider. **Confirmed** shows its reply. An unanswered request times out after ten seconds. After starting the provider, move the fader again to send a fresh request.
 
 Two events: `fader_changed` whenever a value changes, at most 30 times a second per slot (fields: `slot`, `value`, `display_value` and `origin`: `midi`, `ui`, `api`, `auto_fade` or `obs`), and `state_changed` whenever a job, device, layout or Studio Mode changes.
 

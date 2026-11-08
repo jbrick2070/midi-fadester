@@ -51,6 +51,8 @@ struct mfd_persisted_cal_entry {
 	struct mfd_control_calibration cal;
 };
 
+enum mfd_mix_delivery { MFD_MIX_IDLE, MFD_MIX_WAITING, MFD_MIX_CONFIRMED, MFD_MIX_DECLINED, MFD_MIX_UNAVAILABLE, MFD_MIX_NO_REPLY };
+
 struct mfd_fader_slot {
 	bool enabled;
 	char id[MFD_SLOT_ID_MAX];
@@ -107,6 +109,11 @@ struct mfd_fader_slot {
 	float last_alpha_b;
 	float last_audio_mul;
 	float last_audio_db;
+	char mix_request_id[40];
+	enum mfd_mix_delivery mix_delivery;
+	double mix_reported_db;
+	char mix_reason[80];
+	uint64_t mix_sent_ns;
 	uint32_t output_write_count;
 
 	/* Auto-fade state */
@@ -335,6 +342,12 @@ struct mfd_engine {
 	bool pending_state_event;
 	bool pending_config_save;
 	struct mfd_pending_fader_emit pending_fader_emits[MFD_MAX_FADER_SLOTS];
+	/* Coalesce the most recent absolute mix request. The OBS call runs outside the slot lock. */
+	bool mix_pending;
+	int mix_slot;
+	uint64_t mix_slot_rev;
+	float mix_db;
+	float mix_send_wait;
 
 	uint64_t config_topology_rev;
 	uint64_t telemetry_rev;

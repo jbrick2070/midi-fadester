@@ -836,6 +836,8 @@ const char *mfd_target_mode_to_string(enum mfd_target_type target)
 		return "layer_opacity";
 	case MFD_TARGET_AUDIO_VOLUME:
 		return "audio_volume";
+	case MFD_TARGET_MIX_MASTER:
+		return "mix_master";
 	case MFD_TARGET_FILTER_PARAM:
 		return "filter_param";
 	case MFD_TARGET_UNASSIGNED:
@@ -867,6 +869,10 @@ bool mfd_target_mode_from_string(const char *str, enum mfd_target_type *out_targ
 	}
 	if (strcmp(str, "audio_volume") == 0) {
 		*out_target = MFD_TARGET_AUDIO_VOLUME;
+		return true;
+	}
+	if (strcmp(str, "mix_master") == 0) {
+		*out_target = MFD_TARGET_MIX_MASTER;
 		return true;
 	}
 	if (strcmp(str, "filter_param") == 0) {

@@ -492,6 +492,25 @@ void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, 
 	}
 
 	switch (slot->target_type) {
+	case MFD_TARGET_MIX_MASTER: {
+		char db[24];
+		snprintf(db, sizeof(db), "%.1f", slot->mix_reported_db);
+		const char *values[] = {db};
+		const char *label;
+		switch (slot->mix_delivery) {
+		case MFD_MIX_WAITING: label = mfd_text_or_english(translate, "Mix.Waiting", "Requested %1 dB"); break;
+		case MFD_MIX_CONFIRMED: label = mfd_text_or_english(translate, "Mix.Confirmed", "Confirmed %1 dB"); break;
+		case MFD_MIX_DECLINED:
+			label = mfd_text_or_english(translate, "Mix.Declined", "Declined: %1");
+			values[0] = slot->mix_reason;
+			break;
+		case MFD_MIX_NO_REPLY: label = mfd_text_or_english(translate, "Mix.NoReply", "No mix provider reply"); break;
+		case MFD_MIX_UNAVAILABLE: label = mfd_text_or_english(translate, "Mix.Unavailable", "Mix request unavailable"); break;
+		default: label = mfd_text_or_english(translate, "Readout.MixMasterIdle", "Fadester mix provider required"); break;
+		}
+		mfd_text_fill(out, out_size, label, values, 1U);
+		break;
+	}
 	case MFD_TARGET_FILTER_PARAM: {
 		double pmin = slot->filter_prop_valid ? slot->filter_prop_min
 						      : fmin(slot->filter_from_val, slot->filter_to_val);
@@ -598,6 +617,11 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 	mfd_engine_abort_tbar_for_config_change_locked(eng, slot);
 	enum mfd_target_type prev_target = slot->target_type;
 	slot->target_type = new_target;
+	if (prev_target != new_target) {
+		slot->mix_request_id[0] = '\0';
+		slot->mix_delivery = MFD_MIX_IDLE;
+		slot->mix_sent_ns = 0;
+	}
 	if (prev_target == new_target) {
 		configure_slot_takeover_mode(eng, slot);
 		if (new_target == MFD_TARGET_TBAR && slot->takeover.state != MFD_TAKEOVER_PARKED) {
@@ -1945,6 +1969,12 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				snprintf(lbl, sizeof(lbl), "Unassigned");
 				avail = false;
 				mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+				break;
+
+			case MFD_TARGET_MIX_MASTER:
+				snprintf(lbl, sizeof(lbl), "Fadester mix master");
+				avail = true; /* Can request; the external mix provider confirms application. */
+				mfd_msg_clear(&rsn);
 				break;
 
 			case MFD_TARGET_TBAR:
@@ -4190,6 +4220,15 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		}
 		break;
 
+	case MFD_TARGET_MIX_MASTER: {
+		int index = (int)(slot - eng->fader_slots);
+		slot->last_applied_val = val; /* Local control position; provider replies carry the applied gain. */
+		eng->mix_slot = index;
+		eng->mix_slot_rev = eng->slot_config_rev[index];
+		eng->mix_db = fmaxf(-100.0f, mfd_deflection_to_db(val));
+		eng->mix_pending = true;
+		break;
+	}
 	case MFD_TARGET_FILTER_PARAM:
 		apply_filter_param_output_locked(eng, slot, val);
 		break;
@@ -4400,6 +4439,13 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		eng->fader_slots[i].sec_since_last_fader_event += seconds;
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (s->mix_sent_ns && os_gettime_ns() - s->mix_sent_ns > 10000000000ULL) {
+			s->mix_sent_ns = 0;
+			s->mix_request_id[0] = '\0';
+			s->mix_delivery = MFD_MIX_NO_REPLY;
+			mfd_engine_mark_ui_dirty(eng, false);
+		}
 	}
 
 	struct mfd_midi_raw_event raw;
@@ -4484,6 +4530,15 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				continue;
 			}
 
+			if (slot->target_type == MFD_TARGET_MIX_MASTER) {
+				/* Absolute master: report calibrated travel, independent of a source's pickup value. */
+				slot->auto_fade_active = false;
+				mfd_takeover_unpark_from_api(&slot->takeover, norm);
+				mfd_smoother_reset(&slot->smoother, norm);
+				mfd_engine_apply_slot_output(eng, slot, norm);
+				mfd_engine_notify_fader_changed(eng, i, "midi");
+				continue;
+			}
 			float effective = slot->last_applied_val;
 			bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 					  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
@@ -4704,7 +4759,18 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		}
 	}
 
+	eng->mix_send_wait = fmaxf(0.0f, eng->mix_send_wait - seconds);
+	bool send_mix = eng->mix_pending && eng->mix_send_wait <= 0.0f;
+	int mix_slot = eng->mix_slot;
+	uint64_t mix_revision = eng->mix_slot_rev;
+	float mix_db = eng->mix_db;
+	if (send_mix) {
+		eng->mix_pending = false;
+		eng->mix_send_wait = 0.05f;
+	}
 	mfd_engine_unlock(eng);
+	if (send_mix)
+		mfd_vendor_send_mix_set(eng, mix_slot, mix_revision, mix_db);
 }
 
 static void mfd_engine_video_tick(void *param, float seconds)
@@ -5476,7 +5542,7 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		if (obs_data_has_user_value(item, "target_type")) {
 			long long raw_ttype = obs_data_get_int(item, "target_type");
 			if (raw_ttype < (long long)MFD_TARGET_UNASSIGNED ||
-			    raw_ttype > (long long)MFD_TARGET_FILTER_PARAM) {
+			    raw_ttype > (long long)MFD_TARGET_MIX_MASTER) {
 				obs_log(LOG_WARNING,
 					"Slot '%s' had invalid target_type %lld; downgrading to unassigned", s->id,
 					raw_ttype);
@@ -5533,7 +5599,7 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			}
 		} else {
 			clear_slot_filter_fields(s);
-			if (s->target_type != MFD_TARGET_TBAR && s->source_a_name[0] == '\0' &&
+			if (s->target_type != MFD_TARGET_TBAR && s->target_type != MFD_TARGET_MIX_MASTER && s->source_a_name[0] == '\0' &&
 			    s->source_b_name[0] == '\0') {
 				s->target_type = MFD_TARGET_UNASSIGNED;
 			}
