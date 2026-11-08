@@ -27,6 +27,9 @@ extern "C" {
 #define TUB_COALESCE_INTERVAL_NS 50000000ULL
 
 int tub_speed_clamp_pct(int pct);
+/* A speed setting as stored (obs_data integers are 64-bit), clamped to the range before it is narrowed, so a huge
+ * value written over obs-websocket reads as 800 rather than wrapping around. */
+int tub_speed_pct_from_setting(long long value);
 double tub_speed_pct_to_rate(int pct);
 
 /* The speed a fader at value (0 to 1) asks for, between min_pct at 0 and max_pct at 1 on a ratio scale: equal fader

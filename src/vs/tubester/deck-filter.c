@@ -334,7 +334,7 @@ static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings
 	}
 
 	/* a new speed reaches the page through the coalescer in the tick; a pitch change is sent at once */
-	int speed = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED));
+	int speed = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED));
 	bool pitch = obs_data_get_bool(settings, TUB_SETTING_TAPE_PITCH);
 	if (pitch != f->tape_pitch)
 		f->send_rate = true;
@@ -343,8 +343,8 @@ static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings
 
 	long long slot = obs_data_get_int(settings, TUB_SETTING_SPEED_FADER);
 	f->fader_slot = (slot >= 0 && slot < VS_FADER_SLOT_COUNT) ? (int)slot : VS_FADER_SLOT_NONE;
-	f->fader_min_pct = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MIN));
-	f->fader_max_pct = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MAX));
+	f->fader_min_pct = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MIN));
+	f->fader_max_pct = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MAX));
 	/* the tick works out the fader's speed; without a live fader the slider's applies from now on */
 	if (f->fader_slot == VS_FADER_SLOT_NONE)
 		f->fader_live = false;
@@ -361,8 +361,11 @@ static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings
 	f->start_seconds = (isfinite(start) && start >= 0.0) ? start : 0.0;
 
 	bool playing = obs_data_get_bool(settings, TUB_SETTING_PLAYING);
-	if (playing != f->playing)
+	if (playing != f->playing) {
 		f->send_transport = true;
+		/* a new play state is a new occurrence for the repair's log */
+		f->play_repair_logged = false;
+	}
 	f->playing = playing;
 }
 
@@ -429,7 +432,9 @@ static void check_play_locked(struct tub_deck_filter *f, uint64_t now)
 	const struct tub_report *r = &f->link.last;
 	if (f->tape_status != TAPE_SET || f->current_cmd_is_eject || r->ended || r->error_code != 0 ||
 	    r->ready_state < 1) {
+		/* this occurrence is over: a later disagreement is logged again */
 		f->play_mismatch_streak = 0;
+		f->play_repair_logged = false;
 		return;
 	}
 	if (now < f->last_play_sent_ns || now - f->last_play_sent_ns < TUB_REPAIR_GRACE_NS)
@@ -464,6 +469,8 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 		f->send_rate = true;
 		f->send_loop = true;
 		f->resend_current = false;
+		/* a missed command on the new page is a new occurrence, logged again */
+		f->resend_logged = false;
 		obs_log(LOG_INFO, "tape deck %s: page connected", f->deck_id);
 		break;
 	case TUB_REPORT_ACCEPTED:
@@ -688,7 +695,7 @@ static void hotkey_on_ui_thread(void *param)
 	}
 
 	obs_data_t *settings = obs_source_get_settings(source);
-	int pct = tub_speed_clamp_pct((int)obs_data_get_int(settings, TUB_SETTING_SPEED));
+	int pct = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED));
 	obs_data_release(settings);
 	int next = TUB_SPEED_NORMAL_PCT;
 	if (action == HOTKEY_SPEED_UP)
@@ -949,7 +956,7 @@ static void build_tape_or_eject_locked(struct tub_deck_filter *f, uint64_t gen, 
 {
 	if (f->tape_status == TAPE_SET) {
 		double at = f->tape_from_start ? f->start_seconds : f->last_position;
-		c->tape = tub_command_tape(gen, f->tape_url, at, f->loop, f->playing);
+		c->tape = tub_command_tape(gen, f->tape_url, at, f->start_seconds, f->loop, f->playing);
 		if (!c->tape)
 			obs_log(LOG_WARNING, "tape deck %s: the tape address cannot be sent; ejecting", f->deck_id);
 	}
@@ -963,6 +970,7 @@ static void build_tape_or_eject_locked(struct tub_deck_filter *f, uint64_t gen, 
 		f->send_cue = false;
 		f->last_play_sent_ns = now;
 		f->play_mismatch_streak = 0;
+		f->play_repair_logged = false;
 		f->send_rate = true;
 	} else {
 		/* no usable tape: the page empties its player and the deck reads Ready with no tape */
@@ -992,6 +1000,8 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 	if (f->send_tape) {
 		f->send_tape = false;
 		f->resend_current = false;
+		/* a new generation: if this command is missed too, that is a new occurrence */
+		f->resend_logged = false;
 		/* a generation is used only by a command that is really sent, so the page never falls behind the link */
 		build_tape_or_eject_locked(f, f->link.gen + 1, now, c);
 	} else if (f->resend_current) {
@@ -1043,6 +1053,9 @@ static void build_commands_locked(struct tub_deck_filter *f, int port, float sec
 	if (send_speed) {
 		c->rate = tub_command_rate(tub_speed_pct_to_rate(want), f->tape_pitch);
 		if (c->rate) {
+			/* a new speed is a new occurrence for the repair's log; a repair resends the same speed */
+			if (want != f->sent_pct)
+				f->rate_repair_logged = false;
 			f->sent_pct = want;
 			f->last_rate_sent_ns = now;
 			f->rate_mismatch_streak = 0;
@@ -1081,8 +1094,9 @@ static void update_wanted_speed(struct tub_deck_filter *f)
 	if (slot >= 0 && slot < VS_FADER_SLOT_COUNT) {
 		/* one slot per call, in turn; Midi Fadester also pushes each change as it happens */
 		vs_fader_bridge_poll_once();
-		live = vs_fader_bridge_is_midi_fadester_loaded();
-		value = vs_fader_bridge_get_slot(slot);
+		/* live once the slot has been read: before that, and for a slot this Midi Fadester does not have, the Speed
+		 * setting applies rather than the bottom speed the bridge's starting 0 would give */
+		live = vs_fader_bridge_get_known_slot(slot, &value);
 	}
 
 	pthread_mutex_lock(&f->mutex);

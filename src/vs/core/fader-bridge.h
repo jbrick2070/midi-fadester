@@ -63,6 +63,10 @@ bool vs_fader_bridge_poll_once(void);
 bool vs_fader_bridge_set_slot(int slot_idx, float value);
 bool vs_fader_bridge_set_slot_by_name(const char *name, float value);
 float vs_fader_bridge_get_slot(int slot_idx);
+/* True with *out_value set when Midi Fadester is loaded and the slot holds a value it gave: a poll that answered, a
+ * pushed change or a direct set. False (and 0) before the slot's first read and for a slot the provider does not have
+ * (an FX slot on an older Midi Fadester), so a binding can fall back instead of reading the 0 the bridge starts from. */
+bool vs_fader_bridge_get_known_slot(int slot_idx, float *out_value);
 /* Copies a coherent snapshot of all slots under one bridge lock. Unloaded slots read zero. */
 void vs_fader_bridge_get_slots(float out_values[VS_FADER_SLOT_COUNT]);
 

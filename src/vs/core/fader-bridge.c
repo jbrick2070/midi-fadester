@@ -38,6 +38,9 @@ static int g_poll_slot_idx = 0;
 static volatile bool g_panic_active = false;
 
 static float g_fader_values[VS_FADER_SLOT_COUNT];
+/* the slot holds a value Midi Fadester gave (a poll that answered ok, a pushed change, a direct set), not the 0 it
+ * starts from or the 0 an unavailable slot reads */
+static bool g_fader_known[VS_FADER_SLOT_COUNT];
 static uint64_t g_fader_generations[VS_FADER_SLOT_COUNT];
 static uint64_t g_bridge_revision;
 static struct vs_audio_frame g_latest_signals;
@@ -62,6 +65,7 @@ static float clamp01(float x)
 static void clear_fader_values_locked(void)
 {
 	memset(g_fader_values, 0, sizeof(g_fader_values));
+	memset(g_fader_known, 0, sizeof(g_fader_known));
 	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
 		++g_fader_generations[i];
 	++g_bridge_revision;
@@ -121,6 +125,7 @@ static void on_global_signal(void *data, const char *signal, calldata_t *params)
 	pthread_mutex_lock(&g_bridge_mutex);
 	g_midi_fadester_loaded = true;
 	g_fader_values[idx] = clamped;
+	g_fader_known[idx] = true;
 	++g_fader_generations[idx];
 	++g_bridge_revision;
 	pthread_mutex_unlock(&g_bridge_mutex);
@@ -232,6 +237,7 @@ bool vs_fader_bridge_poll_once(void)
 		g_midi_fadester_loaded = true;
 		/* Older providers do not expose FX slots; do not retain a stale value when a slot disappears. */
 		g_fader_values[idx] = val;
+		g_fader_known[idx] = ok;
 		++g_fader_generations[idx];
 		++g_bridge_revision;
 	}
@@ -247,6 +253,7 @@ bool vs_fader_bridge_set_slot(int slot_idx, float value)
 	pthread_mutex_lock(&g_bridge_mutex);
 	g_midi_fadester_loaded = true;
 	g_fader_values[slot_idx] = clamped;
+	g_fader_known[slot_idx] = true;
 	++g_fader_generations[slot_idx];
 	++g_bridge_revision;
 	pthread_mutex_unlock(&g_bridge_mutex);
@@ -269,6 +276,20 @@ float vs_fader_bridge_get_slot(int slot_idx)
 	const float val = g_midi_fadester_loaded ? g_fader_values[slot_idx] : 0.0f;
 	pthread_mutex_unlock(&g_bridge_mutex);
 	return val;
+}
+
+bool vs_fader_bridge_get_known_slot(int slot_idx, float *out_value)
+{
+	if (out_value)
+		*out_value = 0.0f;
+	if (slot_idx < 0 || slot_idx >= VS_FADER_SLOT_COUNT)
+		return false;
+	pthread_mutex_lock(&g_bridge_mutex);
+	const bool known = g_midi_fadester_loaded && g_fader_known[slot_idx];
+	if (known && out_value)
+		*out_value = g_fader_values[slot_idx];
+	pthread_mutex_unlock(&g_bridge_mutex);
+	return known;
 }
 
 void vs_fader_bridge_get_slots(float out_values[VS_FADER_SLOT_COUNT])

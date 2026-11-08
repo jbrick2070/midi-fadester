@@ -26,6 +26,7 @@
   var seq = 0;
   var nopic = false;
   var pendingAt = 0; /* where the tape being loaded starts; applied once its metadata is known */
+  var pendingIsStart = false; /* pendingAt is the start position (not a place confirmed before a reload) */
   var wdLast = -1, wdSame = 0;
 
   /* The tape the player holds. Chromium keeps currentSrc after an eject removes the src attribute, so the attribute
@@ -49,6 +50,12 @@
     return v.ended || (v.paused && hasTape() && isFinite(v.duration) && v.duration > 0 && v.currentTime >= v.duration);
   }
 
+  /* A start position at or past the end of the tape means 0: loading, cueing and playing after the end agree, and a
+     start left over from a longer tape never parks a short one at its end. */
+  function startWithin(s) {
+    return s > 0 && s < v.duration ? s : 0;
+  }
+
   function post(ev) {
     if (!link) return;
     var r = {
@@ -70,15 +77,18 @@
      filter never reads a position of 0 while the tape is really starting further in. */
   v.addEventListener('loadedmetadata', function () {
     if (pendingAt > 0) {
-      var at = pendingAt;
+      /* a place confirmed before a reload is kept even at the very end, so an ended tape stays ended */
+      var at = pendingIsStart ? startWithin(pendingAt) : pendingAt;
       pendingAt = 0;
-      v.currentTime = at;
+      pendingIsStart = false;
+      if (at > 0) v.currentTime = at;
     }
     nopic = v.videoWidth === 0;
     post(nopic ? 'nopicture' : 'loadedmetadata');
   });
   v.addEventListener('error', function () {
     pendingAt = 0;
+    pendingIsStart = false;
     post('error');
   });
 
@@ -90,6 +100,7 @@
   function resetPlayerState() {
     nopic = false;
     pendingAt = 0;
+    pendingIsStart = false;
     wdLast = -1;
     wdSame = 0;
   }
@@ -117,6 +128,7 @@
     if (d.tape !== undefined) {
       resetPlayerState();
       pendingAt = d.at > 0 ? d.at : 0;
+      pendingIsStart = d.start !== undefined && d.at === d.start;
       if (d.loop !== undefined) v.loop = !!d.loop;
       /* Loading runs the media load algorithm, which puts playbackRate back to defaultPlaybackRate; the rate command
          sets both, so the speed survives every load */
@@ -133,18 +145,21 @@
       v.playbackRate = d.rate;
     }
     if (d.seek !== undefined) {
-      /* a tape still loading takes the place once its metadata is known, as a tape command's start does */
+      /* a seek is a cue to the start position. A tape still loading takes it once its metadata is known, as a tape
+         command's start does. */
       if (v.readyState < 1) {
         pendingAt = d.seek > 0 ? d.seek : 0;
+        pendingIsStart = true;
       } else {
         /* the metadata handler may still be queued: it must not take the tape back to the load position */
         pendingAt = 0;
-        v.currentTime = d.seek;
+        pendingIsStart = false;
+        v.currentTime = startWithin(d.seek);
       }
     }
     if (d.play) {
-      /* play after the end starts from the start position rather than from 0 (D-11); a start past the end means 0 */
-      if (atEnd() && d.start !== undefined) v.currentTime = d.start > 0 && d.start < v.duration ? d.start : 0;
+      /* play after the end starts from the start position rather than from 0 (D-11) */
+      if (atEnd() && d.start !== undefined) v.currentTime = startWithin(d.start);
       play();
     }
     if (d.pause) v.pause();

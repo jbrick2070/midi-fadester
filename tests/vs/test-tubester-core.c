@@ -112,6 +112,13 @@ static void test_speed_range(void)
 	assert(tub_speed_pct_to_rate(100) == 1.0);
 	assert(tub_speed_pct_to_rate(25) == 0.25);
 	assert(tub_speed_pct_to_rate(1600) == 8.0);
+	/* a stored setting is clamped before it is narrowed: 4294967396 would wrap to 100 as an int */
+	assert(tub_speed_pct_from_setting(150) == 150);
+	assert(tub_speed_pct_from_setting(4294967396LL) == 800);
+	assert(tub_speed_pct_from_setting(-4294967196LL) == 25);
+	assert(tub_speed_pct_from_setting(9223372036854775807LL) == 800);
+	assert(tub_speed_pct_from_setting(-9223372036854775807LL - 1) == 25);
+	assert(tub_speed_pct_from_setting(0) == 25);
 	printf("  test_speed_range: PASS\n");
 }
 

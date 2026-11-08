@@ -26,6 +26,15 @@ int tub_speed_clamp_pct(int pct)
 	return pct;
 }
 
+int tub_speed_pct_from_setting(long long value)
+{
+	if (value < TUB_SPEED_MIN_PCT)
+		return TUB_SPEED_MIN_PCT;
+	if (value > TUB_SPEED_MAX_PCT)
+		return TUB_SPEED_MAX_PCT;
+	return (int)value;
+}
+
 double tub_speed_pct_to_rate(int pct)
 {
 	return (double)tub_speed_clamp_pct(pct) / 100.0;

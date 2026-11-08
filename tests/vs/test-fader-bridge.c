@@ -407,6 +407,65 @@ static void test_fx_bridge_poll_signal_and_legacy_provider(void)
 	proc_handler_destroy(ph);
 }
 
+/* A slot counts as known only once Midi Fadester gave its value, so a Tape Deck's Speed Fader can fall back to the
+ * Speed setting until then, and for an FX slot an older provider does not have. */
+static void test_slot_known_only_after_a_read(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph && sh);
+	struct fake_fadester_ctx ctx = {0};
+	for (int i = 0; i < 18; i++)
+		ctx.slots[i] = 0.5f;
+	proc_handler_add(
+		ph,
+		"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+		fake_midi_fadester_get_slot_value, &ctx);
+	signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+	float v = -1.0f;
+	assert(!vs_fader_bridge_get_known_slot(VS_FADER_1, &v) && v == 0.0f);
+
+	/* attach reads the crossfader: it is known; fader 5 is not read yet, although Midi Fadester is loaded */
+	vs_fader_bridge_attach(ph, sh);
+	assert(vs_fader_bridge_is_midi_fadester_loaded());
+	assert(vs_fader_bridge_get_known_slot(VS_FADER_CROSSFADER, &v) && float_near(v, 0.5f, 1e-6f));
+	v = -1.0f;
+	assert(!vs_fader_bridge_get_known_slot(VS_FADER_5, &v) && v == 0.0f);
+	assert(!vs_fader_bridge_get_known_slot(-1, &v) && !vs_fader_bridge_get_known_slot(VS_FADER_SLOT_COUNT, &v));
+	assert(!vs_fader_bridge_get_known_slot(VS_FADER_5, NULL));
+
+	/* a pushed change makes its slot known at once */
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_5");
+	calldata_set_float(&cd, "value", 0.75);
+	calldata_set_string(&cd, "origin", "midi");
+	signal_handler_signal(sh, "midi_fadester_fader_changed", &cd);
+	calldata_free(&cd);
+	assert(vs_fader_bridge_get_known_slot(VS_FADER_5, &v) && float_near(v, 0.75f, 1e-6f));
+
+	/* the round robin reads every slot */
+	for (int i = 0; i < 18; i++)
+		vs_fader_bridge_poll_once();
+	for (int i = 0; i < 18; i++)
+		assert(vs_fader_bridge_get_known_slot(i, &v));
+
+	/* a provider without the FX bank: its FX slots are unavailable, not a fader at 0 */
+	ctx.reject_fx = true;
+	for (int i = 0; i < 18; i++)
+		vs_fader_bridge_poll_once();
+	assert(vs_fader_bridge_get_known_slot(VS_FADER_8, &v));
+	assert(!vs_fader_bridge_get_known_slot(VS_FADER_FX_1, &v) && v == 0.0f);
+
+	/* a direct set is a value too, and detaching forgets every slot */
+	assert(vs_fader_bridge_set_slot(VS_FADER_FX_2, 0.3f));
+	assert(vs_fader_bridge_get_known_slot(VS_FADER_FX_2, &v) && float_near(v, 0.3f, 1e-6f));
+	vs_fader_bridge_detach();
+	assert(!vs_fader_bridge_get_known_slot(VS_FADER_8, &v) && v == 0.0f);
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
 static void test_newer_events_win_over_in_flight_poll(void)
 {
 	proc_handler_t *ph = proc_handler_create();
@@ -903,6 +962,7 @@ int main(void)
 	test_vendor_payload_fields_trigger_events();
 	test_in_process_bridge_fake_proc_and_signal();
 	test_fx_bridge_poll_signal_and_legacy_provider();
+	test_slot_known_only_after_a_read();
 	test_newer_events_win_over_in_flight_poll();
 	test_panic_and_restore_hotkeys_logic();
 	test_restore_writes_back_only_what_panic_saved();
