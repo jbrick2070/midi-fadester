@@ -32,3 +32,7 @@
 
 # Exclude CMake build number cache
 /cmake/.CMakeBuildNumber
+
+# Exclude the local demo-reel production workspace (renders, browser profiles,
+# masters). It stays on disk outside git until the demos are redone.
+/docs/demo-reel/
