@@ -16,6 +16,9 @@
 #include <util/platform.h>
 #include "plugin-support.h"
 #include <ctype.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -150,6 +153,11 @@ bool mfd_engine_init_mutex(struct mfd_engine *eng)
 	if (pthread_mutex_init_recursive(&eng->state_mutex) != 0) {
 		return false;
 	}
+	if (pthread_mutex_init(&eng->graph_mutex, NULL) != 0) {
+		pthread_mutex_destroy(&eng->state_mutex);
+		return false;
+	}
+	eng->graph_mutex_initialized = true;
 	eng->state_mutex_initialized = true;
 	eng->lock_depth = 0U;
 	return true;
@@ -163,6 +171,23 @@ void mfd_engine_destroy_mutex(struct mfd_engine *eng)
 	eng->state_mutex_initialized = false;
 	eng->lock_depth = 0U;
 	pthread_mutex_destroy(&eng->state_mutex);
+	if (eng->graph_mutex_initialized) {
+		eng->graph_mutex_initialized = false;
+		pthread_mutex_destroy(&eng->graph_mutex);
+	}
+	bfree(eng->graph_items);
+	eng->graph_items = NULL;
+	eng->graph_count = 0U;
+	eng->graph_cap = 0U;
+}
+
+static long current_thread_key(void)
+{
+#ifdef _WIN32
+	return (long)GetCurrentThreadId();
+#else
+	return (long)(uintptr_t)pthread_self();
+#endif
 }
 
 void mfd_engine_lock(struct mfd_engine *eng)
@@ -173,7 +198,15 @@ void mfd_engine_lock(struct mfd_engine *eng)
 	if (eng->state_mutex_initialized) {
 		pthread_mutex_lock(&eng->state_mutex);
 	}
+	if (eng->lock_depth == 0U) {
+		os_atomic_store_long(&eng->lock_owner, current_thread_key());
+	}
 	++eng->lock_depth;
+}
+
+bool mfd_engine_held_by_current_thread(const struct mfd_engine *eng)
+{
+	return eng && os_atomic_load_long((volatile long *)&eng->lock_owner) == current_thread_key();
 }
 
 void mfd_engine_unlock(struct mfd_engine *eng)
@@ -207,6 +240,7 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 		eng->pending_ui_notify = false;
 		ui_fn = eng->ui_notify_fn;
 		ui_ud = eng->ui_notify_user_data;
+		os_atomic_store_long(&eng->lock_owner, 0);
 	}
 
 	if (eng->state_mutex_initialized) {
@@ -1782,6 +1816,7 @@ static void sync_filter_bypass_lease_ex_locked(struct mfd_engine *eng, const cha
 		if (lease) {
 			bool restore_en = lease->pre_mfd_enabled;
 			lease->writing_enable = true;
+			lease->writing_value = restore_en;
 			sg_set_filter_enabled(eng, source_name, filter_name, restore_en);
 			lease->writing_enable = false;
 			memset(lease, 0, sizeof(*lease));
@@ -1828,6 +1863,7 @@ static void sync_filter_bypass_lease_ex_locked(struct mfd_engine *eng, const cha
 	if (!lease->has_written_enable || live_en != want_enabled || lease->last_mfd_enabled != want_enabled) {
 		if (live_en != want_enabled) {
 			lease->writing_enable = true;
+			lease->writing_value = want_enabled;
 			sg_set_filter_enabled(eng, source_name, filter_name, want_enabled);
 			lease->writing_enable = false;
 		}
@@ -1873,6 +1909,7 @@ void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng)
 		}
 		if (sg_filter_exists(eng, l->source_name, l->filter_name, NULL)) {
 			l->writing_enable = true;
+			l->writing_value = l->pre_mfd_enabled;
 			sg_set_filter_enabled(eng, l->source_name, l->filter_name, l->pre_mfd_enabled);
 			l->writing_enable = false;
 		}
@@ -1961,10 +1998,18 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 	}
 }
 
-static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, const struct mfd_fader_slot *slot,
-					      char *out_label, size_t label_size, bool *out_available,
-					      struct mfd_msg *out_reason, char *out_resolved_scene,
-					      size_t resolved_size, bool *out_a_above_b)
+/*
+ * live == false is a status read: the in-process bridge that Visual Sidechain polls on the graphics thread every
+ * frame, the vendor API, a refused fader write. These run often and from any thread, so they report what
+ * mfd_engine_reevaluate_slots() last found instead of looking the scene graph up (obs_get_source_by_name and
+ * obs_scene_enum_items take libobs's sources, canvas and scene locks) each time. The re-check runs on every scene,
+ * item, source and frontend change (see mfd_engine_report_scene_graph_change). live == true is for that re-check
+ * and for checks made before a change is committed.
+ */
+static void evaluate_slot_preconditions(const struct mfd_engine *eng, const struct mfd_fader_slot *slot,
+					char *out_label, size_t label_size, bool *out_available,
+					struct mfd_msg *out_reason, char *out_resolved_scene, size_t resolved_size,
+					bool *out_a_above_b, bool live)
 {
 	char lbl[128] = "Unassigned";
 	bool avail = false;
@@ -2022,6 +2067,9 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
 					avail = false;
 					mfd_msg_set(&rsn, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
+				} else if (!live) {
+					avail = slot->cached_available;
+					rsn = slot->cached_reason_msg;
 				} else if (slot->scene_name[0] != '\0') {
 					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
 						avail = false;
@@ -2094,6 +2142,9 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				if (slot->source_a_name[0] == '\0') {
 					avail = false;
 					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+				} else if (!live) {
+					avail = slot->cached_available;
+					rsn = slot->cached_reason_msg;
 				} else if (slot->scene_name[0] != '\0') {
 					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
 						avail = false;
@@ -2145,6 +2196,9 @@ static void evaluate_slot_preconditions_const(const struct mfd_engine *eng, cons
 				if (slot->source_a_name[0] == '\0') {
 					avail = false;
 					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+				} else if (!live) {
+					avail = slot->cached_available;
+					rsn = slot->cached_reason_msg;
 				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
 					avail = false;
 					mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL,
@@ -2215,8 +2269,8 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 			refresh_filter_slot_metadata_locked(eng, i, &new_avail, &new_reason);
 		} else {
 			slot->filter_prop_valid = false;
-			evaluate_slot_preconditions_const(eng, slot, NULL, 0U, &new_avail, &new_reason, new_resolved,
-							  sizeof(new_resolved), &new_a_above_b);
+			evaluate_slot_preconditions(eng, slot, NULL, 0U, &new_avail, &new_reason, new_resolved,
+						    sizeof(new_resolved), &new_a_above_b, true);
 		}
 
 		slot->cached_available = new_avail;
@@ -2280,13 +2334,13 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 	mfd_engine_unlock(eng);
 }
 
-void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_name, const char *new_name)
+/* Engine lock held. Renames every reference; no re-check (a batch of renames re-checks once, at the end). */
+static bool rename_source_refs_locked(struct mfd_engine *eng, const char *prev_name, const char *new_name)
 {
 	if (!eng || !prev_name || prev_name[0] == '\0' || !new_name || new_name[0] == '\0' ||
 	    strcmp(prev_name, new_name) == 0) {
-		return;
+		return false;
 	}
-	mfd_engine_lock(eng);
 	bool touched = false;
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_filter_bypass_lease *l = &eng->filter_leases[i];
@@ -2318,6 +2372,17 @@ void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_na
 			touched = true;
 		}
 	}
+	return touched;
+}
+
+void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_name, const char *new_name)
+{
+	if (!eng || !prev_name || prev_name[0] == '\0' || !new_name || new_name[0] == '\0' ||
+	    strcmp(prev_name, new_name) == 0) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	const bool touched = rename_source_refs_locked(eng, prev_name, new_name);
 	mfd_engine_reevaluate_slots(eng, false);
 	if (touched) {
 		mfd_engine_notify_state_changed(eng);
@@ -2327,14 +2392,14 @@ void mfd_engine_handle_source_rename(struct mfd_engine *eng, const char *prev_na
 	mfd_engine_unlock(eng);
 }
 
-void mfd_engine_handle_filter_rename(struct mfd_engine *eng, const char *parent_source_name, const char *prev_name,
-				     const char *new_name)
+/* Engine lock held. Renames the filter's references; no re-check. */
+static bool rename_filter_refs_locked(struct mfd_engine *eng, const char *parent_source_name, const char *prev_name,
+				      const char *new_name)
 {
 	if (!eng || !parent_source_name || !parent_source_name[0] || !prev_name || !prev_name[0] || !new_name ||
 	    !new_name[0] || strcmp(prev_name, new_name) == 0) {
-		return;
+		return false;
 	}
-	mfd_engine_lock(eng);
 	bool touched = false;
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_filter_bypass_lease *l = &eng->filter_leases[i];
@@ -2352,6 +2417,18 @@ void mfd_engine_handle_filter_rename(struct mfd_engine *eng, const char *parent_
 			touched = true;
 		}
 	}
+	return touched;
+}
+
+void mfd_engine_handle_filter_rename(struct mfd_engine *eng, const char *parent_source_name, const char *prev_name,
+				     const char *new_name)
+{
+	if (!eng || !parent_source_name || !parent_source_name[0] || !prev_name || !prev_name[0] || !new_name ||
+	    !new_name[0] || strcmp(prev_name, new_name) == 0) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	const bool touched = rename_filter_refs_locked(eng, parent_source_name, prev_name, new_name);
 	mfd_engine_reevaluate_slots(eng, false);
 	if (touched) {
 		mfd_engine_notify_state_changed(eng);
@@ -2385,7 +2462,9 @@ void mfd_engine_handle_filter_enable(struct mfd_engine *eng, const char *parent_
 	mfd_engine_lock(eng);
 	struct mfd_filter_bypass_lease *lease = find_filter_lease_locked(eng, parent_source_name, filter_name);
 	if (lease) {
-		if (lease->writing_enable) {
+		if (lease->writing_enable && enabled == lease->writing_value) {
+			/* the echo of Midi Fadester's own write. An operator toggle queued earlier and applied during that
+			 * write (the owner-thread path drains first) carries its own value and is recorded below. */
 			mfd_engine_unlock(eng);
 			return;
 		}
@@ -2488,7 +2567,7 @@ void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_f
 				size_t label_size, bool *out_available, char *out_reason, size_t reason_size)
 {
 	struct mfd_msg msg;
-	evaluate_slot_preconditions_const(eng, slot, out_label, label_size, out_available, &msg, NULL, 0U, NULL);
+	evaluate_slot_preconditions(eng, slot, out_label, label_size, out_available, &msg, NULL, 0U, NULL, false);
 	mfd_msg_format_english(&msg, out_reason, reason_size);
 }
 
@@ -2497,7 +2576,7 @@ void mfd_engine_get_slot_status_msg(const struct mfd_engine *eng, const struct m
 				    struct mfd_msg *out_msg)
 {
 	struct mfd_msg msg;
-	evaluate_slot_preconditions_const(eng, slot, out_label, label_size, out_available, &msg, NULL, 0U, NULL);
+	evaluate_slot_preconditions(eng, slot, out_label, label_size, out_available, &msg, NULL, 0U, NULL, false);
 	mfd_msg_format_english(&msg, out_reason, reason_size);
 	if (out_msg) {
 		*out_msg = msg;
@@ -3176,8 +3255,8 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 		struct mfd_msg rsn;
 		char res_sc[MFD_SOURCE_NAME_MAX] = {0};
 		bool a_above = out->slots[i].a_is_above_b;
-		evaluate_slot_preconditions_const(eng, &out->slots[i], lbl, sizeof(lbl), &avail, &rsn, res_sc,
-						  sizeof(res_sc), &a_above);
+		evaluate_slot_preconditions(eng, &out->slots[i], lbl, sizeof(lbl), &avail, &rsn, res_sc, sizeof(res_sc),
+					    &a_above, true);
 		out->slots[i].cached_available = avail;
 		out->slots[i].cached_reason_msg = rsn;
 		mfd_msg_format_english(&rsn, out->slots[i].cached_reason, sizeof(out->slots[i].cached_reason));
@@ -3449,7 +3528,7 @@ bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const
 
 	bool avail = false;
 	struct mfd_msg rsn;
-	evaluate_slot_preconditions_const(eng, &tmp, NULL, 0U, &avail, &rsn, NULL, 0U, NULL);
+	evaluate_slot_preconditions(eng, &tmp, NULL, 0U, &avail, &rsn, NULL, 0U, NULL, true);
 	if (!avail && out_msg) {
 		*out_msg = rsn;
 	}
@@ -3912,7 +3991,7 @@ bool mfd_engine_set_slot_value_msg(struct mfd_engine *eng, int slot_index, float
 	}
 	if (!mfd_engine_is_slot_writable(eng, slot)) {
 		bool avail = false;
-		evaluate_slot_preconditions_const(eng, slot, NULL, 0U, &avail, out_msg, NULL, 0U, NULL);
+		evaluate_slot_preconditions(eng, slot, NULL, 0U, &avail, out_msg, NULL, 0U, NULL, false);
 		mfd_engine_unlock(eng);
 		return false;
 	}
@@ -4518,6 +4597,9 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		return;
 	}
 
+	/* The video tick runs under libobs's draw-callbacks lock only, never a source or scene lock. */
+	mfd_engine_process_scene_graph_changes(eng);
+
 	mfd_engine_lock(eng);
 
 	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
@@ -4921,18 +5003,19 @@ static void disconnect_tracked_entry_signals(struct mfd_tracked_signal_entry *en
 	if (!entry || !sh) {
 		return;
 	}
+	struct mfd_engine *eng = entry->eng;
 	if (entry->is_filter) {
-		signal_handler_disconnect(sh, "rename", on_obs_filter_rename, entry);
-		signal_handler_disconnect(sh, "update_properties", on_obs_filter_update_properties, entry);
-		signal_handler_disconnect(sh, "enable", on_obs_filter_enable, entry);
-		signal_handler_disconnect(sh, "update", on_obs_filter_update, entry);
+		signal_handler_disconnect(sh, "rename", on_obs_filter_rename, eng);
+		signal_handler_disconnect(sh, "update_properties", on_obs_filter_update_properties, eng);
+		signal_handler_disconnect(sh, "enable", on_obs_filter_enable, eng);
+		signal_handler_disconnect(sh, "update", on_obs_filter_update, eng);
 	} else {
-		signal_handler_disconnect(sh, "filter_add", on_obs_host_filter_add, entry);
-		signal_handler_disconnect(sh, "filter_remove", on_obs_host_filter_remove, entry);
+		signal_handler_disconnect(sh, "filter_add", on_obs_host_filter_add, eng);
+		signal_handler_disconnect(sh, "filter_remove", on_obs_host_filter_remove, eng);
 		if (entry->is_scene) {
-			signal_handler_disconnect(sh, "item_add", on_obs_scene_signal, entry);
-			signal_handler_disconnect(sh, "item_remove", on_obs_scene_signal, entry);
-			signal_handler_disconnect(sh, "reorder", on_obs_scene_signal, entry);
+			signal_handler_disconnect(sh, "item_add", on_obs_scene_signal, eng);
+			signal_handler_disconnect(sh, "item_remove", on_obs_scene_signal, eng);
+			signal_handler_disconnect(sh, "reorder", on_obs_scene_signal, eng);
 		}
 	}
 }
@@ -4951,34 +5034,6 @@ static void free_tracked_signal_entry(struct mfd_tracked_signal_entry *entry)
 	free(entry);
 }
 
-static void remove_tracked_signal_by_ptr_locked(struct mfd_engine *eng, obs_source_t *src)
-{
-	if (!eng || !src) {
-		return;
-	}
-	struct mfd_tracked_signal_entry **pp = &eng->tracked_signals_head;
-	while (*pp != NULL) {
-		struct mfd_tracked_signal_entry *cur = *pp;
-		if (cur->key_ptr == src) {
-			*pp = cur->next;
-			disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(src));
-			free_tracked_signal_entry(cur);
-			continue;
-		}
-		if (cur->is_filter && cur->weak_parent && obs_weak_source_references_source(cur->weak_parent, src)) {
-			*pp = cur->next;
-			obs_source_t *flt = cur->weak_src ? obs_weak_source_get_source(cur->weak_src) : NULL;
-			if (flt) {
-				disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(flt));
-				obs_source_release(flt);
-			}
-			free_tracked_signal_entry(cur);
-			continue;
-		}
-		pp = &cur->next;
-	}
-}
-
 static void disconnect_all_tracked_signals_locked(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -4987,12 +5042,44 @@ static void disconnect_all_tracked_signals_locked(struct mfd_engine *eng)
 	while (eng->tracked_signals_head != NULL) {
 		struct mfd_tracked_signal_entry *cur = eng->tracked_signals_head;
 		eng->tracked_signals_head = cur->next;
-		if (obs_initialized() && cur->weak_src) {
-			obs_source_t *live = obs_weak_source_get_source(cur->weak_src);
-			if (live) {
-				disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(live));
-				obs_source_release(live);
+		obs_source_t *live = (obs_initialized() && cur->weak_src) ? obs_weak_source_get_source(cur->weak_src)
+									  : NULL;
+		if (live) {
+			disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(live));
+			obs_source_release(live);
+		}
+		/* A source past its last reference keeps no entry: its callbacks carry the engine, not the entry. */
+		free_tracked_signal_entry(cur);
+	}
+}
+
+/* Drops tracked entries for sources that were removed or destroyed, and for filters no longer on their host. */
+static void prune_tracked_signals_locked(struct mfd_engine *eng)
+{
+	if (!eng || !obs_initialized()) {
+		return;
+	}
+	struct mfd_tracked_signal_entry **pp = &eng->tracked_signals_head;
+	while (*pp != NULL) {
+		struct mfd_tracked_signal_entry *cur = *pp;
+		obs_source_t *src = cur->weak_src ? obs_weak_source_get_source(cur->weak_src) : NULL;
+		bool keep = src && !obs_source_removed(src);
+		if (keep && cur->is_filter) {
+			obs_source_t *parent = cur->weak_parent ? obs_weak_source_get_source(cur->weak_parent) : NULL;
+			keep = parent && !obs_source_removed(parent) && obs_filter_get_parent(src) == parent;
+			if (parent) {
+				obs_source_release(parent);
 			}
+		}
+		if (keep) {
+			obs_source_release(src);
+			pp = &cur->next;
+			continue;
+		}
+		*pp = cur->next;
+		if (src) {
+			disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(src));
+			obs_source_release(src);
 		}
 		free_tracked_signal_entry(cur);
 	}
@@ -5031,10 +5118,10 @@ static void connect_filter_source_signals_locked(struct mfd_engine *eng, obs_sou
 	entry->next = eng->tracked_signals_head;
 	eng->tracked_signals_head = entry;
 
-	signal_handler_connect(sh, "rename", on_obs_filter_rename, entry);
-	signal_handler_connect(sh, "update_properties", on_obs_filter_update_properties, entry);
-	signal_handler_connect(sh, "enable", on_obs_filter_enable, entry);
-	signal_handler_connect(sh, "update", on_obs_filter_update, entry);
+	signal_handler_connect(sh, "rename", on_obs_filter_rename, eng);
+	signal_handler_connect(sh, "update_properties", on_obs_filter_update_properties, eng);
+	signal_handler_connect(sh, "enable", on_obs_filter_enable, eng);
+	signal_handler_connect(sh, "update", on_obs_filter_update, eng);
 }
 
 static void enum_connect_host_filters_cb(obs_source_t *parent, obs_source_t *child, void *param)
@@ -5070,12 +5157,12 @@ static void connect_host_source_signals_locked(struct mfd_engine *eng, obs_sourc
 				entry->next = eng->tracked_signals_head;
 				eng->tracked_signals_head = entry;
 
-				signal_handler_connect(sh, "filter_add", on_obs_host_filter_add, entry);
-				signal_handler_connect(sh, "filter_remove", on_obs_host_filter_remove, entry);
+				signal_handler_connect(sh, "filter_add", on_obs_host_filter_add, eng);
+				signal_handler_connect(sh, "filter_remove", on_obs_host_filter_remove, eng);
 				if (entry->is_scene) {
-					signal_handler_connect(sh, "item_add", on_obs_scene_signal, entry);
-					signal_handler_connect(sh, "item_remove", on_obs_scene_signal, entry);
-					signal_handler_connect(sh, "reorder", on_obs_scene_signal, entry);
+					signal_handler_connect(sh, "item_add", on_obs_scene_signal, eng);
+					signal_handler_connect(sh, "item_remove", on_obs_scene_signal, eng);
+					signal_handler_connect(sh, "reorder", on_obs_scene_signal, eng);
 				}
 			}
 		}
@@ -5095,219 +5182,499 @@ static void connect_all_live_source_and_filter_signals(struct mfd_engine *eng)
 		return;
 	}
 	mfd_engine_lock(eng);
-	obs_enum_sources(enum_connect_sources_cb, eng);
-	obs_enum_scenes(enum_connect_sources_cb, eng);
+	if (eng->signals_connected) {
+		obs_enum_sources(enum_connect_sources_cb, eng);
+		obs_enum_scenes(enum_connect_sources_cb, eng);
+	}
 	mfd_engine_unlock(eng);
+}
+
+static void graph_lock(struct mfd_engine *eng)
+{
+	if (eng->graph_mutex_initialized) {
+		pthread_mutex_lock(&eng->graph_mutex);
+	}
+}
+
+static void graph_unlock(struct mfd_engine *eng)
+{
+	if (eng->graph_mutex_initialized) {
+		pthread_mutex_unlock(&eng->graph_mutex);
+	}
+}
+
+void mfd_engine_discard_scene_graph_changes(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	graph_lock(eng);
+	struct mfd_graph_change *items = eng->graph_items;
+	eng->graph_items = NULL;
+	eng->graph_count = 0U;
+	eng->graph_cap = 0U;
+	eng->graph_rescan = false;
+	eng->graph_recheck = false;
+	eng->graph_overflowed = false;
+	os_atomic_store_long(&eng->graph_pending, 0);
+	graph_unlock(eng);
+	bfree(items);
+}
+
+/*
+ * Engine lock held. Applies one name-bearing change to Midi Fadester's own state only: no re-check here (the caller
+ * re-checks once, after the whole batch, against the scene graph as it now is).
+ */
+static void apply_named_change_locked(struct mfd_engine *eng, const struct mfd_graph_change *ch, bool *renamed,
+				      bool *recheck, bool *prune)
+{
+	switch (ch->kind) {
+	case MFD_GRAPH_RESCAN:
+	case MFD_GRAPH_RECHECK:
+		*recheck = true;
+		break;
+	case MFD_GRAPH_SOURCE_GONE:
+		*prune = true;
+		if (!ch->flag) {
+			if (ch->a[0] != '\0') {
+				invalidate_filter_leases_for_removed_locked(eng, ch->a, NULL);
+			}
+			*recheck = true;
+		}
+		break;
+	case MFD_GRAPH_SOURCE_RENAMED:
+		if (rename_source_refs_locked(eng, ch->a, ch->b)) {
+			*renamed = true;
+		}
+		*recheck = true;
+		break;
+	case MFD_GRAPH_FILTER_REMOVED:
+		*prune = true;
+		if (ch->a[0] != '\0') {
+			invalidate_filter_leases_for_removed_locked(eng, ch->a, ch->b[0] != '\0' ? ch->b : NULL);
+		}
+		*recheck = true;
+		break;
+	case MFD_GRAPH_FILTER_RENAMED:
+		if (rename_filter_refs_locked(eng, ch->a, ch->b, ch->c)) {
+			*renamed = true;
+		}
+		*recheck = true;
+		break;
+	case MFD_GRAPH_FILTER_ENABLED:
+		mfd_engine_handle_filter_enable(eng, ch->a, ch->b, ch->flag);
+		break;
+	case MFD_GRAPH_FILTER_SETTINGS:
+		mfd_engine_handle_filter_settings_updated(eng, ch->a, ch->b);
+		break;
+	}
+}
+
+/* Engine lock held. Re-checks once after a batch (or one owner-thread change). */
+static void finish_changes_locked(struct mfd_engine *eng, bool renamed, bool recheck, bool prune, bool rescan)
+{
+	if (prune || rescan) {
+		prune_tracked_signals_locked(eng);
+	}
+	if (rescan) {
+		connect_all_live_source_and_filter_signals(eng); /* a no-op once exit or shutdown disconnected */
+		recheck = true;
+	}
+	if (recheck || renamed) {
+		mfd_engine_reevaluate_slots(eng, true);
+	}
+	if (renamed) {
+		mfd_engine_notify_state_changed(eng);
+	}
+}
+
+/* Releases the engine lock. A rename is saved to the global config by the UI thread's flush, never here: a drain may
+ * run on the graphics thread. */
+static void unlock_after_changes(struct mfd_engine *eng, bool renamed)
+{
+	if (renamed && obs_initialized()) {
+		eng->pending_config_save = true;
+	}
+	mfd_engine_unlock(eng);
+}
+
+/* allow_rescan is false on the owner-thread path: connecting signals there would enumerate sources inside whatever
+ * libobs call this thread is in; the rescan stays queued for the next drain. */
+static size_t drain_scene_graph_changes(struct mfd_engine *eng, bool allow_rescan)
+{
+	if (os_atomic_load_long(&eng->graph_pending) == 0) {
+		return 0U; /* nothing queued: an idle video tick takes no lock */
+	}
+	/*
+	 * The engine lock first, then the batch: drains (the video tick, frontend events, obs-websocket requests) then
+	 * run one at a time, each on everything queued before it, so a later batch can never be applied before an
+	 * earlier one (A->B then B->C). Order: engine lock, then graph_mutex, as on the owner-thread path; the signal
+	 * callbacks take graph_mutex only.
+	 */
+	mfd_engine_lock(eng);
+	graph_lock(eng);
+	struct mfd_graph_change *items = eng->graph_items;
+	const size_t count = eng->graph_count;
+	const bool rescan = allow_rescan && eng->graph_rescan;
+	const bool recheck = eng->graph_recheck || (!allow_rescan && eng->graph_rescan);
+	const bool overflowed = eng->graph_overflowed;
+	eng->graph_items = NULL;
+	eng->graph_count = 0U;
+	eng->graph_cap = 0U;
+	eng->graph_recheck = false;
+	eng->graph_overflowed = false;
+	if (allow_rescan) {
+		eng->graph_rescan = false;
+	}
+	os_atomic_store_long(&eng->graph_pending, eng->graph_rescan ? 1 : 0);
+	graph_unlock(eng);
+	if (!eng->initialized || (count == 0U && !rescan && !recheck)) {
+		/* nothing to do, or shut down: nothing may be connected or changed any more */
+		mfd_engine_unlock(eng);
+		bfree(items);
+		return 0U;
+	}
+	if (overflowed) {
+		obs_log(LOG_WARNING, "More than %d filter changes queued at once; rescanning sources",
+			MFD_GRAPH_CHANGE_MAX);
+	}
+	const bool was_draining = eng->graph_draining;
+	eng->graph_draining = true;
+	bool renamed = false;
+	bool need_recheck = recheck;
+	bool prune = false;
+	for (size_t i = 0U; i < count; ++i) {
+		apply_named_change_locked(eng, &items[i], &renamed, &need_recheck, &prune);
+	}
+	finish_changes_locked(eng, renamed, need_recheck, prune, rescan);
+	eng->graph_draining = was_draining;
+	unlock_after_changes(eng, renamed);
+	bfree(items);
+	return count + (rescan ? 1U : 0U) + (recheck ? 1U : 0U);
+}
+
+size_t mfd_engine_process_scene_graph_changes(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return 0U;
+	}
+	return drain_scene_graph_changes(eng, true);
+}
+
+static void fill_graph_change(struct mfd_graph_change *ch, enum mfd_graph_change_kind kind, const char *a,
+			      const char *b, const char *c, bool flag)
+{
+	ch->kind = kind;
+	ch->flag = flag;
+	snprintf(ch->a, sizeof(ch->a), "%s", a ? a : "");
+	snprintf(ch->b, sizeof(ch->b), "%s", b ? b : "");
+	snprintf(ch->c, sizeof(ch->c), "%s", c ? c : "");
+}
+
+static bool graph_kind_is_droppable(enum mfd_graph_change_kind kind)
+{
+	return kind == MFD_GRAPH_FILTER_SETTINGS; /* an operator's enable toggle is never dropped */
+}
+
+static bool graph_kind_is_foldable(enum mfd_graph_change_kind kind)
+{
+	return kind == MFD_GRAPH_SOURCE_GONE || kind == MFD_GRAPH_FILTER_SETTINGS || kind == MFD_GRAPH_FILTER_ENABLED;
+}
+
+/* A rename or removal: an update queued after it may concern a different source or filter of the same name. */
+static bool graph_kind_is_fold_barrier(enum mfd_graph_change_kind kind)
+{
+	return kind == MFD_GRAPH_SOURCE_RENAMED || kind == MFD_GRAPH_FILTER_RENAMED ||
+	       kind == MFD_GRAPH_FILTER_REMOVED || kind == MFD_GRAPH_SOURCE_GONE;
+}
+
+/*
+ * graph_mutex held. An entry this change can replace: the same removed source, or the same filter's settings or
+ * enable state (the last value wins). Searched from the tail and never past a rename or removal, so a change never
+ * moves ahead of one queued before it (enable A, rename A->B, rename C->A, enable A keeps all four).
+ */
+static struct mfd_graph_change *find_foldable_graph_change(struct mfd_engine *eng, enum mfd_graph_change_kind kind,
+							   const char *a, const char *b, bool flag)
+{
+	if (!graph_kind_is_foldable(kind)) {
+		return NULL;
+	}
+	const char *na = a ? a : "";
+	const char *nb = b ? b : "";
+	for (size_t i = eng->graph_count; i > 0U; --i) {
+		struct mfd_graph_change *q = &eng->graph_items[i - 1U];
+		const bool same_key = q->kind == kind && strncmp(q->a, na, sizeof(q->a) - 1U) == 0 &&
+				      (kind == MFD_GRAPH_SOURCE_GONE ? (q->flag == flag)
+								     : (strncmp(q->b, nb, sizeof(q->b) - 1U) == 0));
+		if (same_key) {
+			return q;
+		}
+		if (graph_kind_is_fold_barrier(q->kind)) {
+			return NULL;
+		}
+	}
+	return NULL;
+}
+
+static void enqueue_graph_change(struct mfd_engine *eng, enum mfd_graph_change_kind kind, const char *a, const char *b,
+				 const char *c, bool flag)
+{
+	graph_lock(eng);
+	if (kind == MFD_GRAPH_RESCAN) {
+		eng->graph_rescan = true;
+	} else if (kind == MFD_GRAPH_RECHECK) {
+		eng->graph_recheck = true;
+	} else {
+		struct mfd_graph_change *same = find_foldable_graph_change(eng, kind, a, b, flag);
+		if (same) {
+			same->flag =
+				flag; /* remove and destroy report one source once; a filter keeps its last value */
+		} else if (graph_kind_is_droppable(kind) && eng->graph_count >= MFD_GRAPH_CHANGE_MAX) {
+			/* Too many filters changed at once: a full rescan and re-check stand in for the dropped ones */
+			eng->graph_rescan = true;
+			eng->graph_recheck = true;
+			eng->graph_overflowed = true;
+		} else {
+			if (eng->graph_count == eng->graph_cap) {
+				/* renames, removals and removed filters grow past MFD_GRAPH_CHANGE_MAX: losing one would leave
+				 * a slot naming a source that no longer exists */
+				const size_t cap = eng->graph_cap ? eng->graph_cap * 2U : 64U;
+				eng->graph_items = brealloc(eng->graph_items, cap * sizeof(*eng->graph_items));
+				eng->graph_cap = cap;
+			}
+			fill_graph_change(&eng->graph_items[eng->graph_count++], kind, a, b, c, flag);
+		}
+	}
+	os_atomic_store_long(&eng->graph_pending, 1);
+	graph_unlock(eng);
+}
+
+void mfd_engine_report_scene_graph_change(struct mfd_engine *eng, enum mfd_graph_change_kind kind, const char *a,
+					  const char *b, const char *c, bool flag)
+{
+	if (!eng) {
+		return;
+	}
+	if (!mfd_engine_held_by_current_thread(eng)) {
+		enqueue_graph_change(eng, kind, a, b, c, flag);
+		return;
+	}
+	/*
+	 * Midi Fadester's own call made libobs emit this (a bypass write, a filter it added): this thread already holds
+	 * the engine lock, so applying now waits for nothing and keeps the engine -> libobs order. Its write guards
+	 * (writing_enable, writing_filter_settings) are set right now, so it must be applied now, not queued. Changes
+	 * queued earlier go first, unless this thread is draining them already.
+	 */
+	if (kind == MFD_GRAPH_RESCAN) {
+		enqueue_graph_change(eng, kind, a, b, c, flag);
+		return;
+	}
+	if (!eng->graph_draining) {
+		drain_scene_graph_changes(eng, false);
+	}
+	struct mfd_graph_change *ch = bzalloc(sizeof(*ch));
+	fill_graph_change(ch, kind, a, b, c, flag);
+	bool renamed = false;
+	bool recheck = false;
+	bool prune = false;
+	mfd_engine_lock(eng);
+	const bool was_draining = eng->graph_draining;
+	eng->graph_draining = true; /* echoes of this change's own writes apply in place, not after a new drain */
+	apply_named_change_locked(eng, ch, &renamed, &recheck, &prune);
+	finish_changes_locked(eng, renamed, recheck, prune, false);
+	eng->graph_draining = was_draining;
+	unlock_after_changes(eng, renamed);
+	bfree(ch);
+}
+
+/*
+ * libobs signal callbacks. libobs may hold its own locks while it emits these (the sources mutex during a removal,
+ * a scene's full lock for item_remove), and an engine-lock holder looks the scene graph up through those same locks.
+ * So none of these waits for the engine lock: each reports the change, which is queued unless this thread already
+ * holds the engine lock. Their data is the engine, never a tracking entry, so a late signal from a source that is
+ * being destroyed touches nothing that has been freed.
+ */
+static struct mfd_engine *engine_from_signal_data(void *data)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)data;
+	return (eng && eng->initialized) ? eng : NULL;
+}
+
+/* The filter a filter signal is about, and its host's name; false when either is gone. */
+static bool filter_signal_names(calldata_t *cd, char *out_host, size_t host_size, char *out_filter, size_t filter_size)
+{
+	obs_source_t *flt = cd ? (obs_source_t *)calldata_ptr(cd, "source") : NULL;
+	obs_source_t *host = flt ? obs_filter_get_parent(flt) : NULL;
+	const char *hname = host ? obs_source_get_name(host) : NULL;
+	const char *fname = flt ? obs_source_get_name(flt) : NULL;
+	if (!hname || hname[0] == '\0' || !fname || fname[0] == '\0') {
+		return false;
+	}
+	snprintf(out_host, host_size, "%s", hname);
+	snprintf(out_filter, filter_size, "%s", fname);
+	return true;
 }
 
 static void on_obs_scene_signal(void *data, calldata_t *cd)
 {
 	UNUSED_PARAMETER(cd);
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized) {
-		return;
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (eng) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
 	}
-	mfd_engine_reevaluate_slots(entry->eng, true);
 }
 
 static void on_obs_host_filter_add(void *data, calldata_t *cd)
 {
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized || !cd) {
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (!eng) {
 		return;
 	}
-	struct mfd_engine *eng = entry->eng;
-	obs_source_t *host = (obs_source_t *)calldata_ptr(cd, "source");
-	obs_source_t *flt = (obs_source_t *)calldata_ptr(cd, "filter");
-	mfd_engine_lock(eng);
-	if (host && flt) {
-		if (mfd_is_internal_filter(obs_source_get_name(flt), obs_source_get_id(flt))) {
-			mfd_engine_unlock(eng);
-			return;
-		}
-		connect_filter_source_signals_locked(eng, host, flt);
+	obs_source_t *flt = cd ? (obs_source_t *)calldata_ptr(cd, "filter") : NULL;
+	if (flt && mfd_is_internal_filter(obs_source_get_name(flt), obs_source_get_id(flt))) {
+		return;
 	}
-	mfd_engine_reevaluate_slots(eng, true);
-	mfd_engine_unlock(eng);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RESCAN, NULL, NULL, NULL, false);
 }
 
 static void on_obs_host_filter_remove(void *data, calldata_t *cd)
 {
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized || !cd) {
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (!eng) {
 		return;
 	}
-	struct mfd_engine *eng = entry->eng;
-	obs_source_t *host = (obs_source_t *)calldata_ptr(cd, "source");
-	obs_source_t *flt = (obs_source_t *)calldata_ptr(cd, "filter");
-	mfd_engine_lock(eng);
-	if (flt) {
-		remove_tracked_signal_by_ptr_locked(eng, flt);
-	}
-	const char *hname = host ? obs_source_get_name(host) : NULL;
+	obs_source_t *host = cd ? (obs_source_t *)calldata_ptr(cd, "source") : NULL;
+	obs_source_t *flt = cd ? (obs_source_t *)calldata_ptr(cd, "filter") : NULL;
 	const char *fname = flt ? obs_source_get_name(flt) : NULL;
 	if (flt && mfd_is_internal_filter(fname, obs_source_get_id(flt))) {
-		mfd_engine_unlock(eng);
 		return;
 	}
-	if (hname && hname[0] != '\0') {
-		mfd_engine_handle_filter_removed(eng, hname, fname);
-	} else {
-		mfd_engine_reevaluate_slots(eng, true);
-	}
-	mfd_engine_unlock(eng);
-}
-
-static bool resolve_filter_entry_names(struct mfd_tracked_signal_entry *entry, char *out_parent, size_t parent_size,
-				       char *out_filter, size_t filter_size)
-{
-	if (!entry || !entry->weak_src || !entry->weak_parent) {
-		return false;
-	}
-	obs_source_t *flt = obs_weak_source_get_source(entry->weak_src);
-	obs_source_t *parent = obs_weak_source_get_source(entry->weak_parent);
-	bool ok = false;
-	if (flt && parent && !obs_source_removed(flt) && !obs_source_removed(parent)) {
-		const char *pname = obs_source_get_name(parent);
-		const char *fname = obs_source_get_name(flt);
-		if (pname && pname[0] != '\0' && fname && fname[0] != '\0') {
-			snprintf(out_parent, parent_size, "%s", pname);
-			snprintf(out_filter, filter_size, "%s", fname);
-			ok = true;
-		}
-	}
-	if (flt) {
-		obs_source_release(flt);
-	}
-	if (parent) {
-		obs_source_release(parent);
-	}
-	return ok;
+	const char *hname = host ? obs_source_get_name(host) : NULL;
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_REMOVED, hname, fname, NULL, false);
 }
 
 static void on_obs_filter_rename(void *data, calldata_t *cd)
 {
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized || !cd || !entry->weak_parent) {
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (!eng || !cd) {
 		return;
 	}
-	const char *prev_name = calldata_string(cd, "prev_name");
-	const char *new_name = calldata_string(cd, "new_name");
-	obs_source_t *parent = obs_weak_source_get_source(entry->weak_parent);
-	if (!parent) {
-		return;
-	}
-	char pname[MFD_SOURCE_NAME_MAX] = {0};
-	const char *raw_p = obs_source_get_name(parent);
-	if (raw_p) {
-		snprintf(pname, sizeof(pname), "%s", raw_p);
-	}
-	obs_source_release(parent);
-	if (pname[0] != '\0') {
-		mfd_engine_handle_filter_rename(entry->eng, pname, prev_name, new_name);
+	obs_source_t *flt = (obs_source_t *)calldata_ptr(cd, "source");
+	obs_source_t *host = flt ? obs_filter_get_parent(flt) : NULL;
+	const char *hname = host ? obs_source_get_name(host) : NULL;
+	if (hname && hname[0] != '\0') {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_RENAMED, hname,
+						     calldata_string(cd, "prev_name"), calldata_string(cd, "new_name"),
+						     false);
 	}
 }
 
 static void on_obs_filter_update_properties(void *data, calldata_t *cd)
 {
 	UNUSED_PARAMETER(cd);
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized) {
-		return;
-	}
-	char pname[MFD_SOURCE_NAME_MAX] = {0};
-	char fname[MFD_SOURCE_NAME_MAX] = {0};
-	if (resolve_filter_entry_names(entry, pname, sizeof(pname), fname, sizeof(fname))) {
-		mfd_engine_handle_filter_properties_updated(entry->eng, pname, fname);
-	} else {
-		mfd_engine_reevaluate_slots(entry->eng, true);
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (eng) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
 	}
 }
 
 static void on_obs_filter_enable(void *data, calldata_t *cd)
 {
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized || !cd) {
-		return;
-	}
-	bool enabled = calldata_bool(cd, "enabled");
-	char pname[MFD_SOURCE_NAME_MAX] = {0};
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	char hname[MFD_SOURCE_NAME_MAX] = {0};
 	char fname[MFD_SOURCE_NAME_MAX] = {0};
-	if (resolve_filter_entry_names(entry, pname, sizeof(pname), fname, sizeof(fname))) {
-		mfd_engine_handle_filter_enable(entry->eng, pname, fname, enabled);
+	if (eng && filter_signal_names(cd, hname, sizeof(hname), fname, sizeof(fname))) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, hname, fname, NULL,
+						     calldata_bool(cd, "enabled"));
 	}
 }
 
 static void on_obs_filter_update(void *data, calldata_t *cd)
 {
-	UNUSED_PARAMETER(cd);
-	struct mfd_tracked_signal_entry *entry = (struct mfd_tracked_signal_entry *)data;
-	if (!entry || !entry->eng || !entry->eng->initialized) {
-		return;
-	}
-	char pname[MFD_SOURCE_NAME_MAX] = {0};
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	char hname[MFD_SOURCE_NAME_MAX] = {0};
 	char fname[MFD_SOURCE_NAME_MAX] = {0};
-	if (resolve_filter_entry_names(entry, pname, sizeof(pname), fname, sizeof(fname))) {
-		mfd_engine_handle_filter_settings_updated(entry->eng, pname, fname);
+	if (eng && filter_signal_names(cd, hname, sizeof(hname), fname, sizeof(fname))) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_SETTINGS, hname, fname, NULL, false);
 	}
 }
 
 static void on_obs_source_create(void *data, calldata_t *cd)
 {
-	struct mfd_engine *eng = (struct mfd_engine *)data;
-	if (!eng || !eng->initialized) {
-		return;
-	}
+	struct mfd_engine *eng = engine_from_signal_data(data);
 	obs_source_t *src = cd ? (obs_source_t *)calldata_ptr(cd, "source") : NULL;
-	if (!src) {
+	if (!eng || !src) {
 		return;
 	}
 	enum obs_source_type stype = obs_source_get_type(src);
 	if (stype != OBS_SOURCE_TYPE_INPUT && stype != OBS_SOURCE_TYPE_SCENE) {
 		return;
 	}
-	mfd_engine_lock(eng);
-	connect_host_source_signals_locked(eng, src);
-	mfd_engine_reevaluate_slots(eng, true);
-	mfd_engine_unlock(eng);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RESCAN, NULL, NULL, NULL, false);
 }
 
 static void on_obs_source_remove_or_destroy(void *data, calldata_t *cd)
 {
-	struct mfd_engine *eng = (struct mfd_engine *)data;
-	if (!eng || !eng->initialized) {
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (!eng) {
 		return;
 	}
 	obs_source_t *src = cd ? (obs_source_t *)calldata_ptr(cd, "source") : NULL;
-	mfd_engine_lock(eng);
-	bool should_reeval = true;
-	if (src) {
-		enum obs_source_type stype = obs_source_get_type(src);
-		remove_tracked_signal_by_ptr_locked(eng, src);
-		if (stype == OBS_SOURCE_TYPE_FILTER || stype == OBS_SOURCE_TYPE_TRANSITION) {
-			should_reeval = false;
-		} else {
-			const char *sname = obs_source_get_name(src);
-			if (sname && sname[0] != '\0') {
-				invalidate_filter_leases_for_removed_locked(eng, sname, NULL);
-			}
-		}
+	if (!src) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
+		return;
 	}
-	if (should_reeval) {
-		mfd_engine_reevaluate_slots(eng, true);
-	}
-	mfd_engine_unlock(eng);
+	enum obs_source_type stype = obs_source_get_type(src);
+	const bool filter_or_transition = (stype == OBS_SOURCE_TYPE_FILTER || stype == OBS_SOURCE_TYPE_TRANSITION);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_SOURCE_GONE, obs_source_get_name(src), NULL, NULL,
+					     filter_or_transition);
 }
 
 static void on_obs_source_rename(void *data, calldata_t *cd)
 {
-	struct mfd_engine *eng = (struct mfd_engine *)data;
-	if (!eng || !eng->initialized || !cd) {
+	struct mfd_engine *eng = engine_from_signal_data(data);
+	if (eng && cd) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_SOURCE_RENAMED, calldata_string(cd, "prev_name"),
+						     calldata_string(cd, "new_name"), NULL, false);
+	}
+}
+
+void mfd_engine_connect_signal_callbacks_for_test(struct mfd_engine *eng, signal_handler_t *sh)
+{
+	if (!eng || !sh) {
 		return;
 	}
-	const char *prev_name = calldata_string(cd, "prev_name");
-	const char *new_name = calldata_string(cd, "new_name");
-	mfd_engine_handle_source_rename(eng, prev_name, new_name);
+	static const char *const decls[] = {
+		"void source_create(ptr source)",
+		"void source_remove(ptr source)",
+		"void source_destroy(ptr source)",
+		"void source_rename(ptr source, string new_name, string prev_name)",
+		"void item_add(ptr scene, ptr item)",
+		"void item_remove(ptr scene, ptr item)",
+		"void reorder(ptr scene)",
+		"void filter_add(ptr source, ptr filter)",
+		"void filter_remove(ptr source, ptr filter)",
+		"void rename(ptr source, string new_name, string prev_name)",
+		"void update_properties(ptr source)",
+		"void enable(ptr source, bool enabled)",
+		"void update(ptr source)",
+	};
+	for (size_t i = 0U; i < sizeof(decls) / sizeof(decls[0]); ++i) {
+		signal_handler_add(sh, decls[i]);
+	}
+	signal_handler_connect(sh, "source_create", on_obs_source_create, eng);
+	signal_handler_connect(sh, "source_remove", on_obs_source_remove_or_destroy, eng);
+	signal_handler_connect(sh, "source_destroy", on_obs_source_remove_or_destroy, eng);
+	signal_handler_connect(sh, "source_rename", on_obs_source_rename, eng);
+	signal_handler_connect(sh, "item_add", on_obs_scene_signal, eng);
+	signal_handler_connect(sh, "item_remove", on_obs_scene_signal, eng);
+	signal_handler_connect(sh, "reorder", on_obs_scene_signal, eng);
+	signal_handler_connect(sh, "filter_add", on_obs_host_filter_add, eng);
+	signal_handler_connect(sh, "filter_remove", on_obs_host_filter_remove, eng);
+	signal_handler_connect(sh, "rename", on_obs_filter_rename, eng);
+	signal_handler_connect(sh, "update_properties", on_obs_filter_update_properties, eng);
+	signal_handler_connect(sh, "enable", on_obs_filter_enable, eng);
+	signal_handler_connect(sh, "update", on_obs_filter_update, eng);
 }
 
 static void connect_obs_signals(struct mfd_engine *eng)
@@ -5316,6 +5683,7 @@ static void connect_obs_signals(struct mfd_engine *eng)
 		return;
 	}
 	mfd_engine_lock(eng);
+	eng->signals_connected = true; /* before connecting: connect_all_live_source_and_filter_signals requires it */
 	signal_handler_t *sh = obs_get_signal_handler();
 	if (sh) {
 		signal_handler_connect(sh, "source_create", on_obs_source_create, eng);
@@ -5324,7 +5692,6 @@ static void connect_obs_signals(struct mfd_engine *eng)
 		signal_handler_connect(sh, "source_rename", on_obs_source_rename, eng);
 	}
 	connect_all_live_source_and_filter_signals(eng);
-	eng->signals_connected = true;
 	mfd_engine_unlock(eng);
 }
 
@@ -5408,6 +5775,15 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		return;
 	}
 
+	/* Frontend events run on the UI thread with no libobs lock held: a safe place to catch up. */
+	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
+	    event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
+		/* Changes queued for the scene collection that is going away name sources that no longer matter. */
+		mfd_engine_discard_scene_graph_changes(eng);
+	} else {
+		mfd_engine_process_scene_graph_changes(eng);
+	}
+
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		mfd_engine_lock(eng);
@@ -5448,6 +5824,11 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	default:
 		break;
 	}
+}
+
+void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event)
+{
+	on_frontend_event((enum obs_frontend_event)event, eng);
 }
 
 static void serialize_calibrations(const struct mfd_engine *eng, obs_data_t *root)
@@ -6102,6 +6483,9 @@ void mfd_engine_shutdown(void)
 	mfd_engine_cancel_setup_session(&g_engine);
 	mfd_engine_restore_all_bypass_leases(&g_engine);
 	disconnect_obs_signals(&g_engine);
+	/* Exit already disconnected the signals; whatever got connected since must not outlive the module. */
+	disconnect_all_tracked_signals_locked(&g_engine);
+	mfd_engine_discard_scene_graph_changes(&g_engine);
 	mfd_engine_unlock(&g_engine);
 
 	obs_remove_tick_callback(mfd_engine_video_tick, &g_engine);

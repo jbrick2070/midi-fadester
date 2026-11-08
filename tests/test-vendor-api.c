@@ -10,6 +10,7 @@
 #include "core/mfd-text.h"
 #include "plugin-support.h"
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <util/text-lookup.h>
 #include <util/platform.h>
 #include <util/threading.h>
@@ -1129,6 +1130,1084 @@ static int test_config_abort_and_movement_errors(void)
 	return 0;
 }
 
+/*
+ * Lock-order model of the OBS 33 shutdown hang with Mix two layers slots loaded. Visual Sidechain polls
+ * midi_fadester_get_slot_value on the graphics thread every frame. The status read takes the engine lock; for the
+ * layer and volume modes it used to look the scene and its layers up in OBS (obs_get_source_by_name,
+ * obs_scene_enum_items), which take libobs's sources, canvas and scene locks. OBS's own threads hold those locks while
+ * they call into Midi Fadester, whose callbacks take the engine lock. Here every scene-graph lookup takes
+ * libobs_lock, standing in for those locks. The main thread holds libobs_lock as OBS does and then needs the engine
+ * lock. A status read must therefore finish without the libobs lock.
+ */
+/* Generous margins so a slow CI runner cannot fail a correct build: a lookup gives up on the stand-in lock only
+ * after LOCK_ORDER_LOOKUP_TIMEOUT_MS (an OBS deadlock), and a step that must not wait gets LOCK_ORDER_WAIT_MS. */
+#define LOCK_ORDER_LOOKUP_TIMEOUT_MS 15000
+#define LOCK_ORDER_WAIT_MS 5000
+
+struct lock_order_graph {
+	struct fake_scene_graph sg; /* first: the base fake ops take this struct's address as their user data */
+	pthread_mutex_t libobs_lock;
+	volatile long lookups;
+	volatile long lookups_timed_out;
+};
+
+static bool lock_order_take_libobs_lock(struct lock_order_graph *g)
+{
+	os_atomic_inc_long(&g->lookups);
+	for (int waited_ms = 0; waited_ms < LOCK_ORDER_LOOKUP_TIMEOUT_MS; waited_ms += 2) {
+		if (pthread_mutex_trylock(&g->libobs_lock) == 0) {
+			return true;
+		}
+		os_sleep_ms(2);
+	}
+	/* Would have deadlocked in OBS; go on without it so the test fails instead of hanging. */
+	os_atomic_inc_long(&g->lookups_timed_out);
+	return false;
+}
+
+static bool lock_order_source_exists(const char *source_name, void *user_data)
+{
+	struct lock_order_graph *g = user_data;
+	bool locked = lock_order_take_libobs_lock(g);
+	bool r = fake_op_source_exists(source_name, &g->sg);
+	if (locked) {
+		pthread_mutex_unlock(&g->libobs_lock);
+	}
+	return r;
+}
+
+static bool lock_order_scene_exists(const char *scene_name, void *user_data)
+{
+	struct lock_order_graph *g = user_data;
+	bool locked = lock_order_take_libobs_lock(g);
+	bool r = fake_op_scene_exists(scene_name, &g->sg);
+	if (locked) {
+		pthread_mutex_unlock(&g->libobs_lock);
+	}
+	return r;
+}
+
+static bool lock_order_source_has_audio(const char *source_name, void *user_data)
+{
+	struct lock_order_graph *g = user_data;
+	bool locked = lock_order_take_libobs_lock(g);
+	bool r = fake_op_source_has_audio(source_name, &g->sg);
+	if (locked) {
+		pthread_mutex_unlock(&g->libobs_lock);
+	}
+	return r;
+}
+
+static int lock_order_scene_item_stack_index(const char *scene_name, const char *source_name, void *user_data)
+{
+	struct lock_order_graph *g = user_data;
+	bool locked = lock_order_take_libobs_lock(g);
+	int r = fake_op_scene_item_stack_index(scene_name, source_name, &g->sg);
+	if (locked) {
+		pthread_mutex_unlock(&g->libobs_lock);
+	}
+	return r;
+}
+
+static bool lock_order_find_scene_with_layer(const char *source_name, const char *exclude_scene, char *out_scene,
+					     size_t out_size, void *user_data)
+{
+	struct lock_order_graph *g = user_data;
+	bool locked = lock_order_take_libobs_lock(g);
+	bool r = fake_op_find_scene_with_layer(source_name, exclude_scene, out_scene, out_size, &g->sg);
+	if (locked) {
+		pthread_mutex_unlock(&g->libobs_lock);
+	}
+	return r;
+}
+
+static bool lock_order_find_scene_with_pair(const char *source_a, const char *source_b, char *out_scene,
+					    size_t out_size, int *out_idx_a, int *out_idx_b, void *user_data)
+{
+	struct lock_order_graph *g = user_data;
+	bool locked = lock_order_take_libobs_lock(g);
+	bool r = fake_op_find_scene_with_pair(source_a, source_b, out_scene, out_size, out_idx_a, out_idx_b, &g->sg);
+	if (locked) {
+		pthread_mutex_unlock(&g->libobs_lock);
+	}
+	return r;
+}
+
+struct lock_order_poll {
+	proc_handler_t *ph;
+	volatile bool done;
+	bool all_ok;
+	bool all_available;
+};
+
+static void *lock_order_poll_worker(void *arg)
+{
+	struct lock_order_poll *p = arg;
+	static const char *const slots[] = {"fader_2", "fader_3", "fader_4"};
+	p->all_ok = true;
+	p->all_available = true;
+	for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); ++i) {
+		struct calldata cd;
+		calldata_init(&cd);
+		calldata_set_string(&cd, "slot", slots[i]);
+		if (!proc_handler_call(p->ph, "midi_fadester_get_slot_value", &cd) || !calldata_bool(&cd, "ok")) {
+			p->all_ok = false;
+		}
+		const char *reason = calldata_string(&cd, "reason");
+		if (reason && reason[0] != '\0') {
+			p->all_available = false;
+		}
+		calldata_free(&cd);
+	}
+	os_atomic_set_bool(&p->done, true);
+	return NULL;
+}
+
+static int test_status_read_takes_no_libobs_lock(void)
+{
+	struct lock_order_graph g;
+	memset(&g, 0, sizeof(g));
+	REQUIRE(pthread_mutex_init(&g.libobs_lock, NULL) == 0);
+	fake_sg_add_source(&g.sg, "A", true);
+	fake_sg_add_source(&g.sg, "B", true);
+	fake_sg_add_scene(&g.sg, "Cold");
+	fake_sg_scene_add_item(&g.sg, "Cold", "A");
+	fake_sg_scene_add_item(&g.sg, "Cold", "B");
+
+	struct mfd_scene_graph_ops ops = g_fake_sg_ops;
+	ops.source_exists = lock_order_source_exists;
+	ops.scene_exists = lock_order_scene_exists;
+	ops.source_has_audio = lock_order_source_has_audio;
+	ops.scene_item_stack_index = lock_order_scene_item_stack_index;
+	ops.find_scene_with_layer = lock_order_find_scene_with_layer;
+	ops.find_scene_with_pair = lock_order_find_scene_with_pair;
+
+	struct mfd_engine *eng = calloc(1U, sizeof(*eng));
+	REQUIRE(eng != NULL);
+	REQUIRE(mfd_engine_init_mutex(eng));
+	eng->smooth_tau_ms = 12.0f;
+	eng->scene_graph_ops = &ops;
+	eng->scene_graph_user_data = &g;
+	eng->studio_mode_override_set = true;
+	eng->studio_mode_override = false;
+	g.sg.owner_eng = eng;
+
+	/* The three modes whose status needs the scene graph: Mix two layers (as in the hung runs), one layer, Volume */
+	struct mfd_fader_slot *mix = &eng->fader_slots[2];
+	snprintf(mix->id, sizeof(mix->id), "%s", "fader_2");
+	mix->enabled = true;
+	mix->target_type = MFD_TARGET_TWO_SOURCE_MIX;
+	snprintf(mix->scene_name, sizeof(mix->scene_name), "%s", "Cold");
+	snprintf(mix->source_a_name, sizeof(mix->source_a_name), "%s", "A");
+	snprintf(mix->source_b_name, sizeof(mix->source_b_name), "%s", "B");
+	struct mfd_fader_slot *layer = &eng->fader_slots[3];
+	snprintf(layer->id, sizeof(layer->id), "%s", "fader_3");
+	layer->enabled = true;
+	layer->target_type = MFD_TARGET_SINGLE_LAYER;
+	snprintf(layer->source_a_name, sizeof(layer->source_a_name), "%s", "A");
+	struct mfd_fader_slot *vol = &eng->fader_slots[4];
+	snprintf(vol->id, sizeof(vol->id), "%s", "fader_4");
+	vol->enabled = true;
+	vol->target_type = MFD_TARGET_AUDIO_VOLUME;
+	snprintf(vol->source_a_name, sizeof(vol->source_a_name), "%s", "A");
+
+	/* Re-evaluation (scene, item, source and frontend changes) still looks the layers up */
+	mfd_engine_reevaluate_slots(eng, false);
+	REQUIRE(mix->cached_available && layer->cached_available && vol->cached_available);
+	REQUIRE(g.lookups > 0 && g.lookups_timed_out == 0);
+
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	REQUIRE(ph != NULL && sh != NULL);
+	REQUIRE(mfd_bridge_register_with_handlers(ph, sh, eng));
+
+	/* An OBS thread holds libobs's lock (the frontend save, a signal emission) while the poll runs */
+	pthread_mutex_lock(&g.libobs_lock);
+	const long lookups_before = g.lookups;
+	struct lock_order_poll poll;
+	memset(&poll, 0, sizeof(poll));
+	poll.ph = ph;
+	pthread_t th;
+	REQUIRE(pthread_create(&th, NULL, lock_order_poll_worker, &poll) == 0);
+	bool finished = false;
+	for (int waited_ms = 0; waited_ms < LOCK_ORDER_WAIT_MS && !finished; waited_ms += 2) {
+		finished = os_atomic_load_bool(&poll.done);
+		if (!finished) {
+			os_sleep_ms(2);
+		}
+	}
+	/* That thread then calls into Midi Fadester, which takes the engine lock (on_save_callback) */
+	if (finished) {
+		mfd_engine_lock(eng);
+		mfd_engine_unlock(eng);
+	}
+	pthread_mutex_unlock(&g.libobs_lock);
+	pthread_join(th, NULL);
+
+	mfd_bridge_register_with_handlers(NULL, NULL, NULL);
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+	const long status_lookups = g.lookups - lookups_before;
+	const long timed_out = g.lookups_timed_out;
+	mfd_engine_destroy_mutex(eng);
+	free(eng);
+	pthread_mutex_destroy(&g.libobs_lock);
+
+	REQUIRE(finished);            /* the status read never waits on the libobs lock */
+	REQUIRE(status_lookups == 0); /* and never asks the scene graph */
+	REQUIRE(timed_out == 0);
+	REQUIRE(poll.all_ok && poll.all_available); /* it still reports the cached availability */
+	return 0;
+}
+
+/*
+ * The cycle the OBS 33 shutdown trace caught (2026-11-08, Mix two layers slots loaded): during shutdown two threads
+ * report removed or destroyed sources at once. One (libobs's destruction task) holds no libobs lock; the main thread
+ * fires its source_remove callback while libobs holds the sources mutex. The old callback took the engine lock and
+ * re-checked the slots at once, looking the scenes up through that same mutex: the first thread got the engine lock
+ * and waited for the sources mutex, the main thread held the sources mutex and waited for the engine lock. Here the
+ * real signal callbacks are connected to a test signal handler: thread "destroy" emits source_destroy with no
+ * stand-in lock held, thread "main" emits source_remove while the stand-in lock is held.
+ */
+struct graph_signal_ctx {
+	signal_handler_t *sh;
+	const char *signal;
+	volatile bool done;
+};
+
+static void *graph_signal_worker(void *arg)
+{
+	struct graph_signal_ctx *c = arg;
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_ptr(&cd, "source", NULL);
+	signal_handler_signal(c->sh, c->signal, &cd);
+	calldata_free(&cd);
+	os_atomic_set_bool(&c->done, true);
+	return NULL;
+}
+
+static bool wait_flag(volatile bool *flag, int max_ms)
+{
+	for (int waited_ms = 0; waited_ms < max_ms; waited_ms += 2) {
+		if (os_atomic_load_bool(flag)) {
+			return true;
+		}
+		os_sleep_ms(2);
+	}
+	return os_atomic_load_bool(flag);
+}
+
+static void lock_order_mix_slot(struct mfd_engine *eng, int index, const char *id, const char *scene, const char *a,
+				const char *b)
+{
+	struct mfd_fader_slot *s = &eng->fader_slots[index];
+	snprintf(s->id, sizeof(s->id), "%s", id);
+	s->enabled = true;
+	s->target_type = MFD_TARGET_TWO_SOURCE_MIX;
+	snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
+	snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", a);
+	snprintf(s->source_b_name, sizeof(s->source_b_name), "%s", b);
+}
+
+/* An initialized engine on a fake scene graph, with the real signal callbacks on a test signal handler. */
+static struct mfd_engine *graph_test_engine(struct fake_scene_graph *sg, const struct mfd_scene_graph_ops *ops,
+					    void *ops_user_data, signal_handler_t **out_sh)
+{
+	struct mfd_engine *eng = calloc(1U, sizeof(*eng));
+	if (!eng || !mfd_engine_init_mutex(eng)) {
+		free(eng);
+		return NULL;
+	}
+	eng->smooth_tau_ms = 12.0f;
+	eng->scene_graph_ops = ops;
+	eng->scene_graph_user_data = ops_user_data;
+	eng->studio_mode_override_set = true;
+	eng->studio_mode_override = false;
+	eng->initialized = true;
+	sg->owner_eng = eng;
+	*out_sh = signal_handler_create();
+	mfd_engine_connect_signal_callbacks_for_test(eng, *out_sh);
+	return eng;
+}
+
+static void graph_test_engine_free(struct mfd_engine *eng, signal_handler_t *sh)
+{
+	signal_handler_destroy(sh);
+	mfd_engine_destroy_mutex(eng);
+	free(eng);
+}
+
+static void emit_source_rename(signal_handler_t *sh, const char *prev_name, const char *new_name)
+{
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_ptr(&cd, "source", NULL);
+	calldata_set_string(&cd, "prev_name", prev_name);
+	calldata_set_string(&cd, "new_name", new_name);
+	signal_handler_signal(sh, "source_rename", &cd);
+	calldata_free(&cd);
+}
+
+static void emit_simple(signal_handler_t *sh, const char *signal)
+{
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_ptr(&cd, "source", NULL);
+	signal_handler_signal(sh, signal, &cd);
+	calldata_free(&cd);
+}
+
+static int test_source_removal_callbacks_never_wait_for_engine(void)
+{
+	struct lock_order_graph g;
+	memset(&g, 0, sizeof(g));
+	REQUIRE(pthread_mutex_init(&g.libobs_lock, NULL) == 0);
+	fake_sg_add_source(&g.sg, "A", true);
+	fake_sg_add_source(&g.sg, "B", true);
+	fake_sg_add_source(&g.sg, "C", true);
+	fake_sg_add_source(&g.sg, "D", true);
+	fake_sg_add_scene(&g.sg, "Cold");
+	fake_sg_scene_add_item(&g.sg, "Cold", "A");
+	fake_sg_scene_add_item(&g.sg, "Cold", "B");
+	fake_sg_add_scene(&g.sg, "Mix");
+	fake_sg_scene_add_item(&g.sg, "Mix", "C");
+	fake_sg_scene_add_item(&g.sg, "Mix", "D");
+
+	struct mfd_scene_graph_ops ops = g_fake_sg_ops;
+	ops.source_exists = lock_order_source_exists;
+	ops.scene_exists = lock_order_scene_exists;
+	ops.source_has_audio = lock_order_source_has_audio;
+	ops.scene_item_stack_index = lock_order_scene_item_stack_index;
+	ops.find_scene_with_layer = lock_order_find_scene_with_layer;
+	ops.find_scene_with_pair = lock_order_find_scene_with_pair;
+
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&g.sg, &ops, &g, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B"); /* the two slots of the hung runs */
+	lock_order_mix_slot(eng, 1, "fader_1", "Mix", "C", "D");
+	mfd_engine_reevaluate_slots(eng, false);
+	REQUIRE(eng->fader_slots[1].cached_available && eng->fader_slots[2].cached_available);
+
+	/* The stand-in sources lock is held (by libobs, for "main") until "main" has emitted */
+	struct graph_signal_ctx main_ctx = {sh, "source_remove", false};
+	struct graph_signal_ctx destroy_ctx = {sh, "source_destroy", false};
+	pthread_mutex_lock(&g.libobs_lock);
+	const long lookups_before = g.lookups;
+	pthread_t th_destroy;
+	REQUIRE(pthread_create(&th_destroy, NULL, graph_signal_worker, &destroy_ctx) == 0);
+	/* Give "destroy" the engine lock and a lookup, as in the trace (the old callback gets that far) */
+	for (int waited_ms = 0;
+	     waited_ms < 500 && !os_atomic_load_bool(&destroy_ctx.done) && g.lookups == lookups_before;
+	     waited_ms += 2) {
+		os_sleep_ms(2);
+	}
+	pthread_t th_main;
+	REQUIRE(pthread_create(&th_main, NULL, graph_signal_worker, &main_ctx) == 0);
+	const bool main_done = wait_flag(&main_ctx.done, LOCK_ORDER_WAIT_MS);
+	const bool destroy_done = wait_flag(&destroy_ctx.done, LOCK_ORDER_WAIT_MS);
+	pthread_mutex_unlock(&g.libobs_lock); /* lets the old callback's stuck lookup finish, so the test ends */
+	pthread_join(th_main, NULL);
+	pthread_join(th_destroy, NULL);
+	const long lookups_during_signals = g.lookups - lookups_before;
+	const long timed_out = g.lookups_timed_out;
+
+	/* The re-check runs later, where no libobs lock is held (the video tick, a frontend event) */
+	const size_t applied = mfd_engine_process_scene_graph_changes(eng);
+	const bool still_available = eng->fader_slots[1].cached_available && eng->fader_slots[2].cached_available;
+	const long lookups_after = g.lookups;
+
+	graph_test_engine_free(eng, sh);
+	pthread_mutex_destroy(&g.libobs_lock);
+
+	REQUIRE(main_done && destroy_done); /* neither callback waits for the other */
+	REQUIRE(timed_out == 0);            /* no lookup ever waited on the stand-in sources lock */
+	REQUIRE(lookups_during_signals == 0);
+	REQUIRE(applied == 1U); /* both reports fold into one re-check */
+	REQUIRE(lookups_after > lookups_before + lookups_during_signals);
+	REQUIRE(still_available);
+	return 0;
+}
+
+/* A status read reports the last re-check; an item_remove signal flips it once the queue is applied. */
+static int test_cached_status_follows_scene_changes(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	mfd_engine_reevaluate_slots(eng, false);
+
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *bridge_sh = signal_handler_create();
+	REQUIRE(ph != NULL && bridge_sh != NULL);
+	REQUIRE(mfd_bridge_register_with_handlers(ph, bridge_sh, eng));
+	char reason[4][160];
+	bool ok[4];
+	for (int step = 0; step < 4; ++step) {
+		if (step == 1) {
+			fake_sg_scene_remove_item(&sg, "Cold", "B"); /* no signal yet: the cache still says available */
+		} else if (step == 2) {
+			emit_simple(sh, "item_remove");
+			mfd_engine_tick(eng, 0.016f); /* the video tick applies the queued change */
+		} else if (step == 3) {
+			fake_sg_scene_add_item(&sg, "Cold", "B");
+			emit_simple(sh, "item_add");
+			mfd_engine_process_scene_graph_changes(eng);
+		}
+		struct calldata cd;
+		calldata_init(&cd);
+		calldata_set_string(&cd, "slot", "fader_2");
+		ok[step] = proc_handler_call(ph, "midi_fadester_get_slot_value", &cd) && calldata_bool(&cd, "ok");
+		const char *r = calldata_string(&cd, "reason");
+		snprintf(reason[step], sizeof(reason[step]), "%s", r ? r : "");
+		calldata_free(&cd);
+	}
+	mfd_bridge_register_with_handlers(NULL, NULL, NULL);
+	signal_handler_destroy(bridge_sh);
+	proc_handler_destroy(ph);
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(ok[0] && ok[1] && ok[2] && ok[3]);
+	REQUIRE(reason[0][0] == '\0');
+	REQUIRE(reason[1][0] == '\0');
+	REQUIRE(strcmp(reason[2], "B is no longer in scene Cold.") == 0);
+	REQUIRE(reason[3][0] == '\0');
+	return 0;
+}
+
+/* Rename chains and swaps are applied as names first, then one re-check: no intermediate "unavailable". */
+static int test_rename_batch_keeps_runtime_state(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_fader_slot *mix = &eng->fader_slots[2];
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	mfd_engine_reevaluate_slots(eng, false);
+	REQUIRE(mix->cached_available);
+	mix->auto_fade_active = true; /* a fade in progress must survive a rename it is not affected by */
+
+	/* OBS renamed A -> X -> Y and swapped the scene's name through Tmp; the graph already has the final names */
+	fake_sg_rename(&sg, "A", "Y");
+	fake_sg_rename(&sg, "Cold", "Warm");
+	emit_source_rename(sh, "A", "X");
+	emit_source_rename(sh, "X", "Y");
+	emit_source_rename(sh, "Cold", "Tmp");
+	emit_source_rename(sh, "Tmp", "Warm");
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool names_ok = strcmp(mix->source_a_name, "Y") == 0 && strcmp(mix->source_b_name, "B") == 0 &&
+			      strcmp(mix->scene_name, "Warm") == 0;
+	const bool still_available = mix->cached_available;
+	const bool fade_kept = mix->auto_fade_active;
+
+	/* A swap: A <-> B through a temporary name */
+	fake_sg_rename(&sg, "Y", "T0");
+	fake_sg_rename(&sg, "B", "Y");
+	fake_sg_rename(&sg, "T0", "B");
+	emit_source_rename(sh, "Y", "T0");
+	emit_source_rename(sh, "B", "Y");
+	emit_source_rename(sh, "T0", "B");
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool swapped = strcmp(mix->source_a_name, "B") == 0 && strcmp(mix->source_b_name, "Y") == 0 &&
+			     mix->cached_available && mix->auto_fade_active;
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(names_ok);
+	REQUIRE(still_available);
+	REQUIRE(fade_kept);
+	REQUIRE(swapped);
+	return 0;
+}
+
+/* More changes than the old 32-entry queue held: none is lost, removals of one name fold, the cap holds. */
+static int test_graph_queue_holds_a_collection_load(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_fader_slot *mix = &eng->fader_slots[2];
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	mfd_engine_reevaluate_slots(eng, false);
+
+	char prev_name[32];
+	char new_name[32];
+	for (int i = 0; i < 200; ++i) {
+		snprintf(prev_name, sizeof(prev_name), "Other %d", i);
+		snprintf(new_name, sizeof(new_name), "Renamed %d", i);
+		emit_source_rename(sh, prev_name, new_name);
+	}
+	fake_sg_rename(&sg, "A", "Y");
+	emit_source_rename(sh, "A", "Y"); /* the 201st change */
+	for (int i = 0; i < 50; ++i) {
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_SOURCE_GONE, "Gone", NULL, NULL, false);
+	}
+	const size_t queued = eng->graph_count;
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool late_rename_applied = strcmp(mix->source_a_name, "Y") == 0 && mix->cached_available;
+
+	/* Renames are never dropped, even past MFD_GRAPH_CHANGE_MAX */
+	for (int i = 0; i < MFD_GRAPH_CHANGE_MAX + 10; ++i) {
+		snprintf(prev_name, sizeof(prev_name), "Many %d", i);
+		snprintf(new_name, sizeof(new_name), "More %d", i);
+		emit_source_rename(sh, prev_name, new_name);
+	}
+	const size_t renames_kept = eng->graph_count;
+	const bool renames_not_flagged = !eng->graph_overflowed;
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool drained = eng->graph_count == 0U && !eng->graph_rescan && !eng->graph_recheck;
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(queued == 202U); /* 201 renames and one "Gone" */
+	REQUIRE(late_rename_applied);
+	REQUIRE(renames_kept == (size_t)MFD_GRAPH_CHANGE_MAX + 10U);
+	REQUIRE(renames_not_flagged);
+	REQUIRE(drained);
+	return 0;
+}
+
+/*
+ * A flood of filter settings and enable changes: one entry per filter keeps the last value, past the cap the rest
+ * are dropped for a full rescan, and a rename that arrives in the middle of the flood still applies.
+ */
+static int test_rename_survives_filter_settings_flood(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_fader_slot *mix = &eng->fader_slots[2];
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	mfd_engine_reevaluate_slots(eng, false);
+
+	for (int i = 0; i < 100; ++i) { /* one filter driven every frame */
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_SETTINGS, "Cam", "Blur", NULL, false);
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "Blur", NULL, (i % 2) == 0);
+	}
+	const bool folded = eng->graph_count == 2U && !eng->graph_items[1].flag; /* the last enable value: off */
+
+	char filter_name[32];
+	for (int i = 0; i < MFD_GRAPH_CHANGE_MAX; ++i) {
+		snprintf(filter_name, sizeof(filter_name), "Filter %d", i);
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_SETTINGS, "Cam", filter_name, NULL, false);
+		if (i == MFD_GRAPH_CHANGE_MAX / 2) {
+			fake_sg_rename(&sg, "A", "Y");
+			emit_source_rename(sh, "A", "Y");
+		}
+	}
+	fake_sg_rename(&sg, "B", "Z");
+	emit_source_rename(sh, "B", "Z"); /* after the cap is reached */
+	const bool capped = eng->graph_count == (size_t)MFD_GRAPH_CHANGE_MAX + 1U && eng->graph_overflowed &&
+			    eng->graph_rescan && eng->graph_recheck;
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool renamed = strcmp(mix->source_a_name, "Y") == 0 && strcmp(mix->source_b_name, "Z") == 0 &&
+			     mix->cached_available;
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(folded);
+	REQUIRE(capped);
+	REQUIRE(renamed);
+	return 0;
+}
+
+/* On the thread that holds the engine lock a change applies at once, after the changes queued before it. */
+static int test_owner_thread_change_drains_older_ones_first(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_fader_slot *mix = &eng->fader_slots[2];
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	mfd_engine_reevaluate_slots(eng, false);
+
+	fake_sg_rename(&sg, "A", "Y");
+	emit_source_rename(sh, "A", "Y"); /* queued: this thread does not hold the engine lock */
+	const bool queued = eng->graph_count == 1U && strcmp(mix->source_a_name, "A") == 0;
+
+	mfd_engine_lock(eng);
+	mfd_engine_lock(eng); /* recursion: the owner path runs at any depth */
+	emit_simple(sh, "item_remove");
+	const bool rename_first = strcmp(mix->source_a_name, "Y") == 0 && mix->cached_available;
+	const bool queue_empty = eng->graph_count == 0U;
+	mfd_engine_unlock(eng);
+	mfd_engine_unlock(eng);
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(queued);
+	REQUIRE(rename_first);
+	REQUIRE(queue_empty);
+	return 0;
+}
+
+/* Changes queued for a scene collection that is going away are dropped at collection change, cleanup and exit. */
+static int test_graph_queue_discarded_at_collection_change_and_exit(void)
+{
+	static const int events[] = {OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED,
+				     OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP, OBS_FRONTEND_EVENT_EXIT};
+	for (size_t e = 0U; e < sizeof(events) / sizeof(events[0]); ++e) {
+		struct fake_scene_graph sg;
+		memset(&sg, 0, sizeof(sg));
+		fake_sg_add_source(&sg, "A", true);
+		fake_sg_add_source(&sg, "B", true);
+		fake_sg_add_scene(&sg, "Cold");
+		fake_sg_scene_add_item(&sg, "Cold", "A");
+		fake_sg_scene_add_item(&sg, "Cold", "B");
+		signal_handler_t *sh = NULL;
+		struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+		REQUIRE(eng != NULL && sh != NULL);
+		lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+		emit_source_rename(sh, "A", "Old collection's A");
+		emit_simple(sh, "item_remove");
+		mfd_engine_frontend_event_for_test(eng, events[e]);
+		const bool dropped = eng->graph_count == 0U && !eng->graph_recheck && !eng->graph_rescan;
+		mfd_engine_process_scene_graph_changes(eng);
+		const bool name_kept = strcmp(eng->fader_slots[2].source_a_name, "A") == 0;
+		graph_test_engine_free(eng, sh);
+		REQUIRE(dropped);
+		REQUIRE(name_kept);
+	}
+	return 0;
+}
+
+/*
+ * An operator's eye toggle, queued, then applied while Midi Fadester writes the same filter's enable state (the
+ * owner-thread path drains first, inside the write's guard): it is recorded as the new baseline, and only the write's
+ * own echo is ignored.
+ */
+static int test_operator_toggle_drained_inside_own_write_is_kept(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_filter_bypass_lease *lease = &eng->filter_leases[0];
+	lease->in_use = true;
+	snprintf(lease->source_name, sizeof(lease->source_name), "%s", "Cam");
+	snprintf(lease->filter_name, sizeof(lease->filter_name), "%s", "Blur");
+	lease->pre_mfd_enabled = true;
+	lease->last_mfd_enabled = true;
+	lease->has_written_enable = true;
+
+	/* The operator switches the filter off; the signal arrives on another thread, so it is queued */
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "Blur", NULL, false);
+	const bool queued = eng->graph_count == 1U;
+
+	/* Midi Fadester then writes "on" and libobs echoes it on the same thread, inside the write's guard */
+	mfd_engine_lock(eng);
+	lease->writing_enable = true;
+	lease->writing_value = true;
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "Blur", NULL, true);
+	lease->writing_enable = false;
+	const bool baseline_off = !lease->pre_mfd_enabled; /* the operator's toggle, not the echo */
+	mfd_engine_unlock(eng);
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(queued);
+	REQUIRE(baseline_off);
+	return 0;
+}
+
+/* On the owner-thread path a rescan is never run in place (it would enumerate sources inside a libobs call). */
+static int test_owner_thread_rescan_stays_queued(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	mfd_engine_lock(eng);
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_ptr(&cd, "source", NULL);
+	calldata_set_ptr(&cd, "filter", NULL);
+	signal_handler_signal(sh, "filter_add", &cd); /* a filter appeared: asks for a rescan */
+	calldata_free(&cd);
+	const bool queued_while_owner = eng->graph_rescan;
+	mfd_engine_unlock(eng);
+	const size_t applied = mfd_engine_process_scene_graph_changes(eng);
+	const bool cleared = !eng->graph_rescan;
+	graph_test_engine_free(eng, sh);
+	REQUIRE(queued_while_owner);
+	REQUIRE(applied == 1U);
+	REQUIRE(cleared);
+	return 0;
+}
+
+/* Two threads: one queues renames and re-checks as fast as it can, the other drains as fast as it can. */
+struct graph_stress_ctx {
+	signal_handler_t *sh;
+	int renames;
+	volatile bool stop;
+};
+
+static void *graph_stress_reporter(void *arg)
+{
+	struct graph_stress_ctx *c = arg;
+	char prev_name[32];
+	char new_name[32];
+	for (int i = 0; i < c->renames; ++i) {
+		snprintf(prev_name, sizeof(prev_name), "S%d", i);
+		snprintf(new_name, sizeof(new_name), "S%d", i + 1);
+		emit_source_rename(c->sh, prev_name, new_name);
+		emit_simple(c->sh, "item_remove");
+	}
+	os_atomic_set_bool(&c->stop, true);
+	return NULL;
+}
+
+static int test_graph_queue_enqueue_versus_drain_stress(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "S3000", true); /* the final name; the slot starts at S0 */
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "S3000");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "S0", "B");
+
+	struct graph_stress_ctx ctx = {sh, 3000, false};
+	pthread_t th;
+	REQUIRE(pthread_create(&th, NULL, graph_stress_reporter, &ctx) == 0);
+	while (!os_atomic_load_bool(&ctx.stop)) {
+		mfd_engine_process_scene_graph_changes(eng);
+	}
+	pthread_join(th, NULL);
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool final_name = strcmp(eng->fader_slots[2].source_a_name, "S3000") == 0;
+	const bool available = eng->fader_slots[2].cached_available;
+	const bool empty = eng->graph_count == 0U && !eng->graph_recheck;
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(final_name); /* every rename applied, in order */
+	REQUIRE(available);
+	REQUIRE(empty);
+	return 0;
+}
+
+/* Two drainers at once (the video tick and an obs-websocket request, say) must apply batches in queue order. */
+struct graph_drainer_ctx {
+	struct mfd_engine *eng;
+	volatile bool *stop;
+};
+
+static void *graph_drainer(void *arg)
+{
+	struct graph_drainer_ctx *c = arg;
+	while (!os_atomic_load_bool(c->stop)) {
+		mfd_engine_process_scene_graph_changes(c->eng);
+	}
+	return NULL;
+}
+
+static int test_concurrent_drains_keep_rename_order(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "S3000", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "S3000");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "S0", "B");
+
+	volatile bool stop = false;
+	struct graph_drainer_ctx dc = {eng, &stop};
+	pthread_t drainers[2];
+	REQUIRE(pthread_create(&drainers[0], NULL, graph_drainer, &dc) == 0);
+	REQUIRE(pthread_create(&drainers[1], NULL, graph_drainer, &dc) == 0);
+	char prev_name[32];
+	char new_name[32];
+	for (int i = 0; i < 3000; ++i) {
+		snprintf(prev_name, sizeof(prev_name), "S%d", i);
+		snprintf(new_name, sizeof(new_name), "S%d", i + 1);
+		emit_source_rename(sh, prev_name, new_name);
+	}
+	os_atomic_set_bool(&stop, true);
+	pthread_join(drainers[0], NULL);
+	pthread_join(drainers[1], NULL);
+	mfd_engine_process_scene_graph_changes(eng);
+	char final_name[MFD_SOURCE_NAME_MAX];
+	snprintf(final_name, sizeof(final_name), "%s", eng->fader_slots[2].source_a_name);
+	graph_test_engine_free(eng, sh);
+	if (strcmp(final_name, "S3000") != 0) {
+		fprintf(stderr, "rename chain ended at '%s'\n", final_name);
+	}
+	REQUIRE(strcmp(final_name, "S3000") == 0);
+	return 0;
+}
+
+/*
+ * The same ordering made deterministic: a drainer that has to wait for the engine lock must not have taken its
+ * batch yet, or the lock holder applies a later rename (B->C) before that batch's earlier one (A->B).
+ */
+struct graph_one_drain_ctx {
+	struct mfd_engine *eng;
+	volatile bool done;
+};
+
+static void *graph_one_drain(void *arg)
+{
+	struct graph_one_drain_ctx *c = arg;
+	mfd_engine_process_scene_graph_changes(c->eng);
+	os_atomic_set_bool(&c->done, true);
+	return NULL;
+}
+
+static int test_waiting_drainer_takes_no_batch(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "C", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "C");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "X");
+
+	emit_source_rename(sh, "A", "B"); /* queued */
+	mfd_engine_lock(eng);
+	struct graph_one_drain_ctx dc = {eng, false};
+	pthread_t th;
+	REQUIRE(pthread_create(&th, NULL, graph_one_drain, &dc) == 0);
+	os_sleep_ms(200); /* the drainer is now waiting for the engine lock */
+	const bool batch_left = eng->graph_count == 1U;
+	emit_source_rename(sh, "B", "C"); /* owner path: drains what is queued, then applies this */
+	mfd_engine_unlock(eng);
+	pthread_join(th, NULL);
+	mfd_engine_process_scene_graph_changes(eng);
+	char final_name[MFD_SOURCE_NAME_MAX];
+	snprintf(final_name, sizeof(final_name), "%s", eng->fader_slots[2].source_a_name);
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(batch_left);
+	REQUIRE(strcmp(final_name, "C") == 0);
+	return 0;
+}
+
+/* Settings and enable changes fold only back to the last rename or removal: a reused name is another filter. */
+static int test_fold_stops_at_rename_or_removal(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_filter_bypass_lease *lease = &eng->filter_leases[0];
+	lease->in_use = true;
+	snprintf(lease->source_name, sizeof(lease->source_name), "%s", "Cam");
+	snprintf(lease->filter_name, sizeof(lease->filter_name), "%s", "A");
+	lease->pre_mfd_enabled = false;
+	lease->last_mfd_enabled = false;
+	lease->has_written_enable = true;
+
+	/* The operator turns the old A on, renames it to B, renames C to A and turns the new A off */
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "A", NULL, true);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_RENAMED, "Cam", "A", "B", false);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_RENAMED, "Cam", "C", "A", false);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "A", NULL, false);
+	const size_t across_renames = eng->graph_count;
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool old_filter_on = strcmp(lease->filter_name, "B") == 0 &&
+				   lease->pre_mfd_enabled; /* the new A's "off" is not B's */
+
+	/* enable, remove, re-add, enable: the second enable stays after the removal */
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "D", NULL, true);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_REMOVED, "Cam", "D", NULL, false);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "D", NULL, false);
+	const size_t across_removal = eng->graph_count;
+	mfd_engine_process_scene_graph_changes(eng);
+
+	/* with nothing in between they still fold */
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "E", NULL, true);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_SETTINGS, "Cam", "F", NULL, false);
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "E", NULL, false);
+	const size_t folded = eng->graph_count;
+	mfd_engine_process_scene_graph_changes(eng);
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(across_renames == 4U);
+	REQUIRE(old_filter_on);
+	REQUIRE(across_removal == 3U);
+	REQUIRE(folded == 2U);
+	return 0;
+}
+
+/* Past the cap settings changes are dropped, an operator's enable toggle never is. */
+static int test_enable_toggle_survives_overflow(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	struct mfd_filter_bypass_lease *lease = &eng->filter_leases[0];
+	lease->in_use = true;
+	snprintf(lease->source_name, sizeof(lease->source_name), "%s", "Cam");
+	snprintf(lease->filter_name, sizeof(lease->filter_name), "%s", "Blur");
+	lease->pre_mfd_enabled = true;
+	lease->last_mfd_enabled = true;
+	lease->has_written_enable = true;
+
+	char filter_name[32];
+	for (int i = 0; i < MFD_GRAPH_CHANGE_MAX + 5; ++i) {
+		snprintf(filter_name, sizeof(filter_name), "Filter %d", i);
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_SETTINGS, "Cam", filter_name, NULL, false);
+	}
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_ENABLED, "Cam", "Blur", NULL, false);
+	const bool kept = eng->graph_count == (size_t)MFD_GRAPH_CHANGE_MAX + 1U && eng->graph_overflowed;
+	mfd_engine_process_scene_graph_changes(eng);
+	const bool recorded = !lease->pre_mfd_enabled;
+	graph_test_engine_free(eng, sh);
+	REQUIRE(kept);
+	REQUIRE(recorded);
+	return 0;
+}
+
+/* get_state's view of one slot */
+static bool vendor_slot_state(struct mfd_engine *eng, int index, bool *out_available, char *out_reason,
+			      size_t reason_size)
+{
+	obs_data_t *req = obs_data_create();
+	obs_data_t *res = obs_data_create();
+	mfd_vendor_handle_get_state(req, res, eng);
+	obs_data_array_t *arr = obs_data_get_array(res, "slots");
+	obs_data_t *item = arr ? obs_data_array_item(arr, (size_t)index) : NULL;
+	bool found = item != NULL;
+	if (item) {
+		*out_available = obs_data_get_bool(item, "available");
+		snprintf(out_reason, reason_size, "%s", obs_data_get_string(item, "reason"));
+		obs_data_release(item);
+	}
+	obs_data_array_release(arr);
+	obs_data_release(res);
+	obs_data_release(req);
+	return found;
+}
+
+/*
+ * An obs-websocket request right after a scene change, before any video tick (the live self-test's scene-signal check
+ * removes and re-adds a layer and asks get_state at once): the reply must already reflect the change.
+ */
+static int test_vendor_request_sees_queued_scene_changes(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	mfd_engine_reevaluate_slots(eng, false);
+
+	bool avail_removed = true;
+	char reason_removed[160] = {0};
+	fake_sg_scene_remove_item(&sg, "Cold", "B");
+	emit_simple(sh, "item_remove");
+	const bool got_removed = vendor_slot_state(eng, 2, &avail_removed, reason_removed, sizeof(reason_removed));
+
+	obs_data_t *req = obs_data_create();
+	obs_data_t *res = obs_data_create();
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	emit_simple(sh, "item_add");
+	obs_data_set_string(req, "slot", "fader_2");
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, eng); /* a write right after the re-add is allowed */
+	const bool write_ok = !obs_data_has_user_value(res, "error") && obs_data_has_user_value(res, "value");
+	obs_data_release(res);
+	obs_data_release(req);
+
+	bool avail_readded = false;
+	char reason_readded[160] = {0};
+	const bool got_readded = vendor_slot_state(eng, 2, &avail_readded, reason_readded, sizeof(reason_readded));
+	graph_test_engine_free(eng, sh);
+
+	REQUIRE(got_removed && !avail_removed);
+	REQUIRE(strcmp(reason_removed, "B is no longer in scene Cold.") == 0);
+	REQUIRE(write_ok);
+	REQUIRE(got_readded && avail_readded && reason_readded[0] == '\0');
+	return 0;
+}
+
+/* A drain that took its batch before shutdown must apply nothing once the engine is shut down. */
+static int test_graph_drain_after_shutdown_does_nothing(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "A", true);
+	fake_sg_add_source(&sg, "B", true);
+	fake_sg_add_scene(&sg, "Cold");
+	fake_sg_scene_add_item(&sg, "Cold", "A");
+	fake_sg_scene_add_item(&sg, "Cold", "B");
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &g_fake_sg_ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	lock_order_mix_slot(eng, 2, "fader_2", "Cold", "A", "B");
+	emit_source_rename(sh, "A", "Y");
+	mfd_engine_lock(eng);
+	eng->initialized = false; /* what mfd_engine_shutdown does under the engine lock */
+	mfd_engine_unlock(eng);
+	const size_t applied = mfd_engine_process_scene_graph_changes(eng);
+	const bool untouched = strcmp(eng->fader_slots[2].source_a_name, "A") == 0;
+	graph_test_engine_free(eng, sh);
+	REQUIRE(applied == 0U);
+	REQUIRE(untouched);
+	return 0;
+}
+
 int main(void)
 {
 	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
@@ -1136,6 +2215,23 @@ int main(void)
 	mfd_text_set_lookup(test_locale_text);
 	REQUIRE(strcmp(mfd_text("PluginDisplayName", "missing"), "Midi Fadester") == 0);
 	REQUIRE(test_config_abort_and_movement_errors() == 0);
+	REQUIRE(test_status_read_takes_no_libobs_lock() == 0);
+	REQUIRE(test_source_removal_callbacks_never_wait_for_engine() == 0);
+	REQUIRE(test_cached_status_follows_scene_changes() == 0);
+	REQUIRE(test_rename_batch_keeps_runtime_state() == 0);
+	REQUIRE(test_graph_queue_holds_a_collection_load() == 0);
+	REQUIRE(test_rename_survives_filter_settings_flood() == 0);
+	REQUIRE(test_owner_thread_change_drains_older_ones_first() == 0);
+	REQUIRE(test_graph_queue_discarded_at_collection_change_and_exit() == 0);
+	REQUIRE(test_graph_drain_after_shutdown_does_nothing() == 0);
+	REQUIRE(test_vendor_request_sees_queued_scene_changes() == 0);
+	REQUIRE(test_operator_toggle_drained_inside_own_write_is_kept() == 0);
+	REQUIRE(test_owner_thread_rescan_stays_queued() == 0);
+	REQUIRE(test_graph_queue_enqueue_versus_drain_stress() == 0);
+	REQUIRE(test_concurrent_drains_keep_rename_order() == 0);
+	REQUIRE(test_waiting_drainer_takes_no_batch() == 0);
+	REQUIRE(test_fold_stops_at_rename_or_removal() == 0);
+	REQUIRE(test_enable_toggle_survives_overflow() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
 	fake_sg_add_source(&fake_sg, "Cam 1", true);

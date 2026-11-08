@@ -12,6 +12,7 @@
 #include <obs-data.h>
 #include <obs-properties.h>
 #include <util/threading.h>
+#include <callback/signal.h>
 #include "core/midi-types.h"
 #include "core/midi-queue.h"
 #include "core/midi-parser.h"
@@ -295,7 +296,8 @@ struct mfd_filter_bypass_lease {
 	bool pre_mfd_enabled;
 	bool last_mfd_enabled;
 	bool has_written_enable;
-	bool writing_enable;
+	bool writing_enable; /* Midi Fadester is writing writing_value: an "enable" signal with that value is its echo */
+	bool writing_value;
 };
 
 struct mfd_tracked_signal_entry;
@@ -347,10 +349,57 @@ struct mfd_scene_graph_ops {
 	bool (*get_volume)(const char *source_name, float *out_mul, void *user_data);
 };
 
+/*
+ * Scene-graph changes reported by libobs signals. libobs emits them while it may hold its own locks (the sources
+ * mutex, a scene's lock: obs_sceneitem_remove fires item_remove inside full_lock), so the callbacks never wait for the
+ * engine lock: they queue the change here, and mfd_engine_process_scene_graph_changes() applies it later from a
+ * context that holds no libobs lock (the engine's video tick, a frontend event, the UI thread).
+ */
+enum mfd_graph_change_kind {
+	MFD_GRAPH_RESCAN = 0,      /* a source or filter appeared: connect signals, then re-check */
+	MFD_GRAPH_RECHECK,         /* scene items or a filter's properties changed: re-check */
+	MFD_GRAPH_SOURCE_GONE,     /* a: the removed or destroyed source's name; flag: it was a filter or transition */
+	MFD_GRAPH_SOURCE_RENAMED,  /* a -> b */
+	MFD_GRAPH_FILTER_REMOVED,  /* a: host, b: filter */
+	MFD_GRAPH_FILTER_RENAMED,  /* a: host, b -> c */
+	MFD_GRAPH_FILTER_ENABLED,  /* a: host, b: filter, flag: enabled */
+	MFD_GRAPH_FILTER_SETTINGS, /* a: host, b: filter */
+};
+
+/*
+ * Queued changes kept between two drains. Settings and enable changes fold by (host, filter), keeping the last value,
+ * but never across a later rename or removal. Past this many entries further settings changes are dropped and a full
+ * rescan and re-check stand in. Enable changes, renames, removals and removed filters are never dropped: the queue
+ * grows past the cap for them (removals also fold by name).
+ */
+#define MFD_GRAPH_CHANGE_MAX 4096
+
+struct mfd_graph_change {
+	enum mfd_graph_change_kind kind;
+	bool flag;
+	char a[MFD_SOURCE_NAME_MAX];
+	char b[MFD_SOURCE_NAME_MAX];
+	char c[MFD_SOURCE_NAME_MAX];
+};
+
 struct mfd_engine {
 	pthread_mutex_t state_mutex;
 	bool state_mutex_initialized;
 	uint32_t lock_depth;
+	volatile long lock_owner; /* thread holding state_mutex, 0 when free (written only by the holder) */
+
+	/* Queued scene-graph changes, guarded by graph_mutex: a leaf lock, never held across any other lock or call
+	 * into libobs or Midi Fadester. Rescan and re-check are flags; the name-bearing changes keep their order. */
+	pthread_mutex_t graph_mutex;
+	bool graph_mutex_initialized;
+	bool graph_rescan;
+	bool graph_recheck;
+	bool graph_overflowed;
+	struct mfd_graph_change *graph_items;
+	size_t graph_count;
+	size_t graph_cap;
+	bool graph_draining;         /* written only by the engine-lock holder */
+	volatile long graph_pending; /* 1 while anything is queued: a lock-free hint so an idle tick takes no lock */
 	bool pending_ui_notify;
 	bool pending_state_event;
 	bool pending_config_save;
@@ -421,6 +470,19 @@ void mfd_engine_destroy_mutex(struct mfd_engine *eng);
 void mfd_engine_lock(struct mfd_engine *eng);
 void mfd_engine_unlock(struct mfd_engine *eng);
 void mfd_engine_mark_ui_dirty(struct mfd_engine *eng, bool is_topology);
+bool mfd_engine_held_by_current_thread(const struct mfd_engine *eng);
+/* Called from libobs signal callbacks: applied at once when this thread already holds the engine lock (Midi
+ * Fadester's own write caused the signal), queued otherwise. Never waits for the engine lock. */
+void mfd_engine_report_scene_graph_change(struct mfd_engine *eng, enum mfd_graph_change_kind kind, const char *a,
+					  const char *b, const char *c, bool flag);
+/* Applies queued changes; call only where no libobs lock is held. Returns how many were applied. */
+size_t mfd_engine_process_scene_graph_changes(struct mfd_engine *eng);
+/* Drops every queued change (scene collection change, cleanup and exit). */
+void mfd_engine_discard_scene_graph_changes(struct mfd_engine *eng);
+/* Tests: connect the libobs signal callbacks to a test signal handler, as they are connected to OBS's own. */
+void mfd_engine_connect_signal_callbacks_for_test(struct mfd_engine *eng, signal_handler_t *sh);
+/* Tests: run the frontend event callback (event is an enum obs_frontend_event). */
+void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event);
 void mfd_engine_bump_slot_rev(struct mfd_engine *eng, int slot_index);
 
 void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, void *user_data);

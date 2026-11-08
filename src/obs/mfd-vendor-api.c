@@ -351,6 +351,12 @@ void mfd_vendor_emit_state_changed(struct mfd_engine *eng)
 	obs_data_release(ev);
 }
 
+/*
+ * Visual Sidechain polls this every frame from its filters' video_tick (the audio tap, before it enters the graphics
+ * context) and the Tape Deck's tick; its render callbacks only read the values it has already fetched. It takes the
+ * engine lock, and the engine may create its opacity filter (which enters the graphics context) under that lock, so
+ * this must never be called from a render callback or anywhere else that holds the graphics context.
+ */
 static void proc_get_slot_value(void *data, calldata_t *cd)
 {
 	struct mfd_engine *eng = (struct mfd_engine *)data;
@@ -564,6 +570,25 @@ bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh,
 	return (ph != NULL) && (sh != NULL);
 }
 
+/*
+ * An obs-websocket request runs on obs-websocket's thread, outside every libobs callback and with no libobs lock
+ * held, so scene changes queued since the last video tick can be applied here first: the reply (availability,
+ * whether a write is allowed) then matches OBS as it is now, not as it was a frame ago. request_data is NULL when
+ * Midi Fadester builds a state_changed event itself; that path applies nothing.
+ */
+static void sync_scene_graph_for_request(struct mfd_engine *eng, const obs_data_t *request_data)
+{
+	/*
+	 * Skipped on the graphics thread (its own tick drains first) and where this thread already holds the engine
+	 * lock. One case cannot be detected: a request issued synchronously from a script's libobs signal handler, with
+	 * libobs holding its own lock. That caller was already exposed before this drain existed, because every handler
+	 * below takes the engine lock and reads the scene graph under it; this drain adds no new kind of wait.
+	 */
+	if (eng && request_data && gs_get_context() == NULL && !mfd_engine_held_by_current_thread(eng)) {
+		mfd_engine_process_scene_graph_changes(eng);
+	}
+}
+
 void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
 	UNUSED_PARAMETER(request_data);
@@ -574,6 +599,7 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
@@ -631,6 +657,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	int idx = resolve_slot_or_error(request_data, response_data);
 	if (idx < 0) {
@@ -744,6 +771,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	int idx = resolve_slot_or_error(request_data, response_data);
 	if (idx < 0) {
@@ -847,6 +875,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	int idx = resolve_slot_or_error(request_data, response_data);
 	if (idx < 0) {
@@ -931,6 +960,7 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	int idx = resolve_slot_or_error(request_data, response_data);
 	if (idx < 0) {
@@ -1192,6 +1222,7 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	const char *name = request_data ? obs_data_get_string(request_data, "name") : NULL;
 	const struct mfd_controller_profile_def *def = mfd_profile_find_by_slug(name);
@@ -1229,6 +1260,7 @@ void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *respons
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	const char *source = (request_data && obs_data_has_user_value(request_data, "source"))
 				     ? obs_data_get_string(request_data, "source")
@@ -1256,6 +1288,7 @@ void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_d
 	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	sync_scene_graph_for_request(eng, request_data);
 
 	long long raw_ms = (request_data && obs_data_has_user_value(request_data, "ms"))
 				   ? obs_data_get_int(request_data, "ms")
