@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 param(
     [string]$RepoDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
-    [string]$ObsRoot = "C:\Users\jeffr\OBS-Studio-33-Portable-MidiFadester",
+    [string]$ObsRoot = "C:\Users\jeffr\OBS-Studio-33-Portable",
     [string]$SharedObsRoot = ""
 )
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path (Join-Path $ObsRoot "bin\64bit\obs64.exe"))) {
-    throw "Dedicated Portable OBS root not found at '$ObsRoot'. Clone OBS-Studio-33-Portable to '$ObsRoot' first."
+    throw "Test OBS folder not found at '$ObsRoot'. It holds only settings; its bin, core and data link to the installed OBS 33 (TESTING.md, section 3)."
 }
 
 $resolvedObsRoot = (Resolve-Path $ObsRoot).Path.TrimEnd('\')
@@ -19,6 +19,11 @@ foreach ($p in $obsProcs) {
     if ($p.ExecutablePath -and ($p.ExecutablePath -ieq $targetObsExe)) {
         throw "obs64.exe (PID $($p.ProcessId)) is already running from '$resolvedObsRoot'. Refusing to close an active session or test run."
     }
+}
+# One OBS on this machine: the test folder borrows the installed OBS and shares its plugin folder, so any running
+# obs64.exe (the operator's show or another run) holds the DLL this script replaces. Refuse; never close it.
+if ($obsProcs.Count -gt 0) {
+    throw "obs64.exe is running (PID $(($obsProcs | ForEach-Object { $_.ProcessId }) -join ', ')). Close it first; this run never closes another OBS."
 }
 
 $allProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
