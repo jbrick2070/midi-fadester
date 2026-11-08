@@ -25,12 +25,14 @@ extern "C" {
 /* Each returns a JSON object as a string the caller frees with bfree, or NULL when an argument cannot be sent. The
  * text is checked before it is returned: obs-browser splices it into page code, so it holds no raw line terminator. */
 char *tub_command_hello(const char *deck_id, int port, const char *token);
-/* Loads a tape at at_seconds: the start position for a new tape, else the place last confirmed. start_seconds is the
- * start position, so the page can tell the two apart: a start position at or past the end of the tape means 0, while
- * a confirmed place at the end stays there. The tape plays at once when playing is true, else it waits paused, so a
- * page that reloads keeps a paused deck paused (R-CTL-4). */
-char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, double start_seconds, bool loop,
-		       bool playing);
+/* Loads a tape at at_seconds: the start position for a new tape, else the place last confirmed. from_start says which
+ * (sent as fromStart), because the page treats them differently: a start position at or past the end of the tape
+ * means 0, while a confirmed place at the end stays there, so an ended tape stays ended. The value cannot tell them
+ * apart: an ended tape's confirmed place equals its start position when that is the tape's length. start_seconds is
+ * the start position. The tape plays at once when playing is true, else it waits paused, so a page that reloads keeps
+ * a paused deck paused (R-CTL-4). */
+char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, double start_seconds, bool from_start,
+		       bool loop, bool playing);
 /* Takes the tape out: the page empties its player, so the deck reads Ready with no tape. It carries a new generation,
  * like a tape command, so reports about the old tape stop counting at once. */
 char *tub_command_eject(uint64_t gen);

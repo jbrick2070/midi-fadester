@@ -85,7 +85,8 @@ float4 mainImage(VertData v_in) : TARGET
 	float aura_mask = max(silhouette_edge, frame_edge) * aura_intensity * drive;
 	float3 aura_rgb = lerp(low_freq_color.rgb, high_freq_color.rgb, saturate(norm_angle * 0.8 + 0.2 * audio_high));
 
-	float3 out_rgb = base.rgb * base.a + aura_rgb * aura_mask * (1.0 - 0.5 * base.a);
+	/* image is premultiplied, so base.rgb already carries base.a (R-SHD-5) */
+	float3 out_rgb = base.rgb + aura_rgb * aura_mask * (1.0 - 0.5 * base.a);
 	float out_a = saturate(base.a + aura_mask);
 	return float4(out_rgb, out_a);
 }

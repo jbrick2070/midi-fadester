@@ -3,6 +3,8 @@
 # Verifies:
 #   (a) A pass-through shader on a solid color source reproduces the source color within 1 %.
 #   (b) A shader that outputs the source at 50 % opacity over black measures 50 % brightness (within 1 %), not 25 %.
+#   (c) The Spectral Aura preset with Aura Intensity 0 and the border aura off leaves a half-alpha red source as it is
+#       (within 1 %): premultiplied colour in, premultiplied colour out, with no second multiply by alpha.
 
 $ErrorActionPreference = "Stop"
 
@@ -190,14 +192,50 @@ try {
     $statusB = if ($passB) { "PASS" } else { "FAIL" }
     Write-Host ("[visual-sidechain] SCREENSHOT CHECK (b) 50% opacity  [{0}]: measured_lin=({1:F4}, {2:F4}, {3:F4}) srgb=({4:F4}, {5:F4}, {6:F4}) expected_lin=({7:F4}, 0.0000, 0.0000) err={8:F4} (<= 0.0100)" -f $statusB, $resB.lin_r, $resB.lin_g, $resB.lin_b, $resB.srgb_r, $resB.srgb_g, $resB.srgb_b, $expectedB, $errB)
 
-    if ($origScene -and $origScene -ne "__vs_selftest_scene__") {
+    # Check (c): Spectral Aura, Aura Intensity 0 and border aura off, on a half-alpha red source must match the same
+    # source without the filter within 1 % (a second multiply by alpha would halve the red, a dark fringe on cutouts)
+    $null = Call-ObsReq "CreateScene" @{ sceneName = "__vs_selftest_alpha_scene__" }
+    $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = "__vs_selftest_alpha_scene__" }
+    $null = Call-ObsReq "CreateInput" @{
+        sceneName        = "__vs_selftest_alpha_scene__"
+        inputName        = "__vs_selftest_half_alpha__"
+        inputKind        = "color_source_v3"
+        # ABGR 0x800000FF: red at half alpha
+        inputSettings    = @{ color = 2147483903; width = 1920; height = 1080 }
+        sceneItemEnabled = $true
+    }
+    Start-Sleep -Milliseconds 250
+    $srcAlpha = Measure-SceneScreenshot "__vs_selftest_alpha_scene__"
+    $null = Call-ObsReq "CreateSourceFilter" @{
+        sourceName     = "__vs_selftest_half_alpha__"
+        filterName     = "__vs_selftest_aura__"
+        filterKind     = "visual_sidechain_shader_filter"
+        filterSettings = @{
+            preset_shader  = "fft-spectral-aura.shader"
+            aura_intensity = 0.0
+            border_aura    = $false
+        }
+    }
+    Start-Sleep -Milliseconds 300
+    $resC = Measure-SceneScreenshot "__vs_selftest_alpha_scene__"
+    $errC_R = [Math]::Abs($resC.lin_r - $srcAlpha.lin_r)
+    $errC_G = [Math]::Abs($resC.lin_g - $srcAlpha.lin_g)
+    $errC_B = [Math]::Abs($resC.lin_b - $srcAlpha.lin_b)
+    $maxErrC = [Math]::Max($errC_R, [Math]::Max($errC_G, $errC_B))
+    $passC = ($maxErrC -le 0.01)
+    $statusC = if ($passC) { "PASS" } else { "FAIL" }
+    Write-Host ("[visual-sidechain] SCREENSHOT CHECK (c) aura half-alpha [{0}]: measured_lin=({1:F4}, {2:F4}, {3:F4}) source_lin=({4:F4}, {5:F4}, {6:F4}) max_err={7:F4} (<= 0.0100)" -f $statusC, $resC.lin_r, $resC.lin_g, $resC.lin_b, $srcAlpha.lin_r, $srcAlpha.lin_g, $srcAlpha.lin_b, $maxErrC)
+
+    if ($origScene -and $origScene -ne "__vs_selftest_scene__" -and $origScene -ne "__vs_selftest_alpha_scene__") {
         $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = $origScene }
     }
+    $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_half_alpha__" }
+    $null = Call-ObsReq "RemoveScene" @{ sceneName = "__vs_selftest_alpha_scene__" }
     $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_color__" }
     $null = Call-ObsReq "RemoveScene" @{ sceneName = "__vs_selftest_scene__" }
     $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "done", $ct).GetAwaiter().GetResult() | Out-Null
 
-    $allPassed = ($passA -and $passB)
+    $allPassed = ($passA -and $passB -and $passC)
 } finally {
     if ($proc -and -not $proc.HasExited) {
         Write-Host "OBS remains open (PID=$($proc.Id)). Close it manually, then inspect its shutdown leak report."
@@ -208,5 +246,5 @@ if (-not $allPassed) {
     Write-Host "[visual-sidechain] GetSourceScreenshot self-test FAILED"
     exit 1
 }
-Write-Host "[visual-sidechain] GetSourceScreenshot self-test PASSED (check_a=PASS check_b=PASS)"
+Write-Host "[visual-sidechain] GetSourceScreenshot self-test PASSED (check_a=PASS check_b=PASS check_c=PASS)"
 exit 0

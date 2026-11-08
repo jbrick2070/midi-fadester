@@ -956,7 +956,8 @@ static void build_tape_or_eject_locked(struct tub_deck_filter *f, uint64_t gen, 
 {
 	if (f->tape_status == TAPE_SET) {
 		double at = f->tape_from_start ? f->start_seconds : f->last_position;
-		c->tape = tub_command_tape(gen, f->tape_url, at, f->start_seconds, f->loop, f->playing);
+		c->tape = tub_command_tape(gen, f->tape_url, at, f->start_seconds, f->tape_from_start, f->loop,
+					   f->playing);
 		if (!c->tape)
 			obs_log(LOG_WARNING, "tape deck %s: the tape address cannot be sent; ejecting", f->deck_id);
 	}

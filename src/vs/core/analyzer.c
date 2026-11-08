@@ -295,6 +295,10 @@ float vs_analyzer_get_signal(const struct vs_analyzer *ana, const struct vs_audi
 	case VS_SIG_CUSTOM_HZ:
 		if (!ana || !ana->initialized)
 			return 0.0f;
+		/* A stopped source leaves its last window in the ring, and every step reruns the FFT on it: cut the band
+		 * hard, like the FFT bins and flux, instead of holding its last level (R-ANA-7). */
+		if (ana->time_since_audio_sec > VS_ENV_STARVATION_THRESHOLD_SEC)
+			return 0.0f;
 		return vs_spectrum_extract_hz_band(&ana->spectrum, ana->mag_low, ana->mag_mid, custom_low_hz,
 						   custom_high_hz, custom_mode);
 	default:

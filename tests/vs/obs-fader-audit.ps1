@@ -22,10 +22,11 @@ $audioName = "__vs_audit_audio_$suffix"
 $sceneCreated = $false
 $inputCreated = $false
 $audioCreated = $false
+$panicLoopStarted = $false
 $originalScene = ''
 $originalFaders = @{}
 $checks = [System.Collections.Generic.List[object]]::new()
-$expectedCheckCount = 26
+$expectedCheckCount = 27
 $expectedWarnings = [System.Collections.Generic.List[string]]::new()
 
 function Receive-Json {
@@ -250,17 +251,41 @@ try {
     Set-Shader @{ tap_mode = 0 }
     $null = Invoke-Obs 'RemoveInput' @{ inputName = $audioName }; $audioCreated = $false
     $null = Invoke-Obs 'RemoveSourceFilter' @{ sourceName = $inputName; filterName = $filterName }
-    # Every built-in compiles; repeatedly switching feedback to a nonfeedback preset exercises cache release.
+    # Every built-in compiles; repeatedly switching feedback to a nonfeedback preset exercises cache release. A failed
+    # compile only logs and renders the source unchanged, so the proof is in this run's new log lines: each built-in
+    # logs "Compiled shader '<file>'", and no new line reports a compile or parse failure.
     $shaders = Get-ChildItem -LiteralPath "$PSScriptRoot\..\data\shaders" -Filter '*.shader'
+    $compileLog = Get-ChildItem -LiteralPath "$ObsRoot\config\obs-studio\logs" -Filter '*.txt' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $compileLogStart = @(Get-Content -LiteralPath $compileLog.FullName).Count
     foreach ($shader in $shaders) {
-        $null = Invoke-Obs 'CreateSourceFilter' @{ sourceName = $inputName; filterName = $shader.Name; filterKind = 'visual_sidechain_shader_filter'; filterSettings = @{ preset_shader = $shader.Name; override_entire_effect = $true } }
+        $null = Invoke-Obs 'CreateSourceFilter' @{ sourceName = $inputName; filterName = $shader.Name; filterKind = 'visual_sidechain_shader_filter'; filterSettings = @{ preset_shader = $shader.Name } }
     }
     for ($i = 0; $i -lt 8; $i++) {
         $null = Invoke-Obs 'SetSourceFilterSettings' @{ sourceName = $inputName; filterName = 'fft-feedback-trails.shader'; filterSettings = @{ preset_shader = 'fft-spectral-aura.shader' }; overlay = $true }
         $null = Invoke-Obs 'SetSourceFilterSettings' @{ sourceName = $inputName; filterName = 'fft-feedback-trails.shader'; filterSettings = @{ preset_shader = 'fft-feedback-trails.shader' }; overlay = $true }
     }
     $null = Get-Pixel
-    $checks.Add(@{ check = 'builtin_shaders_and_feedback_churn'; result = 'PASS'; shaders = $shaders.Count })
+    Start-Sleep -Milliseconds 500
+    $compileLines = @(Get-Content -LiteralPath $compileLog.FullName | Select-Object -Skip $compileLogStart)
+    $notCompiled = @($shaders | Where-Object { $marker = "[visual-sidechain] Compiled shader '$($_.Name)'"; -not @($compileLines | Where-Object { $_.Contains($marker) }).Count } | ForEach-Object { $_.Name })
+    $compileFailures = @($compileLines | Where-Object { $_.Contains('HLSL compiler error (') -or $_.Contains('Shader parse error (') -or $_.Contains('Shader file not found') })
+    $checks.Add(@{ check = 'builtin_shaders_and_feedback_churn'; result = if ($notCompiled.Count -eq 0 -and $compileFailures.Count -eq 0) { 'PASS' } else { 'FAIL' }; shaders = $shaders.Count; not_compiled = $notCompiled; compile_failures = $compileFailures })
+    # Panic and Restore from obs-websocket's thread while the frontend saves the scene collection (CreateScene and
+    # RemoveScene each queue a save). The hotkey callbacks used to walk every source under libobs's hotkey lock while a
+    # save held the sources lock and waited for the hotkey lock: a deadlock that froze OBS. Every request must answer
+    # (Receive-Json gives up after 10 s), and rendering must go on.
+    $renderedBefore = (Invoke-Obs 'GetStats' @{}).renderTotalFrames
+    $panicLoopStarted = $true
+    for ($i = 0; $i -lt 40; $i++) {
+        $saveScene = "__vs_audit_save_${suffix}_$i"
+        $null = Invoke-Obs 'CreateScene' @{ sceneName = $saveScene }
+        $null = Invoke-Obs 'RemoveScene' @{ sceneName = $saveScene }
+        $null = Invoke-Obs 'TriggerHotkeyByName' @{ hotkeyName = 'visual_sidechain_panic' }
+        $null = Invoke-Obs 'TriggerHotkeyByName' @{ hotkeyName = 'visual_sidechain_restore' }
+    }
+    Start-Sleep -Milliseconds 500
+    $renderedAfter = (Invoke-Obs 'GetStats' @{}).renderTotalFrames
+    $checks.Add(@{ check = 'panic_restore_during_saves'; result = if ($renderedAfter -gt $renderedBefore) { 'PASS' } else { 'FAIL' }; iterations = 40; rendered_before = $renderedBefore; rendered_after = $renderedAfter })
     $samples = [System.Collections.Generic.List[object]]::new()
     for ($i = 0; $i -lt $StressSeconds; $i++) {
         $stats = Invoke-Obs 'GetStats' @{}
@@ -273,6 +298,7 @@ try {
     if (@($checks | Where-Object { $_.result -eq 'FAIL' }).Count) { throw 'One or more live checks failed; see results above.' }
 } finally {
     if ($ws.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+        try { if ($panicLoopStarted) { $null = Invoke-Obs 'TriggerHotkeyByName' @{ hotkeyName = 'visual_sidechain_restore' } } } catch { Write-Warning $_ }
         try { if ($originalScene) { $null = Invoke-Obs 'SetCurrentProgramScene' @{ sceneName = $originalScene } } } catch { Write-Warning $_ }
         foreach ($slot in $originalFaders.Keys) { try { $null = Invoke-Fadester 'set_fader_value' @{ slot = $slot; value = $originalFaders[$slot] } } catch { Write-Warning $_ } }
         try { if ($audioCreated) { $null = Invoke-Obs 'RemoveInput' @{ inputName = $audioName } } } catch { Write-Warning $_ }

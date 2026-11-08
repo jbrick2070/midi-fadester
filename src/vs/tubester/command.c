@@ -74,8 +74,8 @@ char *tub_command_hello(const char *deck_id, int port, const char *token)
 	return finish(d);
 }
 
-char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, double start_seconds, bool loop,
-		       bool playing)
+char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, double start_seconds, bool from_start,
+		       bool loop, bool playing)
 {
 	/* Only what tub_path_to_file_url writes: file:///X:/... or file://server/share/... */
 	if (gen == 0 || !file_url || strncmp(file_url, "file://", 7) != 0 || !isfinite(at_seconds) || at_seconds < 0 ||
@@ -92,6 +92,7 @@ char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, do
 	obs_data_set_string(d, "tape", file_url);
 	obs_data_set_double(d, "at", at_seconds);
 	obs_data_set_double(d, "start", start_seconds);
+	obs_data_set_bool(d, "fromStart", from_start);
 	obs_data_set_bool(d, "loop", loop);
 	obs_data_set_bool(d, "playing", playing);
 	return finish(d);

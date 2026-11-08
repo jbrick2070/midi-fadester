@@ -8,6 +8,7 @@
 #undef NDEBUG
 #endif
 
+#include "obs/audio-tap.h"
 #include "obs/modulator-filter.h"
 #include "obs/vendor-api.h"
 
@@ -31,10 +32,214 @@ void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct v
 	(void)is_primary_track;
 }
 
+/* Private test inputs to hold filters: never ticked or rendered, so their data is a placeholder. Scenes would need a
+ * canvas. */
+static int g_input_placeholder;
+
+static const char *test_input_get_name(void *unused)
+{
+	(void)unused;
+	return "Visual Sidechain test input";
+}
+
+static void *test_input_create(obs_data_t *settings, obs_source_t *source)
+{
+	(void)settings;
+	(void)source;
+	return &g_input_placeholder;
+}
+
+static void test_input_destroy(void *data)
+{
+	(void)data;
+}
+
+static uint32_t test_input_get_size(void *data)
+{
+	(void)data;
+	return 64;
+}
+
+static struct obs_source_info test_video_input = {
+	.id = "vs_test_video_input",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	.output_flags = OBS_SOURCE_VIDEO,
+	.get_name = test_input_get_name,
+	.create = test_input_create,
+	.destroy = test_input_destroy,
+	.get_width = test_input_get_size,
+	.get_height = test_input_get_size,
+};
+
+static struct obs_source_info test_av_input = {
+	.id = "vs_test_av_input",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO,
+	.get_name = test_input_get_name,
+	.create = test_input_create,
+	.destroy = test_input_destroy,
+	.get_width = test_input_get_size,
+	.get_height = test_input_get_size,
+};
+
+static obs_source_t *create_modulator_aimed_at(const char *name, const char *target_filter)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_bool(settings, "slot_1_enabled", true);
+	obs_data_set_string(settings, "slot_1_target_filter", target_filter);
+	obs_data_set_string(settings, "slot_1_target_setting", "slot_1_amount_pct");
+	obs_source_t *modulator = obs_source_create("visual_sidechain_modulator_filter", name, settings, NULL);
+	obs_data_release(settings);
+	return modulator;
+}
+
+/* Whether slot 1's target setting list in the modulator's Properties offers `value` */
+static bool slot_1_target_settings_offer(obs_source_t *modulator, const char *value)
+{
+	obs_properties_t *props = obs_source_properties(modulator);
+	assert(props);
+	obs_property_t *group = obs_properties_get(props, "mod_slot_group_1");
+	assert(group && obs_property_get_type(group) == OBS_PROPERTY_GROUP);
+	obs_property_t *list = obs_properties_get(obs_property_group_content(group), "slot_1_target_setting");
+	assert(list && obs_property_get_type(list) == OBS_PROPERTY_LIST);
+	bool offered = false;
+	for (size_t i = 0; i < obs_property_list_item_count(list); i++) {
+		const char *item = obs_property_list_item_string(list, i);
+		if (item && strcmp(item, value) == 0)
+			offered = true;
+	}
+	obs_properties_destroy(props);
+	return offered;
+}
+
+/* Two Audio Modulators aimed at each other (R-MOD-1/2 allow any sibling). Target discovery reads the target's
+ * properties, which discover the target's own targets: without the recursion guard the second add never returned
+ * (stack overflow), and a saved pair crashed OBS on every load. Each list still offers the other's settings. */
+static void test_modulators_aimed_at_each_other(void)
+{
+	obs_source_t *parent = obs_source_create("vs_test_video_input", "vs-test-parent", NULL, NULL);
+	obs_source_t *a = create_modulator_aimed_at("A", "B");
+	obs_source_t *b = create_modulator_aimed_at("B", "A");
+	assert(parent && a && b);
+	obs_source_filter_add(parent, a);
+	obs_source_filter_add(parent, b);
+
+	assert(slot_1_target_settings_offer(a, "slot_1_amount_pct"));
+	assert(slot_1_target_settings_offer(b, "slot_1_amount_pct"));
+
+	obs_source_filter_remove(parent, b);
+	obs_source_filter_remove(parent, a);
+	obs_source_release(b);
+	obs_source_release(a);
+	obs_source_release(parent);
+}
+
+/* A removed filter's Parent Source tap lets go of the old parent, and a tap whose filter object moved to another
+ * source follows it there instead of keeping the old parent. */
+static void test_parent_tap_follows_its_filter(void)
+{
+	obs_source_t *p1 = obs_source_create("vs_test_av_input", "vs-test-p1", NULL, NULL);
+	obs_source_t *p2 = obs_source_create("vs_test_av_input", "vs-test-p2", NULL, NULL);
+	obs_source_t *filter = obs_source_create("visual_sidechain_modulator_filter", "F", NULL, NULL);
+	assert(p1 && p2 && filter);
+	obs_source_filter_add(p1, filter);
+
+	struct vs_audio_tap tap;
+	assert(vs_audio_tap_init(&tap, false));
+	vs_audio_tap_configure(&tap, filter, VS_TAP_PARENT_SOURCE, "", false, NULL);
+	assert(tap.source_cb_active);
+	assert(obs_weak_source_references_source(tap.weak_capture_source, p1));
+
+	vs_audio_tap_detach_parent(&tap);
+	assert(!tap.source_cb_active);
+	assert(tap.weak_capture_source == NULL);
+
+	vs_audio_tap_configure(&tap, filter, VS_TAP_PARENT_SOURCE, "", false, NULL);
+	assert(obs_weak_source_references_source(tap.weak_capture_source, p1));
+	assert(obs_source_get_ref(filter) == filter);
+	obs_source_filter_remove(p1, filter);
+	obs_source_filter_add(p2, filter);
+	obs_source_release(filter);
+	vs_audio_tap_configure(&tap, filter, VS_TAP_PARENT_SOURCE, "", false, NULL);
+	assert(tap.source_cb_active);
+	assert(obs_weak_source_references_source(tap.weak_capture_source, p2));
+
+	vs_audio_tap_destroy(&tap);
+	obs_source_filter_remove(p2, filter);
+	obs_source_release(filter);
+	obs_source_release(p2);
+	obs_source_release(p1);
+}
+
+/* The Audio Modulator looks a Named Source up outside its mutex and hands it to the tap's retry. A lookup made for
+ * another name covers nothing: no attachment, and the retry timer is kept for the next tick's lookup. */
+static void test_named_tap_attaches_from_a_lookup(void)
+{
+	struct vs_audio_tap tap;
+	assert(vs_audio_tap_init(&tap, false));
+	vs_audio_tap_configure(&tap, NULL, VS_TAP_NAMED_SOURCE, "vs-test-named", false, NULL);
+	assert(!tap.source_cb_active);
+	obs_source_t *named = obs_source_create("vs_test_av_input", "vs-test-named", NULL, NULL);
+	assert(named);
+
+	struct vs_audio_tap_named_lookup lookup;
+	vs_audio_tap_plan_named_lookup(&tap, 0.5f, &lookup);
+	assert(!lookup.planned); /* the retry is not due yet */
+	vs_audio_tap_tick_with_lookup(&tap, NULL, 0.5f, &lookup);
+
+	vs_audio_tap_plan_named_lookup(&tap, 0.6f, &lookup);
+	assert(lookup.planned && strcmp(lookup.name, "vs-test-named") == 0);
+	struct vs_audio_tap_named_lookup other = lookup;
+	snprintf(other.name, sizeof(other.name), "%s", "vs-test-other");
+	vs_audio_tap_tick_with_lookup(&tap, NULL, 0.6f, &other);
+	assert(!tap.source_cb_active);
+
+	vs_audio_tap_plan_named_lookup(&tap, 0.1f, &lookup);
+	assert(lookup.planned);
+	vs_audio_tap_resolve_named_lookup(&lookup);
+	assert(lookup.source == named);
+	vs_audio_tap_tick_with_lookup(&tap, NULL, 0.1f, &lookup);
+	vs_audio_tap_release_named_lookup(&lookup);
+	assert(tap.source_cb_active && obs_weak_source_references_source(tap.weak_capture_source, named));
+
+	vs_audio_tap_destroy(&tap);
+	obs_source_release(named);
+}
+
+/* Under the Audio Modulator's mutex (its tick's pending updates) configure must not look a Named Source up: with
+ * defer_named_attach set it records the target and attaches nothing, although the source exists, and the planned
+ * retry attaches it once the lock is released. */
+static void test_deferred_named_configure_leaves_attach_to_retry(void)
+{
+	obs_source_t *named = obs_source_create("vs_test_av_input", "vs-test-deferred", NULL, NULL);
+	assert(named);
+	struct vs_audio_tap tap;
+	assert(vs_audio_tap_init(&tap, false));
+	tap.defer_named_attach = true;
+	vs_audio_tap_configure(&tap, NULL, VS_TAP_NAMED_SOURCE, "vs-test-deferred", false, NULL);
+	tap.defer_named_attach = false;
+	assert(tap.mode == VS_TAP_NAMED_SOURCE && strcmp(tap.source_name, "vs-test-deferred") == 0);
+	assert(!tap.source_cb_active && tap.weak_capture_source == NULL);
+
+	struct vs_audio_tap_named_lookup lookup;
+	vs_audio_tap_plan_named_lookup(&tap, 1.0f, &lookup);
+	assert(lookup.planned);
+	vs_audio_tap_resolve_named_lookup(&lookup);
+	vs_audio_tap_tick_with_lookup(&tap, NULL, 1.0f, &lookup);
+	vs_audio_tap_release_named_lookup(&lookup);
+	assert(tap.source_cb_active && obs_weak_source_references_source(tap.weak_capture_source, named));
+
+	vs_audio_tap_destroy(&tap);
+	obs_source_release(named);
+}
+
 int main(void)
 {
 	/* Headless libobs initialization only: no OBS executable, modules, video, audio, or user configuration. */
 	assert(obs_startup("en-US", NULL, NULL));
+	obs_register_source(&vs_modulator_filter_info);
+	obs_register_source(&test_video_input);
+	obs_register_source(&test_av_input);
 	obs_properties_t *props = vs_modulator_filter_info.get_properties(NULL);
 	assert(props);
 	const char *suffixes[] = {"amount_pct", "min_value", "max_value", "custom_low_hz", "custom_high_hz"};
@@ -66,6 +271,11 @@ int main(void)
 	}
 	assert(count == 40);
 	obs_properties_destroy(props);
+
+	test_modulators_aimed_at_each_other();
+	test_parent_tap_follows_its_filter();
+	test_named_tap_attaches_from_a_lookup();
+	test_deferred_named_configure_leaves_attach_to_retry();
 	obs_shutdown();
 	puts("test-modulator-properties: all assertions passed");
 	return 0;

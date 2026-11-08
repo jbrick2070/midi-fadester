@@ -26,6 +26,53 @@ static bool double_near(double a, double b, double eps)
 	return fabs(a - b) <= eps;
 }
 
+/* A built-in shader's text, NUL-terminated; the caller frees it. */
+static char *read_builtin_shader(const char *file_name)
+{
+	char path[512];
+	snprintf(path, sizeof(path), "%s/%s", VS_SHADERS_DIR, file_name);
+	FILE *fp = fopen(path, "rb");
+	assert(fp != NULL);
+	assert(fseek(fp, 0, SEEK_END) == 0);
+	const long size = ftell(fp);
+	assert(size > 0);
+	assert(fseek(fp, 0, SEEK_SET) == 0);
+	char *text = (char *)malloc((size_t)size + 1u);
+	assert(text != NULL);
+	assert(fread(text, 1u, (size_t)size, fp) == (size_t)size);
+	text[size] = '\0';
+	fclose(fp);
+	return text;
+}
+
+/* A shader's code without its comments and string literals (annotation labels and tooltips): what it computes with,
+ * not what it says. The caller frees it. */
+static char *code_without_comments_or_strings(const char *src)
+{
+	const size_t len = strlen(src);
+	char *code = (char *)malloc(len + 1u);
+	assert(code != NULL);
+	size_t n = 0;
+	for (size_t i = 0; i < len;) {
+		if (src[i] == '/' && src[i + 1] == '/') {
+			while (i < len && src[i] != '\n')
+				i++;
+		} else if (src[i] == '/' && src[i + 1] == '*') {
+			const char *end = strstr(src + i + 2, "*/");
+			i = end ? (size_t)(end - src) + 2u : len;
+			code[n++] = ' ';
+		} else if (src[i] == '"') {
+			const char *end = strchr(src + i + 1, '"');
+			i = end ? (size_t)(end - src) + 1u : len;
+			code[n++] = ' ';
+		} else {
+			code[n++] = src[i++];
+		}
+	}
+	code[n] = '\0';
+	return code;
+}
+
 struct cycle_loader_ctx {
 	int call_count;
 };
@@ -176,6 +223,7 @@ static void test_shader_uniform_annotations(void)
 	assert(strstr(res.full_effect_source, "uniform texture2d audio_fft;") != NULL);
 	assert(strstr(res.full_effect_source, "uniform float vs_effect_mix;") != NULL);
 	assert(strstr(res.full_effect_source, "uniform float vs_reactivity_scale;") != NULL);
+	assert(strstr(res.full_effect_source, "uniform float vs_flash_envelope;") != NULL);
 	assert(strstr(res.full_effect_source, "pixel_shader  = vs_mainImage_entry(v_in);") != NULL);
 	assert(strstr(res.full_effect_source, "technique Draw") != NULL);
 
@@ -184,7 +232,7 @@ static void test_shader_uniform_annotations(void)
 
 static void test_fader_control_uniform_ownership(void)
 {
-	static const char *const host_uniforms[] = {"vs_effect_mix", "vs_reactivity_scale"};
+	static const char *const host_uniforms[] = {"vs_effect_mix", "vs_reactivity_scale", "vs_flash_envelope"};
 	for (size_t i = 0; i < sizeof(host_uniforms) / sizeof(host_uniforms[0]); i++) {
 		char source[128];
 		snprintf(source, sizeof(source), "uniform float %s = 1.0;\n", host_uniforms[i]);
@@ -199,6 +247,7 @@ static void test_fader_control_uniform_ownership(void)
 	const char *shader_src =
 		"uniform float vs_effect_mix = 0.1;\n"
 		"uniform float vs_reactivity_scale = 0.2;\n"
+		"uniform float vs_flash_envelope = 0.3;\n"
 		"uniform float amount = 0.75;\n"
 		"float4 mainImage(VertData v_in) : TARGET { return image.Sample(texture_sampler, v_in.uv); }\n";
 	struct vs_shader_parse_result res;
@@ -208,6 +257,7 @@ static void test_fader_control_uniform_ownership(void)
 	assert(res.params[0].default_val[0] == 0.75);
 	assert(strstr(res.full_effect_source, "uniform float vs_effect_mix = 0.1;") != NULL);
 	assert(strstr(res.full_effect_source, "uniform float vs_reactivity_scale = 0.2;") != NULL);
+	assert(strstr(res.full_effect_source, "uniform float vs_flash_envelope = 0.3;") != NULL);
 	vs_shader_parse_result_free(&res);
 }
 
@@ -394,9 +444,26 @@ static void test_builtin_shaders_parse_and_provenance(void)
 			fprintf(stderr, "Built-in shader validation failed for %s: %s\n", path, err_buf);
 		}
 		assert(valid);
+
+		/* image is premultiplied and shaders return premultiplied colour (R-SHD-5): multiplying by alpha again
+		 * darkens soft edges. A static guard only; tests/obs-shader-screenshot-selftest.ps1 checks the pixels. */
+		char *text = read_builtin_shader(k_builtin_shaders[i]);
+		assert(strstr(text, "base.rgb * base.a") == NULL);
+
+		/* Each built-in must react to audio in its code: vs_shader_validate_builtin_file finds the names anywhere in
+		 * the raw text, so here comments and strings do not count. FFT Strobe & Flash is driven by the host uniform
+		 * vs_flash_envelope, its flash limiter's output, and that envelope is what counts for it: the trigger named
+		 * in its comment (audio_kick, audio_snare, audio_spectral_flux) is documentation only. */
+		char *code = code_without_comments_or_strings(text);
+		assert(strstr(code, "audio_") != NULL || strstr(code, "vs_sample_") != NULL ||
+		       strstr(code, "vs_flash_envelope") != NULL);
+		free(code);
+		free(text);
 	}
 
-	/* Verify fft-strobe-flash.shader has Maximum Flash Rate <= 3.0 Hz and photosensitivity guideline tooltip */
+	/* fft-strobe-flash.shader (R-SHD-3 (8)): the host's flash limiter owns the rate, so the shader takes its envelope
+	 * and has no stateless gate of its own; Maximum Flash Rate runs 0.5 to 3 Hz, default 3, with no unlock above 3;
+	 * the limiter reads both parameters by these names. */
 	char strobe_path[512];
 	snprintf(strobe_path, sizeof(strobe_path), "%s/fft-strobe-flash.shader", VS_SHADERS_DIR);
 	FILE *fp = fopen(strobe_path, "rb");
@@ -409,6 +476,8 @@ static void test_builtin_shaders_parse_and_provenance(void)
 	fread(buf, 1u, (size_t)sz, fp);
 	buf[sz] = '\0';
 	fclose(fp);
+	assert(strstr(buf, "vs_flash_envelope") != NULL);
+	assert(strstr(buf, "cos(elapsed_time") == NULL);
 
 	struct vs_shader_parse_result res;
 	const enum vs_shader_error perr = vs_shader_ExpandAndParse(buf, VS_SHADERS_DIR, false, NULL, NULL, &res);
@@ -416,15 +485,23 @@ static void test_builtin_shaders_parse_and_provenance(void)
 	assert(perr == VS_SHADER_OK);
 
 	bool found_rate = false;
+	bool found_threshold = false;
 	for (size_t i = 0; i < res.param_count; i++) {
 		if (strcmp(res.params[i].name, "max_flash_rate_hz") == 0) {
 			found_rate = true;
-			assert(res.params[i].has_default);
-			assert(res.params[i].default_val[0] <= 3.0);
-			assert(strstr(res.params[i].tooltip, "Photosensitivity guideline") != NULL);
+			assert(res.params[i].type == VS_SHADER_PARAM_FLOAT);
+			assert(res.params[i].has_min && res.params[i].min_val == 0.5);
+			assert(res.params[i].has_max && res.params[i].max_val == 3.0);
+			assert(res.params[i].has_default && res.params[i].default_val[0] == 3.0);
+			assert(strcmp(res.params[i].tooltip,
+				      "Limits this effect to 0.5-3 flashes per second. Faster triggers are skipped. "
+				      "Flashing may still harm photosensitive viewers.") == 0);
+		} else if (strcmp(res.params[i].name, "onset_threshold") == 0) {
+			found_threshold = true;
+			assert(res.params[i].type == VS_SHADER_PARAM_FLOAT);
 		}
 	}
-	assert(found_rate);
+	assert(found_rate && found_threshold);
 	vs_shader_parse_result_free(&res);
 
 	/* Verify fft-visualizer-overlay.shader and fft-mirror-split.shader expose named select options (R-UP-4) */

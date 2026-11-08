@@ -128,7 +128,7 @@
     if (d.tape !== undefined) {
       resetPlayerState();
       pendingAt = d.at > 0 ? d.at : 0;
-      pendingIsStart = d.start !== undefined && d.at === d.start;
+      pendingIsStart = d.fromStart === true;
       if (d.loop !== undefined) v.loop = !!d.loop;
       /* Loading runs the media load algorithm, which puts playbackRate back to defaultPlaybackRate; the rate command
          sets both, so the speed survives every load */

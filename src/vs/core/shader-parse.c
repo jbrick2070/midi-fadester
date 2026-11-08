@@ -67,6 +67,7 @@ static const char *const k_effect_template_begin =
 	"uniform float fader_fx_8;\n"
 	"uniform float vs_effect_mix;\n"
 	"uniform float vs_reactivity_scale;\n"
+	"uniform float vs_flash_envelope;\n"
 	"uniform texture2d audio_spectrum;\n"
 	"uniform texture2d audio_fft;\n"
 	"\n"
@@ -333,7 +334,8 @@ static bool is_builtin_uniform_name(const char *name)
 
 static bool is_fader_host_uniform_name(const char *name)
 {
-	return strcmp(name, "vs_effect_mix") == 0 || strcmp(name, "vs_reactivity_scale") == 0;
+	return strcmp(name, "vs_effect_mix") == 0 || strcmp(name, "vs_reactivity_scale") == 0 ||
+	       strcmp(name, "vs_flash_envelope") == 0;
 }
 
 /* User parameters share the source's settings and OBS properties namespace. Keep this exact-name

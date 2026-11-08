@@ -18,6 +18,7 @@
 #include "property-status.h"
 #include "text.h"
 
+#include <util/platform.h>
 #include <util/threading.h>
 
 #include <stdio.h>
@@ -35,6 +36,9 @@ struct vs_modulator_filter {
 	bool pending_load_restore;
 	bool pending_target_refresh;
 	signal_handler_t *parent_signals;
+	/* After a save: the UI task that resumes writes is queued, and since when writes have waited */
+	bool resume_queued;
+	uint64_t suspended_since_ns;
 };
 
 static const char *modulator_get_name(void *unused)
@@ -98,6 +102,53 @@ static void apply_baseline_to_removed_filter(void *user_data, const char *filter
 	obs_data_release(settings);
 }
 
+/* Caller holds f->mutex. A target edited while the modulator wrote nothing (a steady signal or silence skips writes)
+ * keeps that edit (R-MOD-5 (1)): each in-use entry of filter_name whose live value is no longer the last written one
+ * takes it as its baseline. target may be NULL, meaning look the sibling up by name; pass the filter itself when it
+ * is already unlinked from the parent. */
+static void reconcile_target_locked(struct vs_modulator_filter *f, const char *filter_name, obs_source_t *target)
+{
+	if (!f || !filter_name || filter_name[0] == '\0')
+		return;
+	obs_source_t *acquired = target ? NULL : acquire_sibling_filter(f, filter_name);
+	obs_source_t *source = target ? target : acquired;
+	if (!source)
+		return;
+	obs_data_t *s = obs_source_get_settings(source);
+	if (s) {
+		for (size_t i = 0; i < VS_MAX_BASELINE_ENTRIES; i++) {
+			const struct vs_baseline_entry *e = &f->baselines.entries[i];
+			if (!e->in_use || strcmp(e->filter_name, filter_name) != 0)
+				continue;
+			if (e->prop_type == VS_PROP_INT)
+				vs_baseline_reconcile_int(&f->baselines, e->filter_name, e->setting_name,
+							  (int64_t)obs_data_get_int(s, e->setting_name));
+			else
+				vs_baseline_reconcile_float(&f->baselines, e->filter_name, e->setting_name,
+							    obs_data_get_double(s, e->setting_name));
+		}
+		obs_data_release(s);
+	}
+	if (acquired)
+		obs_source_release(acquired);
+}
+
+/* Caller holds f->mutex. reconcile_target_locked for every in-use entry, one sibling lookup per target filter. */
+static void reconcile_all_locked(struct vs_modulator_filter *f)
+{
+	for (size_t i = 0; i < VS_MAX_BASELINE_ENTRIES; i++) {
+		const struct vs_baseline_entry *e = &f->baselines.entries[i];
+		if (!e->in_use)
+			continue;
+		bool seen = false;
+		for (size_t j = 0; j < i && !seen; j++)
+			seen = f->baselines.entries[j].in_use &&
+			       strcmp(f->baselines.entries[j].filter_name, e->filter_name) == 0;
+		if (!seen)
+			reconcile_target_locked(f, e->filter_name, NULL);
+	}
+}
+
 static void on_parent_filter_added(void *data, calldata_t *cd)
 {
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
@@ -127,6 +178,8 @@ static void on_parent_filter_removed(void *data, calldata_t *cd)
 		if (name && strcmp(f->slot_cfg[i].target_filter, name) == 0)
 			vs_mod_slot_reset_state(&f->slot_state[i]);
 	}
+	/* already unlinked, so a lookup by name would miss it: reconcile against the filter itself */
+	reconcile_target_locked(f, name, filter);
 	vs_baseline_restore_filter(&f->baselines, name, apply_baseline_to_removed_filter, filter);
 	pthread_mutex_unlock(&f->mutex);
 }
@@ -149,6 +202,22 @@ static bool has_any_active_baseline(const struct vs_baseline_table *table)
 			return true;
 	}
 	return false;
+}
+
+static _Thread_local int g_target_discovery_depth;
+
+/* Discovery reads a target's properties. When the target is itself an Audio Modulator, its properties discover its
+ * own targets, so two modulators aimed at each other would recurse forever. Discovery therefore never nests on a
+ * thread: the nested (throwaway) properties skip their own target lists. Thread-local because Properties (UI
+ * thread) and modulator_update (graphics thread) discover at the same time. */
+static obs_properties_t *target_properties_for_discovery(obs_source_t *target)
+{
+	if (g_target_discovery_depth > 0)
+		return NULL;
+	g_target_discovery_depth++;
+	obs_properties_t *props = obs_source_properties(target);
+	g_target_discovery_depth--;
+	return props;
 }
 
 struct prop_query_ctx {
@@ -238,7 +307,7 @@ static bool query_target_setting_info(struct vs_modulator_filter *f, const char 
 	if (!target)
 		return false;
 
-	obs_properties_t *props = obs_source_properties(target);
+	obs_properties_t *props = target_properties_for_discovery(target);
 	if (props) {
 		inspect_properties_for_setting(props, out_q);
 		obs_properties_destroy(props);
@@ -255,6 +324,7 @@ static void on_modulator_enable_signal(void *data, calldata_t *cd)
 	const bool enabled = calldata_bool(cd, "enabled");
 	if (!enabled) {
 		pthread_mutex_lock(&f->mutex);
+		reconcile_all_locked(f);
 		vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
 		for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++)
 			vs_mod_slot_reset_state(&f->slot_state[i]);
@@ -431,9 +501,11 @@ static void modulator_update(void *data, obs_data_t *settings)
 					break;
 				}
 			}
-			if (!still_owned)
+			if (!still_owned) {
+				reconcile_target_locked(f, prev.target_filter, NULL);
 				vs_baseline_restore_entry(&f->baselines, prev.target_filter, prev.target_setting,
 							  apply_baseline_to_obs_filter, f);
+			}
 			vs_mod_slot_reset_state(&f->slot_state[i]);
 		}
 
@@ -490,7 +562,9 @@ static void modulator_save(void *data, obs_data_t *settings)
 	pthread_mutex_lock(&f->mutex);
 
 	/* 1. Restore all live target filter settings to their baseline values right now so OBS
-	 * serializes the unmodulated baseline values into the scene collection JSON (R-MOD-6). */
+	 * serializes the unmodulated baseline values into the scene collection JSON (R-MOD-6). A manual edit made while
+	 * nothing was written is kept. Writes then stay suspended until the save has returned (modulator_video_tick). */
+	reconcile_all_locked(f);
 	vs_baseline_on_pre_save(&f->baselines, apply_baseline_to_obs_filter, f);
 
 	/* 2. If Panic is active during save, preserve pre-panic amounts in settings for serialization
@@ -520,10 +594,6 @@ static void modulator_save(void *data, obs_data_t *settings)
 	}
 	obs_data_set_array(settings, "saved_baselines", arr);
 	obs_data_array_release(arr);
-
-	/* Reset slot epsilon gates so the next video_tick immediately resumes modulation. */
-	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++)
-		f->slot_state[i].has_last_written = false;
 
 	pthread_mutex_unlock(&f->mutex);
 }
@@ -588,7 +658,10 @@ static void modulator_filter_remove(void *data, obs_source_t *parent)
 		return;
 	disconnect_parent_filter_signals(f);
 	pthread_mutex_lock(&f->mutex);
+	/* Siblings are still reachable: libobs clears filter_parent only after filter_remove returns. */
+	reconcile_all_locked(f);
 	vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
+	vs_audio_tap_detach_parent(&f->tap);
 	pthread_mutex_unlock(&f->mutex);
 }
 
@@ -615,14 +688,40 @@ static void modulator_destroy(void *data)
 	bfree(f);
 }
 
-static void modulator_video_tick(void *data, float seconds)
+/* Caller holds f->mutex. Ends the post-save suspension; the epsilon gates reset so the next tick writes again. */
+static void resume_writes_locked(struct vs_modulator_filter *f)
 {
-	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
-	if (!f || !f->context)
-		return;
+	vs_baseline_resume_after_save(&f->baselines);
+	f->resume_queued = false;
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++)
+		f->slot_state[i].has_last_written = false;
+}
 
+/* UI task queued by the tick after a save; it runs once OBSBasic::Save has returned. */
+static void resume_after_save_task(void *param)
+{
+	obs_weak_source_t *weak = param;
+	obs_source_t *source = obs_weak_source_get_source(weak);
+	obs_weak_source_release(weak);
+	if (!source)
+		return;
+	struct vs_modulator_filter *f = obs_obj_get_data(source);
+	if (f) {
+		pthread_mutex_lock(&f->mutex);
+		resume_writes_locked(f);
+		pthread_mutex_unlock(&f->mutex);
+	}
+	obs_source_release(source);
+}
+
+static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seconds,
+				       const struct vs_audio_tap_named_lookup *named)
+{
 	pthread_mutex_lock(&f->mutex);
 
+	/* These updates run under f->mutex: a Named Source tap they reconfigure attaches through the planned retry
+	 * instead of looking the source up here (see modulator_video_tick). */
+	f->tap.defer_named_attach = true;
 	if (f->pending_target_refresh) {
 		obs_data_t *settings = obs_source_get_settings(f->context);
 		if (settings) {
@@ -644,10 +743,12 @@ static void modulator_video_tick(void *data, float seconds)
 			f->pending_load_restore = false;
 		}
 	}
+	f->tap.defer_named_attach = false;
 
 	/* Idempotent baseline restore if the filter is disabled via any path (R-MOD-5(2)(c)). */
 	if (!obs_source_enabled(f->context)) {
 		if (has_any_active_baseline(&f->baselines)) {
+			reconcile_all_locked(f);
 			vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
 			for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++)
 				vs_mod_slot_reset_state(&f->slot_state[i]);
@@ -656,13 +757,31 @@ static void modulator_video_tick(void *data, float seconds)
 		return;
 	}
 
-	vs_audio_tap_tick(&f->tap, f->context, seconds);
+	vs_audio_tap_tick_with_lookup(&f->tap, f->context, seconds, named);
 
 	if (vs_fader_bridge_is_panic_active()) {
 		if (has_any_active_baseline(&f->baselines)) {
+			reconcile_all_locked(f);
 			vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
 			for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++)
 				f->slot_state[i].has_last_written = false;
+		}
+		pthread_mutex_unlock(&f->mutex);
+		return;
+	}
+
+	/* A save restored the baselines (R-MOD-6). The frontend writes the scene-collection JSON only at the end of
+	 * OBSBasic::Save, after scenes, canvases, transitions and module callbacks, while ticks already run again, so the
+	 * targets keep their baselines until the save has returned. Posted from this thread, the UI task runs after
+	 * OBSBasic::Save; the 10 s fallback covers a task that never runs (no frontend). */
+	if (f->baselines.writes_suspended) {
+		if (!f->resume_queued) {
+			f->resume_queued = true;
+			f->suspended_since_ns = os_gettime_ns();
+			obs_queue_task(OBS_TASK_UI, resume_after_save_task, obs_source_get_weak_source(f->context),
+				       false);
+		} else if (os_gettime_ns() - f->suspended_since_ns > 10000000000ULL) {
+			resume_writes_locked(f);
 		}
 		pthread_mutex_unlock(&f->mutex);
 		return;
@@ -720,6 +839,28 @@ static void modulator_video_tick(void *data, float seconds)
 	}
 
 	pthread_mutex_unlock(&f->mutex);
+}
+
+/* Lock order: the frontend's save holds the sources lock when it calls modulator_save, which takes f->mutex, so this
+ * tick must not take the sources lock under f->mutex. The tap's Named Source retry needs obs_get_source_by_name: it
+ * is planned under f->mutex, looked up outside it, and handed to the tap. */
+static void modulator_video_tick(void *data, float seconds)
+{
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
+	if (!f || !f->context)
+		return;
+
+	/* A disabled modulator does not tick its tap, so it needs no lookup. */
+	struct vs_audio_tap_named_lookup named = {0};
+	if (obs_source_enabled(f->context)) {
+		pthread_mutex_lock(&f->mutex);
+		vs_audio_tap_plan_named_lookup(&f->tap, seconds, &named);
+		pthread_mutex_unlock(&f->mutex);
+		vs_audio_tap_resolve_named_lookup(&named);
+	}
+
+	modulator_tick_with_lookup(f, seconds, &named);
+	vs_audio_tap_release_named_lookup(&named);
 }
 
 static void modulator_video_render(void *data, gs_effect_t *effect)
@@ -792,7 +933,7 @@ static void populate_target_setting_list(struct vs_modulator_filter *f, obs_prop
 	if (!target)
 		return;
 
-	obs_properties_t *target_props = obs_source_properties(target);
+	obs_properties_t *target_props = target_properties_for_discovery(target);
 	if (target_props) {
 		populate_numeric_settings_recursive(target_props, setting_list);
 		obs_properties_destroy(target_props);
@@ -1282,6 +1423,7 @@ void vs_modulator_filter_apply_panic(obs_source_t *source)
 		if (settings)
 			obs_data_set_double(settings, key, 0.0);
 	}
+	reconcile_all_locked(f);
 	vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
 	pthread_mutex_unlock(&f->mutex);
 

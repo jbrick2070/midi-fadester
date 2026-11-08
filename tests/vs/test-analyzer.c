@@ -226,6 +226,30 @@ static void test_custom_hz_flux_after_analyzer_step(void)
 	vs_analyzer_free(&ana);
 }
 
+static void test_custom_hz_zero_after_audio_stops(void)
+{
+	struct vs_analyzer_config cfg;
+	struct vs_analyzer ana;
+	struct vs_audio_frame frame;
+	float samples[VS_FFT_LOW_SIZE];
+	vs_analyzer_default_config(&cfg);
+	assert(vs_analyzer_init(&ana, &cfg));
+	for (size_t i = 0; i < VS_FFT_LOW_SIZE; i++)
+		samples[i] = sinf(6.28318530717958647692f * 440.0f * (float)i / 48000.0f);
+	vs_analyzer_push_mono(&ana, samples, VS_FFT_LOW_SIZE, 1u);
+	vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_AVERAGE) > 0.8f);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_PEAK) > 0.8f);
+
+	/* The source stops (a paused Parent or Named Source tap gets no more callbacks): the ring keeps its last window
+	 * and each step reruns the FFT on it. More than 50 ms without audio, the band reads exactly 0 (R-ANA-7). */
+	for (int i = 0; i < 4; i++)
+		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_AVERAGE) == 0.0f);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_PEAK) == 0.0f);
+	vs_analyzer_free(&ana);
+}
+
 static void test_aligned_windows_with_delayed_startup(void)
 {
 	struct vs_analyzer_config cfg;
@@ -263,6 +287,7 @@ int main(void)
 	test_wav_subbass_35hz_vs_kick_95hz();
 	test_wav_dynamic_range_and_silence();
 	test_custom_hz_flux_after_analyzer_step();
+	test_custom_hz_zero_after_audio_stops();
 	test_aligned_windows_with_delayed_startup();
 	printf("test-analyzer: all WAV fixture assertions passed\n");
 	return 0;

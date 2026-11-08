@@ -28,6 +28,7 @@
 #include <obs-module.h>
 #include <util/dstr.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <math.h>
 #include <limits.h>
@@ -79,6 +80,11 @@ struct vs_user_uniform_binding {
 struct vs_shader_filter {
 	obs_source_t *context;
 	struct vs_audio_tap tap;
+
+	/* Requests from other threads to the graphics thread, the only one that compiles or touches the tap */
+	volatile bool reload_requested;      /* Reload & Recompile: the next update compiles */
+	volatile bool tap_refresh_requested; /* filter_add: the next tick reconfigures the tap */
+	volatile bool tap_detach_requested;  /* filter_remove: the next tick lets go of the old parent */
 
 	char preset_shader[128];
 	char shader_file_path[512];
@@ -143,6 +149,13 @@ struct vs_shader_filter {
 	int mix_fader_slot;
 	int reactivity_fader_slot;
 	struct vs_shader_param_fader_cfg param_faders[VS_SHADER_PARAM_FADER_SLOTS];
+
+	/* Photosensitivity flash limiter (R-SHD-3 (8)): the tick steps it, the render binds its envelope */
+	struct vs_flash_limiter flash_limiter;
+	float flash_envelope;
+	gs_eparam_t *p_vs_flash_envelope;
+	int flash_threshold_param; /* index of the FLOAT parameter onset_threshold, or -1 */
+	int flash_rate_param;      /* index of the FLOAT parameter max_flash_rate_hz, or -1 */
 
 	/* Ping-pong render targets for feedback shaders (R-UP-5, fft-feedback-trails.shader) */
 	gs_texrender_t *input_texrender[2];
@@ -225,6 +238,12 @@ static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 	sf->p_audio_custom_band = NULL;
 	sf->p_vs_effect_mix = NULL;
 	sf->p_vs_reactivity_scale = NULL;
+	sf->p_vs_flash_envelope = NULL;
+	sf->flash_threshold_param = -1;
+	sf->flash_rate_param = -1;
+	sf->flash_envelope = 0.0f;
+	/* The flash limiter survives recompiles: resetting it here would let a Reload or an inline edit start a flash
+	 * before the photosensitivity cap allows (R-SHD-3 (8)). create starts it at zero. */
 }
 
 /* Caller must hold obs_enter_graphics(). Copies the panic slots into `out` (VS_SHADER_MAX_UNIFORMS entries) before
@@ -460,7 +479,8 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 
 	sf->effect = gs_effect_create(sf->parsed.full_effect_source, shader_label, &gs_err);
 	if (sf->effect) {
-		/* Manual Reload also enters here without the normal update's later fader synchronization. */
+		/* Resolve the host percent controls against the new shader's parameters before their values are read;
+		 * the update synchronizes the fader controls again afterwards. */
 		sync_static_controls_from_settings_locked(sf, settings);
 		sf->p_image = gs_effect_get_param_by_name(sf->effect, "image");
 		sf->p_previous_image = gs_effect_get_param_by_name(sf->effect, "previous_image");
@@ -502,6 +522,7 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		}
 		sf->p_vs_effect_mix = gs_effect_get_param_by_name(sf->effect, "vs_effect_mix");
 		sf->p_vs_reactivity_scale = gs_effect_get_param_by_name(sf->effect, "vs_reactivity_scale");
+		sf->p_vs_flash_envelope = gs_effect_get_param_by_name(sf->effect, "vs_flash_envelope");
 
 		for (size_t i = 0; i < sf->parsed.param_count; i++) {
 			sf->user_bindings[i].eparam =
@@ -509,6 +530,13 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 			sf->user_bindings[i].type = sf->parsed.params[i].type;
 			snprintf(sf->panic_slots[i].name, sizeof(sf->panic_slots[i].name), "%s",
 				 sf->parsed.params[i].name);
+			/* the flash limiter reads these two, as the strobe shader names them */
+			if (sf->parsed.params[i].type == VS_SHADER_PARAM_FLOAT) {
+				if (strcmp(sf->parsed.params[i].name, "onset_threshold") == 0)
+					sf->flash_threshold_param = (int)i;
+				else if (strcmp(sf->parsed.params[i].name, "max_flash_rate_hz") == 0)
+					sf->flash_rate_param = (int)i;
+			}
 		}
 
 		if (settings)
@@ -699,6 +727,7 @@ static void shader_filter_get_defaults(obs_data_t *settings)
 static void shader_filter_update(void *data, obs_data_t *settings)
 {
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+	const bool reload = os_atomic_exchange_bool(&sf->reload_requested, false);
 	vs_audio_tap_update_from_settings(&sf->tap, sf->context, settings);
 
 	sf->custom_low_hz = (float)obs_data_get_double(settings, S_CUSTOM_LOW_HZ);
@@ -711,6 +740,8 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	snprintf(prev_file_path, sizeof(prev_file_path), "%s", sf->shader_file_path);
 	const bool prev_override = sf->override_entire_effect;
 
+	/* Under the graphics lock, so the snapshot shader_filter_get_properties takes under it is coherent */
+	obs_enter_graphics();
 	const char *preset = obs_data_get_string(settings, S_PRESET_SHADER);
 	if (!preset || preset[0] == '\0')
 		preset = "fft-spectral-aura.shader";
@@ -726,6 +757,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	const char *stext = obs_data_get_string(settings, S_SHADER_TEXT);
 	bfree(sf->shader_text);
 	sf->shader_text = bstrdup(stext ? stext : "");
+	obs_leave_graphics();
 
 	size_t text_len = 0u;
 	const uint64_t text_hash =
@@ -736,7 +768,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		 sf->override_entire_effect ? 1 : 0, text_len, (unsigned long long)text_hash);
 
 	obs_enter_graphics();
-	const bool needs_compile = (strcmp(sig, sf->last_compiled_signature) != 0) ||
+	const bool needs_compile = reload || (strcmp(sig, sf->last_compiled_signature) != 0) ||
 				   (!sf->effect && sf->compile_error[0] == '\0');
 	obs_leave_graphics();
 
@@ -754,7 +786,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		const bool ui_source_switched = (strcmp(prev_preset, sf->preset_shader) != 0) ||
 						(strcmp(prev_file_path, sf->shader_file_path) != 0) ||
 						(prev_override != sf->override_entire_effect);
-		if (!sf->in_create && !sf->rebuilding_props && ui_source_switched && sf->context) {
+		if (!sf->in_create && !sf->rebuilding_props && (ui_source_switched || reload) && sf->context) {
 			sf->rebuilding_props = true;
 			obs_source_update_properties(sf->context);
 			sf->rebuilding_props = false;
@@ -797,6 +829,8 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 	sf->reactivity_fader_slot = VS_FADER_SLOT_NONE;
 	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++)
 		sf->param_faders[k].fader_slot = VS_FADER_SLOT_NONE;
+	sf->flash_threshold_param = -1;
+	sf->flash_rate_param = -1;
 
 	vs_audio_tap_init(&sf->tap, true);
 
@@ -832,16 +866,75 @@ static void shader_filter_add(void *data, obs_source_t *parent)
 	if (!sf || !sf->context)
 		return;
 
-	obs_data_t *s = obs_source_get_settings(sf->context);
-	if (s) {
-		vs_audio_tap_update_from_settings(&sf->tap, sf->context, s);
-		obs_data_release(s);
+	/* This runs on the adding thread (UI, obs-websocket, a collection load) while the graphics thread may already
+	 * tick the filter and its tap. The next tick reconfigures the tap for the new parent instead. */
+	os_atomic_set_bool(&sf->tap_refresh_requested, true);
+}
+
+static void shader_filter_remove(void *data, obs_source_t *parent)
+{
+	UNUSED_PARAMETER(parent);
+	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+	if (sf)
+		os_atomic_set_bool(&sf->tap_detach_requested, true);
+}
+
+/* A bound slot scales the static slider; with no slot, or when Midi Fadester is not loaded, the slider
+ * value stands alone so a missing fader plugin never silences or dries the effect. */
+static float fader_snapshot_scale(const float faders[VS_FADER_SLOT_COUNT], int slot, bool fadester_loaded)
+{
+	if (slot < 0 || !fadester_loaded)
+		return 1.0f;
+	return slot < VS_FADER_SLOT_COUNT ? faders[slot] : 0.0f;
+}
+
+/* Caller must hold obs_enter_graphics(). The parameter fader that drives the named parameter, or NULL. */
+static const struct vs_shader_param_fader_cfg *param_fader_for_locked(const struct vs_shader_filter *sf,
+								      const char *name, bool fadester_loaded)
+{
+	const struct vs_shader_param_fader_cfg *pf = NULL;
+	for (int k = 0; fadester_loaded && k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		if (sf->param_faders[k].fader_slot >= 0 && sf->param_faders[k].target_param[0] != '\0' &&
+		    strcmp(sf->param_faders[k].target_param, name) == 0) {
+			pf = &sf->param_faders[k];
+		}
 	}
+	return pf;
+}
+
+/* Caller must hold obs_enter_graphics(). Float parameter i as the shader receives it: its slider value, or the mapped
+ * fader value when a parameter fader targets it. Panic zeroing stays with the caller. */
+static float effective_float_param_locked(const struct vs_shader_filter *sf, size_t i,
+					  const float faders[VS_FADER_SLOT_COUNT], bool fadester_loaded)
+{
+	const struct vs_shader_param_info *info = &sf->parsed.params[i];
+	const struct vs_shader_param_fader_cfg *pf = param_fader_for_locked(sf, info->name, fadester_loaded);
+	if (!pf)
+		return sf->user_bindings[i].f_val;
+	return vs_fader_bridge_map_float_param(faders[pf->fader_slot], pf->min_val, pf->max_val, info->has_min,
+					       info->min_val, info->has_max, info->max_val);
+}
+
+/* 0..1, NaN as 0 (HLSL saturate) */
+static float clamp_unit(float v)
+{
+	return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;
 }
 
 static void shader_filter_video_tick(void *data, float seconds)
 {
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+	/* The tap is touched only here, on the graphics thread (and in create and destroy, which never overlap a tick).
+	 * A detach goes first, so a filter moved to another source lets go of the old parent before it attaches. */
+	if (os_atomic_exchange_bool(&sf->tap_detach_requested, false))
+		vs_audio_tap_detach_parent(&sf->tap);
+	if (os_atomic_exchange_bool(&sf->tap_refresh_requested, false)) {
+		obs_data_t *s = obs_source_get_settings(sf->context);
+		if (s) {
+			vs_audio_tap_update_from_settings(&sf->tap, sf->context, s);
+			obs_data_release(s);
+		}
+	}
 	vs_audio_tap_tick(&sf->tap, sf->context, seconds);
 
 	sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame, VS_SIG_CUSTOM_HZ,
@@ -860,16 +953,33 @@ static void shader_filter_video_tick(void *data, float seconds)
 			}
 		}
 	}
-	obs_leave_graphics();
-}
 
-/* A bound slot scales the static slider; with no slot, or when Midi Fadester is not loaded, the slider
- * value stands alone so a missing fader plugin never silences or dries the effect. */
-static float fader_snapshot_scale(const float faders[VS_FADER_SLOT_COUNT], int slot, bool fadester_loaded)
-{
-	if (slot < 0 || !fadester_loaded)
-		return 1.0f;
-	return slot < VS_FADER_SLOT_COUNT ? faders[slot] : 0.0f;
+	/* Photosensitivity flash limiter (R-SHD-3 (8)). The trigger the strobe shader used to compute, from the same
+	 * reactivity-scaled values it receives, through the shader's own threshold and rate parameters (0.30 and 3 Hz
+	 * when it has none). The limiter admits at most that many flashes a second; Panic keeps the envelope at 0. */
+	float faders[VS_FADER_SLOT_COUNT];
+	vs_fader_bridge_get_slots(faders);
+	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+	const float react =
+		sf->audio_reactivity * fader_snapshot_scale(faders, sf->reactivity_fader_slot, fadester_loaded);
+	const struct vs_audio_frame *fr = &sf->tap.current_frame;
+	const float trig = fmaxf(fr->kick, fmaxf(fr->snare * 0.85f, fr->spectral_flux)) * react;
+	const float thr =
+		sf->flash_threshold_param >= 0
+			? effective_float_param_locked(sf, (size_t)sf->flash_threshold_param, faders, fadester_loaded)
+			: 0.30f;
+	const float rate = sf->flash_rate_param >= 0 ? effective_float_param_locked(sf, (size_t)sf->flash_rate_param,
+										    faders, fadester_loaded)
+						     : (float)VS_FLASH_RATE_DEFAULT_HZ;
+	const float over = clamp_unit((trig - thr) / fmaxf(1.0f - thr, 1e-4f));
+	const bool panic = vs_fader_bridge_is_panic_active();
+	const float env = vs_flash_limiter_step(&sf->flash_limiter, panic ? 0.0f : over, rate, seconds);
+	/* Panic ends a flash in flight for good: a zero peak keeps since_admit_sec, so the spacing holds, and no tail of
+	 * it is left to show after Restore. */
+	if (panic)
+		sf->flash_limiter.peak = 0.0f;
+	sf->flash_envelope = panic ? 0.0f : env;
+	obs_leave_graphics();
 }
 
 static float effective_mix_scale(const struct vs_shader_filter *sf, const float faders[VS_FADER_SLOT_COUNT],
@@ -916,6 +1026,8 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 		gs_effect_set_float(sf->p_vs_effect_mix, mix_scale);
 	if (sf->p_vs_reactivity_scale)
 		gs_effect_set_float(sf->p_vs_reactivity_scale, react_scale);
+	if (sf->p_vs_flash_envelope)
+		gs_effect_set_float(sf->p_vs_flash_envelope, sf->flash_envelope);
 
 	/* GPU helpers scale the audio textures; only scalar uniforms need CPU scaling here. */
 	const struct vs_audio_frame *f = &sf->tap.current_frame;
@@ -968,25 +1080,14 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 		if (!b->eparam)
 			continue;
 
-		const struct vs_shader_param_fader_cfg *pf = NULL;
-		for (int k = 0; fadester_loaded && k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
-			if (sf->param_faders[k].fader_slot >= 0 && sf->param_faders[k].target_param[0] != '\0' &&
-			    strcmp(sf->param_faders[k].target_param, info->name) == 0) {
-				pf = &sf->param_faders[k];
-			}
-		}
-
 		if (b->type == VS_SHADER_PARAM_FLOAT) {
-			float val = b->f_val;
-			if (pf) {
-				val = vs_fader_bridge_map_float_param(faders[pf->fader_slot], pf->min_val, pf->max_val,
-								      info->has_min, info->min_val, info->has_max,
-								      info->max_val);
-			}
+			float val = effective_float_param_locked(sf, i, faders, fadester_loaded);
 			if (panic_active && vs_fader_bridge_is_strobe_or_flash_param(info->name))
 				val = 0.0f;
 			gs_effect_set_float(b->eparam, val);
 		} else if (b->type == VS_SHADER_PARAM_INT) {
+			const struct vs_shader_param_fader_cfg *pf =
+				param_fader_for_locked(sf, info->name, fadester_loaded);
 			int val = b->i_val;
 			if (pf && is_fader_bindable_shader_param(info)) {
 				const int step = isfinite(info->step_val) && info->step_val >= 1.0
@@ -1506,14 +1607,12 @@ static bool on_reload_shader_clicked(obs_properties_t *props, obs_property_t *pr
 	if (!sf)
 		return false;
 
-	obs_data_t *settings = obs_source_get_settings(sf->context);
-	sf->last_compiled_signature[0] = '\0';
-	compile_shader(sf, settings);
-	obs_data_release(settings);
-	sf->rebuilding_props = true;
-	obs_source_update_properties(sf->context);
-	sf->rebuilding_props = false;
-	return true;
+	/* This runs on the UI thread, while the graphics thread's update may be replacing shader_text, the preset and
+	 * the file path. Only the graphics thread compiles: the request makes the next update compile, and that update
+	 * rebuilds Properties afterwards, so there is nothing to refresh yet. */
+	os_atomic_set_bool(&sf->reload_requested, true);
+	obs_source_update(sf->context, NULL);
+	return false;
 }
 
 /* A file dialog filter's name: the characters Qt's filter syntax gives a meaning to become spaces */
@@ -1854,6 +1953,7 @@ void vs_register_shader_filter(void)
 	info.video_get_color_space = shader_filter_get_color_space;
 	info.get_properties = shader_filter_get_properties;
 	info.filter_add = shader_filter_add;
+	info.filter_remove = shader_filter_remove;
 
 	obs_register_source(&info);
 }

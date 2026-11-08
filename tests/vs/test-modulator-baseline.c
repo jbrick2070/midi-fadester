@@ -24,6 +24,7 @@ struct mock_target_state {
 	double intensity;
 	double threshold;
 	int64_t interval;
+	int applies; /* how many values the baseline table wrote */
 };
 
 static bool double_near(double a, double b, double eps)
@@ -38,6 +39,7 @@ static void apply_to_mock_target(void *user_data, const char *filter_name, const
 	if (!target || !filter_name || !setting_name)
 		return;
 
+	target->applies++;
 	if (prop_type == VS_PROP_FLOAT) {
 		if (strcmp(setting_name, "intensity") == 0)
 			target->intensity = float_val;
@@ -114,17 +116,79 @@ static void test_baseline_scene_save_mid_pulse(void)
 	assert(vs_baseline_on_pre_save(&table, apply_to_mock_target, &target) == 1u);
 	assert(double_near(target.intensity, 0.25, 1e-6));
 
-	/* Next video_tick resumes modulation (to 0.75) while keeping original baseline at 0.25. */
-	assert(vs_baseline_record_before_write_float(&table, "NVIDIA Blur", "intensity", target.intensity, 0.75));
-	target.intensity = 0.75;
-
+	/* The frontend writes the JSON only at the end of its save, so writes stay suspended until the save has
+	 * returned: no record (the tick writes nothing), and the target and baseline keep 0.25. */
+	assert(!vs_baseline_record_before_write_float(&table, "NVIDIA Blur", "intensity", target.intensity, 0.75));
+	assert(double_near(target.intensity, 0.25, 1e-6));
 	const struct vs_baseline_entry *e = vs_baseline_find(&table, "NVIDIA Blur", "intensity");
 	assert(e != NULL);
+	assert(double_near(e->original_float, 0.25, 1e-6));
+	assert(double_near(e->last_written_float, 0.25, 1e-6));
+	assert(!vs_baseline_record_before_write_int(&table, "NVIDIA Blur", "interval", target.interval, 4));
+	assert(vs_baseline_find(&table, "NVIDIA Blur", "interval") == NULL);
+
+	/* After the save, the next video_tick resumes modulation (to 0.75) while keeping original baseline at 0.25. */
+	vs_baseline_resume_after_save(&table);
+	assert(vs_baseline_record_before_write_float(&table, "NVIDIA Blur", "intensity", target.intensity, 0.75));
+	target.intensity = 0.75;
 	assert(double_near(e->original_float, 0.25, 1e-6));
 
 	/* Disabling the modulator later still restores the original 0.25. */
 	assert(vs_baseline_restore_all(&table, apply_to_mock_target, &target) == 1u);
 	assert(double_near(target.intensity, 0.25, 1e-6));
+
+	/* A pre-save that restored nothing suspends nothing. */
+	assert(vs_baseline_on_pre_save(&table, apply_to_mock_target, &target) == 0u);
+	assert(vs_baseline_record_before_write_float(&table, "NVIDIA Blur", "intensity", target.intensity, 0.5));
+}
+
+static void test_manual_edit_during_steady_signal_survives_restore_and_save(void)
+{
+	struct vs_baseline_table table;
+	struct mock_target_state target = {0.25, 0.50, 1};
+	vs_baseline_init(&table);
+
+	/* The modulator writes 0.5 once (0.25 captured). A still fader then holds the mapped value steady, so the
+	 * epsilon gate skips every later write. */
+	assert(vs_baseline_record_before_write_float(&table, "Color", "intensity", target.intensity, 0.5));
+	target.intensity = 0.5;
+
+	/* The user sets 0.8 meanwhile. No write records it, so the modulator reconciles before restoring or saving. */
+	target.intensity = 0.8;
+	assert(vs_baseline_reconcile_float(&table, "Color", "intensity", target.intensity));
+
+	/* A save writes the user's 0.8, not the stale 0.25 ... */
+	target.applies = 0;
+	assert(vs_baseline_on_pre_save(&table, apply_to_mock_target, &target) == 1u);
+	assert(target.applies == 1 && double_near(target.intensity, 0.8, 1e-9));
+	const struct vs_baseline_entry *e = vs_baseline_find(&table, "Color", "intensity");
+	assert(e != NULL);
+	assert(double_near(e->original_float, 0.8, 1e-9) && double_near(e->last_written_float, 0.8, 1e-9));
+	vs_baseline_resume_after_save(&table);
+
+	/* ... and so does disabling the modulator. */
+	assert(vs_baseline_restore_all(&table, apply_to_mock_target, &target) == 1u);
+	assert(target.applies == 2 && double_near(target.intensity, 0.8, 1e-9));
+
+	/* With the target still holding the last written value (or within the edit tolerance), a reconcile returns false
+	 * and changes nothing; a missing entry is no edit either. */
+	assert(vs_baseline_record_before_write_float(&table, "Color", "intensity", 0.25, 0.5));
+	assert(!vs_baseline_reconcile_float(&table, "Color", "intensity", 0.5));
+	assert(!vs_baseline_reconcile_float(&table, "Color", "intensity", 0.5 + 5e-4));
+	e = vs_baseline_find(&table, "Color", "intensity");
+	assert(e != NULL && e->prop_type == VS_PROP_FLOAT && e->has_last_written);
+	assert(e->original_float == 0.25 && e->original_int == 0);
+	assert(e->last_written_float == 0.5 && e->last_written_int == 1);
+	assert(!vs_baseline_reconcile_float(&table, "Color", "threshold", 0.9));
+
+	/* Integer targets follow the same rule with any difference. */
+	assert(vs_baseline_record_before_write_int(&table, "Color", "interval", 1, 4));
+	assert(!vs_baseline_reconcile_int(&table, "Color", "interval", 4));
+	assert(vs_baseline_reconcile_int(&table, "Color", "interval", 7));
+	target.interval = 4;
+	target.applies = 0;
+	assert(vs_baseline_restore_entry(&table, "Color", "interval", apply_to_mock_target, &target));
+	assert(target.applies == 1 && target.interval == 7);
 }
 
 static void test_baseline_crash_recovery_reload(void)
@@ -165,6 +229,7 @@ int main(void)
 	test_baseline_capture_once_during_pulse();
 	test_baseline_restore_on_disable_retarget_remove();
 	test_baseline_scene_save_mid_pulse();
+	test_manual_edit_during_steady_signal_survives_restore_and_save();
 	test_baseline_crash_recovery_reload();
 	test_removed_filter_forgets_old_baseline_before_recreation();
 	printf("test-modulator-baseline: all assertions passed\n");

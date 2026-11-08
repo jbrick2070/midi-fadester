@@ -26,10 +26,10 @@ uniform float onset_threshold <
 
 uniform float max_flash_rate_hz <
 	string label = "Maximum Flash Rate (Hz)";
-	string tooltip = "Photosensitivity guideline: keep at or below 3.0 Hz (W3C WCAG 2.3.1 / ITU-R BT.1702 three-flashes-per-second limit).";
+	string tooltip = "Limits this effect to 0.5-3 flashes per second. Faster triggers are skipped. Flashing may still harm photosensitive viewers.";
 	string widget_type = "slider";
 	float minimum = 0.5;
-	float maximum = 8.0;
+	float maximum = 3.0;
 	float step = 0.25;
 > = 3.0;
 
@@ -45,16 +45,14 @@ float4 mainImage(VertData v_in) : TARGET
 {
 	float4 base = image.Sample(texture_sampler, v_in.uv);
 
-	float trigger_sig = max(audio_kick, max(audio_snare * 0.85, audio_spectral_flux));
-	float over_thresh = saturate((trigger_sig - onset_threshold) / max(1.0 - onset_threshold, 1e-4));
-
-	/* Rate-limiting envelope gated by max_flash_rate_hz */
-	float rate_hz = clamp(max_flash_rate_hz, 0.5, 8.0);
-	float phase_gate = 0.5 + 0.5 * cos(elapsed_time * rate_hz * 6.28318530);
-	float flash_amt = over_thresh * phase_gate * flash_intensity;
+	/* Photosensitivity cap (R-SHD-3 (8)): the host admits at most max_flash_rate_hz flashes per second, whatever the
+	 * audio, and hands this shader vs_flash_envelope: one rise and one fall back to exactly 0 per flash. Its limiter
+	 * reads onset_threshold and max_flash_rate_hz and triggers on max(audio_kick, audio_snare * 0.85,
+	 * audio_spectral_flux). */
+	float flash_amt = saturate(vs_flash_envelope) * flash_intensity;
 
 	float3 tinted = lerp(base.rgb, flash_tint.rgb, flash_amt);
-	if (allow_invert && over_thresh > 0.65) {
+	if (allow_invert && vs_flash_envelope > 0.65) {
 		float3 inv = 1.0 - base.rgb;
 		tinted = lerp(tinted, inv, flash_amt * 0.75);
 	}

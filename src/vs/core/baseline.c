@@ -79,6 +79,8 @@ bool vs_baseline_record_before_write_float(struct vs_baseline_table *table, cons
 {
 	if (!table || !filter_name || !setting_name || filter_name[0] == '\0' || setting_name[0] == '\0')
 		return false;
+	if (table->writes_suspended)
+		return false;
 
 	struct vs_baseline_entry *e = find_mutable(table, filter_name, setting_name);
 	if (!e) {
@@ -108,6 +110,8 @@ bool vs_baseline_record_before_write_int(struct vs_baseline_table *table, const 
 {
 	if (!table || !filter_name || !setting_name || filter_name[0] == '\0' || setting_name[0] == '\0')
 		return false;
+	if (table->writes_suspended)
+		return false;
 
 	struct vs_baseline_entry *e = find_mutable(table, filter_name, setting_name);
 	if (!e) {
@@ -127,6 +131,34 @@ bool vs_baseline_record_before_write_int(struct vs_baseline_table *table, const 
 	e->last_written_int = new_modulated_val;
 	e->last_written_float = (double)new_modulated_val;
 	e->has_last_written = true;
+	return true;
+}
+
+bool vs_baseline_reconcile_float(struct vs_baseline_table *table, const char *filter_name, const char *setting_name,
+				 double current_target_val)
+{
+	struct vs_baseline_entry *e = find_mutable(table, filter_name, setting_name);
+	if (!e || !e->has_last_written)
+		return false;
+	if (!(fabs(current_target_val - e->last_written_float) > VS_USER_EDIT_FLOAT_TOL))
+		return false;
+	e->original_float = current_target_val;
+	e->original_int = (int64_t)llround(current_target_val);
+	e->last_written_float = current_target_val;
+	e->last_written_int = (int64_t)llround(current_target_val);
+	return true;
+}
+
+bool vs_baseline_reconcile_int(struct vs_baseline_table *table, const char *filter_name, const char *setting_name,
+			       int64_t current_target_val)
+{
+	struct vs_baseline_entry *e = find_mutable(table, filter_name, setting_name);
+	if (!e || !e->has_last_written || current_target_val == e->last_written_int)
+		return false;
+	e->original_int = current_target_val;
+	e->original_float = (double)current_target_val;
+	e->last_written_int = current_target_val;
+	e->last_written_float = (double)current_target_val;
 	return true;
 }
 
@@ -204,7 +236,15 @@ size_t vs_baseline_on_pre_save(struct vs_baseline_table *table, vs_baseline_appl
 			count++;
 		}
 	}
+	if (count > 0)
+		table->writes_suspended = true;
 	return count;
+}
+
+void vs_baseline_resume_after_save(struct vs_baseline_table *table)
+{
+	if (table)
+		table->writes_suspended = false;
 }
 
 bool vs_baseline_on_load_entry(struct vs_baseline_table *table, const char *filter_name, const char *setting_name,

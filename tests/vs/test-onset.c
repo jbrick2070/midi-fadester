@@ -120,11 +120,200 @@ static void test_onset_beat_tempo_and_sync_advance(void)
 	free(mag_mid);
 }
 
+/* Photosensitivity flash limiter (R-SHD-3 (8)), stepped at 60 fps. */
+#define FLASH_TEST_FRAMES 300
+
+static const float k_flash_dt = 1.0f / 60.0f;
+
+static void run_flash_limiter(const float *over, int frames, float rate_hz, float *env)
+{
+	struct vs_flash_limiter lim;
+	vs_flash_limiter_reset(&lim);
+	for (int i = 0; i < frames; i++)
+		env[i] = vs_flash_limiter_step(&lim, over[i], rate_hz, k_flash_dt);
+}
+
+/* A kick as the onset detector shapes it (a jump to 1, then a 65 ms decay) through the default 0.30 threshold: how
+ * far it is over, 0..1, `age` frames after its onset. Over for 5 frames, then 0. */
+static float kick_over(int age)
+{
+	const double kick = exp(-(double)age * (double)k_flash_dt / 0.065);
+	const double over = (kick - 0.30) / 0.70;
+	return over > 0.0 ? (float)over : 0.0f;
+}
+
+/* The photosensitivity contract on one run; returns the number of flashes. Any frame brighter than the one before is
+ * a rise, and it must start from exactly 0: a flash never brightens again before it has gone dark. From `fall`
+ * seconds after its rise a flash is exactly 0; rises are at least 1 / rate apart; and any half-open 1 s window holds
+ * at most max_per_second rises (a window that starts at a rise is the fullest). */
+static int check_flash_contract(const float *env, int frames, double rate_hz, int max_per_second)
+{
+	assert(frames <= FLASH_TEST_FRAMES);
+	const double dt = (double)k_flash_dt;
+	const double interval = 1.0 / rate_hz;
+	const double fall = fmin(0.5 * interval, 0.15);
+	int rise[FLASH_TEST_FRAMES];
+	int rises = 0;
+	float prev = 0.0f;
+	for (int i = 0; i < frames; i++) {
+		assert(env[i] >= 0.0f && env[i] <= 1.0f);
+		if (env[i] > prev) {
+			assert(prev == 0.0f);
+			rise[rises++] = i;
+		}
+		prev = env[i];
+	}
+	for (int r = 0; r < rises; r++) {
+		const int end = r + 1 < rises ? rise[r + 1] : frames;
+		for (int i = rise[r] + 1; i < end; i++) {
+			if ((double)(i - rise[r]) * dt >= fall + 1e-9)
+				assert(env[i] == 0.0f);
+		}
+		if (r > 0)
+			assert((double)(rise[r] - rise[r - 1]) * dt >= interval - 1e-6);
+		int in_window = 0;
+		for (int q = r; q < rises && (double)(rise[q] - rise[r]) * dt < 1.0; q++)
+			in_window++;
+		assert(in_window <= max_per_second);
+	}
+	return rises;
+}
+
+static void test_flash_limiter_caps_flash_rate(void)
+{
+	float over[FLASH_TEST_FRAMES];
+	float env[FLASH_TEST_FRAMES];
+	float ref[FLASH_TEST_FRAMES];
+
+	/* (a) A trigger over its threshold on every frame for 3 s at the default 3 Hz: exactly 9 flashes, 1/3 s apart,
+	 * each from full intensity down to exactly 0 within 0.15 s. */
+	for (int i = 0; i < 180; i++)
+		over[i] = 1.0f;
+	run_flash_limiter(over, 180, 3.0f, env);
+	assert(env[0] == 1.0f);
+	assert(check_flash_contract(env, 180, 3.0, 3) == 9);
+
+	/* The same trigger at lower settings: the cap follows the slider. */
+	const struct {
+		float rate;
+		int max_per_second;
+		int flashes;
+	} k_settings[] = {{2.5f, 3, 8}, {2.0f, 2, 6}, {1.0f, 1, 3}, {0.5f, 1, 2}};
+	for (size_t s = 0; s < sizeof(k_settings) / sizeof(k_settings[0]); s++) {
+		run_flash_limiter(over, 180, k_settings[s].rate, env);
+		assert(check_flash_contract(env, 180, k_settings[s].rate, k_settings[s].max_per_second) ==
+		       k_settings[s].flashes);
+	}
+
+	/* (b) A 10 Hz trigger train (every 6 frames) at 3 Hz, where the old stateless gate let 7 flashes a second
+	 * through. Single-frame pulses: 8 flashes in 3 s, 0.4 s apart. Kick-shaped pulses, over the threshold for 5
+	 * frames each: exactly at the cap, 9 flashes 1/3 s apart. */
+	for (int i = 0; i < 180; i++)
+		over[i] = (i % 6 == 0) ? 1.0f : 0.0f;
+	run_flash_limiter(over, 180, 3.0f, env);
+	assert(check_flash_contract(env, 180, 3.0, 3) == 8);
+	for (int i = 0; i < 180; i++)
+		over[i] = kick_over(i % 6);
+	run_flash_limiter(over, 180, 3.0f, env);
+	assert(check_flash_contract(env, 180, 3.0, 3) == 9);
+
+	/* (c) At 0.5 Hz, kicks at 1.9 s and 2.1 s (frames 114 and 126) give one flash, from the first kick. */
+	for (int i = 0; i < 300; i++) {
+		if (i >= 126)
+			over[i] = kick_over(i - 126);
+		else if (i >= 114)
+			over[i] = kick_over(i - 114);
+		else
+			over[i] = 0.0f;
+	}
+	run_flash_limiter(over, 300, 0.5f, env);
+	assert(check_flash_contract(env, 300, 0.5, 1) == 1);
+	assert(env[113] == 0.0f && env[114] > 0.99f);
+
+	/* (d) A trigger at or below its threshold, or NaN, never starts a flash. The limiter is live all along: the
+	 * first trigger over the threshold flashes at once. */
+	const float not_over[] = {0.0f, -0.0f, -1e-6f, -1.0f, -INFINITY, NAN};
+	const float some_rates[] = {0.5f, 3.0f};
+	for (size_t r = 0; r < sizeof(some_rates) / sizeof(some_rates[0]); r++) {
+		for (size_t k = 0; k < sizeof(not_over) / sizeof(not_over[0]); k++) {
+			struct vs_flash_limiter lim;
+			vs_flash_limiter_reset(&lim);
+			for (int i = 0; i < 240; i++)
+				assert(vs_flash_limiter_step(&lim, not_over[k], some_rates[r], k_flash_dt) == 0.0f);
+			assert(vs_flash_limiter_step(&lim, 0.25f, some_rates[r], k_flash_dt) == 0.25f);
+		}
+	}
+
+	/* (e) A NaN or infinite rate behaves exactly like 3 Hz, and so do 3.25, 8 and 100 Hz (the cap has no unlock);
+	 * rates under 0.5 Hz behave exactly like 0.5 Hz. Checked on the steady trigger and on the kick train. */
+	const float like_3[] = {NAN, INFINITY, -INFINITY, 3.25f, 8.0f, 100.0f};
+	const float like_half[] = {0.25f, 0.0f, -5.0f};
+	for (int pattern = 0; pattern < 2; pattern++) {
+		for (int i = 0; i < 180; i++)
+			over[i] = pattern == 0 ? 1.0f : kick_over(i % 6);
+		run_flash_limiter(over, 180, 3.0f, ref);
+		for (size_t k = 0; k < sizeof(like_3) / sizeof(like_3[0]); k++) {
+			run_flash_limiter(over, 180, like_3[k], env);
+			for (int i = 0; i < 180; i++)
+				assert(env[i] == ref[i]);
+			assert(check_flash_contract(env, 180, 3.0, 3) == 9);
+		}
+		run_flash_limiter(over, 180, 0.5f, ref);
+		for (size_t k = 0; k < sizeof(like_half) / sizeof(like_half[0]); k++) {
+			run_flash_limiter(over, 180, like_half[k], env);
+			for (int i = 0; i < 180; i++)
+				assert(env[i] == ref[i]);
+		}
+	}
+
+	/* (f) A NaN, negative, zero or infinite frame time does not advance time: a flash neither fades nor restarts
+	 * through such frames, and once real frames resume the next flash comes exactly 20 real frames (1/3 s) after
+	 * the first. */
+	struct vs_flash_limiter lim;
+	vs_flash_limiter_reset(&lim);
+	assert(vs_flash_limiter_step(&lim, 0.6f, 3.0f, k_flash_dt) == 0.6f);
+	float held = 0.0f;
+	for (int i = 0; i < 3; i++)
+		held = vs_flash_limiter_step(&lim, 0.0f, 3.0f, k_flash_dt);
+	assert(held > 0.0f && held < 0.6f);
+	const float bad_dt[] = {NAN, -k_flash_dt, -1.0f, -INFINITY, INFINITY, 0.0f, -0.0f};
+	for (size_t k = 0; k < sizeof(bad_dt) / sizeof(bad_dt[0]); k++) {
+		for (int i = 0; i < 40; i++)
+			assert(vs_flash_limiter_step(&lim, 1.0f, 3.0f, bad_dt[k]) == held);
+	}
+	int real_frames = 3;
+	float e = held;
+	while (e != 1.0f) {
+		e = vs_flash_limiter_step(&lim, 1.0f, 3.0f, k_flash_dt);
+		real_frames++;
+		assert(real_frames <= 20);
+		if (real_frames >= 9 && real_frames < 20)
+			assert(e == 0.0f);
+	}
+	assert(real_frames == 20);
+}
+
+/* Panic zeroes the peak of a flash in flight (shader-filter.c) and keeps the time since it was admitted: the envelope
+ * stays exactly 0 until the next admitted flash, which still comes no sooner than 1/3 s after the last. */
+static void test_flash_limiter_peak_zeroed_mid_fall(void)
+{
+	struct vs_flash_limiter lim;
+	vs_flash_limiter_reset(&lim);
+	assert(vs_flash_limiter_step(&lim, 1.0f, 3.0f, k_flash_dt) == 1.0f);
+	assert(vs_flash_limiter_step(&lim, 1.0f, 3.0f, k_flash_dt) > 0.0f);
+	lim.peak = 0.0f;
+	for (int frame = 2; frame < 20; frame++)
+		assert(vs_flash_limiter_step(&lim, 1.0f, 3.0f, k_flash_dt) == 0.0f);
+	assert(vs_flash_limiter_step(&lim, 0.7f, 3.0f, k_flash_dt) == 0.7f);
+}
+
 int main(void)
 {
 	test_onset_kick_and_snare_separation();
 	test_onset_refractory_cooldown();
 	test_onset_beat_tempo_and_sync_advance();
+	test_flash_limiter_caps_flash_rate();
+	test_flash_limiter_peak_zeroed_mid_fall();
 	printf("test-onset: all assertions passed\n");
 	return 0;
 }

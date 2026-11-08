@@ -43,6 +43,9 @@ struct vs_audio_tap {
 	bool source_cb_active;
 	bool warned_attachment_failure;
 	float retry_accum_sec;
+	/* Set by a caller holding a lock that the frontend's save takes after the sources lock: configure then records a
+	 * Named Source target without looking it up, and the 1 s retry attaches it (see vs_audio_tap_named_lookup). */
+	bool defer_named_attach;
 
 	uint32_t sample_rate;
 	size_t channels;
@@ -61,8 +64,28 @@ void vs_audio_tap_destroy(struct vs_audio_tap *tap);
 
 void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_source, enum vs_tap_mode mode,
 			    const char *source_name, bool react_when_muted, const struct vs_analyzer_config *ana_cfg);
+/* For a filter being removed from its parent: a Parent Source tap lets go of that parent (the 1 s retry starts over,
+ * and finds no parent until the filter is added again). Other modes are left as they are. */
+void vs_audio_tap_detach_parent(struct vs_audio_tap *tap);
 
 void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds);
+
+/* The Named Source that this tick's once-a-second retry will look up, found by the caller outside a lock that the
+ * frontend's save takes after the sources lock (the Audio Modulator's mutex): obs_get_source_by_name takes the sources
+ * lock, so it must not run under such a lock. Plan with the tap's lock held, resolve without it, then tick with it. */
+struct vs_audio_tap_named_lookup {
+	bool planned;
+	char name[256];
+	obs_source_t *source; /* a reference, or NULL when no source has that name */
+};
+void vs_audio_tap_plan_named_lookup(const struct vs_audio_tap *tap, float seconds,
+				    struct vs_audio_tap_named_lookup *lookup);
+void vs_audio_tap_resolve_named_lookup(struct vs_audio_tap_named_lookup *lookup);
+void vs_audio_tap_release_named_lookup(struct vs_audio_tap_named_lookup *lookup);
+/* vs_audio_tap_tick, except that a Named Source retry takes the source from the lookup instead of looking it up. A
+ * retry the lookup does not cover (the tap changed in between) waits for the next tick with its timer kept. */
+void vs_audio_tap_tick_with_lookup(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds,
+				   const struct vs_audio_tap_named_lookup *lookup);
 
 /* Shared OBS settings & properties helpers used by both Shader Filter and Audio Modulator. */
 void vs_audio_tap_get_defaults(obs_data_t *settings);

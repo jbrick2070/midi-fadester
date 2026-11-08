@@ -14,6 +14,7 @@
 #include "vendor-api.h"
 
 #include <media-io/audio-io.h>
+#include <stdio.h>
 #include <string.h>
 
 #define S_TAP_STATUS_WARNING "tap_status_warning"
@@ -66,7 +67,9 @@ static void detach_tap_callbacks(struct vs_audio_tap *tap)
 	}
 }
 
-static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *filter_source)
+/* lookup, when not NULL, is a Named Source lookup made for tap->source_name: it replaces obs_get_source_by_name. */
+static bool try_attach_tap_callbacks_with(struct vs_audio_tap *tap, obs_source_t *filter_source,
+					  const struct vs_audio_tap_named_lookup *lookup)
 {
 	if (!tap)
 		return false;
@@ -109,7 +112,9 @@ static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *fil
 	if (tap->mode == VS_TAP_NAMED_SOURCE) {
 		if (tap->source_name[0] == '\0')
 			return false;
-		obs_source_t *src = obs_get_source_by_name(tap->source_name);
+		obs_source_t *src = !lookup          ? obs_get_source_by_name(tap->source_name)
+				    : lookup->source ? obs_source_get_ref(lookup->source)
+						     : NULL;
 		if (!src) {
 			if (!tap->warned_attachment_failure) {
 				obs_log(LOG_WARNING,
@@ -141,6 +146,11 @@ static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *fil
 	}
 
 	return false;
+}
+
+static bool try_attach_tap_callbacks(struct vs_audio_tap *tap, obs_source_t *filter_source)
+{
+	return try_attach_tap_callbacks_with(tap, filter_source, NULL);
 }
 
 bool vs_audio_tap_init(struct vs_audio_tap *tap, bool upload_gpu_textures)
@@ -208,7 +218,12 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 	const char *safe_name = source_name ? source_name : "";
 	const bool selection_changed = (tap->mode != mode) ||
 				       (strncmp(tap->source_name, safe_name, sizeof(tap->source_name) - 1u) != 0);
-	const bool target_changed = selection_changed || (!tap->raw_cb_active && !tap->source_cb_active);
+	/* The same filter object may have moved to another source: a Parent Source tap follows its current parent. */
+	const bool parent_moved =
+		mode == VS_TAP_PARENT_SOURCE && tap->source_cb_active && filter_source &&
+		!obs_weak_source_references_source(tap->weak_capture_source, obs_filter_get_parent(filter_source));
+	const bool target_changed = selection_changed || parent_moved ||
+				    (!tap->raw_cb_active && !tap->source_cb_active);
 
 	os_atomic_set_bool(&tap->react_when_muted, react_when_muted);
 	if (ana_cfg)
@@ -224,8 +239,19 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 		tap->source_name[sizeof(tap->source_name) - 1u] = '\0';
 		tap->retry_accum_sec = 0.0f;
 		vs_analyzer_reset(&tap->analyzer);
-		try_attach_tap_callbacks(tap, filter_source);
+		if (!(tap->defer_named_attach && mode == VS_TAP_NAMED_SOURCE))
+			try_attach_tap_callbacks(tap, filter_source);
 	}
+}
+
+void vs_audio_tap_detach_parent(struct vs_audio_tap *tap)
+{
+	if (!tap || tap->mode != VS_TAP_PARENT_SOURCE)
+		return;
+	detach_tap_callbacks(tap);
+	tap->retry_accum_sec = 0.0f;
+	tap->warned_attachment_failure = false;
+	vs_analyzer_reset(&tap->analyzer);
 }
 
 static void upload_tap_textures(struct vs_audio_tap *tap)
@@ -255,7 +281,43 @@ static void upload_tap_textures(struct vs_audio_tap *tap)
 	obs_leave_graphics();
 }
 
-void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds)
+void vs_audio_tap_plan_named_lookup(const struct vs_audio_tap *tap, float seconds,
+				    struct vs_audio_tap_named_lookup *lookup)
+{
+	if (!lookup)
+		return;
+	memset(lookup, 0, sizeof(*lookup));
+	if (!tap || tap->mode != VS_TAP_NAMED_SOURCE || tap->source_name[0] == '\0' || tap->raw_cb_active)
+		return;
+	/* Mirrors the tick: an expired attachment is cleared first and restarts the retry timer. */
+	float accum = tap->retry_accum_sec;
+	if (tap->source_cb_active) {
+		if (!tap->weak_capture_source || !obs_weak_source_expired(tap->weak_capture_source))
+			return;
+		accum = 0.0f;
+	}
+	if (accum + seconds < 1.0f)
+		return;
+	lookup->planned = true;
+	snprintf(lookup->name, sizeof(lookup->name), "%s", tap->source_name);
+}
+
+void vs_audio_tap_resolve_named_lookup(struct vs_audio_tap_named_lookup *lookup)
+{
+	if (lookup && lookup->planned && !lookup->source)
+		lookup->source = obs_get_source_by_name(lookup->name);
+}
+
+void vs_audio_tap_release_named_lookup(struct vs_audio_tap_named_lookup *lookup)
+{
+	if (!lookup)
+		return;
+	obs_source_release(lookup->source);
+	lookup->source = NULL;
+}
+
+static void tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds,
+		     const struct vs_audio_tap_named_lookup *lookup)
 {
 	if (!tap)
 		return;
@@ -272,9 +334,12 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 	/* Retry attachment once per second if a named or parent source was not ready at load time. */
 	if (!tap->raw_cb_active && !tap->source_cb_active) {
 		tap->retry_accum_sec += seconds;
-		if (tap->retry_accum_sec >= 1.0f) {
+		const bool lookup_misses = lookup && tap->mode == VS_TAP_NAMED_SOURCE && tap->source_name[0] != '\0' &&
+					   (!lookup->planned || strcmp(lookup->name, tap->source_name) != 0);
+		if (tap->retry_accum_sec >= 1.0f && !lookup_misses) {
 			tap->retry_accum_sec = 0.0f;
-			try_attach_tap_callbacks(tap, filter_source);
+			try_attach_tap_callbacks_with(tap, filter_source,
+						      lookup && tap->mode == VS_TAP_NAMED_SOURCE ? lookup : NULL);
 		}
 	}
 
@@ -286,6 +351,17 @@ void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, fl
 	vs_analyzer_step(&tap->analyzer, seconds, &tap->current_frame);
 	vs_vendor_api_on_tick(video_ts, seconds, &tap->current_frame, tap->mode == VS_TAP_TRACK_1);
 	upload_tap_textures(tap);
+}
+
+void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds)
+{
+	tap_tick(tap, filter_source, seconds, NULL);
+}
+
+void vs_audio_tap_tick_with_lookup(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds,
+				   const struct vs_audio_tap_named_lookup *lookup)
+{
+	tap_tick(tap, filter_source, seconds, lookup);
 }
 
 void vs_audio_tap_get_defaults(obs_data_t *settings)

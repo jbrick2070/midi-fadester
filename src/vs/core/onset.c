@@ -215,3 +215,45 @@ void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *ma
 	memcpy(onset->prev_mag_low, mag_low, (max_low + 1u) * sizeof(float));
 	memcpy(onset->prev_mag_mid, mag_mid, (max_mid + 1u) * sizeof(float));
 }
+
+void vs_flash_limiter_reset(struct vs_flash_limiter *lim)
+{
+	if (lim)
+		memset(lim, 0, sizeof(*lim));
+}
+
+float vs_flash_limiter_step(struct vs_flash_limiter *lim, float over_01, float max_rate_hz, float dt_sec)
+{
+	if (!lim)
+		return 0.0f;
+
+	double rate = is_finite_f32(max_rate_hz) ? (double)max_rate_hz : VS_FLASH_RATE_DEFAULT_HZ;
+	if (rate < VS_FLASH_RATE_MIN_HZ)
+		rate = VS_FLASH_RATE_MIN_HZ;
+	if (rate > VS_FLASH_RATE_MAX_HZ)
+		rate = VS_FLASH_RATE_MAX_HZ;
+	const double interval = 1.0 / rate;
+	/* At most 0.15 s: at 3 Hz or less every flash is dark again well before the next may start. */
+	const double fall = fmin(0.5 * interval, VS_FLASH_FALL_MAX_SEC);
+
+	if (is_finite_f32(dt_sec) && dt_sec > 0.0f)
+		lim->since_admit_sec += (double)dt_sec;
+
+	float over = isnan(over_01) ? 0.0f : over_01;
+	if (over < 0.0f)
+		over = 0.0f;
+	if (over > 1.0f)
+		over = 1.0f;
+
+	/* The 1e-9 s slack absorbs rounding when the interval is a whole number of frames. */
+	if (over > 0.0f && (!lim->has_admitted || lim->since_admit_sec + 1e-9 >= interval)) {
+		lim->peak = over;
+		lim->since_admit_sec = 0.0;
+		lim->has_admitted = true;
+	}
+
+	/* Within a flash the envelope only falls: each admitted flash is exactly one rise and one fall. */
+	if (!lim->has_admitted || lim->since_admit_sec >= fall)
+		return 0.0f;
+	return (float)((double)lim->peak * (1.0 - lim->since_admit_sec / fall));
+}
