@@ -153,6 +153,21 @@ static void set_error_comment(obs_data_t *response_data, const char *error_code,
 	obs_data_set_string(response_data, "error_code", error_code ? error_code : "");
 }
 
+/* A present parameter of the wrong JSON type (a string, a bool, an object) would read as 0 and move the slot to 0 %:
+ * refuse it instead. Absence is reported by the caller as missing_parameter. */
+static bool request_number_or_error(obs_data_t *request_data, obs_data_t *response_data, const char *name)
+{
+	obs_data_item_t *item = obs_data_item_byname(request_data, name);
+	const bool ok = item && obs_data_item_gettype(item) == OBS_DATA_NUMBER;
+	obs_data_item_release(&item);
+	if (!ok) {
+		char sentence[128];
+		snprintf(sentence, sizeof(sentence), "Parameter '%s' must be a number.", name);
+		set_error_comment(response_data, "invalid_parameter", sentence);
+	}
+	return ok;
+}
+
 static void set_error_msg(obs_data_t *response_data, const struct mfd_msg *msg)
 {
 	char sentence[256];
@@ -668,6 +683,9 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 				  "Missing required 'value' parameter (0.0 to 1.0).");
 		return;
 	}
+	if (!request_number_or_error(request_data, response_data, "value")) {
+		return;
+	}
 
 	float val = clamp01((float)obs_data_get_double(request_data, "value"));
 	bool release = obs_data_get_bool(request_data, "release");
@@ -782,6 +800,9 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 				  "Missing required 'delta' parameter (-1.0 to 1.0).");
 		return;
 	}
+	if (!request_number_or_error(request_data, response_data, "delta")) {
+		return;
+	}
 
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
@@ -884,6 +905,10 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	if (!obs_data_has_user_value(request_data, "to") || !obs_data_has_user_value(request_data, "ms")) {
 		set_error_comment(response_data, "missing_parameter",
 				  "Missing required 'to' (0.0..1.0) or 'ms' (50..20000) parameter.");
+		return;
+	}
+	if (!request_number_or_error(request_data, response_data, "to") ||
+	    !request_number_or_error(request_data, response_data, "ms")) {
 		return;
 	}
 

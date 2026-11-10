@@ -192,6 +192,9 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	MMRESULT start_res = midiInStart(hmi);
 	if (start_res != MMSYSERR_NOERROR) {
 		midiInClose(hmi);
+		/* midiInClose sends MIM_CLOSE, which sets this flag; the device was never open, so clear it or the
+		 * engine re-polls MIDI on every frame. */
+		os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 		dev->error_kind = MFD_WINMM_ERR_OPEN_FAILED;
 		dev->error_operation = MFD_WINMM_OP_START;
 		dev->error_code = (uint32_t)start_res;

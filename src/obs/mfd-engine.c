@@ -117,6 +117,17 @@ static bool slot_addr_is_14bit(const struct mfd_midi_addr *addr)
 	return addr->is_14bit || (addr->type == MFD_MIDI_PITCH_BEND);
 }
 
+/* A row's MIDI Learn ends whenever the strips it belongs to are replaced (layout change, import, dialog closed):
+ * otherwise the next control moved, minutes later, silently rebinds a strip. The setup sheet's own Learn is
+ * separate and stays. Caller holds the engine lock. */
+static void cancel_row_learn_locked(struct mfd_engine *eng)
+{
+	eng->learning_slot_index = -1;
+	if (!eng->setup_session.learning) {
+		mfd_midi_parser_cancel_learn(&eng->midi_parser);
+	}
+}
+
 static bool midi_addr_exact_equal(const struct mfd_midi_addr *a, const struct mfd_midi_addr *b)
 {
 	if (!a || !b) {
@@ -819,6 +830,7 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 
 	mfd_engine_lock(eng);
 	mfd_engine_cancel_setup_session(eng);
+	cancel_row_learn_locked(eng);
 	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	if (reset_targets) {
 		mfd_engine_load_profile_defaults(eng, prof);
@@ -4641,6 +4653,13 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				int lidx = eng->learning_slot_index;
 				struct mfd_fader_slot *ls = &eng->fader_slots[lidx];
 				ls->addr = learned;
+				/* One control drives one strip: take the address away from any other strip, as Set up does. */
+				for (int j = 0; j < MFD_MAX_FADER_SLOTS; ++j) {
+					if (j != lidx && midi_addr_exact_equal(&eng->fader_slots[j].addr, &learned)) {
+						eng->fader_slots[j].addr.type = MFD_MIDI_NONE;
+						mfd_engine_bump_slot_rev(eng, j);
+					}
+				}
 				mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &ls->addr,
 									&ls->cal);
 				ls->enabled = true;
@@ -6189,18 +6208,37 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	return ok;
 }
 
-bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
+/* R-FEEL-1: the smoothing time constant is 0-250 ms (the dialog's range); a hand-edited file may hold anything. */
+static float clamp_smooth_tau_ms(float tau_ms)
+{
+	if (!isfinite(tau_ms) || tau_ms <= 0.0f) {
+		return 0.0f;
+	}
+	return (tau_ms > 250.0f) ? 250.0f : tau_ms;
+}
+
+/* user_file: a file the user picked in Import. It is read without the ".bak" recovery (which would rename a
+ * neighbouring "<file>.bak" over the user's own file when it does not parse), must look like a Midi Fadester
+ * configuration, and leaves the port and the one-time notices alone when it does not name them. */
+static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath, bool user_file)
 {
 	if (!eng || !filepath || filepath[0] == '\0') {
 		return false;
 	}
-	obs_data_t *data = obs_data_create_from_json_file_safe(filepath, "bak");
+	obs_data_t *data = user_file ? obs_data_create_from_json_file(filepath)
+				     : obs_data_create_from_json_file_safe(filepath, "bak");
 	if (!data) {
 		return false;
 	}
+	if (user_file && !obs_data_has_user_value(data, "slots") && !obs_data_has_user_value(data, "device_name") &&
+	    !obs_data_has_user_value(data, "active_profile")) {
+		obs_data_release(data);
+		return false;
+	}
 	mfd_engine_lock(eng);
+	cancel_row_learn_locked(eng);
 	const char *dev = obs_data_get_string(data, "device_name");
-	if (dev) {
+	if (dev && (!user_file || dev[0] != '\0')) {
 		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", dev);
 	}
 	const char *prof = obs_data_get_string(data, "active_profile");
@@ -6208,21 +6246,23 @@ bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
 		snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", prof);
 	}
 	if (obs_data_has_user_value(data, "smooth_tau_ms")) {
-		eng->smooth_tau_ms = (float)obs_data_get_double(data, "smooth_tau_ms");
+		eng->smooth_tau_ms = clamp_smooth_tau_ms((float)obs_data_get_double(data, "smooth_tau_ms"));
 	}
 	if (obs_data_has_user_value(data, "tbar_bidirectional_flip")) {
 		eng->tbar_bidirectional_flip = obs_data_get_bool(data, "tbar_bidirectional_flip");
 	}
 	if (obs_data_has_user_value(data, "first_run_offer_dismissed")) {
 		eng->first_run_offer_dismissed = obs_data_get_bool(data, "first_run_offer_dismissed");
-	} else {
+	} else if (!user_file) {
 		/* Upgrading from 0.1.x global.json without first_run_offer_dismissed: never prompt to reset */
 		eng->first_run_offer_dismissed = true;
 	}
-	/* Existing users have not seen the companion card, so show it once after upgrading. */
-	eng->stream_deck_companion_dismissed = obs_data_has_user_value(data, "stream_deck_companion_dismissed")
-						       ? obs_data_get_bool(data, "stream_deck_companion_dismissed")
-						       : false;
+	if (obs_data_has_user_value(data, "stream_deck_companion_dismissed")) {
+		eng->stream_deck_companion_dismissed = obs_data_get_bool(data, "stream_deck_companion_dismissed");
+	} else if (!user_file) {
+		/* Existing users have not seen the companion card, so show it once after upgrading. */
+		eng->stream_deck_companion_dismissed = false;
+	}
 	deserialize_calibrations(eng, data);
 	deserialize_slots(eng, data);
 	refresh_apc40_detected_locked(eng);
@@ -6232,10 +6272,15 @@ bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
 	return true;
 }
 
+bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath)
+{
+	return import_config_file_impl(eng, filepath, false);
+}
+
 /* Dialog Import: load the file, then open the port it names. Layout and bindings stay as imported. */
 bool mfd_engine_import_config_file_and_reopen(struct mfd_engine *eng, const char *filepath)
 {
-	if (!mfd_engine_import_config_file(eng, filepath)) {
+	if (!import_config_file_impl(eng, filepath, true)) {
 		return false;
 	}
 	mfd_engine_lock(eng);
@@ -6319,7 +6364,7 @@ void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms)
 		return;
 	}
 	mfd_engine_lock(eng);
-	eng->smooth_tau_ms = (isfinite(tau_ms) && tau_ms >= 0.0f) ? tau_ms : 0.0f;
+	eng->smooth_tau_ms = clamp_smooth_tau_ms(tau_ms);
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		mfd_smoother_set_tau_ms(&eng->fader_slots[i].smoother, eng->smooth_tau_ms);
 	}
@@ -6362,10 +6407,7 @@ void mfd_engine_cancel_learn(struct mfd_engine *eng)
 		return;
 	}
 	mfd_engine_lock(eng);
-	eng->learning_slot_index = -1;
-	if (!eng->setup_session.learning) {
-		mfd_midi_parser_cancel_learn(&eng->midi_parser);
-	}
+	cancel_row_learn_locked(eng);
 	mfd_engine_mark_ui_dirty(eng, true);
 	mfd_engine_unlock(eng);
 }

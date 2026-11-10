@@ -3467,6 +3467,90 @@ int main(void)
 		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
 	}
 
+	/* 12j2: A user-picked Import file that is not a Midi Fadester configuration is refused and left as it was (no
+	 * ".bak" renamed over it); an empty device name keeps the port; the smoothing time is held to 0-250 ms. */
+	{
+		const char *tmp_other_json = "test-mfd-import-other.json";
+		const char *tmp_other_bak = "test-mfd-import-other.json.bak";
+		FILE *fp = fopen(tmp_other_json, "wb");
+		REQUIRE(fp != NULL);
+		fputs("{\"hello\":1}\n", fp);
+		fclose(fp);
+		REQUIRE(!mfd_engine_import_config_file_and_reopen(&eng, tmp_other_json));
+		fp = fopen(tmp_other_json, "wb");
+		REQUIRE(fp != NULL);
+		fputs("not json", fp);
+		fclose(fp);
+		fp = fopen(tmp_other_bak, "wb");
+		REQUIRE(fp != NULL);
+		fputs("{\"device_name\":\"From Bak\"}\n", fp);
+		fclose(fp);
+		REQUIRE(!mfd_engine_import_config_file_and_reopen(&eng, tmp_other_json));
+		fp = fopen(tmp_other_json, "rb");
+		REQUIRE(fp != NULL);
+		char head[16] = {0};
+		REQUIRE(fgets(head, sizeof(head), fp) != NULL);
+		fclose(fp);
+		REQUIRE(strcmp(head, "not json") == 0);
+		remove(tmp_other_json);
+		remove(tmp_other_bak);
+
+		char saved_dev2[MFD_MIDI_DEV_NAME_MAX];
+		snprintf(saved_dev2, sizeof(saved_dev2), "%s", eng.configured_device_name);
+		snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "%s", "Fadester Test Port C");
+		const char *tmp_tau_json = "test-mfd-import-tau.json";
+		fp = fopen(tmp_tau_json, "wb");
+		REQUIRE(fp != NULL);
+		fputs("{\"device_name\":\"\",\"active_profile\":\"apc40mk2\",\"smooth_tau_ms\":100000}\n", fp);
+		fclose(fp);
+		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
+		REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_tau_json));
+		remove(tmp_tau_json);
+		REQUIRE(strcmp(eng.configured_device_name, "Fadester Test Port C") == 0);
+		REQUIRE(eng.smooth_tau_ms == 250.0f);
+		mfd_engine_set_smooth_tau_ms(&eng, 9000.0f);
+		REQUIRE(eng.smooth_tau_ms == 250.0f);
+		mfd_engine_set_smooth_tau_ms(&eng, 30.0f);
+		snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "%s", saved_dev2);
+		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
+	}
+
+	/* 12j4: Row Learn takes the captured control away from any other strip; a layout change ends an armed Learn */
+	{
+		struct mfd_fader_slot saved_slots[MFD_MAX_FADER_SLOTS];
+		memcpy(saved_slots, eng.fader_slots, sizeof(saved_slots));
+		for (int j = 0; j < MFD_MAX_FADER_SLOTS; ++j) {
+			eng.fader_slots[j].addr.type = MFD_MIDI_NONE; /* only slot 1 holds the address below */
+		}
+		eng.fader_slots[1].addr = (struct mfd_midi_addr){MFD_MIDI_CC, 0U, 21U, false};
+		mfd_engine_start_learn(&eng, 3);
+		REQUIRE(eng.learning_slot_index == 3);
+		push_midi_cc(&eng, 0, 21, 64);
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.learning_slot_index == -1);
+		REQUIRE(eng.fader_slots[3].addr.type == MFD_MIDI_CC && eng.fader_slots[3].addr.number == 21U);
+		REQUIRE(eng.fader_slots[1].addr.type == MFD_MIDI_NONE);
+
+		mfd_engine_start_learn(&eng, 3);
+		REQUIRE(mfd_midi_parser_is_learning(&eng.midi_parser));
+		REQUIRE(mfd_engine_select_profile(&eng, mfd_engine_get_active_profile(&eng), false));
+		REQUIRE(eng.learning_slot_index == -1);
+		REQUIRE(!mfd_midi_parser_is_learning(&eng.midi_parser));
+		memcpy(eng.fader_slots, saved_slots, sizeof(saved_slots));
+	}
+
+	/* 12j3: A vendor value of the wrong JSON type is refused instead of read as 0 */
+	{
+		obs_data_t *wreq = obs_data_create();
+		obs_data_t *wres = obs_data_create();
+		obs_data_set_string(wreq, "slot", "fader_2");
+		obs_data_set_string(wreq, "value", "0.5");
+		mfd_vendor_handle_set_fader_value(wreq, wres, &eng);
+		REQUIRE(strcmp(obs_data_get_string(wres, "error_code"), "invalid_parameter") == 0);
+		obs_data_release(wreq);
+		obs_data_release(wres);
+	}
+
 	/* 12k: Generic after a desk without a crossfader brings back the slots that desk lacked as Not used; a strip the
 	 * user turned off stays off, and bindings stay */
 	mfd_engine_load_profile_defaults(&eng, MFD_PROFILE_AKAI_MIDIMIX);

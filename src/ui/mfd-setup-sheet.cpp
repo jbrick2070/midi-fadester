@@ -632,6 +632,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	combo_feel_->setObjectName(QStringLiteral("mfdComboFeel"));
 	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_DIP_FREE)),
 			     static_cast<int>(MFD_CURVE_DIP_FREE));
+	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_FULL_CENTER)),
+			     static_cast<int>(MFD_CURVE_FULL_CENTER));
 	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_COSINE)),
 			     static_cast<int>(MFD_CURVE_COSINE));
 	combo_feel_->addItem(QString::fromUtf8(mfd_ui_curve_plain_name(MFD_CURVE_LINEAR)),
@@ -913,7 +915,7 @@ void MfdSetupSheetDialog::open_for_slot(int slot_index)
 		chosen_filter_has_custom_range_ = false;
 		chosen_filter_bypass_ = false;
 	}
-	chosen_curve_ = (s.curve == MFD_CURVE_FULL_CENTER) ? MFD_CURVE_DIP_FREE : s.curve;
+	chosen_curve_ = s.curve; /* every curve is in the Feel list, so Done never changes one the user did not touch */
 	chosen_afv_ = s.audio_follows_video;
 	chosen_tbar_bidir_ = snap_.tbar_bidirectional_flip;
 

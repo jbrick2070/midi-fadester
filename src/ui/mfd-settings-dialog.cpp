@@ -36,13 +36,16 @@
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QPainter>
 #include <QPaintEvent>
@@ -558,6 +561,10 @@ public:
 			if (idx == 1 && setup_sheet_ && setup_sheet_->isVisible()) {
 				setup_sheet_->reject();
 			}
+			if (idx != 1 && eng_) {
+				mfd_engine_cancel_learn(
+					eng_); /* row Learn lives on the Advanced tab: leaving it ends Learn */
+			}
 			refresh_from_engine();
 			if (idx == 1 && table_) {
 				for (int c = 0; c < 9; ++c) {
@@ -579,6 +586,9 @@ public:
 
 	~MfdSettingsDialog() override
 	{
+		if (eng_) {
+			mfd_engine_cancel_learn(eng_);
+		}
 		if (owns_engine_notify_ && eng_) {
 			mfd_engine_set_ui_notify_fn(eng_, nullptr, nullptr);
 		}
@@ -644,6 +654,10 @@ public:
 protected:
 	void closeEvent(QCloseEvent *event) override
 	{
+		if (eng_) {
+			mfd_engine_cancel_learn(
+				eng_); /* an armed row Learn must not bind a control after the window is gone */
+		}
 		if (setup_sheet_ && setup_sheet_->isVisible()) {
 			setup_sheet_->reject();
 		}
@@ -651,6 +665,15 @@ protected:
 			controller_view_dlg_->close();
 		}
 		QDialog::closeEvent(event);
+	}
+
+	void hideEvent(QHideEvent *event) override
+	{
+		/* Esc and reject() hide the window without a closeEvent. */
+		if (eng_) {
+			mfd_engine_cancel_learn(eng_);
+		}
+		QDialog::hideEvent(event);
 	}
 
 private:
@@ -765,11 +788,9 @@ private:
 		lay->addWidget(zone1);
 
 		connect(z1_btn_reconnect_, &QPushButton::clicked, this, [this]() {
-			mfd_engine_reconnect_midi(eng_, snap_.configured_device_name);
-			mfd_engine_save_global_config(eng_);
-			mfd_engine_notify_state_changed(eng_);
-			populate_device_combos();
-			refresh_from_engine();
+			/* Same as the Advanced tab's Reconnect: rescan the configured port with its layout rules. */
+			mfd_engine_get_ui_snapshot(eng_, &snap_);
+			apply_controller_selection(QString::fromUtf8(snap_.configured_device_name));
 		});
 		connect(z1_btn_change_ctrl_, &QPushButton::clicked, this, [this]() {
 			populate_device_combos();
@@ -783,8 +804,11 @@ private:
 		connect(zone1_profile_combo_, QOverload<int>::of(&QComboBox::activated), this, [this](int) {
 			const auto chosen_prof =
 				static_cast<enum mfd_controller_profile>(zone1_profile_combo_->currentData().toInt());
-			mfd_engine_select_profile(eng_, chosen_prof, false);
 			z1_change_panel_->hide();
+			if (chosen_prof == snap_.active_profile) {
+				return; /* picking the layout already in use must not touch the strips */
+			}
+			mfd_engine_select_profile(eng_, chosen_prof, false);
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
 		});
@@ -1186,6 +1210,13 @@ private:
 				populate_device_combos();
 				last_adv_topology_rev_ = ~0ULL;
 				refresh_from_engine();
+			} else {
+				QMessageBox::warning(
+					this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
+					mfdFill(mfdText("Dialog.Import.Failed",
+							"Could not read %1. It is not a Midi Fadester settings "
+							"file, or it is damaged. Nothing was changed."),
+						{QDir::toNativeSeparators(path)}));
 			}
 		});
 
@@ -1197,7 +1228,13 @@ private:
 			if (path.isEmpty()) {
 				return;
 			}
-			mfd_engine_export_config_file(eng_, path.toUtf8().constData());
+			if (!mfd_engine_export_config_file(eng_, path.toUtf8().constData())) {
+				QMessageBox::warning(
+					this, mfdText("Dialog.Export.Title", "Export Midi Fadester Configuration"),
+					mfdFill(mfdText("Dialog.Export.Failed",
+							"Could not write %1. Choose another folder and try again."),
+						{QDir::toNativeSeparators(path)}));
+			}
 		});
 
 		connect(device_combo_, QOverload<int>::of(&QComboBox::activated), this,
@@ -1212,6 +1249,9 @@ private:
 		connect(profile_combo_, QOverload<int>::of(&QComboBox::activated), this, [this](int) {
 			const auto chosen_prof =
 				static_cast<enum mfd_controller_profile>(profile_combo_->currentData().toInt());
+			if (chosen_prof == snap_.active_profile) {
+				return; /* picking the layout already in use must not touch the strips */
+			}
 			mfd_engine_select_profile(eng_, chosen_prof, false);
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
@@ -2351,7 +2391,7 @@ private:
 	struct mfd_engine *eng_ = nullptr;
 	bool owns_engine_notify_ = false;
 	std::atomic<bool> local_refresh_queued_{false};
-	struct mfd_ui_snapshot snap_ {};
+	struct mfd_ui_snapshot snap_{};
 	struct mfd_ui_catalog *adv_catalog_ = nullptr;
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
@@ -2389,7 +2429,7 @@ private:
 	QLabel *strip_assign_labels_[MFD_MAX_FADER_SLOTS]{};
 	QLabel *strip_status_labels_[MFD_MAX_FADER_SLOTS]{};
 	QPushButton *strip_action_btns_[MFD_MAX_FADER_SLOTS]{};
-	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS] {};
+	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS]{};
 
 	QLabel *z3_status_label_ = nullptr;
 
