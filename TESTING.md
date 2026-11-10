@@ -88,21 +88,21 @@ Step 2 filters pickers to valid OBS scenes/sources for the chosen role, explains
 
 ![State 6: Set up Step 2 Pickers and Multi-Scene Warning](docs/screenshots/06-setup-step2-pickers.png)
 
-### State 7 — 3-Step `Set up` Sheet: Step 3 of 3 (`Try it` Live Hardware Rehearsal)
+### State 7 — 3-Step `Set up` Sheet: Step 3 of 3 (`Move the control` Hardware Test)
 
-Step 3 lets the operator move the physical fader and watch the live response bar (`75%`) and plain-English confirmation (`"1 mixes Color and Color 2 in scene Red"`) before clicking `[Done]`, with a one-click `[Wrong fader? Move a different one]` MIDI Learn rebind button.
+Step 3 asks the operator to move the physical control (`"Move the control. This strip does not change OBS until you click Done."`) and shows the live `Hardware test` bar and the plain-English confirmation (`"1 mixes Color and Color 2 in scene Red"`) before `[Done]`. The strip leaves OBS alone until `[Done]`. `[Which hardware control? ▾]` shows the strip's MIDI control with a `[Learn]` button, and warns when that control is already assigned to another strip.
 
-![State 7: Set up Step 3 Try It](docs/screenshots/07-setup-step3-try-it.png)
+![State 7: Set up Step 3, Move the Control](docs/screenshots/07-setup-step3-try-it.png)
 
 ### State 8 — `[Show controller]` Live APC40 mkII SVG Desk Map (Hardware-Verified)
 
-Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Akai APC40 mkII desk showing labeled orientation zones above the faders (`"Clip launch pads (for desk orientation — Midi Fadester uses the faders below)"` and `"Scene pads"`), all 8 track faders (`Ch 1–8 CC 7`), Master fader (`Ch 1 CC 14`), horizontal Crossfader (`Ch 1 CC 15`), live `%` positions, short assignment labels, and color-coded state accents (`Active / Ready`, `At end (parked)`, `Needs pickup / Studio Mode`, `Needs attention`) updating event-driven on every MIDI/OBS change.
+Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Akai APC40 mkII desk showing labeled orientation zones above the faders (`"Clip launch pads (for desk orientation — Midi Fadester uses the faders below)"` and `"Scene pads"`), all 8 track faders (`Ch 1–8 CC 7`), Master fader (`Ch 1 CC 14`), horizontal Crossfader (`Ch 1 CC 15`), live `%` positions, short assignment labels, and color-coded state accents (`Active / Ready`, `At end (parked)`, `Needs pick-up or Studio Mode`, `Needs attention`) updating event-driven on every MIDI/OBS change.
 
 ![State 8: Live APC40 mkII SVG Desk View](docs/screenshots/08-show-controller-svg.png)
 
 ### State 9 — `Advanced` Tab (Multi-Controller Profile Picker, 10-Row Power-User Table & High-Contrast Help Callout)
 
-Switching to `Advanced` provides the multi-controller `Profile:` picker (Verified & Beta controller layouts), `Load <Profile> Defaults`, the full 10-row power-user matrix (`On`, `Strip`, `MIDI Control` + `Learn` / clear, `Reverse direction`, `What it does`, `Left`, `Right`, `Feel`, `Also fade audio`, stretched `Output` readout bar), `Smoothing (ms)`, `T-bar works in both directions`, `Import...` / `Export...`, `Back to Strips`, and a full-width `13px` two-line callout comparing **Switch scenes (T-bar)** vs. **Mix two layers**. Edits in `Advanced` and `Strips` share the exact same `mfd_engine` snapshot and round-trip instantaneously.
+Switching to `Advanced` provides the multi-controller `Layout:` picker (Verified & Beta controller layouts), `Reset all strips to the <layout> layout` (`Clear all strips` on the Generic layout), the line saying that changes on the page take effect at once and are saved, the full 10-row power-user matrix (`On`, `Strip`, `MIDI Control` + `Learn` / clear, `Reverse direction`, `What it does`, `Left`, `Right`, `Feel`, `Also fade audio`, stretched `Output` readout bar), `Smoothing (ms)`, `T-bar works in both directions`, `Import...` / `Export...`, `Back to Strips`, and a full-width `13px` two-line callout comparing **Switch scenes (T-bar)** vs. **Mix two layers**. Edits in `Advanced` and `Strips` share the exact same `mfd_engine` snapshot and round-trip instantaneously.
 
 ![State 9: Advanced Tab](docs/screenshots/09-advanced-tab.png)
 

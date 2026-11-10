@@ -36,10 +36,10 @@ Midi Fadester turns the faders and knobs on a MIDI controller into live controls
 
 Every fader or knob gets one job:
 
-- **Switch scenes.** Throw the crossfader and OBS fades Program to Preview, like OBS's own T-bar in Studio Mode.
+- **Switch scenes.** Throw the crossfader and OBS fades Preview into Program, like OBS's own T-bar in Studio Mode.
 - **Mix two layers.** In one scene, crossfade between two layers. Left is one, right is the other, and with the default feel the picture never darkens in the middle.
 - **Show or hide a layer.** Fade one layer in and out, 0 to 100 %.
-- **Volume.** Ride one audio source on a cubic dB curve: 0 dB at the top, silence at the bottom.
+- **Volume.** Ride one audio source: 0 dB at the top, silence at the bottom, about −18 dB in the middle (volume = position cubed).
 - **Filter or effect setting.** Sweep any numeric setting of any filter between two values you choose: a blur radius, a color correction, a key threshold, a shader's slider, Visual Sidechain's reactivity amount.
 
 There are 18 slots: a crossfader, eight channel faders, a master, and eight FX knobs. Each remembers its own job. The faders feel like hardware: moves are smoothed, a fader that is out of place picks up without a jump, and the ends of the travel never flicker.
@@ -80,11 +80,11 @@ Either way you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 
 3. **Turn on Studio Mode.** If it is off, the crossfader strip says *Studio Mode is off.* and offers a **Turn on Studio Mode** button. Click it.
 4. **Throw the crossfader** all the way to the other end. Program fades to what was in Preview. When the throw finishes, OBS moves the old Program scene into Preview (its default *Swap Preview/Program Scenes After Transitioning* setting), ready for the next throw, and the strip reads *At end.* Pick another scene in Preview and throw the crossfader back the other way.
-5. **Give a fader a job.** Click **Set up** under a strip. Three steps: pick the job, pick the scene and layer or source, then move the fader and watch it work before you click **Done**.
+5. **Give a fader a job.** Click **Set up** under a strip. Three steps: pick the job, pick the scene and layer or source, then move the fader, check that the bar in the sheet follows it, and click **Done**. OBS does not change until you click **Done**.
 
-   ![Set up, step 1 of 3: what should this fader do?](docs/screenshots/05-setup-step1-cards.png)
+   ![Set up, step 1 of 3: what should this control do?](docs/screenshots/05-setup-step1-cards.png)
 
-6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab also has a **Learn** button on every row.
+6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. When a desk has no ready layout but another desk's layout is in use, a blue bar at the top says so. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab also has a **Learn** button on every row; changes on that tab take effect at once and are saved.
 
 The jobs are saved with the scene collection and the controller settings per Windows user; both come back the next time OBS starts.
 
@@ -92,14 +92,14 @@ The jobs are saved with the scene collection and the controller settings per Win
 
 | Job | What the fader does | What it needs |
 |---|---|---|
-| **Switch scenes (T-bar)** | Fades Program to Preview from 0 to 100 %. Reach the far end to finish; return to the start to cancel. | Studio Mode on. Any transition except Cut and Stinger, which OBS swaps for Fade while a T-bar moves. |
+| **Switch scenes (T-bar)** | Fades Preview into Program from 0 to 100 %. Reach the far end to finish; return to the start to cancel. | Studio Mode on. Any transition except Cut and Stinger, which OBS swaps for Fade while a T-bar moves. |
 | **Mix two layers** | Crossfades the Left layer and the Right layer inside one scene. Left end shows Left, right end shows Right. | Both layers in the same scene. Which one is on top is detected automatically. |
 | **Show or hide a layer** | Fades one layer from invisible to fully visible. | The layer in a scene. |
 | **Volume** | Sets one audio source's volume on a cubic curve (volume = position cubed); the strip shows the dB value. OBS's own mixer slider uses a log curve, so the same position reads a different dB there. | A source that has audio. |
-| **Fadester mix master** | Requests absolute shared mix gain from silence to 0 dB using the same cubic fader curve. The strip displays a request until the provider confirms or declines it. | The Fadester mix provider running and explicitly enabled on the same OBS connection. |
+| **Fadester mix master** | Fades all OBS mixer inputs together, from silence to 0 dB, on the same cubic curve, through the Fadester Companion app. The strip shows *Requested* until Fadester Companion confirms or declines. | The Fadester Companion app running, with its option for all OBS mixer inputs turned on (see [Set up the shared mix for MIDI](#set-up-the-shared-mix-for-midi)). |
 | **Filter or effect setting** | Sweeps one numeric setting of one filter between a value *At 0 %* and a value *At 100 %*. | The filter already added to the source or scene in OBS. |
 
-A strip can also be **Not used**. Its hardware control stays bound, so you can give it a job later.
+A strip can also be **Not used**. Its MIDI control stays assigned, so you can give it a job later.
 
 Good to know:
 
@@ -123,12 +123,12 @@ Both crossfade video, in two different styles.
 
 Watch the Program box (on the right in OBS's default layout). It never jumps; it only fades. At the end of a throw the Preview box switches to the old Program scene: that is OBS's default *Swap Preview/Program Scenes After Transitioning* setting lining up the next throw.
 
-**Mix two layers** is the DJ mixer. Put both sources, or two nested scenes, in one scene, and give a fader the job with Left and Right. The left end shows Left, the right end shows Right, and the middle shows both. There is no Preview and Program, and Studio Mode can stay off. The **Feel** column on the Advanced tab picks the curve; the Set up sheet offers all but Full-center, and opening Set up on a Full-center strip changes it to Dip-free:
+**Mix two layers** is the DJ mixer. Put both sources, or two nested scenes, in one scene, and give a fader the job with Left and Right. The left end shows Left, the right end shows Right, and the middle shows both. There is no Preview and Program, and Studio Mode can stay off. The **Feel** column on the Advanced tab picks the curve; the Set up sheet offers all of them:
 
 | Curve | What you see |
 |---|---|
 | **Dip-free** (default) | The picture never darkens in the middle. The lower layer stays at 100 % while the upper one fades, which gives a true optical dissolve instead of the 25 % dip two half-transparent layers produce. |
-| **Full-center** | Both layers reach 100 % at the center mark. Advanced tab and API only. |
+| **Full at center** | Both layers reach 100 % at the center mark. |
 | **Equal power** | A sine/cosine crossfade for sources of matched brightness. |
 | **Linear** | A straight 0 to 100 % blend on both layers. |
 | **Cut** | An instant switch at the halfway mark. |
@@ -196,11 +196,11 @@ Midi Fadester registers an obs-websocket 5 vendor API. Call it with `CallVendorR
 
 ### Set up the shared mix for MIDI
 
-1. Open the **Fadester for TourBox** Windows companion on the OBS computer. It supplies the shared mix service and works with a MIDI controller alone. In OBS, enable **Tools → WebSocket Server Settings** with authentication, then use the same local port in the companion. It can read OBS’s saved password, or you can enter the password shown by OBS.
+1. Open the **Fadester Companion** Windows app on the OBS computer. It supplies the shared mix service and works with a MIDI controller alone. In OBS, enable **Tools → WebSocket Server Settings** with authentication, then use the same local port in the companion. It can read OBS’s saved password, or you can enter the password shown by OBS.
 2. In the companion’s **Setup** tab, check **Enable All OBS mixer inputs**. For MIDI use, check **Run for Stream Deck, OpenDeck or MIDI only (no TourBox shortcuts)**. Click **Save & start controls** and leave the companion running. This service moves the public mixer inputs together, preserving their relative levels.
 3. In **OBS → Tools → Midi Fadester**, choose **Master → Set up → Fadester mix master**, then learn the fader if needed. The same assignment is available per slot under **Advanced**. **Volume** continues to operate one chosen OBS source directly.
 
-The bottom stop requests silence, midpoint requests about −18.1 dB, and the top requests unity. **Requested** means the strip is waiting for the provider. **Confirmed** shows its reply. An unanswered request times out after ten seconds. After starting the provider, move the fader again to send a fresh request.
+The bottom stop requests silence, midpoint requests about −18.1 dB, and the top requests unity. **Requested** means the strip is waiting for Fadester Companion. **Confirmed** shows its reply. After ten seconds without a reply the strip shows *No answer from Fadester Companion*. Until the first request it shows *Needs Fadester Companion*. After starting Fadester Companion, move the fader again to send a fresh request.
 
 Two events: `fader_changed` whenever a value changes, at most 30 times a second per slot (fields: `slot`, `value`, `display_value` and `origin`: `midi`, `ui`, `api`, `auto_fade` or `obs`), and `state_changed` whenever a job, device, layout or Studio Mode changes.
 
@@ -238,10 +238,11 @@ The dialog says what is wrong in a sentence, next to the strip it concerns, and 
 | You see | It means | Do |
 |---|---|---|
 | *Another program has the APC40 mkII open. Close it, then press Reconnect.* | Windows lets one program use a MIDI port at a time. | Close the DAW, MIDI-OX, a browser tab using Web MIDI, or whatever else holds the desk, then **Reconnect**. |
-| *APC40 mkII not found. Plug it in, then Reconnect.* / *No MIDI controller found. Plug one in, then press Reconnect.* | The port is gone or the desk is off. | Plug it in or power it on. The plugin notices when Windows reports the device again; **Reconnect** forces a rescan, and **Change controller** picks a different port. |
+| *APC40 mkII not found. Plug it in, then press Reconnect.* / *No MIDI controller found. Plug one in, then press Reconnect.* | The port is gone or the desk is off. | Plug it in or power it on. The plugin notices when Windows reports the device again; **Reconnect** forces a rescan, and **Change controller** picks a different port. |
 | *Could not open APC40 mkII. Unplug and replug it, then press Reconnect.* | Windows refused the port for another reason. | Do that. |
 | *Studio Mode is off.* | Switch scenes needs Studio Mode. | **Turn on Studio Mode** on the strip, or the **Studio Mode** button in OBS's Controls dock. |
-| *No MIDI control bound.* | The strip has a job but no fader. | **Set up**, or **Learn** on the Advanced tab, then move the fader. |
+| *No MIDI control assigned. Click Set up. In step 3, press Learn.* | The strip has a job but no MIDI control. | Do that and move the fader, or press **Learn** on the Advanced tab. |
+| *There is no ready layout for …* in a blue bar at the top | Midi Fadester has no layout for this desk, and the layout in use is for another desk, so the strips may not follow this desk's faders. | Learn each fader as the bar says. **OK** hides the bar until the window is opened again. |
 | *Scene Red was deleted.* / *Cam is no longer in scene Blue.* / *Color and Color 2 are not in the same scene.* | The scene or layer the job named is gone or moved. | **Set up** on the strip and pick again. Renames follow by themselves; only removals break a job. |
 | *Mic/Aux has no audio.* | A Volume job points at a source without sound. | Pick a source with audio. |
 | *Filter 'Blur' was removed from Cam. Re-add it in OBS Filters or click Set up.* / *Setting 'radius' is no longer available on 'Blur'.* | The filter or its setting is gone. | Re-add the filter in OBS, or **Set up** and pick another. |
@@ -250,7 +251,7 @@ The dialog says what is wrong in a sentence, next to the strip it concerns, and 
 | The crossfader moves but nothing happens | A throw starts only past the first 6 % of the travel. | Throw further. If the strip is amber, Studio Mode is off. |
 | The transition is a Fade although Cut or Stinger is selected | OBS uses Fade for any T-bar move with those two. | Pick another transition for throws, or use OBS's Transition button for cuts. |
 | A layer fades in a scene you did not expect | The opacity filter sits on the source, which is in both scenes. | Put a copy of the source in the other scene. |
-| *CRITICAL: Studio Mode 'slider-tbar' widget not found in this OBS version. T-bar sync disabled.* in red on the crossfader strip | OBS changed its Studio Mode window and the T-bar cannot be driven. The log says *CRITICAL: Studio Mode is active, but Qt QSlider 'slider-tbar' was not found in OBS main window!* | Everything else still works. Please open an issue with your OBS version. |
+| *Midi Fadester cannot find the T-bar in this OBS version. Switch scenes does not work. Everything else still works. Look for a newer version of Midi Fadester.* in red on the crossfader strip | OBS changed its Studio Mode window and the T-bar cannot be driven. The log says *CRITICAL: Studio Mode is active, but Qt QSlider 'slider-tbar' was not found in OBS main window!* | Everything else still works. Please open an issue with your OBS version. |
 
 The OBS log (**Help → Log Files → Show Log Files**) has every Midi Fadester line prefixed with `[midi-fadester]`.
 

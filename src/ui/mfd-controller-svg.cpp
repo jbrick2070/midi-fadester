@@ -88,7 +88,7 @@ static QString compact_midi_addr(const struct mfd_midi_addr &addr)
 	case MFD_MIDI_NOTE_ON:
 		return mfdFill(mfdText("Map.Addr.Note", "Ch %1 Note %2"), {ch, num});
 	default:
-		return mfdText("Map.Addr.Unbound", "Unbound");
+		return mfdText("Map.Addr.Unbound", "Not assigned");
 	}
 }
 
@@ -206,9 +206,9 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		badge_txt = elide_px(badge_txt, 12, true, badge_w - 12);
 	}
 	const int title_max_px = 560;
-	const QString header_title = elide_px(mfdFill(mfdText("Map.HeaderTitle", "%1 \xE2\x80\x94 Hardware Map"),
-						      {QString::fromUtf8(mfd_profile_ui_display_name(def))}),
-					      18, true, title_max_px);
+	/* the desk's name is the heading; the window title says what the window is */
+	const QString header_title =
+		elide_px(QString::fromUtf8(mfd_profile_ui_display_name(def)), 18, true, title_max_px);
 	const int status_cx = std::max(388, 52 + text_px(header_title, 18, true) + 14);
 	const QString dot_hex = ctrl.dot_green ? QStringLiteral("#22c55e") : QStringLiteral("#ef4444");
 	const int status_right = is_beta ? (942 - badge_w - 12) : 942;
@@ -592,7 +592,7 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 					  QStringLiteral("#f59e0b"), QStringLiteral("#ef4444")};
 	const QString legend_texts[4] = {mfdText("Map.LegendActive", "Active / Ready"),
 					 mfdText("Map.LegendAtEnd", "At end (parked)"),
-					 mfdText("Map.LegendPickup", "Needs pickup / Studio Mode"),
+					 mfdText("Map.LegendPickup", "Needs pick-up or Studio Mode"),
 					 mfdText("Map.LegendAttention", "Needs attention")};
 	const int legend_english_cx[4] = {52, 168, 294, 484};
 	/* the legend ends where the crossfader or Beta card begins */
@@ -623,7 +623,7 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 MfdControllerViewDialog::MfdControllerViewDialog(QWidget *parent) : QDialog(parent)
 {
 	setObjectName(QStringLiteral("mfdControllerSvgDialog"));
-	setWindowTitle(mfdText("Map.WindowTitle", "Midi Fadester \xE2\x80\x94 Controller Map"));
+	setWindowTitle(mfdText("Map.WindowTitle", "Midi Fadester \xE2\x80\x94 Controller"));
 	resize(960, 560);
 	setStyleSheet(QStringLiteral("QDialog { background-color: #0b1120; color: #f8fafc; }"));
 

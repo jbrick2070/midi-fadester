@@ -71,7 +71,7 @@ static QString format_plain_midi_addr(const struct mfd_midi_addr &addr)
 			       {QString::number(static_cast<int>(addr.channel) + 1),
 				QString::number(static_cast<int>(addr.number))});
 	default:
-		return mfdText("Setup.NoMidiControl", "No MIDI control bound");
+		return mfdText("Setup.NoMidiControl", "No MIDI control assigned");
 	}
 }
 
@@ -157,13 +157,13 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	stack_->setObjectName(QStringLiteral("mfdSetupStack"));
 	root->addWidget(stack_, 1);
 
-	/* --- Page 0: Step 1 ("What should this fader do?") --- */
+	/* --- Page 0: Step 1 ("What should this control do?") --- */
 	auto *page1 = new QWidget(stack_);
 	auto *p1_lay = new QVBoxLayout(page1);
 	p1_lay->setContentsMargins(0, 0, 0, 0);
 	p1_lay->setSpacing(10);
 
-	auto *p1_prompt = new QLabel(mfdText("Setup.Step1.Prompt", "What should this fader do?"), page1);
+	auto *p1_prompt = new QLabel(mfdText("Setup.Step1.Prompt", "What should this control do?"), page1);
 	p1_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p1_lay->addWidget(p1_prompt);
 
@@ -184,7 +184,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 						       "Fade one layer in (right) or out (left)."));
 	card_volume_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardVolume"), MFD_TARGET_AUDIO_VOLUME, mfdText("Setup.Card.Volume", "Volume"),
-		mfdText("Setup.Card.Volume.Description", "Control one audio source, like OBS's mixer slider."));
+		mfdText("Setup.Card.Volume.Description", "Control the volume of one audio source."));
 	card_filter_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardFilterSetting"), MFD_TARGET_FILTER_PARAM,
 		mfdText("Setup.Card.Filter", "Filter or effect setting"),
@@ -198,7 +198,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	card_master_mix_ = create_mode_card_button(page1, QStringLiteral("mfdCardMasterMix"), MFD_TARGET_MIX_MASTER,
 						   mfdText("Target.MixMaster", "Fadester mix master"),
 						   mfdText("Setup.Card.MixMaster.Description",
-							   "Ride the shared mix from silence to unity."));
+							   "Fade all OBS mixer inputs together. Needs the Fadester "
+							   "Companion app."));
 	grid->addWidget(card_master_mix_, 2, 1);
 	p1_lay->addLayout(grid, 1);
 
@@ -244,7 +245,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p2_lay->addWidget(p2_prompt);
 	step2_master_mix_info_ = new QLabel(
 		mfdText("Setup.MixMaster.Help",
-			"Start and enable the Fadester mix provider on this OBS connection. This fader sends absolute gain requests for its configured mix. Its readout shows the provider reply."),
+			"Start the Fadester Companion app and turn on its option for all OBS mixer inputs. This control "
+			"then moves all of them together. The strip shows the app's answer."),
 		page2);
 	step2_master_mix_info_->setWordWrap(true);
 	p2_lay->addWidget(step2_master_mix_info_);
@@ -590,13 +592,16 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 
 	stack_->addWidget(page2);
 
-	/* --- Page 2: Step 3 ("Try it.") --- */
+	/* --- Page 2: Step 3 (move the control; OBS waits for Done) --- */
 	auto *page3 = new QWidget(stack_);
 	auto *p3_lay = new QVBoxLayout(page3);
 	p3_lay->setContentsMargins(0, 0, 0, 0);
 	p3_lay->setSpacing(10);
 
-	auto *p3_prompt = new QLabel(mfdText("Setup.Step3.Prompt", "Try it."), page3);
+	auto *p3_prompt = new QLabel(mfdText("Setup.Step3.Prompt",
+					     "Move the control. This strip does not change OBS until you click Done."),
+				     page3);
+	p3_prompt->setWordWrap(true);
 	p3_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p3_lay->addWidget(p3_prompt);
 
@@ -668,8 +673,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p3_lay->addWidget(chk_also_fade_audio_);
 
 	volume_law_label_ = new QLabel(
-		mfdText("Setup.VolumeLaw",
-			"Uses OBS's own cubic dB fader curve (0.0 dB at top, smooth fade to silence at bottom)."),
+		mfdText("Setup.VolumeLaw", "Top is 0 dB. Bottom is silence. At the same position, OBS's mixer slider "
+					   "shows a different dB value."),
 		page3);
 	volume_law_label_->setObjectName(QStringLiteral("mfdVolumeLawLabel"));
 	volume_law_label_->setWordWrap(true);
@@ -1623,18 +1628,17 @@ void MfdSetupSheetDialog::update_step3_controls()
 			candidate_meter_->setFormat(progress_format(
 				mfdFill(mfdText("Setup.MeterTestValue", "Hardware test: %1% \xC2\xB7 %2"), values)));
 		} else {
-			candidate_meter_->setFormat(progress_format(
-				mfdFill(mfdText("Setup.MeterWaitValue",
-						"Move control on your controller to test (%1% \xC2\xB7 %2)"),
-					values)));
+			candidate_meter_->setFormat(progress_format(mfdFill(
+				mfdText("Setup.MeterWaitValue", "Move the control to test it (%1% \xC2\xB7 %2)"),
+				values)));
 		}
 	} else if (snap_.setup.has_candidate_input) {
 		candidate_meter_->setFormat(progress_format(
 			mfdFill(mfdText("Setup.MeterTest", "Hardware test: %1%"), {QString::number(meter_pct)})));
 	} else {
-		candidate_meter_->setFormat(progress_format(
-			mfdFill(mfdText("Setup.MeterWait", "Move the fader on your controller to test (%1%)"),
-				{QString::number(meter_pct)})));
+		candidate_meter_->setFormat(
+			progress_format(mfdFill(mfdText("Setup.MeterWait", "Move the control to test it (%1%)"),
+						{QString::number(meter_pct)})));
 	}
 
 	feel_box_->setVisible(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX);

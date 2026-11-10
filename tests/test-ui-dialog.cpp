@@ -1066,6 +1066,34 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_9"))->text() ==
 		QStringLiteral("Volume: Desktop Audio"));
 
+	/* --- 1b. A desk with no ready layout on another desk's layout: a blue bar says how to Learn; OK hides it --- */
+	auto *nl_banner = must_find<QWidget>(dlg.get(), QStringLiteral("mfdNoLayoutBanner"));
+	auto *nl_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdNoLayoutText"));
+	auto *nl_ok = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdNoLayoutOkBtn"));
+	REQUIRE(nl_banner->isHidden()); /* the APC40 mkII has its own layout */
+	auto set_opened_desk = [&eng](const char *name) {
+		mfd_engine_lock(&eng);
+		std::snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "%s", name);
+		mfd_engine_mark_ui_dirty(&eng, true);
+		mfd_engine_unlock(&eng);
+		pump_ui();
+	};
+	set_opened_desk("USB MIDI Keys");
+	REQUIRE(!nl_banner->isHidden());
+	REQUIRE(nl_text->text() ==
+		QStringLiteral("There is no ready layout for USB MIDI Keys. Click Set up under a strip. In "
+			       "step 3, open Which hardware control?, press Learn and move the fader."));
+	nl_ok->click();
+	pump_ui();
+	REQUIRE(nl_banner->isHidden());
+	set_opened_desk("USB MIDI Keys");
+	REQUIRE(nl_banner->isHidden()); /* stays hidden for that desk while the window is open */
+	set_opened_desk("Another MIDI Desk");
+	REQUIRE(!nl_banner->isHidden());
+	REQUIRE(nl_text->text().contains(QStringLiteral("Another MIDI Desk")));
+	set_opened_desk("APC40 mkII");
+	REQUIRE(nl_banner->isHidden());
+
 	/* --- 2. Studio Mode Off & One-Click Recovery --- */
 	mfd_engine_set_test_frontend_state(&eng, true, false, "", "Red", true);
 	pump_ui();
@@ -1215,6 +1243,9 @@ int main(int argc, char **argv)
 		mfd_engine_lock(&eng);
 		eng.midi_dev.is_open = false;
 		eng.midi_dev.error_kind = MFD_WINMM_ERR_BUSY_ALLOCATED;
+		std::snprintf(eng.midi_dev.error_device_name, sizeof(eng.midi_dev.error_device_name), "APC40 mkII");
+		std::snprintf(eng.midi_dev.last_error, sizeof(eng.midi_dev.last_error),
+			      "MIDI port 'APC40 mkII' is busy (MMSYSERR_ALLOCATED).");
 		mfd_engine_reevaluate_slots(&eng, true);
 		mfd_engine_unlock(&eng);
 		pump_ui();
@@ -1223,6 +1254,9 @@ int main(int argc, char **argv)
 	REQUIRE(z1_status->text() ==
 		QStringLiteral("Another program has the APC40 mkII open. Close it, then press Reconnect."));
 	REQUIRE(!z1_reconnect->isHidden());
+	/* the Advanced tab says it once, beside the port list, in the same words and with no WinMM code */
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvConnLabel"))->text() == z1_status->text());
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvErrorBanner"))->isHidden());
 
 	auto *bar1 = must_find<QWidget>(dlg.get(), QStringLiteral("mfdStripBar_1"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_1"))->text() ==
@@ -1277,6 +1311,8 @@ int main(int argc, char **argv)
 	mfd_engine_lock(&eng);
 	eng.midi_dev.is_open = true;
 	eng.midi_dev.error_kind = MFD_WINMM_OK;
+	eng.midi_dev.error_device_name[0] = '\0';
+	eng.midi_dev.last_error[0] = '\0';
 	mfd_engine_reevaluate_slots(&eng, true);
 	mfd_engine_unlock(&eng);
 	pump_ui();
@@ -1537,7 +1573,7 @@ int main(int argc, char **argv)
 	pump_ui();
 	REQUIRE(!adv_beta_note->isHidden());
 	REQUIRE(adv_beta_note->text().contains(QStringLiteral("Beta (untested on hardware)")));
-	REQUIRE(adv_defaults_btn->text() == QStringLiteral("Load nanoKONTROL2 Defaults"));
+	REQUIRE(adv_defaults_btn->text() == QStringLiteral("Reset all strips to the nanoKONTROL2 layout"));
 
 	/* Verify SVG validity across every registered controller profile (including Generic, APC mini mk2, LCXL) */
 	for (size_t pi = 0U; pi < mfd_profile_count(); ++pi) {
@@ -1586,7 +1622,7 @@ int main(int argc, char **argv)
 			QStringLiteral("FX %1").arg(i - 9));
 	}
 
-	/* Switch to knobless APC mini mk2 -> FX 1..8 remain visible & enabled with zero red "No MIDI control bound." */
+	/* Switch to knobless APC mini mk2 -> FX 1..8 remain visible & enabled with zero red "No MIDI control assigned." */
 	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC_MINI_MK2, false));
 	pump_ui();
 	for (int i = (int)MFD_FADER_STRIP_COUNT; i < MFD_MAX_FADER_SLOTS; ++i) {

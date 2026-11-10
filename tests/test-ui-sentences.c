@@ -356,13 +356,13 @@ int main(void)
 	mfd_ui_format_controller_status(false, "APC40 mkII", "", MFD_WINMM_ERR_CONFIGURED_NOT_FOUND, &ctrl);
 	REQUIRE(!ctrl.dot_green);
 	REQUIRE(ctrl.show_reconnect);
-	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then Reconnect.") == 0);
+	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then press Reconnect.") == 0);
 
 	mfd_ui_format_controller_status(false, "APC40 mkII", "", MFD_WINMM_ERR_DISCONNECTED, &ctrl);
-	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then Reconnect.") == 0);
+	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then press Reconnect.") == 0);
 
 	mfd_ui_format_controller_status(false, "APC40 mkII", "", MFD_WINMM_ERR_NO_DEVICES, &ctrl);
-	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then Reconnect.") == 0);
+	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then press Reconnect.") == 0);
 
 	mfd_ui_format_controller_status(false, "", "", MFD_WINMM_ERR_NO_DEVICES, &ctrl);
 	REQUIRE(strcmp(ctrl.status_sentence, "No MIDI controller found. Plug one in, then press Reconnect.") == 0);
@@ -370,6 +370,27 @@ int main(void)
 	mfd_ui_format_controller_status(false, "APC40 mkII", "", MFD_WINMM_ERR_OPEN_FAILED, &ctrl);
 	REQUIRE(strcmp(ctrl.status_sentence,
 		       "Could not open APC40 mkII. Unplug and replug it, then press Reconnect.") == 0);
+
+	/* 2b. The Advanced banner says a device error in the controller bar's words, with no WinMM code */
+	char dev_err[320];
+	mfd_ui_format_device_error(MFD_WINMM_ERR_BUSY_ALLOCATED, MFD_WINMM_OP_OPEN, 4U, "APC40 mkII", dev_err,
+				   sizeof(dev_err));
+	REQUIRE(strcmp(dev_err, "Another program has the APC40 mkII open. Close it, then press Reconnect.") == 0);
+	mfd_ui_format_device_error(MFD_WINMM_ERR_BUSY_ALLOCATED, MFD_WINMM_OP_OPEN, 4U, "", dev_err, sizeof(dev_err));
+	REQUIRE(strcmp(dev_err, "Another program has the MIDI controller open. Close it, then press Reconnect.") == 0);
+	mfd_ui_format_device_error(MFD_WINMM_ERR_DISCONNECTED, MFD_WINMM_OP_OPEN, 0U, "APC40 mkII", dev_err,
+				   sizeof(dev_err));
+	REQUIRE(strcmp(dev_err, "APC40 mkII not found. Plug it in, then press Reconnect.") == 0);
+	mfd_ui_format_device_error(MFD_WINMM_ERR_CONFIGURED_NOT_FOUND, MFD_WINMM_OP_OPEN, 0U, "", dev_err,
+				   sizeof(dev_err));
+	REQUIRE(strcmp(dev_err, "No MIDI controller found. Plug one in, then press Reconnect.") == 0);
+	mfd_ui_format_device_error(MFD_WINMM_ERR_NO_DEVICES, MFD_WINMM_OP_OPEN, 0U, "", dev_err, sizeof(dev_err));
+	REQUIRE(strcmp(dev_err, "No MIDI controller found. Plug one in, then press Reconnect.") == 0);
+	mfd_ui_format_device_error(MFD_WINMM_ERR_OPEN_FAILED, MFD_WINMM_OP_START, 4U, "APC40 mkII", dev_err,
+				   sizeof(dev_err));
+	REQUIRE(strcmp(dev_err, "Could not open APC40 mkII. Unplug and replug it, then press Reconnect.") == 0);
+	mfd_ui_format_device_error(MFD_WINMM_OK, MFD_WINMM_OP_OPEN, 0U, "APC40 mkII", dev_err, sizeof(dev_err));
+	REQUIRE(dev_err[0] == '\0');
 
 	/* 3. Strip presentation 7-row precedence table */
 	struct mfd_ui_strip_input in;
@@ -462,12 +483,12 @@ int main(void)
 		REQUIRE(strcmp(sp.bottom_button_text, "Set up") == 0);
 	}
 
-	/* Row 3b: Assigned & available in engine, but hardware CC cleared ("No MIDI control bound.") */
+	/* Row 3b: Assigned & available in engine, but hardware CC cleared ("No MIDI control assigned. ...") */
 	in.available = true;
 	in.reason = "";
 	in.addr_type = MFD_MIDI_NONE;
 	mfd_ui_format_strip_presentation(&in, &sp);
-	REQUIRE(strcmp(sp.status_sentence, "No MIDI control bound.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "No MIDI control assigned. Click Set up. In step 3, press Learn.") == 0);
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
 
 	/* Row 4: At end. (parked at rail) */
@@ -596,7 +617,7 @@ int main(void)
 	REQUIRE(strcmp(sp.state_readout, "-inf dB") == 0);
 
 	/* Row 7b: FX bank filter_param with no MIDI CC bound (knobless profile / Stream Deck + only):
-	 * no red "No MIDI control bound." error, bar reflects applied_val, readout shows display_value. */
+	 * no red "No MIDI control assigned." error, bar reflects applied_val, readout shows display_value. */
 	memset(&in, 0, sizeof(in));
 	in.slot_index = 10;
 	in.slot_label = "FX 1";
@@ -631,13 +652,13 @@ int main(void)
 	mfd_ui_format_strip_presentation(&in, &sp);
 	REQUIRE(strcmp(sp.state_readout, "65%") == 0);
 
-	/* Physical fader strip (slot 1) bound to filter_param WITHOUT MIDI CC still flags red "No MIDI control bound." */
+	/* Physical fader strip (slot 1) bound to filter_param WITHOUT MIDI CC still flags red "No MIDI control assigned." */
 	in.slot_index = 1;
 	in.slot_label = "Track Fader 1";
 	in.display_value = "+12.4 px";
 	mfd_ui_format_strip_presentation(&in, &sp);
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
-	REQUIRE(strcmp(sp.status_sentence, "No MIDI control bound.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "No MIDI control assigned. Click Set up. In step 3, press Learn.") == 0);
 
 	/* Filter precondition failure sentences on FX 1 */
 	const char *filter_red_reasons[] = {

@@ -84,7 +84,7 @@ static QString format_midi_addr(const struct mfd_midi_addr &addr)
 	case MFD_MIDI_NOTE_ON:
 		return mfdFill(mfdText("Dialog.MidiAddr.Note", "Ch %1 Note %2"), {ch, num});
 	default:
-		return mfdText("Dialog.MidiAddr.Unbound", "Unbound");
+		return mfdText("Dialog.MidiAddr.Unbound", "Not assigned");
 	}
 }
 
@@ -456,6 +456,35 @@ public:
 			refresh_from_engine();
 		});
 
+		/* --- No Ready Layout Banner: the open desk matches no layout, so its faders do nothing yet --- */
+		no_layout_banner_ = new QWidget(this);
+		no_layout_banner_->setObjectName(QStringLiteral("mfdNoLayoutBanner"));
+		no_layout_banner_->setStyleSheet(QStringLiteral(
+			"QWidget#mfdNoLayoutBanner { background-color: #102a43; border: 1px solid #38bdf8; border-radius: 6px; }"));
+		auto *nl_lay = new QHBoxLayout(no_layout_banner_);
+		nl_lay->setContentsMargins(12, 8, 12, 8);
+		nl_lay->setSpacing(10);
+		no_layout_text_ = new QLabel(no_layout_banner_);
+		no_layout_text_->setObjectName(QStringLiteral("mfdNoLayoutText"));
+		no_layout_text_->setWordWrap(true);
+		no_layout_text_->setStyleSheet(
+			QStringLiteral("color: #e0f2fe; font-weight: bold; background: transparent; border: none;"));
+		auto *btn_nl_ok = new QPushButton(mfdText("Dialog.NoLayout.Ok", "OK"), no_layout_banner_);
+		btn_nl_ok->setObjectName(QStringLiteral("mfdNoLayoutOkBtn"));
+		btn_nl_ok->setCursor(Qt::PointingHandCursor);
+		btn_nl_ok->setStyleSheet(QStringLiteral(
+			"QPushButton { background-color: #0284c7; color: #ffffff; font-weight: bold; padding: 6px 18px; border-radius: 5px; border: 1px solid #38bdf8; }"));
+		nl_lay->addWidget(no_layout_text_, 1);
+		nl_lay->addWidget(btn_nl_ok);
+		no_layout_banner_->hide();
+		root->addWidget(no_layout_banner_);
+
+		connect(btn_nl_ok, &QPushButton::clicked, this, [this]() {
+			/* hidden while this window is open; another desk without a layout brings it back */
+			no_layout_dismissed_for_ = QString::fromUtf8(snap_.opened_device_name);
+			no_layout_banner_->hide();
+		});
+
 		/* --- Amber Studio Mode Banner --- */
 		studio_note_widget_ = new QWidget(this);
 		studio_note_widget_->setObjectName(QStringLiteral("mfdStudioNote"));
@@ -624,6 +653,7 @@ public:
 
 		/* Top banners */
 		first_run_banner_->setVisible(snap_.first_run_offer_pending);
+		refresh_no_layout_banner();
 		stream_deck_companion_card_->setVisible(!snap_.stream_deck_companion_dismissed);
 
 		size_t active_tbar_slots = 0U;
@@ -1046,12 +1076,12 @@ private:
 		conn_status_label_->setObjectName(QStringLiteral("mfdAdvConnLabel"));
 		top_bar->addWidget(conn_status_label_);
 
-		auto *btn_reconnect = new QPushButton(mfdText("Dialog.ReconnectRescan", "Reconnect / Rescan"), adv_tab);
+		auto *btn_reconnect = new QPushButton(mfdText("Dialog.Reconnect", "Reconnect"), adv_tab);
 		btn_reconnect->setObjectName(QStringLiteral("mfdAdvReconnectBtn"));
 		top_bar->addWidget(btn_reconnect);
 
 		top_bar->addSpacing(8);
-		auto *lbl_prof = new QLabel(mfdText("Dialog.Profile", "Profile:"), adv_tab);
+		auto *lbl_prof = new QLabel(mfdText("Dialog.Layout", "Layout:"), adv_tab);
 		lbl_prof->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		top_bar->addWidget(lbl_prof);
 
@@ -1060,8 +1090,8 @@ private:
 		populate_profile_combo(profile_combo_);
 		top_bar->addWidget(profile_combo_);
 
-		btn_defaults_ =
-			new QPushButton(mfdText("Dialog.LoadApc40Defaults", "Load APC40 mkII Defaults"), adv_tab);
+		btn_defaults_ = new QPushButton(
+			mfdText("Dialog.LoadApc40Defaults", "Reset all strips to the APC40 mkII layout"), adv_tab);
 		btn_defaults_->setObjectName(QStringLiteral("mfdAdvDefaultsBtn"));
 		top_bar->addWidget(btn_defaults_);
 		top_bar->addStretch(1);
@@ -1114,6 +1144,14 @@ private:
 				       "border: 1px solid #374151; border-radius: 4px; font-weight: bold; }"));
 		telemetry_bar->addWidget(last_midi_label_);
 		root->addLayout(telemetry_bar);
+
+		auto *applies_note = new QLabel(mfdText("Dialog.Advanced.AppliesAtOnce",
+							"Changes on this page take effect at once and are saved."),
+						adv_tab);
+		applies_note->setObjectName(QStringLiteral("mfdAdvAppliesAtOnce"));
+		applies_note->setWordWrap(true);
+		applies_note->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
+		root->addWidget(applies_note);
 
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -1405,6 +1443,29 @@ private:
 		controller_view_dlg_->raise();
 	}
 
+	/* Shown while the open desk's name matches no ready layout and a layout for another desk is in use (the
+	 * Generic layout is the one for such a desk), until OK. */
+	void refresh_no_layout_banner()
+	{
+		const QString opened = QString::fromUtf8(snap_.opened_device_name);
+		const bool show = snap_.midi_connected && !opened.isEmpty() && !snap_.first_run_offer_pending &&
+				  snap_.active_profile != MFD_PROFILE_GENERIC &&
+				  mfd_profile_match_device_name(snap_.opened_device_name) == MFD_PROFILE_GENERIC &&
+				  opened != no_layout_dismissed_for_;
+		if (show) {
+			const QString text =
+				mfdFill(mfdText("Dialog.NoLayout.Text",
+						"There is no ready layout for %1. Click Set up under a strip. "
+						"In step 3, open Which hardware control?, press Learn and move "
+						"the fader."),
+					{opened});
+			if (no_layout_text_->text() != text) {
+				no_layout_text_->setText(text);
+			}
+		}
+		no_layout_banner_->setVisible(show);
+	}
+
 	void refresh_strips_tab()
 	{
 		struct mfd_ui_controller_presentation ctrl;
@@ -1450,8 +1511,8 @@ private:
 			const QString hint_txt =
 				showing_fx_bank_
 					? mfdText("Dialog.Bank.FxHint",
-						  "Dedicated FX slots for filter sweeps, shader controls, MIDI "
-						  "knobs, and Stream Deck + dials.")
+						  "FX strips for filters, shader controls, knobs and Stream Deck + "
+						  "dials.")
 					: mfdText("Dialog.Bank.FadersHint",
 						  "Channel faders, master, and A/B crossfader.");
 			if (bank_hint_label_->text() != hint_txt) {
@@ -1859,6 +1920,8 @@ private:
 			auto *btn_clear = new QPushButton(QStringLiteral("\xC3\x97"), bind_widget);
 			btn_clear->setObjectName(QStringLiteral("mfdAdvClear_%1").arg(row));
 			btn_clear->setFixedWidth(26);
+			btn_clear->setToolTip(
+				mfdText("Dialog.Tip.ClearMidi", "Remove the MIDI control from this strip."));
 			btn_clear->setEnabled(slot.addr.type != MFD_MIDI_NONE);
 
 			bind_layout->addWidget(lbl_addr, 1);
@@ -2013,7 +2076,7 @@ private:
 				curve_combo->setMaximumWidth(170);
 				curve_combo->addItem(mfdText("Curve.DipFree", "Dip-free"),
 						     static_cast<int>(MFD_CURVE_DIP_FREE));
-				curve_combo->addItem(mfdText("Dialog.Curve.FullCenter", "Full-center"),
+				curve_combo->addItem(mfdText("Curve.FullCenter", "Full at center"),
 						     static_cast<int>(MFD_CURVE_FULL_CENTER));
 				curve_combo->addItem(mfdText("Curve.EqualPower", "Equal power"),
 						     static_cast<int>(MFD_CURVE_COSINE));
@@ -2192,10 +2255,11 @@ private:
 
 		const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(snap_.active_profile);
 		if (btn_defaults_ && pdef) {
-			const QString btn_txt = (pdef->id == MFD_PROFILE_GENERIC)
-							? mfdText("Dialog.ResetGenericSlots", "Reset Generic Slots")
-							: mfdFill(mfdText("Dialog.LoadDefaults", "Load %1 Defaults"),
-								  {QString::fromUtf8(mfd_profile_ui_short_name(pdef))});
+			const QString btn_txt =
+				(pdef->id == MFD_PROFILE_GENERIC)
+					? mfdText("Dialog.ResetGenericSlots", "Clear all strips")
+					: mfdFill(mfdText("Dialog.LoadDefaults", "Reset all strips to the %1 layout"),
+						  {QString::fromUtf8(mfd_profile_ui_short_name(pdef))});
 			if (btn_defaults_->text() != btn_txt) {
 				btn_defaults_->setText(btn_txt);
 			}
@@ -2243,10 +2307,16 @@ private:
 				mfd_ui_format_device_error(snap_.midi_error_kind, snap_.midi_error_operation,
 							   snap_.midi_error_code, snap_.midi_error_device_name,
 							   device_error, sizeof(device_error));
-				banner_label_->setText(device_error[0] != '\0'
-							       ? QString::fromUtf8(device_error)
-							       : QString::fromUtf8(snap_.midi_last_error));
-				banner_label_->show();
+				const QString device_text = device_error[0] != '\0'
+								    ? QString::fromUtf8(device_error)
+								    : QString::fromUtf8(snap_.midi_last_error);
+				/* the status beside the port list already says it */
+				if (device_text == QString::fromUtf8(ctrl.status_sentence)) {
+					banner_label_->hide();
+				} else {
+					banner_label_->setText(device_text);
+					banner_label_->show();
+				}
 			} else {
 				banner_label_->hide();
 			}
@@ -2400,6 +2470,9 @@ private:
 	QString adv_edit_error_;
 
 	QWidget *first_run_banner_ = nullptr;
+	QWidget *no_layout_banner_ = nullptr;
+	QLabel *no_layout_text_ = nullptr;
+	QString no_layout_dismissed_for_;
 	QWidget *studio_note_widget_ = nullptr;
 	QWidget *stream_deck_companion_card_ = nullptr;
 	QTabWidget *main_tabs_ = nullptr;

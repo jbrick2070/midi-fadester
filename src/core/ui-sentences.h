@@ -103,8 +103,8 @@ void mfd_ui_format_db(float db, char *out, size_t out_size);
 void mfd_ui_format_percent(int percent, char *out, size_t out_size);
 /* A slot reason or engine error worded in the language OBS runs in (the English stays for logs and the API). */
 void mfd_ui_format_msg(const struct mfd_msg *msg, char *out, size_t out_size);
-/* The MIDI device error banner from the error's kind, operation, WinMM code and device (the English last_error stays
- * for logs and the API). Writes "" for MFD_WINMM_OK. */
+/* The MIDI device error banner from the error's kind and device, in the Strips bar's words; the operation and the
+ * WinMM code stay in the log with the English last_error, which the API keeps. Writes "" for MFD_WINMM_OK. */
 void mfd_ui_format_device_error(enum mfd_winmm_error_kind kind, enum mfd_winmm_operation operation, uint32_t error_code,
 				const char *device_name, char *out, size_t out_size);
 

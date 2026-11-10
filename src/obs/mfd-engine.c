@@ -550,18 +550,17 @@ void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, 
 			label = mfd_text_or_english(translate, "Mix.Confirmed", "Confirmed %1 dB");
 			break;
 		case MFD_MIX_DECLINED:
-			label = mfd_text_or_english(translate, "Mix.Declined", "Declined: %1");
+			label = mfd_text_or_english(translate, "Mix.Declined", "Fadester Companion said no: %1");
 			values[0] = slot->mix_reason;
 			break;
 		case MFD_MIX_NO_REPLY:
-			label = mfd_text_or_english(translate, "Mix.NoReply", "No mix provider reply");
+			label = mfd_text_or_english(translate, "Mix.NoReply", "No answer from Fadester Companion");
 			break;
 		case MFD_MIX_UNAVAILABLE:
 			label = mfd_text_or_english(translate, "Mix.Unavailable", "Mix request unavailable");
 			break;
 		default:
-			label = mfd_text_or_english(translate, "Readout.MixMasterIdle",
-						    "Fadester mix provider required");
+			label = mfd_text_or_english(translate, "Readout.MixMasterIdle", "Needs Fadester Companion");
 			break;
 		}
 		mfd_text_fill(out, out_size, label, values, 1U);

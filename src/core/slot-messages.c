@@ -59,7 +59,8 @@ static const char *template_for(enum mfd_msg_code code, bool translate)
 	case MFD_MSG_TBAR_SLIDER_MISSING:
 		return mfd_text_or_english(
 			translate, "Msg.TbarSliderMissing",
-			"CRITICAL: Studio Mode 'slider-tbar' widget not found in this OBS version. T-bar sync disabled.");
+			"Midi Fadester cannot find the T-bar in this OBS version. Switch scenes does not work. Everything "
+			"else still works. Look for a newer version of Midi Fadester.");
 	case MFD_MSG_SAME_LAYER:
 		return mfd_text_or_english(translate, "Msg.SameLayer", "Left and Right cannot be the same layer.");
 	case MFD_MSG_SCENE_DELETED:

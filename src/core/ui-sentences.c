@@ -78,6 +78,65 @@ void mfd_ui_strip_name(int slot_index, const char *slot_label, char *out, size_t
 	mfd_ui_strip_title(slot_index, slot_label, out, out_size);
 }
 
+enum controller_problem {
+	CONTROLLER_BUSY,
+	CONTROLLER_NOT_FOUND,
+	CONTROLLER_NONE_FOUND,
+	CONTROLLER_OPEN_FAILED,
+};
+
+/* One sentence per controller problem, for the Strips bar and the Advanced banner alike; a missing name picks the
+ * sentence without one. */
+static void say_controller_problem(enum controller_problem problem, const char *dev, char *s, size_t n)
+{
+	const bool named = has_text(dev);
+	switch (problem) {
+	case CONTROLLER_BUSY:
+		if (named) {
+			say(s, n,
+			    mfd_text("Controller.Busy",
+				     "Another program has the %1 open. Close it, then press Reconnect."),
+			    dev, NULL, NULL, NULL);
+		} else {
+			say(s, n,
+			    mfd_text("Controller.BusyUnnamed",
+				     "Another program has the MIDI controller open. Close it, then press Reconnect."),
+			    NULL, NULL, NULL, NULL);
+		}
+		break;
+	case CONTROLLER_NOT_FOUND:
+		if (named) {
+			say(s, n, mfd_text("Controller.NotFound", "%1 not found. Plug it in, then press Reconnect."),
+			    dev, NULL, NULL, NULL);
+		} else {
+			say(s, n,
+			    mfd_text("Controller.NotFoundUnnamed",
+				     "MIDI controller not found. Plug it in, then press Reconnect."),
+			    NULL, NULL, NULL, NULL);
+		}
+		break;
+	case CONTROLLER_NONE_FOUND:
+		say(s, n,
+		    mfd_text("Controller.NoneFound", "No MIDI controller found. Plug one in, then press Reconnect."),
+		    NULL, NULL, NULL, NULL);
+		break;
+	case CONTROLLER_OPEN_FAILED:
+	default:
+		if (named) {
+			say(s, n,
+			    mfd_text("Controller.OpenFailed",
+				     "Could not open %1. Unplug and replug it, then press Reconnect."),
+			    dev, NULL, NULL, NULL);
+		} else {
+			say(s, n,
+			    mfd_text("Controller.OpenFailedUnnamed",
+				     "Could not open MIDI controller. Unplug and replug it, then press Reconnect."),
+			    NULL, NULL, NULL, NULL);
+		}
+		break;
+	}
+}
+
 void mfd_ui_format_controller_status(bool connected, const char *configured_name, const char *opened_name,
 				     enum mfd_winmm_error_kind error_kind, struct mfd_ui_controller_presentation *out)
 {
@@ -120,45 +179,16 @@ void mfd_ui_format_controller_status(bool connected, const char *configured_name
 	out->dot_green = false;
 	out->show_reconnect = true;
 
-	char *s = out->status_sentence;
-	const size_t n = sizeof(out->status_sentence);
+	enum controller_problem problem = CONTROLLER_OPEN_FAILED;
 	if (error_kind == MFD_WINMM_ERR_BUSY_ALLOCATED) {
-		if (dev) {
-			say(s, n,
-			    mfd_text("Controller.Busy",
-				     "Another program has the %1 open. Close it, then press Reconnect."),
-			    dev, NULL, NULL, NULL);
-		} else {
-			say(s, n,
-			    mfd_text("Controller.BusyUnnamed",
-				     "Another program has the MIDI controller open. Close it, then press Reconnect."),
-			    NULL, NULL, NULL, NULL);
-		}
+		problem = CONTROLLER_BUSY;
 	} else if (error_kind == MFD_WINMM_ERR_CONFIGURED_NOT_FOUND || error_kind == MFD_WINMM_ERR_DISCONNECTED ||
 		   (error_kind == MFD_WINMM_ERR_NO_DEVICES && has_cfg)) {
-		if (dev) {
-			say(s, n, mfd_text("Controller.NotFound", "%1 not found. Plug it in, then Reconnect."), dev,
-			    NULL, NULL, NULL);
-		} else {
-			say(s, n,
-			    mfd_text("Controller.NotFoundUnnamed",
-				     "MIDI controller not found. Plug it in, then Reconnect."),
-			    NULL, NULL, NULL, NULL);
-		}
+		problem = CONTROLLER_NOT_FOUND;
 	} else if (error_kind == MFD_WINMM_ERR_NO_DEVICES) {
-		say(s, n,
-		    mfd_text("Controller.NoneFound", "No MIDI controller found. Plug one in, then press Reconnect."),
-		    NULL, NULL, NULL, NULL);
-	} else if (dev) {
-		say(s, n,
-		    mfd_text("Controller.OpenFailed", "Could not open %1. Unplug and replug it, then press Reconnect."),
-		    dev, NULL, NULL, NULL);
-	} else {
-		say(s, n,
-		    mfd_text("Controller.OpenFailedUnnamed",
-			     "Could not open MIDI controller. Unplug and replug it, then press Reconnect."),
-		    NULL, NULL, NULL, NULL);
+		problem = CONTROLLER_NONE_FOUND;
 	}
+	say_controller_problem(problem, dev, out->status_sentence, sizeof(out->status_sentence));
 }
 
 void mfd_ui_format_db(float db, char *out, size_t out_size)
@@ -250,9 +280,8 @@ static void format_mode_active_readout(const struct mfd_ui_strip_input *in, char
 
 	case MFD_TARGET_MIX_MASTER:
 		snprintf(out, out_size, "%s",
-			 has_text(in->display_value)
-				 ? in->display_value
-				 : mfd_text("Readout.MixMasterIdle", "Fadester mix provider required"));
+			 has_text(in->display_value) ? in->display_value
+						     : mfd_text("Readout.MixMasterIdle", "Needs Fadester Companion"));
 		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (in->auto_fade_active) {
@@ -467,7 +496,8 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 	}
 	if (in->addr_type == MFD_MIDI_NONE && !is_fx_bank) {
 		say(out->status_sentence, sizeof(out->status_sentence),
-		    mfd_text("Strip.NoMidiControl", "No MIDI control bound."), NULL, NULL, NULL, NULL);
+		    mfd_text("Strip.NoMidiControl", "No MIDI control assigned. Click Set up. In step 3, press Learn."),
+		    NULL, NULL, NULL, NULL);
 		out->severity = MFD_UI_SEVERITY_RED;
 		return;
 	}
@@ -594,7 +624,7 @@ void mfd_ui_format_finished_sentence_ex(int slot_index, const char *slot_label, 
 		break;
 	case MFD_TARGET_MIX_MASTER:
 		say(out, out_size,
-		    mfd_text("Finished.MixMaster", "%1 requests shared gain from the Fadester mix provider"), title,
+		    mfd_text("Finished.MixMaster", "%1 fades all OBS mixer inputs through Fadester Companion"), title,
 		    NULL, NULL, NULL);
 		break;
 	case MFD_TARGET_FILTER_PARAM:
@@ -686,17 +716,20 @@ void mfd_ui_format_last_move(int last_moved_slot_index, const char *slot_label, 
 		snprintf(number, sizeof(number), "%u", (unsigned)last_midi->addr.number);
 		switch (last_midi->addr.type) {
 		case MFD_MIDI_CC:
-			say(out, out_size, mfd_text("LastMove.UnmappedCc", "Last move: Unmapped CC %1 (Ch %2)"), number,
-			    ch, NULL, NULL);
+			say(out, out_size,
+			    mfd_text("LastMove.UnmappedCc", "Last move: CC %1 (Ch %2), not assigned to a strip"),
+			    number, ch, NULL, NULL);
 			return;
 		case MFD_MIDI_PITCH_BEND:
 			say(out, out_size,
-			    mfd_text("LastMove.UnmappedPitchBend", "Last move: Unmapped Pitch Bend (Ch %1)"), ch, NULL,
-			    NULL, NULL);
+			    mfd_text("LastMove.UnmappedPitchBend",
+				     "Last move: Pitch Bend (Ch %1), not assigned to a strip"),
+			    ch, NULL, NULL, NULL);
 			return;
 		case MFD_MIDI_NOTE_ON:
 		case MFD_MIDI_NOTE_OFF:
-			say(out, out_size, mfd_text("LastMove.UnmappedNote", "Last move: Unmapped Note %1 (Ch %2)"),
+			say(out, out_size,
+			    mfd_text("LastMove.UnmappedNote", "Last move: Note %1 (Ch %2), not assigned to a strip"),
 			    number, ch, NULL, NULL);
 			return;
 		default:
@@ -800,55 +833,26 @@ void mfd_ui_format_device_error(enum mfd_winmm_error_kind kind, enum mfd_winmm_o
 		return;
 	}
 	out[0] = '\0';
-	char code[16];
-	snprintf(code, sizeof(code), "%u", (unsigned)error_code);
-	const char *dev = has_text(device_name) ? device_name : "";
+	/* the Strips bar's sentences; the WinMM code and the failed step stay in the log */
+	(void)operation;
+	(void)error_code;
+	const char *dev = has_text(device_name) ? device_name : NULL;
 	switch (kind) {
 	case MFD_WINMM_ERR_NO_DEVICES:
-		say(out, out_size,
-		    mfd_text("Device.NoDevices",
-			     "No MIDI input devices detected. Connect your MIDI controller (e.g. Akai "
-			     "APC40 mkII) and click Reconnect."),
-		    NULL, NULL, NULL, NULL);
+		say_controller_problem(CONTROLLER_NONE_FOUND, NULL, out, out_size);
 		break;
 	case MFD_WINMM_ERR_CONFIGURED_NOT_FOUND:
 		/* with no device name the configured device was missing because no device was there at all */
-		if (has_text(device_name)) {
-			say(out, out_size,
-			    mfd_text("Device.NotConnected", "Configured MIDI device '%1' is not connected."), dev, NULL,
-			    NULL, NULL);
-		} else {
-			say(out, out_size,
-			    mfd_text("Device.NoDevices", "No MIDI input devices detected. Connect your MIDI controller "
-							 "(e.g. Akai APC40 mkII) and click Reconnect."),
-			    NULL, NULL, NULL, NULL);
-		}
+		say_controller_problem(dev ? CONTROLLER_NOT_FOUND : CONTROLLER_NONE_FOUND, dev, out, out_size);
 		break;
 	case MFD_WINMM_ERR_BUSY_ALLOCATED:
-		say(out, out_size,
-		    mfd_text("Device.Busy",
-			     "MIDI port '%1' is busy (MMSYSERR_ALLOCATED). Windows WinMM allows only one "
-			     "application at a time \xE2\x80\x94 close Ableton Live, MIDI-OX, or your DAW and "
-			     "click Reconnect."),
-		    dev, NULL, NULL, NULL);
+		say_controller_problem(CONTROLLER_BUSY, dev, out, out_size);
 		break;
 	case MFD_WINMM_ERR_DISCONNECTED:
-		say(out, out_size,
-		    mfd_text("Device.Disconnected",
-			     "MIDI device '%1' was disconnected. Reconnect USB cable and click Reconnect."),
-		    dev, NULL, NULL, NULL);
+		say_controller_problem(CONTROLLER_NOT_FOUND, dev, out, out_size);
 		break;
 	case MFD_WINMM_ERR_OPEN_FAILED:
-		if (operation == MFD_WINMM_OP_START) {
-			say(out, out_size,
-			    mfd_text("Device.StartFailed",
-				     "Failed to start MIDI input stream on '%1' (WinMM error code %2)."),
-			    dev, code, NULL, NULL);
-		} else {
-			say(out, out_size,
-			    mfd_text("Device.OpenFailed", "Failed to open MIDI port '%1' (WinMM error code %2)."), dev,
-			    code, NULL, NULL);
-		}
+		say_controller_problem(CONTROLLER_OPEN_FAILED, dev, out, out_size);
 		break;
 	case MFD_WINMM_OK:
 	default:
