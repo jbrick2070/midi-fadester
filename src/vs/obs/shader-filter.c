@@ -54,9 +54,13 @@
 #define S_EFFECT_MIX "vs_effect_mix_pct"
 #define S_AUDIO_REACTIVITY "vs_audio_reactivity_pct"
 #define S_FADER_NOT_LOADED "vs_shader_fader_not_loaded"
+#define S_PANIC_HINT "vs_panic_hint"
+#define S_FLASH_LIMIT_STATUS "vs_flash_limit_status"
 
 #define PRESET_CUSTOM_FILE "__custom_file__"
 #define PRESET_CUSTOM_TEXT "__custom_text__"
+/* the flash limiter's rate parameter, as the strobe shader names it */
+#define FLASH_RATE_PARAM "max_flash_rate_hz"
 
 struct vs_shader_param_fader_cfg {
 	char target_param[64];
@@ -534,7 +538,7 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 			if (sf->parsed.params[i].type == VS_SHADER_PARAM_FLOAT) {
 				if (strcmp(sf->parsed.params[i].name, "onset_threshold") == 0)
 					sf->flash_threshold_param = (int)i;
-				else if (strcmp(sf->parsed.params[i].name, "max_flash_rate_hz") == 0)
+				else if (strcmp(sf->parsed.params[i].name, FLASH_RATE_PARAM) == 0)
 					sf->flash_rate_param = (int)i;
 			}
 		}
@@ -1615,6 +1619,22 @@ static bool on_reload_shader_clicked(obs_properties_t *props, obs_property_t *pr
 	return false;
 }
 
+/* A built-in preset's parameter text from the locale files (R-I18N-1): the key is ShaderParam.<shader file name without
+ * .shader>.<uniform name><suffix>, with the suffix "" for the label, ".Tooltip" or ".Option<N>". A custom shader, or a
+ * key no locale file has, keeps the shader's own text. */
+static const char *shader_param_text(const char *preset, const char *param_name, const char *suffix,
+				     const char *shader_text)
+{
+	const char *ext = strrchr(preset, '.');
+	if (!ext || strcmp(ext, ".shader") != 0 || strcmp(preset, PRESET_CUSTOM_FILE) == 0 ||
+	    strcmp(preset, PRESET_CUSTOM_TEXT) == 0)
+		return shader_text;
+	char key[320];
+	snprintf(key, sizeof(key), "ShaderParam.%.*s.%s%s", (int)(ext - preset), preset, param_name, suffix);
+	const char *text = NULL;
+	return obs_module_get_string(key, &text) && text ? text : shader_text;
+}
+
 /* A file dialog filter's name: the characters Qt's filter syntax gives a meaning to become spaces */
 static void append_filter_name(struct dstr *out, const char *name)
 {
@@ -1629,8 +1649,9 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
 	obs_properties_t *props = obs_properties_create();
 
-	/* Panel order: tap status row, Shader Source, Shader Parameters, Fader Control, then the audio
-	 * analysis group last so a new user meets the effect before the DSP plumbing. */
+	/* Panel order: Panic's row while it is on, tap status row, Shader Source, Shader Parameters, the Panic hotkey hint,
+	 * Fader Control, then the audio analysis group last so a new user meets the effect before the DSP plumbing. */
+	vs_properties_add_panic_status(props, vs_fader_bridge_is_panic_active());
 	vs_audio_tap_add_status_property(props);
 
 	/* Snapshot shader compiler state under graphics lock without holding the lock across OBS property creation */
@@ -1639,6 +1660,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	bool has_effect = false;
 	bool override_effect = false;
 	bool uses_custom_band = true;
+	bool has_flash_limit = false;
 	size_t param_count = 0u;
 	struct vs_shader_param_info *params_snap = NULL;
 	/* the file dialogs' filters: translated names, fixed patterns (a name cannot break Qt's filter syntax) */
@@ -1658,6 +1680,9 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 		has_effect = (sf->effect != NULL);
 		override_effect = sf->override_entire_effect;
 		uses_custom_band = (sf->p_audio_custom_band != NULL);
+		/* only a built-in preset is known to draw its flashes through the limiter (R-SHD-3 (8)) */
+		has_flash_limit = sf->flash_rate_param >= 0 && strcmp(sf->preset_shader, PRESET_CUSTOM_FILE) != 0 &&
+				  strcmp(sf->preset_shader, PRESET_CUSTOM_TEXT) != 0;
 		param_count = sf->parsed.param_count;
 		if (param_count > 0u) {
 			params_snap = (struct vs_shader_param_info *)bzalloc(sizeof(*params_snap) * param_count);
@@ -1769,51 +1794,70 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 						  strcmp(info->widget_type, "spinbox") == 0);
 			const bool is_select = (info->option_count > 0u) && (strcmp(info->widget_type, "select") == 0 ||
 									     strcmp(info->widget_type, "list") == 0);
+			const char *label = shader_param_text(preset_snap, info->name, "", info->label);
 			obs_property_t *up = NULL;
 			if (info->type == VS_SHADER_PARAM_FLOAT) {
 				if (is_scroller) {
-					up = obs_properties_add_float(u_grp, info->name, info->label, info->min_val,
+					up = obs_properties_add_float(u_grp, info->name, label, info->min_val,
 								      info->max_val, info->step_val);
 				} else {
-					up = obs_properties_add_float_slider(u_grp, info->name, info->label,
-									     info->min_val, info->max_val,
-									     info->step_val);
+					up = obs_properties_add_float_slider(u_grp, info->name, label, info->min_val,
+									     info->max_val, info->step_val);
 				}
 			} else if (info->type == VS_SHADER_PARAM_INT) {
 				const int step = info->step_val >= 1.0 ? (int)info->step_val : 1;
 				if (is_select) {
-					up = obs_properties_add_list(u_grp, info->name, info->label,
-								     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+					up = obs_properties_add_list(u_grp, info->name, label, OBS_COMBO_TYPE_LIST,
+								     OBS_COMBO_FORMAT_INT);
 					for (size_t opt_i = 0; opt_i < info->option_count; opt_i++) {
-						const char *lbl = info->option_labels[opt_i][0] != '\0'
-									  ? info->option_labels[opt_i]
-									  : info->name;
+						char suffix[32];
+						snprintf(suffix, sizeof(suffix), ".Option%zu", opt_i);
+						const char *lbl =
+							info->option_labels[opt_i][0] != '\0'
+								? shader_param_text(preset_snap, info->name, suffix,
+										    info->option_labels[opt_i])
+								: info->name;
 						obs_property_list_add_int(up, lbl,
 									  (long long)info->option_values[opt_i]);
 					}
 				} else if (is_scroller) {
-					up = obs_properties_add_int(u_grp, info->name, info->label, (int)info->min_val,
+					up = obs_properties_add_int(u_grp, info->name, label, (int)info->min_val,
 								    (int)info->max_val, step);
 				} else {
-					up = obs_properties_add_int_slider(u_grp, info->name, info->label,
-									   (int)info->min_val, (int)info->max_val,
-									   step);
+					up = obs_properties_add_int_slider(u_grp, info->name, label, (int)info->min_val,
+									   (int)info->max_val, step);
 				}
 			} else if (info->type == VS_SHADER_PARAM_BOOL) {
-				up = obs_properties_add_bool(u_grp, info->name, info->label);
+				up = obs_properties_add_bool(u_grp, info->name, label);
 			} else if (info->type == VS_SHADER_PARAM_COLOR) {
-				up = obs_properties_add_color_alpha(u_grp, info->name, info->label);
+				up = obs_properties_add_color_alpha(u_grp, info->name, label);
 			} else if (info->type == VS_SHADER_PARAM_TEXTURE) {
-				up = obs_properties_add_path(u_grp, info->name, info->label, OBS_PATH_FILE,
+				up = obs_properties_add_path(u_grp, info->name, label, OBS_PATH_FILE,
 							     image_filter.array, NULL);
 			}
 			if (up && info->tooltip[0] != '\0') {
-				obs_property_set_long_description(up, info->tooltip);
+				obs_property_set_long_description(up, shader_param_text(preset_snap, info->name,
+											".Tooltip", info->tooltip));
+			}
+			/* The flash limiter says that it limits, under its rate slider. The text names the cap, not the
+			 * slider's value, so it stays true while the slider moves without rebuilding Properties. */
+			if (up && has_flash_limit && strcmp(info->name, FLASH_RATE_PARAM) == 0) {
+				char limit[512];
+				snprintf(
+					limit, sizeof(limit),
+					vs_text_format(
+						"Shader.FlashLimit",
+						"Safety limit: at most %.3g flashes per second, or fewer with a lower Maximum Flash Rate (Hz). Faster hits are skipped."),
+					VS_FLASH_RATE_MAX_HZ);
+				vs_properties_add_info(u_grp, S_FLASH_LIMIT_STATUS, limit);
 			}
 		}
 		obs_properties_add_group(props, "vs_shader_params_group", obs_module_text("Shader.ParamsGroup"),
 					 OBS_GROUP_NORMAL, u_grp);
 	}
+
+	/* The Panic and Restore hotkeys have no key until the user sets one, and no other place in OBS names them */
+	vs_properties_add_info(props, S_PANIC_HINT, obs_module_text("Shader.PanicHint"));
 
 	/* 4. Fader Control (Midi & Stream Deck Fadester) */
 	vs_fader_bridge_poll_once();
@@ -1869,7 +1913,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	};
 
 	char key[64];
-	char opt_label[220];
+	char opt_label[512]; /* a translated label can take three bytes a character */
 	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
 		param_fader_key(key, sizeof(key), k, "target");
 		obs_property_t *p_pt = obs_properties_add_list(f_grp, key, obs_module_text(k_pf_target_keys[k]),
@@ -1879,8 +1923,9 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 			const struct vs_shader_param_info *info = &params_snap[i];
 			if (!is_fader_bindable_shader_param(info))
 				continue;
-			if (info->label[0] != '\0' && strcmp(info->label, info->name) != 0)
-				snprintf(opt_label, sizeof(opt_label), "%s (%s)", info->label, info->name);
+			const char *label = shader_param_text(preset_snap, info->name, "", info->label);
+			if (label[0] != '\0' && strcmp(label, info->name) != 0)
+				snprintf(opt_label, sizeof(opt_label), "%s (%s)", label, info->name);
 			else
 				snprintf(opt_label, sizeof(opt_label), "%s", info->name);
 			obs_property_list_add_string(p_pt, opt_label, info->name);

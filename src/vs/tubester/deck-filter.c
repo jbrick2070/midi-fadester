@@ -1475,6 +1475,41 @@ static bool cue_clicked(obs_properties_t *props, obs_property_t *property, void 
 	return false;
 }
 
+/* A new tape was chosen in Properties. The deck takes the settings only later (the dialog applies them after a short
+ * delay, and a video filter's update waits for the next tick), so until then the status line still describes the old
+ * tape: it says that the new one loads instead. OBS also calls this when it applies the settings to new Properties;
+ * the deck then usually already has that tape, and the status line stays as built. The Filters dialog's Defaults button
+ * and its undo rebuild Properties before the deck takes the settings, so the line reads as after a pick. An empty tape
+ * then reads No tape alone, without the state, because the state the deck still reports belongs to the old tape. (The
+ * Tape field itself is read-only, and its file dialog never returns an empty path.) */
+static bool tape_modified(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	struct tub_deck_filter *f = priv;
+	obs_property_t *status = props ? obs_properties_get(props, "tubester_status") : NULL;
+	if (!f || !status || !settings)
+		return false;
+	const char *tape = obs_data_get_string(settings, TUB_SETTING_TAPE);
+	if (!tape)
+		tape = "";
+	pthread_mutex_lock(&f->mutex);
+	bool changed = strcmp(f->tape ? f->tape : "", tape) != 0;
+	/* these say what is wrong whatever the tape, as status_text does */
+	bool fixed_text = f->role == ROLE_WRONG_PARENT || f->role == ROLE_WAITING ||
+			  (f->parent_is_browser && !f->page_url);
+	pthread_mutex_unlock(&f->mutex);
+	if (!changed || fixed_text)
+		return false;
+	if (tape[0] == '\0')
+		vs_property_info_set_text(status, obs_module_text("Tubester.Status.NoTape"));
+	else if (!tub_path_is_usable(tape))
+		vs_property_info_set_text(status, obs_module_text("Tubester.Status.BadPath"));
+	else
+		vs_property_info_set_text(status, obs_module_text("Tubester.Status.Loading"));
+	/* redraws the properties already built, as the Speed Fader's Clear button does */
+	return true;
+}
+
 static bool refresh_status_clicked(obs_properties_t *props, obs_property_t *property, void *data)
 {
 	UNUSED_PARAMETER(props);
@@ -1600,6 +1635,17 @@ static obs_properties_t *deck_get_properties(void *data)
 	struct tub_deck_filter *f = data;
 	obs_properties_t *props = obs_properties_create();
 
+	/* Setup changes the Browser source's own settings and removing the filter does not undo it (R-DCK-3), so the
+	 * window says so before a tape is chosen; on any other parent the status line says what is wrong instead */
+	bool wrong_parent = false;
+	if (f) {
+		pthread_mutex_lock(&f->mutex);
+		wrong_parent = f->role == ROLE_WRONG_PARENT;
+		pthread_mutex_unlock(&f->mutex);
+	}
+	if (!wrong_parent)
+		vs_properties_add_info(props, "tubester_takes_over", obs_module_text("Tubester.Status.TakesOver"));
+
 	struct dstr status = {0};
 	if (f)
 		status_text(f, &status);
@@ -1616,6 +1662,7 @@ static obs_properties_t *deck_get_properties(void *data)
 	obs_property_t *p_tape = obs_properties_add_path(props, TUB_SETTING_TAPE, obs_module_text("Tubester.Tape"),
 							 OBS_PATH_FILE, filter.array, NULL);
 	obs_property_set_long_description(p_tape, obs_module_text("Tubester.Tape.Tooltip"));
+	obs_property_set_modified_callback2(p_tape, tape_modified, f);
 	dstr_free(&filter);
 
 	obs_property_t *p_playing =

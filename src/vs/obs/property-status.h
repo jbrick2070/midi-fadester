@@ -42,6 +42,17 @@ static inline obs_property_t *vs_properties_add_info(obs_properties_t *props, co
 	return property;
 }
 
+/* The warning row at the top of a Shader Filter's or an Audio Modulator's Properties while Panic is on. Panic and
+ * Restore rebuild every such Properties window when they walk the filters (vs_*_filter_apply_panic and _restore), and a
+ * window opened later is built fresh, so the row comes and goes with the flag. */
+static inline void vs_properties_add_panic_status(obs_properties_t *props, bool panic_active)
+{
+	if (!props || !panic_active)
+		return;
+	obs_property_t *row = vs_properties_add_info(props, "vs_panic_status", obs_module_text("Panic.Active"));
+	obs_property_text_set_info_type(row, OBS_TEXT_INFO_WARNING);
+}
+
 static inline const char *vs_property_string_choice_name(obs_property_t *property, const char *value)
 {
 	if (!property || !value)

@@ -182,3 +182,23 @@ foreach(
   )
   set_tests_properties(check-locale-files-catches-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
 endforeach()
+
+# The built-in shaders' parameter texts are in en-US.ini word for word (R-I18N-1), so the translations follow them; the
+# second test proves a missing, a changed and an extra text are each caught
+add_test(
+  NAME check-shader-locale
+  COMMAND
+    "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_SOURCE_DIR}/data/shaders"
+    "-DLOCALE_FILE=${CMAKE_SOURCE_DIR}/data/locale/en-US.ini" -P "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-locale.cmake"
+)
+add_test(
+  NAME check-shader-locale-catches-faults
+  COMMAND
+    "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-locale-bad"
+    "-DLOCALE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-locale-bad/en-US.ini" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-locale.cmake"
+)
+set_tests_properties(
+  check-shader-locale-catches-faults
+  PROPERTIES PASS_REGULAR_EXPRESSION "shader locale: 1 missing, 1 different, 1 extra"
+)

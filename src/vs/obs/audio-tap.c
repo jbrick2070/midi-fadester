@@ -11,6 +11,7 @@
 
 #include "audio-tap.h"
 #include "plugin-support.h"
+#include "text.h"
 #include "vendor-api.h"
 
 #include <media-io/audio-io.h>
@@ -475,6 +476,23 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 	const bool advanced = obs_data_get_bool(settings, "show_advanced_analysis");
 	const char *warn_text = evaluate_tap_warning_text(filter_source, settings);
 
+	/* In a Track mode the status row says which track the filter listens to and what to check when nothing moves,
+	 * because the audio group is the last one in the panel */
+	static const char *const k_track_keys[] = {
+		"AudioTap.Mode.Track1", "AudioTap.Mode.Track2", "AudioTap.Mode.Track3",
+		"AudioTap.Mode.Track4", "AudioTap.Mode.Track5", "AudioTap.Mode.Track6",
+	};
+	char listens_text[768] = "";
+	if (!warn_text && mode >= (int)VS_TAP_TRACK_1 && mode <= (int)VS_TAP_TRACK_6) {
+		snprintf(
+			listens_text, sizeof(listens_text),
+			vs_text_format(
+				"AudioTap.Status.ListensTo",
+				"Listens to %s. If nothing moves, play some sound. Then check that the sound goes to this track (Audio Mixer, Advanced Audio Properties, Tracks). You can choose another Audio Input below."),
+			obs_module_text(k_track_keys[mode - (int)VS_TAP_TRACK_1]));
+	}
+	const char *status_text = warn_text ? warn_text : listens_text;
+
 	obs_property_t *p_src = obs_properties_get(props, "tap_source_name");
 	obs_property_t *p_warn = obs_properties_get(props, S_TAP_STATUS_WARNING);
 	obs_property_t *p_mute = obs_properties_get(props, "react_when_muted");
@@ -484,8 +502,9 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 	if (p_src)
 		obs_property_set_visible(p_src, is_named);
 	if (p_warn) {
-		obs_data_set_string(settings, S_TAP_STATUS_WARNING, warn_text ? warn_text : "");
-		obs_property_set_visible(p_warn, warn_text != NULL);
+		obs_data_set_string(settings, S_TAP_STATUS_WARNING, status_text);
+		obs_property_text_set_info_type(p_warn, warn_text ? OBS_TEXT_INFO_WARNING : OBS_TEXT_INFO_NORMAL);
+		obs_property_set_visible(p_warn, status_text[0] != '\0');
 	}
 	if (p_mute)
 		obs_property_set_visible(p_mute, is_source);
@@ -560,6 +579,7 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 	obs_property_set_long_description(p_sync, obs_module_text("AudioTap.SyncOffsetMs.Tooltip"));
 
 	obs_property_t *p_ag = obs_properties_add_bool(grp, "auto_gain", obs_module_text("AudioTap.AutoGain"));
+	obs_property_set_long_description(p_ag, obs_module_text("AudioTap.AutoGain.Tooltip"));
 	obs_property_set_modified_callback2(p_ag, tap_mode_modified_cb, filter_source);
 
 	obs_property_t *p_adv =

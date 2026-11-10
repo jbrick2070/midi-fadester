@@ -1283,7 +1283,9 @@ static obs_properties_t *modulator_get_properties(void *data)
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	obs_properties_t *props = obs_properties_create();
 
-	/* Panel order: tap status row, ownership note, slots, then the audio analysis group last. */
+	/* Panel order: Panic's row while it is on, tap status row, ownership note, slots, then the audio analysis group
+	 * last. */
+	vs_properties_add_panic_status(props, vs_fader_bridge_is_panic_active());
 	vs_audio_tap_add_status_property(props);
 	vs_properties_add_info(props, "vs_modulator_ownership", obs_module_text("Modulator.Binding.Ownership"));
 
