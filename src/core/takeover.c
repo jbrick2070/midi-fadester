@@ -131,6 +131,9 @@ void mfd_takeover_sync_external(struct mfd_takeover *t, float new_obs_val)
 		t->armed_upper_rail = (clamped < MFD_TWO_RAIL_UPPER_PARK_THRESHOLD);
 		t->midi_at_rail_deadzone = false;
 		if (t->has_last_fader) {
+			/* The mapping was just reset: re-express the fader's position in it, so the crossing
+			 * test below compares like with like (a stale rescaled value fakes a crossing). */
+			t->last_fader = compute_rescaled_effective(t, t->last_raw_fader);
 			t->hint = compute_hint(t->last_fader, t->target_obs, t->pickup_threshold);
 		}
 	}
@@ -145,6 +148,16 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 	float raw_clamped = clamp01(raw_fader_norm);
 
 	if (t->state == MFD_TAKEOVER_PARKED) {
+		if (!t->has_last_fader && t->bidirectional_flip && !t->two_rail_mode) {
+			/* Parked by a take from the API or an auto-fade before the T-bar ever moved: its position
+			 * was unknown. The first message only records it, so a touch can never fire a take. */
+			t->last_raw_fader = raw_clamped;
+			t->has_last_fader = true;
+			t->parked_peak = raw_clamped;
+			t->parked_at_upper_rail = (raw_clamped >= 0.5f);
+			*out_effective_norm = t->target_obs;
+			return false;
+		}
 		t->last_raw_fader = raw_clamped;
 		t->has_last_fader = true;
 
@@ -407,6 +420,21 @@ void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail,
 	t->last_fader = clamped;
 	t->armed_upper_rail = !upper_rail;
 	t->armed_lower_rail = upper_rail;
+	if (t->two_rail_mode) {
+		/* The slot was set from outside while the fader may stand anywhere: anchor the mapping at the
+		 * fader's position, so moving toward the rail keeps the rail value instead of jumping to it. */
+		if (upper_rail) {
+			t->upper_rescale_origin = t->parked_peak;
+			t->upper_rescale_val = clamped;
+			t->lower_rescale_origin = 0.0f;
+			t->lower_rescale_val = 0.0f;
+		} else {
+			t->lower_rescale_origin = t->parked_peak;
+			t->lower_rescale_val = clamped;
+			t->upper_rescale_origin = 1.0f;
+			t->upper_rescale_val = 1.0f;
+		}
+	}
 	t->state = MFD_TAKEOVER_PARKED;
 	t->hint = MFD_HINT_NONE;
 	t->midi_at_rail_deadzone = false;

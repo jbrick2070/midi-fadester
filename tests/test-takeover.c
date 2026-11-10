@@ -357,6 +357,72 @@ int main(void)
 	REQUIRE(strstr(bar_text, "40%") != NULL);
 	REQUIRE(strstr(bar_text, "Studio Mode is off.") != NULL);
 
+	/*
+	 * 9. A two-rail slot set to a rail from outside (Stream Deck key, dial, auto-fade) while the fader stands
+	 *    elsewhere must not jump to the fader's position when the fader moves toward that rail (R-FEEL-2/4).
+	 */
+	struct mfd_takeover t_api_rail;
+	mfd_takeover_init(&t_api_rail, 0.80f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_api_rail, true);
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.80f, &out));
+	mfd_takeover_notify_rail_completed(&t_api_rail, false, 0.0f);
+	REQUIRE(t_api_rail.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.79f, &out));
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.60f, &out));
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+	/* Moving back up > 8% unparks at 0 and rescales [0.70, 1.00] -> [0, 1] */
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.70f, &out));
+	REQUIRE(t_api_rail.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.85f, &out));
+	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
+
+	/* Mirror: slot set to 100 % with the fader at 20 %; the first upward message keeps 100 % */
+	mfd_takeover_init(&t_api_rail, 0.20f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_api_rail, true);
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.20f, &out));
+	mfd_takeover_notify_rail_completed(&t_api_rail, true, 1.0f);
+	REQUIRE(mfd_takeover_step(&t_api_rail, 0.21f, &out));
+	REQUIRE(fabsf(out - 1.0f) < 1e-6f);
+
+	/*
+	 * 10. A bidirectional T-bar parked by an API take before it ever moved: the first touch only records the
+	 *     position and fires nothing; the next real stroke starts from 0 (R-TBAR-SM: one release per throw).
+	 */
+	struct mfd_takeover t_cold;
+	mfd_takeover_init(&t_cold, 0.0f, 0.015f, true);
+	mfd_takeover_notify_tbar_completed(&t_cold);
+	REQUIRE(t_cold.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(!mfd_takeover_step(&t_cold, 0.008f, &out));
+	REQUIRE(t_cold.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(!t_cold.parked_at_upper_rail);
+	REQUIRE(!mfd_takeover_step(&t_cold, 0.05f, &out));
+	REQUIRE(t_cold.state == MFD_TAKEOVER_PARKED);
+	REQUIRE(mfd_takeover_step(&t_cold, 0.10f, &out));
+	REQUIRE(t_cold.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(!t_cold.polarity_reversed);
+	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
+
+	/*
+	 * 11. After an outside change, a fader whose travel was rescaled must not pick up on a false crossing.
+	 */
+	struct mfd_takeover t_resync;
+	mfd_takeover_init(&t_resync, 0.60f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_resync, true);
+	REQUIRE(mfd_takeover_step(&t_resync, 0.60f, &out));
+	mfd_takeover_notify_rail_completed(&t_resync, true, 1.0f);
+	REQUIRE(mfd_takeover_step(&t_resync, 0.50f, &out)); /* unparks at 1.0, rescales [0, 0.5] -> [0, 1] */
+	REQUIRE(fabsf(out - 1.0f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&t_resync, 0.25f, &out));
+	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
+	mfd_takeover_sync_external(&t_resync, 0.40f);
+	REQUIRE(t_resync.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(t_resync.hint == MFD_HINT_MOVE_UP);
+	REQUIRE(!mfd_takeover_step(&t_resync, 0.24f, &out)); /* away from the target: no pick-up */
+	REQUIRE(fabsf(out - 0.40f) < 1e-6f);
+	REQUIRE(mfd_takeover_step(&t_resync, 0.41f, &out)); /* real crossing picks up */
+
 	printf("test-takeover: PASS\n");
 	return 0;
 }
