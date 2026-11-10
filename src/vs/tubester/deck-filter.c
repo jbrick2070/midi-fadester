@@ -1170,6 +1170,11 @@ static void deck_video_tick(void *data, float seconds)
 			f->setup_queued = true;
 			f->awaiting_parent_update = true;
 			f->awaiting_since_ns = locked_now;
+		} else if (recheck && !f->awaiting_parent_update) {
+			/* the parent changed again while a setup is queued (for example the next keystroke in its Properties):
+			 * it may now show another page, so no hello goes out until that setup has looked (R-LNK-1) */
+			f->awaiting_parent_update = true;
+			f->awaiting_since_ns = locked_now;
 		}
 		pthread_mutex_unlock(&f->mutex);
 		if (queue)

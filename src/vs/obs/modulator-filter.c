@@ -387,14 +387,37 @@ static void modulator_get_defaults(obs_data_t *settings)
 	}
 }
 
-static void modulator_update(void *data, obs_data_t *settings)
-{
-	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
-	if (!f || !settings)
-		return;
+/*
+ * Lock order: libobs takes its sources lock and then calls modulator_save (scene-collection save) or the Panic walk,
+ * which take f->mutex. So nothing may take the sources lock while holding f->mutex. Reading a target filter's
+ * properties can (a Shader Filter or Audio Modulator target lists the sources for its Audio Input), so the targets
+ * are inspected before f->mutex is taken, and a Named Source tap attaches through the tick's planned lookup.
+ */
+struct target_discovery {
+	struct prop_query_ctx info[VS_MOD_MAX_SLOTS];
+	bool found[VS_MOD_MAX_SLOTS];
+};
 
+static void discover_targets(struct vs_modulator_filter *f, obs_data_t *settings, struct target_discovery *d)
+{
+	char key[64];
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		slot_key(key, sizeof(key), i, "target_filter");
+		const char *tf = obs_data_get_string(settings, key);
+		slot_key(key, sizeof(key), i, "target_setting");
+		const char *ts = obs_data_get_string(settings, key);
+		d->found[i] = query_target_setting_info(f, tf, ts, &d->info[i]);
+		d->info[i].setting_name = NULL; /* pointed into settings; only the results are kept */
+	}
+}
+
+static void apply_settings(struct vs_modulator_filter *f, obs_data_t *settings, const struct target_discovery *d)
+{
 	pthread_mutex_lock(&f->mutex);
+	const bool defer_before = f->tap.defer_named_attach;
+	f->tap.defer_named_attach = true;
 	vs_audio_tap_update_from_settings(&f->tap, f->context, settings);
+	f->tap.defer_named_attach = defer_before;
 
 	const bool panic_active = vs_fader_bridge_is_panic_active();
 	char key[64];
@@ -427,9 +450,8 @@ static void modulator_update(void *data, obs_data_t *settings)
 
 		/* Query once per settings update, including load. Defaults follow the target's range without
 		 * turning automatic bounds into user overrides that survive a later retarget (R-MOD-2). */
-		struct prop_query_ctx target_info;
-		const bool target_found =
-			query_target_setting_info(f, next.target_filter, next.target_setting, &target_info);
+		const struct prop_query_ctx target_info = d->info[i];
+		const bool target_found = next.target_setting[0] != '\0' && d->found[i];
 		next.prop_type = target_found ? target_info.prop_type : VS_PROP_FLOAT;
 		next.int_step = target_info.int_step;
 		char seed_key[64];
@@ -514,6 +536,16 @@ static void modulator_update(void *data, obs_data_t *settings)
 	pthread_mutex_unlock(&f->mutex);
 }
 
+static void modulator_update(void *data, obs_data_t *settings)
+{
+	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
+	if (!f || !settings)
+		return;
+	struct target_discovery d;
+	discover_targets(f, settings, &d);
+	apply_settings(f, settings, &d);
+}
+
 static void restore_persisted_baselines_from_settings(struct vs_modulator_filter *f, obs_data_t *settings)
 {
 	if (!f || !settings)
@@ -547,8 +579,10 @@ static void modulator_load(void *data, obs_data_t *settings)
 	if (!f || !settings)
 		return;
 
+	struct target_discovery d;
+	discover_targets(f, settings, &d); /* before f->mutex (lock order, see target_discovery) */
 	pthread_mutex_lock(&f->mutex);
-	modulator_update(f, settings);
+	apply_settings(f, settings, &d);
 	f->pending_load_restore = true;
 	pthread_mutex_unlock(&f->mutex);
 }
@@ -717,33 +751,38 @@ static void resume_after_save_task(void *param)
 static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seconds,
 				       const struct vs_audio_tap_named_lookup *named)
 {
+	/* A pending refresh or load restore re-reads the targets' properties: that happens before f->mutex is held
+	 * (lock order, see target_discovery). A request made after this look is handled on the next tick. */
+	pthread_mutex_lock(&f->mutex);
+	/* taken now: a refresh asked for after this look keeps its flag for the next tick's discovery */
+	const bool refresh_taken = f->pending_target_refresh;
+	f->pending_target_refresh = false;
+	const bool restore_due = f->pending_load_restore;
+	pthread_mutex_unlock(&f->mutex);
+	obs_data_t *settings = (refresh_taken || restore_due) ? obs_source_get_settings(f->context) : NULL;
+	struct target_discovery d;
+	if (settings)
+		discover_targets(f, settings, &d);
+
 	pthread_mutex_lock(&f->mutex);
 
-	/* These updates run under f->mutex: a Named Source tap they reconfigure attaches through the planned retry
-	 * instead of looking the source up here (see modulator_video_tick). */
-	f->tap.defer_named_attach = true;
-	if (f->pending_target_refresh) {
-		obs_data_t *settings = obs_source_get_settings(f->context);
-		if (settings) {
-			modulator_update(f, settings);
-			obs_data_release(settings);
-		}
-		f->pending_target_refresh = false;
+	if (refresh_taken) {
+		if (settings)
+			apply_settings(f, settings, &d);
+		else
+			f->pending_target_refresh = true;
 	}
 
-	if (f->pending_load_restore) {
+	if (settings && restore_due && f->pending_load_restore) {
 		obs_source_t *parent = obs_filter_get_parent(f->context);
 		if (parent) {
-			obs_data_t *s = obs_source_get_settings(f->context);
-			if (s) {
-				restore_persisted_baselines_from_settings(f, s);
-				modulator_update(f, s);
-				obs_data_release(s);
-			}
+			restore_persisted_baselines_from_settings(f, settings);
+			apply_settings(f, settings, &d);
 			f->pending_load_restore = false;
 		}
 	}
-	f->tap.defer_named_attach = false;
+	if (settings)
+		obs_data_release(settings);
 
 	/* Idempotent baseline restore if the filter is disabled via any path (R-MOD-5(2)(c)). */
 	if (!obs_source_enabled(f->context)) {

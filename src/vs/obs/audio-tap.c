@@ -241,6 +241,8 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 		vs_analyzer_reset(&tap->analyzer);
 		if (!(tap->defer_named_attach && mode == VS_TAP_NAMED_SOURCE))
 			try_attach_tap_callbacks(tap, filter_source);
+		else
+			tap->retry_accum_sec = 1.0f; /* due now: the next tick's planned lookup attaches it (R-THR-5) */
 	}
 }
 
