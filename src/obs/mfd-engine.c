@@ -1330,16 +1330,29 @@ static bool find_filter_prop_in_props_depth(obs_properties_t *props, obs_data_t 
 	return false;
 }
 
+/*
+ * obs_source_enum_filters holds the source's filter_mutex while it calls back. A scene-collection save takes
+ * sources_mutex and then each filter_mutex (obs_save_sources_filtered -> obs_save_source), so a callback that
+ * looks a source up by name (sources_mutex) under filter_mutex can deadlock OBS. The enumeration therefore only
+ * copies name, type and enabled; the callbacks run after it has returned.
+ */
+struct mfd_filter_copy {
+	char *name;
+	char *id;
+	bool enabled;
+};
+
 struct mfd_live_enum_filters_ctx {
-	mfd_source_filter_cb cb;
-	void *cb_param;
+	struct mfd_filter_copy *items;
+	size_t num;
+	size_t cap;
 };
 
 static void live_enum_source_filters_cb(obs_source_t *parent, obs_source_t *child, void *param)
 {
 	UNUSED_PARAMETER(parent);
 	struct mfd_live_enum_filters_ctx *ctx = (struct mfd_live_enum_filters_ctx *)param;
-	if (!ctx || !ctx->cb || !child || obs_source_removed(child)) {
+	if (!ctx || !child || obs_source_removed(child)) {
 		return;
 	}
 	const char *fnm = obs_source_get_name(child);
@@ -1347,7 +1360,15 @@ static void live_enum_source_filters_cb(obs_source_t *parent, obs_source_t *chil
 	if (!fnm || fnm[0] == '\0' || mfd_is_internal_filter(fnm, fid)) {
 		return;
 	}
-	ctx->cb(fnm, fid ? fid : "", obs_source_enabled(child), ctx->cb_param);
+	if (ctx->num == ctx->cap) {
+		size_t cap = ctx->cap ? ctx->cap * 2U : 8U;
+		ctx->items = brealloc(ctx->items, cap * sizeof(*ctx->items));
+		ctx->cap = cap;
+	}
+	ctx->items[ctx->num].name = bstrdup(fnm);
+	ctx->items[ctx->num].id = bstrdup(fid ? fid : "");
+	ctx->items[ctx->num].enabled = obs_source_enabled(child);
+	ctx->num++;
 }
 
 static bool sg_enum_source_filters(const struct mfd_engine *eng, const char *source_name, bool *out_is_scene,
@@ -1378,8 +1399,14 @@ static bool sg_enum_source_filters(const struct mfd_engine *eng, const char *sou
 		*out_is_scene = obs_source_is_scene(src);
 	}
 	if (cb) {
-		struct mfd_live_enum_filters_ctx ctx = {cb, cb_param};
+		struct mfd_live_enum_filters_ctx ctx = {NULL, 0U, 0U};
 		obs_source_enum_filters(src, live_enum_source_filters_cb, &ctx);
+		for (size_t i = 0; i < ctx.num; ++i) {
+			cb(ctx.items[i].name, ctx.items[i].id, ctx.items[i].enabled, cb_param);
+			bfree(ctx.items[i].name);
+			bfree(ctx.items[i].id);
+		}
+		bfree(ctx.items);
 	}
 	obs_source_release(src);
 	return true;

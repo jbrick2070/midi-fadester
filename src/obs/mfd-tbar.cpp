@@ -35,6 +35,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QThread>
+#include <QTimer>
 #include <QVariant>
 #include <QWidget>
 
@@ -205,9 +206,33 @@ static void refresh_studio_mode_state_on_ui_thread(void)
 
 static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release, uint64_t epoch);
 
+/*
+ * OBS 33 raises TRANSITION_STOPPED when the video side of a transition stops; the audio side stops later, and until
+ * then obs_transition_is_active() stays true. A command parked in that gap has no later event to flush it, so a
+ * single retry chain polls until the transition is really over (at most about 3 s), then runs it.
+ */
+static int g_deferred_tbar_retries = 0;
+static bool g_deferred_flush_scheduled = false;
+
+static void flush_deferred_tbar_on_ui_thread(void);
+
+static void schedule_deferred_flush(void)
+{
+	QWidget *ctx = g_main_win.data();
+	if (g_deferred_flush_scheduled || !ctx) {
+		return;
+	}
+	g_deferred_flush_scheduled = true;
+	QTimer::singleShot(25, ctx, []() {
+		g_deferred_flush_scheduled = false;
+		flush_deferred_tbar_on_ui_thread();
+	});
+}
+
 static void flush_deferred_tbar_on_ui_thread(void)
 {
 	if (!g_pending_deferred_tbar.active) {
+		g_deferred_tbar_retries = 0;
 		return;
 	}
 	obs_source_t *tr = obs_get_output_source(0);
@@ -216,11 +241,26 @@ static void flush_deferred_tbar_on_ui_thread(void)
 		obs_source_release(tr);
 	}
 	if (g_tbar_awaiting_transition_stop && active_tr) {
+		return; /* the coming TRANSITION_STOPPED flushes it */
+	}
+	if (active_tr) {
+		if (++g_deferred_tbar_retries > 120 || !g_main_win) {
+			obs_log(LOG_WARNING, "Deferred T-bar command dropped: the previous transition did not finish.");
+			g_pending_deferred_tbar.active = false;
+			g_deferred_tbar_retries = 0;
+			return;
+		}
+		schedule_deferred_flush();
 		return;
 	}
+	g_deferred_tbar_retries = 0;
 	g_tbar_awaiting_transition_stop = false;
 	const mfd_deferred_tbar_cmd cmd = g_pending_deferred_tbar;
 	g_pending_deferred_tbar.active = false;
+	/* a throw that started meanwhile is newer: the parked command must not move or release it */
+	if (g_tbar_ui_throw_active || cmd.epoch < g_tbar_throw_epoch.load(std::memory_order_acquire)) {
+		return;
+	}
 	execute_tbar_on_ui_thread(cmd.pos_1024, cmd.do_set, cmd.do_release, cmd.epoch);
 }
 
@@ -275,10 +315,15 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 		if (tr_busy) {
 			if (!g_pending_deferred_tbar.active || epoch > g_pending_deferred_tbar.epoch) {
 				g_pending_deferred_tbar = {true, pos_1024, do_set, do_release, epoch};
+				g_deferred_tbar_retries = 0; /* a new command gets the whole wait */
 			} else if (epoch == g_pending_deferred_tbar.epoch && !g_pending_deferred_tbar.do_release) {
 				g_pending_deferred_tbar.pos_1024 = pos_1024;
 				g_pending_deferred_tbar.do_set = g_pending_deferred_tbar.do_set || do_set;
 				g_pending_deferred_tbar.do_release = g_pending_deferred_tbar.do_release || do_release;
+			}
+			if (!g_tbar_awaiting_transition_stop) {
+				/* parked after TRANSITION_STOPPED already came (audio tail): no event will flush it */
+				schedule_deferred_flush();
 			}
 			return;
 		}
