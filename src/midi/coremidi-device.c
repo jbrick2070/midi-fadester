@@ -260,8 +260,8 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 		dev->error_operation = MFD_WINMM_OP_OPEN;
 		dev->error_code = (uint32_t)st;
 		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", chosen_name);
-		snprintf(dev->last_error, sizeof(dev->last_error),
-			 "Failed to open MIDI port '%s' (CoreMIDI error %d).", chosen_name, (int)st);
+		snprintf(dev->last_error, sizeof(dev->last_error), "Failed to open MIDI port '%s' (CoreMIDI error %d).",
+			 chosen_name, (int)st);
 		obs_log(LOG_WARNING, "%s", dev->last_error);
 		return false;
 	}
