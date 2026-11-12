@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -11,6 +12,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-controller-svg.hpp"
@@ -2575,6 +2577,17 @@ static void ui_notify_bridge_cb(void *unused)
 	}
 }
 
+/* A MIDI device was plugged in or out: re-check the open port and refresh the dialog's port list. */
+static void on_midi_ports_changed()
+{
+	mfd_engine_poll_midi_health_on_ui_thread(mfd_engine_get());
+	if (g_dialog) {
+		g_dialog->on_hardware_ports_changed();
+		g_dialog->refresh_from_engine();
+	}
+}
+
+#ifdef _WIN32
 class MfdDeviceChangeFilter final : public QAbstractNativeEventFilter {
 public:
 	bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override
@@ -2586,11 +2599,7 @@ public:
 		if (eventType == "windows_generic_MSG" || eventType == "windows_dispatcher_MSG") {
 			const auto *msg = static_cast<const MSG *>(message);
 			if (msg->message == WM_DEVICECHANGE) {
-				mfd_engine_poll_midi_health_on_ui_thread(mfd_engine_get());
-				if (g_dialog) {
-					g_dialog->on_hardware_ports_changed();
-					g_dialog->refresh_from_engine();
-				}
+				on_midi_ports_changed();
 			}
 		}
 		return false;
@@ -2598,6 +2607,13 @@ public:
 };
 
 static MfdDeviceChangeFilter *g_dev_change_filter = nullptr;
+#else
+static void queue_midi_ports_changed()
+{
+	if (g_ui_dispatcher)
+		QMetaObject::invokeMethod(g_ui_dispatcher, on_midi_ports_changed, Qt::QueuedConnection);
+}
+#endif
 
 static void on_tools_menu_clicked(void *unused)
 {
@@ -2635,10 +2651,14 @@ void mfd_ui_init(void)
 	obs_frontend_add_tools_menu_item(obs_module_text("ToolsMenuTitle"), on_tools_menu_clicked, nullptr);
 
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
+#ifdef _WIN32
 		if (QCoreApplication::instance() && !g_dev_change_filter) {
 			g_dev_change_filter = new MfdDeviceChangeFilter();
 			QCoreApplication::instance()->installNativeEventFilter(g_dev_change_filter);
 		}
+#else
+		mfd_coremidi_set_setup_callback(queue_midi_ports_changed);
+#endif
 		mfd_engine_poll_midi_health_on_ui_thread(mfd_engine_get());
 	}
 }
@@ -2647,6 +2667,7 @@ void mfd_ui_shutdown(void)
 {
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), nullptr, nullptr);
 
+#ifdef _WIN32
 	if (g_dev_change_filter) {
 		if (QCoreApplication::instance()) {
 			QCoreApplication::instance()->removeNativeEventFilter(g_dev_change_filter);
@@ -2654,6 +2675,9 @@ void mfd_ui_shutdown(void)
 		delete g_dev_change_filter;
 		g_dev_change_filter = nullptr;
 	}
+#else
+	mfd_coremidi_set_setup_callback(nullptr);
+#endif
 
 	if (g_dialog) {
 		g_dialog->close();

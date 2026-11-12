@@ -916,7 +916,11 @@ static void capture_and_verify_png(QWidget *w, const QString &out_dir, const QSt
 int main(int argc, char **argv)
 {
 	QApplication app(argc, argv);
+#ifdef __APPLE__
+	REQUIRE(QGuiApplication::platformName() == QStringLiteral("cocoa"));
+#else
 	REQUIRE(QGuiApplication::platformName() == QStringLiteral("windows"));
+#endif
 
 	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
 	REQUIRE(obs_module_lookup != nullptr);
@@ -1186,7 +1190,7 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_3"))->text() ==
 		QStringLiteral("Volume: Mic/Aux"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_3"))->text() == QStringLiteral("-6.0 dB"));
-	REQUIRE(z3_label->text().contains(QStringLiteral("Preview: Blue \xE2\x86\x92 Program: Red")));
+	REQUIRE(z3_label->text().contains(QStringLiteral("Preview: Blue \u2192 Program: Red")));
 	REQUIRE(z3_label->text().contains(QStringLiteral("Last move: Crossfader")));
 
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("03-strips-throwing-and-active.png"));
@@ -1268,7 +1272,7 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_1"))->text() ==
 		QStringLiteral("Move the fader down to 12% to pick up."));
 	REQUIRE(bar1->property("showingPickup").toBool());
-	REQUIRE(bar1->property("arrowGlyph").toString() == QStringLiteral("\xE2\x86\x93"));
+	REQUIRE(bar1->property("arrowGlyph").toString() == QStringLiteral("\u2193"));
 
 	/* Remove Color 2 from Red exclusively for Strip 4 by pinning Strip 1 to Blue */
 	{

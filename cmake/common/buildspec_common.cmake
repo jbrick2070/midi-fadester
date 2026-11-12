@@ -60,6 +60,14 @@ function(_setup_obs_studio)
       -A "${arch},version=${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
       "-DCMAKE_SYSTEM_VERSION=${CMAKE_SYSTEM_VERSION}"
     )
+  elseif(OS_MACOS)
+    set(
+      _cmake_platform_args
+      -G Xcode
+      "-DCMAKE_OSX_ARCHITECTURES:STRING=arm64\\;x86_64"
+      "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+      "-DCMAKE_OSX_SYSROOT=${CMAKE_OSX_SYSROOT}"
+    )
   endif()
   # gersemi: on
 

@@ -53,10 +53,20 @@ static QString xml_escape(const QString &in)
 	return out;
 }
 
+#ifdef __APPLE__
+static constexpr auto k_font_family = "Helvetica Neue";
+static constexpr char k_font[] = "font-family='Helvetica Neue, sans-serif'";
+static constexpr int k_card_label_px = 9;
+#else
+static constexpr auto k_font_family = "Segoe UI";
+static constexpr char k_font[] = "font-family='Segoe UI, sans-serif'";
+static constexpr int k_card_label_px = 10;
+#endif
+
 /* Fits a text into max_px at the SVG's font, by measured width, not by character count (CJK and long words). */
 static QString elide_px(const QString &s, int font_px, bool bold, int max_px)
 {
-	QFont font(QStringLiteral("Segoe UI"));
+	QFont font(QString::fromLatin1(k_font_family));
 	font.setPixelSize(font_px);
 	font.setBold(bold);
 	return QFontMetrics(font).elidedText(s, Qt::ElideRight, max_px);
@@ -64,7 +74,7 @@ static QString elide_px(const QString &s, int font_px, bool bold, int max_px)
 
 static int text_px(const QString &s, int font_px, bool bold)
 {
-	QFont font(QStringLiteral("Segoe UI"));
+	QFont font(QString::fromLatin1(k_font_family));
 	font.setPixelSize(font_px);
 	font.setBold(bold);
 	return QFontMetrics(font).horizontalAdvance(s);
@@ -92,8 +102,6 @@ static QString compact_midi_addr(const struct mfd_midi_addr &addr)
 	}
 }
 
-static const char k_font[] = "font-family='Segoe UI, sans-serif'";
-
 } // namespace
 
 QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
@@ -105,18 +113,18 @@ QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
 	case MFD_TARGET_TBAR:
 		svg += QStringLiteral(
 			"<rect x='12' y='12' width='56' height='36' rx='4' fill='#1e3a8a' stroke='#60a5fa' stroke-width='1.5'/>");
-		svg += svg_text(QStringLiteral("x='40' y='34' fill='#bfdbfe' %1 font-size='10' font-weight='bold' "
+		svg += svg_text(QStringLiteral("x='40' y='34' fill='#bfdbfe' %1 font-size='%2' font-weight='bold' "
 					       "text-anchor='middle'")
-					.arg(font),
-				elide_px(mfdText("Map.ModePreview", "Preview"), 10, true, 54));
+					.arg(font).arg(k_card_label_px),
+				elide_px(mfdText("Map.ModePreview", "Preview"), k_card_label_px, true, 54));
 		svg += QStringLiteral(
 			"<path d='M75 30 L103 30 M97 24 L104 30 L97 36' stroke='#38bdf8' stroke-width='2.2' fill='none' "
 			"stroke-linecap='round' stroke-linejoin='round'/>"
 			"<rect x='112' y='12' width='56' height='36' rx='4' fill='#7f1d1d' stroke='#f87171' stroke-width='1.5'/>");
-		svg += svg_text(QStringLiteral("x='140' y='34' fill='#fecaca' %1 font-size='10' font-weight='bold' "
+		svg += svg_text(QStringLiteral("x='140' y='34' fill='#fecaca' %1 font-size='%2' font-weight='bold' "
 					       "text-anchor='middle'")
-					.arg(font),
-				elide_px(mfdText("Map.ModeProgram", "Program"), 10, true, 54));
+					.arg(font).arg(k_card_label_px),
+				elide_px(mfdText("Map.ModeProgram", "Program"), k_card_label_px, true, 54));
 		svg += QStringLiteral("<rect x='46' y='55' width='88' height='4' rx='2' fill='#334155'/>"
 				      "<rect x='96' y='51' width='12' height='12' rx='3' fill='#38bdf8'/>");
 		break;
@@ -125,15 +133,15 @@ QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
 		svg += QStringLiteral(
 			"<rect x='22' y='10' width='76' height='40' rx='5' fill='#1d4ed8' stroke='#60a5fa' stroke-width='1.5'/>");
 		svg += svg_text(
-			QStringLiteral("x='48' y='33' fill='#dbeafe' %1 font-size='10' font-weight='bold'").arg(font),
-			elide_px(mfdText("Map.ModeLeft", "Left"), 10, true, 48));
+			QStringLiteral("x='48' y='33' fill='#dbeafe' %1 font-size='%2' font-weight='bold'").arg(font).arg(k_card_label_px),
+			elide_px(mfdText("Map.ModeLeft", "Left"), k_card_label_px, true, 48));
 		svg += QStringLiteral(
 			"<rect x='82' y='16' width='76' height='40' rx='5' fill='#047857' fill-opacity='0.82' "
 			"stroke='#34d399' stroke-width='1.5'/>");
-		svg += svg_text(QStringLiteral("x='124' y='40' fill='#d1fae5' %1 font-size='10' font-weight='bold' "
+		svg += svg_text(QStringLiteral("x='124' y='40' fill='#d1fae5' %1 font-size='%2' font-weight='bold' "
 					       "text-anchor='middle'")
-					.arg(font),
-				elide_px(mfdText("Map.ModeRight", "Right"), 10, true, 72));
+					.arg(font).arg(k_card_label_px),
+				elide_px(mfdText("Map.ModeRight", "Right"), k_card_label_px, true, 72));
 		break;
 
 	case MFD_TARGET_SINGLE_LAYER:

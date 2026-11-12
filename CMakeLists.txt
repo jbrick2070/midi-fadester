@@ -22,8 +22,23 @@ find_package(Qt6 COMPONENTS Widgets Core Gui Svg REQUIRED)
 
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg winmm
+  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg
 )
+
+# MIDI input: WinMM on Windows, CoreMIDI on macOS, both behind src/midi/winmm-device.h.
+if(OS_WINDOWS)
+  set(_midi_backend "${CMAKE_CURRENT_SOURCE_DIR}/src/midi/winmm-device.c")
+  set(_midi_libraries winmm)
+elseif(OS_MACOS)
+  set(_midi_backend "${CMAKE_CURRENT_SOURCE_DIR}/src/midi/coremidi-device.c")
+  find_library(COREMIDI_FRAMEWORK CoreMIDI REQUIRED)
+  find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+  set(_midi_libraries "${COREMIDI_FRAMEWORK}" "${COREFOUNDATION_FRAMEWORK}")
+else()
+  message(FATAL_ERROR "Midi Fadester requires Windows or macOS.")
+endif()
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE "${_midi_backend}")
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${_midi_libraries})
 
 set_target_properties(
   ${CMAKE_PROJECT_NAME}
@@ -60,7 +75,6 @@ target_sources(
     src/core/mfd-text.h
     src/core/mfd-text.c
     src/midi/winmm-device.h
-    src/midi/winmm-device.c
     src/obs/mfd-layer-filter.h
     src/obs/mfd-layer-filter.c
     src/obs/mfd-engine.h

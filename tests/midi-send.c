@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
 #include <mmsystem.h>
+#else
+#include <strings.h>
+#define _strnicmp strncasecmp
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -148,6 +153,7 @@ static int run_self_test(void)
 	return 0;
 }
 
+#ifdef _WIN32
 static int find_midi_out_port(const char *port_substring, char *out_name, size_t out_name_size)
 {
 	UINT num_devs = midiOutGetNumDevs();
@@ -491,3 +497,13 @@ int main(int argc, char **argv)
 	       end_val, total_msgs, duration_ms, resolved_name);
 	return 0;
 }
+
+#else
+int main(int argc, char **argv)
+{
+	if (argc == 2 && strcmp(argv[1], "--self-test") == 0)
+		return run_self_test();
+	fprintf(stderr, "Usage: midi-send --self-test\n");
+	return 1;
+}
+#endif

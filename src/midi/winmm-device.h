@@ -81,6 +81,11 @@ bool mfd_winmm_check_health(struct mfd_winmm_device *dev);
 /* Stable id of an error kind for the obs-websocket API's device.error_code ("" for MFD_WINMM_OK). */
 const char *mfd_winmm_error_slug(enum mfd_winmm_error_kind kind);
 
+#ifdef __APPLE__
+/* Register or clear the CoreMIDI setup callback on the UI thread. */
+void mfd_coremidi_set_setup_callback(void (*callback)(void));
+#endif
+
 #ifdef __cplusplus
 }
 #endif

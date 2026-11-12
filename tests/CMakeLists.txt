@@ -2,6 +2,16 @@
 # Copyright (C) 2026 Jeffrey A. Brick
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+if(OS_MACOS)
+  # Test executables live outside OBS.app and need the development frameworks and dylibs.
+  set(CMAKE_SKIP_RPATH FALSE)
+  set(CMAKE_XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "")
+  set(CMAKE_BUILD_RPATH "${CMAKE_SOURCE_DIR}/.deps/Frameworks;${CMAKE_SOURCE_DIR}/.deps/lib")
+  foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
+    list(APPEND CMAKE_BUILD_RPATH "${_prefix}/lib")
+  endforeach()
+endif()
+
 set(_test_dll_dirs "")
 foreach(_config IN ITEMS RELEASE RELWITHDEBINFO DEBUG NOCONFIG)
   get_target_property(_libobs_location OBS::libobs IMPORTED_LOCATION_${_config})
@@ -43,6 +53,14 @@ foreach(_dir IN LISTS _test_dll_dirs)
 endforeach()
 
 set(_ui_test_environment ${_test_environment})
+if(OS_MACOS)
+  foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
+    if(EXISTS "${_prefix}/plugins/platforms/libqcocoa.dylib")
+      set(_qt_plugins_dir "${_prefix}/plugins")
+      break()
+    endif()
+  endforeach()
+endif()
 if(_qt_plugins_dir)
   cmake_path(NATIVE_PATH _qt_plugins_dir _native_qt_plugins)
   list(APPEND _ui_test_environment "QT_PLUGIN_PATH=set:${_native_qt_plugins}")
@@ -90,7 +108,7 @@ add_executable(
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
-  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
+  "${_midi_backend}"
   "${_core}/midi-queue.c"
   "${_core}/midi-parser.c"
   "${_core}/smoother.c"
@@ -105,7 +123,7 @@ add_executable(
 )
 target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(test-vendor-api PRIVATE "MFD_TEST_LOCALE_FILE=\"${CMAKE_SOURCE_DIR}/data/locale/en-US.ini\"")
-target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support winmm)
+target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support ${_midi_libraries})
 add_test(NAME test-vendor-api COMMAND test-vendor-api)
 set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
@@ -124,7 +142,7 @@ add_executable(
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
-  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
+  "${_midi_backend}"
   "${_core}/midi-queue.c"
   "${_core}/midi-parser.c"
   "${_core}/smoother.c"
@@ -145,13 +163,15 @@ target_compile_definitions(
 target_include_directories(test-ui-dialog PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(
   test-ui-dialog
-  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg plugin-support winmm
+  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg plugin-support ${_midi_libraries}
 )
 add_test(NAME test-ui-dialog COMMAND test-ui-dialog)
 set_tests_properties(test-ui-dialog PROPERTIES ENVIRONMENT_MODIFICATION "${_ui_test_environment}")
 
 add_executable(midi-send midi-send.c)
-target_link_libraries(midi-send PRIVATE winmm)
+if(OS_WINDOWS)
+  target_link_libraries(midi-send PRIVATE winmm)
+endif()
 add_test(NAME test-midi-send COMMAND midi-send --self-test)
 set_tests_properties(test-midi-send PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
@@ -182,7 +202,7 @@ set(
   "${_core}/slot-messages.c"
   "${_core}/mfd-text.c"
   "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.h"
-  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.c"
+  "${_midi_backend}"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.h"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.h"
