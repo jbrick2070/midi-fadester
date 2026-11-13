@@ -73,8 +73,6 @@ jobs:
 
   macos-build:
     name: Build for macOS 🍏
-    # midi-fadester is Windows-only (REQUIREMENTS R-PLAT-1); remove this line to re-enable
-    if: false
     runs-on: macos-15
     needs: check-event
     defaults:
@@ -92,8 +90,14 @@ jobs:
           : Set Up Environment 🔧
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Enable Xcode 16.1'
-          sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+          print '::group::Enable Xcode 16'
+          local -a xcodes=(/Applications/Xcode_16*.app(nNOn))
+          if [[ -d /Applications/Xcode_16.1.0.app ]] {
+            sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+          } elif (( #xcodes )) {
+            sudo xcode-select --switch "${xcodes[1]}/Contents/Developer"
+          }
+          xcodebuild -version
           print '::endgroup::'
 
           print '::group::Clean Homebrew Environment'

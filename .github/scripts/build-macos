@@ -131,7 +131,7 @@ build() {
     -arch arm64
     -arch x86_64
     -project ${product_name}.xcodeproj
-    -target ${product_name}
+    -target ALL_BUILD
     -destination "generic/platform=macOS,name=Any Mac"
     -configuration ${config}
     -parallelizeTargets
@@ -143,7 +143,11 @@ build() {
   run_xcodebuild ${build_args}
   popd
 
+  log_group "Testing ${product_name}..."
+  ctest --test-dir build_macos -C ${config} --output-on-failure --no-tests=error
+
   log_group "Installing ${product_name}..."
+  rm -rf "${project_root}/release/${config}"
   cmake --install build_macos --config ${config} --prefix "${project_root}/release/${config}"
 
   popd

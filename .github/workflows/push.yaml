@@ -71,11 +71,11 @@ jobs:
           root_dir="$(pwd)"
           commit_hash="${GITHUB_SHA:0:9}"
 
-          # Windows-only (REQUIREMENTS D-5): macos-universal, ubuntu-24.04-x86_64 and sources rows removed
           variants=(
             'windows-x64;zip|exe'
             'windows-x64-Portable;zip|exe'
             'windows-x64-Installer;zip|exe'
+            'macos-universal;pkg|tar.xz'
           )
 
           for variant_data in "${variants[@]}"; do
@@ -96,7 +96,7 @@ jobs:
           shopt -s extglob
 
           echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
-          for file in ${{ github.workspace }}/@(*.exe|*.zip); do
+          for file in ${{ github.workspace }}/@(*.exe|*.zip|*.pkg|*.tar.xz); do
             echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
           done
 
@@ -113,3 +113,5 @@ jobs:
           files: |
             ${{ github.workspace }}/*.exe
             ${{ github.workspace }}/*.zip
+            ${{ github.workspace }}/*.pkg
+            ${{ github.workspace }}/*.tar.xz
