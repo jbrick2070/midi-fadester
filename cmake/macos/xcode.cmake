@@ -106,10 +106,10 @@ set(CMAKE_XCODE_ATTRIBUTE_GCC_STRICT_ALIASING NO)
 #
 # set(CMAKE_XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD c++17)
 
-# Enable support for module imports in ObjC
-set(CMAKE_XCODE_ATTRIBUTE_CLANG_ENABLE_MODULES YES)
-# Enable automatic linking of imported modules in ObjC
-set(CMAKE_XCODE_ATTRIBUTE_CLANG_MODULES_AUTOLINK YES)
+# Disable support for module imports in ObjC
+set(CMAKE_XCODE_ATTRIBUTE_CLANG_ENABLE_MODULES NO)
+# Disable automatic linking of imported modules in ObjC
+set(CMAKE_XCODE_ATTRIBUTE_CLANG_MODULES_AUTOLINK NO)
 # Enable strict msg_send rules for ObjC
 set(CMAKE_XCODE_ATTRIBUTE_ENABLE_STRICT_OBJC_MSGSEND YES)
 

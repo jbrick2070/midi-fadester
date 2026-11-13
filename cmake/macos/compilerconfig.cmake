@@ -12,6 +12,17 @@ endif()
 include(ccache)
 include(compiler_common)
 
+# Xcode 26+ exports default deployment targets for every Apple platform into
+# Run Script build phases, so universal AUTOMOC predefines invocations need an
+# explicit macOS deployment target flag to disambiguate clang++.
+if(CMAKE_CXX_COMPILER_PREDEFINES_COMMAND AND CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(_mfd_predef_target_flag "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+  if(NOT _mfd_predef_target_flag IN_LIST CMAKE_CXX_COMPILER_PREDEFINES_COMMAND)
+    list(APPEND CMAKE_CXX_COMPILER_PREDEFINES_COMMAND "${_mfd_predef_target_flag}")
+  endif()
+  unset(_mfd_predef_target_flag)
+endif()
+
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-fopenmp-simd>")
 
 # Ensure recent enough Xcode and platform SDK
