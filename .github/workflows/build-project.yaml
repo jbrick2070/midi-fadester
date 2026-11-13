@@ -73,7 +73,7 @@ jobs:
 
   macos-build:
     name: Build for macOS 🍏
-    runs-on: macos-15
+    runs-on: macos-26
     needs: check-event
     defaults:
       run:
@@ -90,10 +90,12 @@ jobs:
           : Set Up Environment 🔧
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Enable Xcode 16'
-          local -a xcodes=(/Applications/Xcode_16*.app(nNOn))
-          if [[ -d /Applications/Xcode_16.1.0.app ]] {
-            sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+          print '::group::Enable Xcode 26.5'
+          local -a xcodes=(/Applications/Xcode_26*.app(nNOn))
+          if [[ -d /Applications/Xcode_26.5.app ]] {
+            sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
+          } elif [[ -d /Applications/Xcode_26.5.0.app ]] {
+            sudo xcode-select --switch /Applications/Xcode_26.5.0.app/Contents/Developer
           } elif (( #xcodes )) {
             sudo xcode-select --switch "${xcodes[1]}/Contents/Developer"
           }
