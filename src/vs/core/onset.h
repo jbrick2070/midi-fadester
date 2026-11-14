@@ -42,6 +42,7 @@ struct vs_onset_result {
 	float snare;
 	float beat;
 	float estimated_bpm;
+	float beat_confidence;
 	bool kick_triggered;
 	bool snare_triggered;
 };
@@ -63,11 +64,14 @@ struct vs_onset {
 	uint32_t bpm_history_pos;
 	float estimated_bpm;
 	float beat_phase;
+	float beat_confidence;
 };
 
 void vs_onset_default_config(struct vs_onset_config *cfg);
 bool vs_onset_init(struct vs_onset *onset, const struct vs_onset_config *cfg);
 void vs_onset_reset(struct vs_onset *onset);
+/* Freezes beat_phase and beat_confidence at 0 during extended silence while keeping estimated_bpm ready for resume. */
+void vs_onset_freeze_beat(struct vs_onset *onset);
 
 void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *mag_mid, float dt_sec,
 		   struct vs_onset_result *out_res);

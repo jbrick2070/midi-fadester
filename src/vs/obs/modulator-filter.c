@@ -1286,7 +1286,7 @@ static obs_properties_t *modulator_get_properties(void *data)
 	/* Panel order: Panic's row while it is on, tap status row, ownership note, slots, then the audio analysis group
 	 * last. */
 	vs_properties_add_panic_status(props, vs_fader_bridge_is_panic_active());
-	vs_audio_tap_add_status_property(props);
+	vs_audio_tap_add_status_property_for_source(props, f ? f->context : NULL);
 	vs_properties_add_info(props, "vs_modulator_ownership", obs_module_text("Modulator.Binding.Ownership"));
 
 	/* Probe Midi Fadester once for the entire Properties build instead of 8x across slots */
@@ -1409,7 +1409,7 @@ static obs_properties_t *modulator_get_properties(void *data)
 		obs_properties_add_group(props, grp_key, grp_title, OBS_GROUP_NORMAL, grp);
 	}
 
-	vs_audio_tap_add_properties(props, f ? f->context : NULL);
+	vs_audio_tap_add_properties_with_tap(props, f ? f->context : NULL, f ? &f->tap : NULL);
 
 	if (cur_settings) {
 		refresh_modulator_properties_visibility(f, props, cur_settings, -1);

@@ -105,6 +105,8 @@ static void proc_visual_sidechain_get_signals(void *data, calldata_t *cd)
 	calldata_set_float(cd, "snare", (double)snap.snare);
 	calldata_set_float(cd, "beat_phase", (double)snap.beat);
 	calldata_set_float(cd, "bpm", (double)snap.estimated_bpm);
+	calldata_set_float(cd, "beat_confidence", (double)snap.beat_confidence);
+	calldata_set_bool(cd, "audio_present", snap.audio_present);
 	calldata_set_bool(cd, "ok", true);
 }
 
@@ -175,14 +177,14 @@ void vs_fader_bridge_attach(proc_handler_t *ph, signal_handler_t *sh)
 	if (ph) {
 		proc_handler_add(
 			ph,
-			"void visual_sidechain_get_signals(out float level, out float bass, out float mid, out float high, out float kick, out float snare, out float beat_phase, out float bpm, out bool ok)",
+			"void visual_sidechain_get_signals(out float level, out float bass, out float mid, out float high, out float kick, out float snare, out float beat_phase, out float bpm, out float beat_confidence, out bool audio_present, out bool ok)",
 			proc_visual_sidechain_get_signals, NULL);
 	}
 
 	if (sh) {
 		signal_handler_add(
 			sh,
-			"void visual_sidechain_signals(float level, float bass, float mid, float high, float kick, float snare, float beat_phase, float bpm, bool ok)");
+			"void visual_sidechain_signals(float level, float bass, float mid, float high, float kick, float snare, float beat_phase, float bpm, float beat_confidence, bool audio_present, bool ok)");
 		signal_handler_connect_global(sh, on_global_signal, NULL);
 	}
 
@@ -447,6 +449,8 @@ void vs_fader_bridge_get_signals(struct vs_audio_frame *out_frame)
 
 static bool signals_differ_beyond_eps(const struct vs_audio_frame *a, const struct vs_audio_frame *b, float eps)
 {
+	if (a->audio_present != b->audio_present)
+		return true;
 	if (fabsf(a->level - b->level) > eps)
 		return true;
 	if (fabsf(a->sub_bass - b->sub_bass) > eps)
@@ -468,6 +472,8 @@ static bool signals_differ_beyond_eps(const struct vs_audio_frame *a, const stru
 	if (fabsf(a->spectral_flux - b->spectral_flux) > eps)
 		return true;
 	if (fabsf(a->estimated_bpm - b->estimated_bpm) > eps)
+		return true;
+	if (fabsf(a->beat_confidence - b->beat_confidence) > eps)
 		return true;
 	for (size_t i = 0; i < VS_SPECTRUM_BANDS; i++) {
 		if (fabsf(a->spectrum[i] - b->spectrum[i]) > eps)
@@ -519,6 +525,8 @@ static void emit_visual_sidechain_signal(signal_handler_t *sh, const struct vs_a
 	calldata_set_float(&cd, "snare", (double)frame->snare);
 	calldata_set_float(&cd, "beat_phase", (double)frame->beat);
 	calldata_set_float(&cd, "bpm", (double)frame->estimated_bpm);
+	calldata_set_float(&cd, "beat_confidence", (double)frame->beat_confidence);
+	calldata_set_bool(&cd, "audio_present", frame->audio_present);
 	calldata_set_bool(&cd, "ok", true);
 	signal_handler_signal(sh, "visual_sidechain_signals", &cd);
 	calldata_free(&cd);

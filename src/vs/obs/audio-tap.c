@@ -15,10 +15,28 @@
 #include "vendor-api.h"
 
 #include <media-io/audio-io.h>
+#include <util/threading.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #define S_TAP_STATUS_WARNING "tap_status_warning"
+#define S_TAP_REFRESH_STATUS "tap_refresh_status"
+
+static void sync_tap_status_atomics(struct vs_audio_tap *tap)
+{
+	if (!tap)
+		return;
+	const bool present = tap->analyzer.has_seen_audio && tap->analyzer.silent_or_starved_sec < VS_SILENCE_HOLD_SEC;
+	long silent_sec = (long)floorf(tap->analyzer.silent_or_starved_sec);
+	if (silent_sec < 0)
+		silent_sec = 0;
+	os_atomic_set_long(&tap->status_mode, (long)tap->mode);
+	os_atomic_set_bool(&tap->status_has_stepped,
+			   tap->analyzer.has_seen_audio || tap->analyzer.silent_or_starved_sec > 0.0f);
+	os_atomic_set_bool(&tap->status_audio_present, present);
+	os_atomic_set_long(&tap->status_silent_seconds, silent_sec);
+}
 
 static void raw_audio_callback(void *param, size_t mix_idx, struct audio_data *frames)
 {
@@ -184,6 +202,7 @@ bool vs_audio_tap_init(struct vs_audio_tap *tap, bool upload_gpu_textures)
 	for (uint32_t i = 0; i < VS_FFT_TEX_BINS; i++)
 		tap->current_frame.waveform[i] = 0.5f;
 
+	sync_tap_status_atomics(tap);
 	return true;
 }
 
@@ -240,6 +259,7 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 		tap->source_name[sizeof(tap->source_name) - 1u] = '\0';
 		tap->retry_accum_sec = 0.0f;
 		vs_analyzer_reset(&tap->analyzer);
+		sync_tap_status_atomics(tap);
 		if (!(tap->defer_named_attach && mode == VS_TAP_NAMED_SOURCE))
 			try_attach_tap_callbacks(tap, filter_source);
 		else
@@ -255,6 +275,7 @@ void vs_audio_tap_detach_parent(struct vs_audio_tap *tap)
 	tap->retry_accum_sec = 0.0f;
 	tap->warned_attachment_failure = false;
 	vs_analyzer_reset(&tap->analyzer);
+	sync_tap_status_atomics(tap);
 }
 
 static void upload_tap_textures(struct vs_audio_tap *tap)
@@ -332,6 +353,7 @@ static void tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, floa
 		tap->warned_attachment_failure = false;
 		tap->retry_accum_sec = 0.0f;
 		vs_analyzer_reset(&tap->analyzer);
+		sync_tap_status_atomics(tap);
 	}
 
 	/* Retry attachment once per second if a named or parent source was not ready at load time. */
@@ -352,6 +374,7 @@ static void tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, floa
 	tap->last_video_frame_ts = video_ts;
 
 	vs_analyzer_step(&tap->analyzer, seconds, &tap->current_frame);
+	sync_tap_status_atomics(tap);
 	vs_vendor_api_on_tick(video_ts, seconds, &tap->current_frame, tap->mode == VS_TAP_TRACK_1);
 	upload_tap_textures(tap);
 }
@@ -462,10 +485,19 @@ static const char *evaluate_tap_warning_text(obs_source_t *filter_source, obs_da
 	return NULL;
 }
 
-static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+static bool refresh_tap_status_cb(obs_properties_t *props, obs_property_t *property, void *data)
 {
+	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
-	obs_source_t *filter_source = (obs_source_t *)priv;
+	obs_source_t *filter_source = (obs_source_t *)data;
+	if (filter_source)
+		obs_source_update_properties(filter_source);
+	return false;
+}
+
+static bool apply_tap_properties_state(obs_source_t *filter_source, const struct vs_audio_tap *tap,
+				       obs_properties_t *props, obs_data_t *settings)
+{
 	if (!props || !settings)
 		return false;
 
@@ -476,25 +508,54 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 	const bool advanced = obs_data_get_bool(settings, "show_advanced_analysis");
 	const char *warn_text = evaluate_tap_warning_text(filter_source, settings);
 
-	/* In a Track mode the status row says which track the filter listens to and what to check when nothing moves,
-	 * because the audio group is the last one in the panel */
 	static const char *const k_track_keys[] = {
 		"AudioTap.Mode.Track1", "AudioTap.Mode.Track2", "AudioTap.Mode.Track3",
 		"AudioTap.Mode.Track4", "AudioTap.Mode.Track5", "AudioTap.Mode.Track6",
 	};
-	char listens_text[768] = "";
-	if (!warn_text && mode >= (int)VS_TAP_TRACK_1 && mode <= (int)VS_TAP_TRACK_6) {
+
+	const char *target_label = obs_module_text("AudioTap.Mode.Track1");
+	if (mode >= (int)VS_TAP_TRACK_1 && mode <= (int)VS_TAP_TRACK_6) {
+		target_label = obs_module_text(k_track_keys[mode - (int)VS_TAP_TRACK_1]);
+	} else if (mode == (int)VS_TAP_PARENT_SOURCE) {
+		obs_source_t *parent = filter_source ? obs_filter_get_parent(filter_source) : NULL;
+		const char *parent_name = parent ? obs_source_get_name(parent) : NULL;
+		target_label = (parent_name && parent_name[0] != '\0') ? parent_name
+								       : obs_module_text("AudioTap.Mode.ParentSource");
+	} else if (mode == (int)VS_TAP_NAMED_SOURCE) {
+		const char *src_name = obs_data_get_string(settings, "tap_source_name");
+		target_label = (src_name && src_name[0] != '\0') ? src_name
+								 : obs_module_text("AudioTap.Mode.NamedSource");
+	}
+
+	char status_buf[768] = "";
+	bool is_warning = (warn_text != NULL);
+	if (!warn_text && tap && os_atomic_load_bool(&tap->status_has_stepped) &&
+	    (int)os_atomic_load_long(&tap->status_mode) == mode) {
+		const bool hearing = os_atomic_load_bool(&tap->status_audio_present);
+		if (hearing) {
+			snprintf(status_buf, sizeof(status_buf),
+				 vs_text_format("AudioTap.Status.Hearing", "Hearing audio on %s."), target_label);
+		} else {
+			const int silent_sec = (int)os_atomic_load_long(&tap->status_silent_seconds);
+			snprintf(status_buf, sizeof(status_buf),
+				 vs_text_format("AudioTap.Status.SilentFor", "No audio on %s for %d s."), target_label,
+				 silent_sec);
+			is_warning = true;
+		}
+	} else if (!warn_text && mode >= (int)VS_TAP_TRACK_1 && mode <= (int)VS_TAP_TRACK_6) {
+		/* Before the first video tick, or when inspecting without a live tap instance, describe the track. */
 		snprintf(
-			listens_text, sizeof(listens_text),
+			status_buf, sizeof(status_buf),
 			vs_text_format(
 				"AudioTap.Status.ListensTo",
 				"Listens to %s. If nothing moves, play some sound. Then check that the sound goes to this track (Audio Mixer, Advanced Audio Properties, Tracks). You can choose another Audio Input below."),
-			obs_module_text(k_track_keys[mode - (int)VS_TAP_TRACK_1]));
+			target_label);
 	}
-	const char *status_text = warn_text ? warn_text : listens_text;
+	const char *status_text = warn_text ? warn_text : status_buf;
 
 	obs_property_t *p_src = obs_properties_get(props, "tap_source_name");
 	obs_property_t *p_warn = obs_properties_get(props, S_TAP_STATUS_WARNING);
+	obs_property_t *p_refresh = obs_properties_get(props, S_TAP_REFRESH_STATUS);
 	obs_property_t *p_mute = obs_properties_get(props, "react_when_muted");
 	obs_property_t *p_floor = obs_properties_get(props, "floor_db");
 	obs_property_t *p_ceil = obs_properties_get(props, "ceiling_db");
@@ -503,9 +564,11 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 		obs_property_set_visible(p_src, is_named);
 	if (p_warn) {
 		obs_data_set_string(settings, S_TAP_STATUS_WARNING, status_text);
-		obs_property_text_set_info_type(p_warn, warn_text ? OBS_TEXT_INFO_WARNING : OBS_TEXT_INFO_NORMAL);
+		obs_property_text_set_info_type(p_warn, is_warning ? OBS_TEXT_INFO_WARNING : OBS_TEXT_INFO_NORMAL);
 		obs_property_set_visible(p_warn, status_text[0] != '\0');
 	}
+	if (p_refresh)
+		obs_property_set_visible(p_refresh, filter_source != NULL);
 	if (p_mute)
 		obs_property_set_visible(p_mute, is_source);
 	if (p_floor)
@@ -526,7 +589,21 @@ static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_proper
 	return true;
 }
 
-void vs_audio_tap_add_status_property(obs_properties_t *props)
+static bool tap_mode_modified_cb(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	return apply_tap_properties_state((obs_source_t *)priv, NULL, props, settings);
+}
+
+static bool tap_mode_modified_with_tap_cb(void *priv, obs_properties_t *props, obs_property_t *property,
+					  obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	const struct vs_audio_tap *tap = (const struct vs_audio_tap *)priv;
+	return apply_tap_properties_state(tap ? tap->ui_filter_source : NULL, tap, props, settings);
+}
+
+void vs_audio_tap_add_status_property_for_source(obs_properties_t *props, obs_source_t *filter_source)
 {
 	if (!props || obs_properties_get(props, S_TAP_STATUS_WARNING))
 		return;
@@ -534,12 +611,29 @@ void vs_audio_tap_add_status_property(obs_properties_t *props)
 		obs_properties_add_text(props, S_TAP_STATUS_WARNING, obs_module_text("AudioTap.Status"), OBS_TEXT_INFO);
 	obs_property_text_set_info_type(p_warn, OBS_TEXT_INFO_WARNING);
 	obs_property_set_visible(p_warn, false);
+
+	if (filter_source) {
+		obs_properties_add_button2(props, S_TAP_REFRESH_STATUS, obs_module_text("AudioTap.RefreshStatus"),
+					   refresh_tap_status_cb, filter_source);
+	}
 }
 
-void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source)
+void vs_audio_tap_add_status_property(obs_properties_t *props)
+{
+	vs_audio_tap_add_status_property_for_source(props, NULL);
+}
+
+void vs_audio_tap_add_properties_with_tap(obs_properties_t *props, obs_source_t *filter_source,
+					  struct vs_audio_tap *tap)
 {
 	if (!props)
 		return;
+
+	if (tap)
+		tap->ui_filter_source = filter_source;
+
+	obs_property_modified2_t mod_cb = tap ? tap_mode_modified_with_tap_cb : tap_mode_modified_cb;
+	void *mod_priv = tap ? (void *)tap : (void *)filter_source;
 
 	obs_properties_t *grp = obs_properties_create();
 
@@ -553,13 +647,13 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 	obs_property_list_add_int(mode_list, obs_module_text("AudioTap.Mode.Track6"), (int)VS_TAP_TRACK_6);
 	obs_property_list_add_int(mode_list, obs_module_text("AudioTap.Mode.ParentSource"), (int)VS_TAP_PARENT_SOURCE);
 	obs_property_list_add_int(mode_list, obs_module_text("AudioTap.Mode.NamedSource"), (int)VS_TAP_NAMED_SOURCE);
-	obs_property_set_modified_callback2(mode_list, tap_mode_modified_cb, filter_source);
+	obs_property_set_modified_callback2(mode_list, mod_cb, mod_priv);
 
 	obs_property_t *src_list = obs_properties_add_list(grp, "tap_source_name", obs_module_text("AudioTap.Source"),
 							   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(src_list, obs_module_text("AudioTap.Source.None"), "");
 	obs_enum_sources(enum_audio_sources_cb, src_list);
-	obs_property_set_modified_callback2(src_list, tap_mode_modified_cb, filter_source);
+	obs_property_set_modified_callback2(src_list, mod_cb, mod_priv);
 
 	/* Filters that hoist the status row to the top of their panel add it before this group. */
 	if (!obs_properties_get(props, S_TAP_STATUS_WARNING)) {
@@ -567,6 +661,10 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 								 obs_module_text("AudioTap.Status"), OBS_TEXT_INFO);
 		obs_property_text_set_info_type(p_warn, OBS_TEXT_INFO_WARNING);
 		obs_property_set_visible(p_warn, false);
+		if (filter_source) {
+			obs_properties_add_button2(grp, S_TAP_REFRESH_STATUS, obs_module_text("AudioTap.RefreshStatus"),
+						   refresh_tap_status_cb, filter_source);
+		}
 	}
 
 	obs_property_t *p_mute =
@@ -580,12 +678,12 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 
 	obs_property_t *p_ag = obs_properties_add_bool(grp, "auto_gain", obs_module_text("AudioTap.AutoGain"));
 	obs_property_set_long_description(p_ag, obs_module_text("AudioTap.AutoGain.Tooltip"));
-	obs_property_set_modified_callback2(p_ag, tap_mode_modified_cb, filter_source);
+	obs_property_set_modified_callback2(p_ag, mod_cb, mod_priv);
 
 	obs_property_t *p_adv =
 		obs_properties_add_bool(grp, "show_advanced_analysis", obs_module_text("AudioTap.AdvancedAnalysis"));
 	obs_property_set_long_description(p_adv, obs_module_text("AudioTap.AdvancedAnalysis.Tooltip"));
-	obs_property_set_modified_callback2(p_adv, tap_mode_modified_cb, filter_source);
+	obs_property_set_modified_callback2(p_adv, mod_cb, mod_priv);
 
 	obs_property_t *p_gate =
 		obs_properties_add_float_slider(grp, "gate_db", obs_module_text("AudioTap.GateDb"), -80.0, -20.0, 1.0);
@@ -619,8 +717,13 @@ void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_s
 	if (filter_source) {
 		obs_data_t *settings = obs_source_get_settings(filter_source);
 		if (settings) {
-			tap_mode_modified_cb(filter_source, props, NULL, settings);
+			apply_tap_properties_state(filter_source, tap, props, settings);
 			obs_data_release(settings);
 		}
 	}
+}
+
+void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source)
+{
+	vs_audio_tap_add_properties_with_tap(props, filter_source, NULL);
 }

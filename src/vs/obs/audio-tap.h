@@ -54,6 +54,13 @@ struct vs_audio_tap {
 	struct vs_audio_frame current_frame;
 	uint64_t last_video_frame_ts;
 
+	/* Lock-free live audio status snapshot read by Properties UI without taking filter/graphics locks. */
+	volatile long status_mode;
+	volatile bool status_has_stepped;
+	volatile bool status_audio_present;
+	volatile long status_silent_seconds;
+	obs_source_t *ui_filter_source;
+
 	gs_texture_t *tex_spectrum; /* 32x1 GS_R32F dynamic texture */
 	gs_texture_t *tex_fft;      /* 512x2 GS_R32F dynamic texture (Row 0: FFT, Row 1: Waveform) */
 	float fft_tex_staging[VS_FFT_TEX_BINS * 2u];
@@ -93,7 +100,10 @@ void vs_audio_tap_update_from_settings(struct vs_audio_tap *tap, obs_source_t *f
 /* Adds the tap status warning row at the current position (top-level) so it stays visible when the
  * analysis group sits at the bottom of a panel. vs_audio_tap_add_properties then skips adding it again. */
 void vs_audio_tap_add_status_property(obs_properties_t *props);
+void vs_audio_tap_add_status_property_for_source(obs_properties_t *props, obs_source_t *filter_source);
 void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source);
+void vs_audio_tap_add_properties_with_tap(obs_properties_t *props, obs_source_t *filter_source,
+					  struct vs_audio_tap *tap);
 
 #ifdef __cplusplus
 }

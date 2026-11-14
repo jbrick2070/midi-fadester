@@ -13,6 +13,7 @@
 #include "obs/vendor-api.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -233,6 +234,55 @@ static void test_deferred_named_configure_leaves_attach_to_retry(void)
 	obs_source_release(named);
 }
 
+static void test_audio_tap_live_status_property(void)
+{
+	obs_source_t *filter =
+		obs_source_create("visual_sidechain_modulator_filter", "vs-test-live-status", NULL, NULL);
+	assert(filter);
+
+	struct vs_audio_tap tap;
+	assert(vs_audio_tap_init(&tap, false));
+
+	/* 1. 5 seconds of silence -> "No audio on AudioTap.Mode.Track1 for 5 s." */
+	float silent[800] = {0};
+	for (size_t f = 0; f < 300u; f++) {
+		vs_analyzer_push_mono(&tap.analyzer, silent, 800u, (uint64_t)(f + 1u) * 16666667ULL);
+		vs_audio_tap_tick(&tap, filter, 800.0f / 48000.0f);
+	}
+
+	obs_properties_t *props = obs_properties_create();
+	vs_audio_tap_add_status_property_for_source(props, filter);
+	vs_audio_tap_add_properties_with_tap(props, filter, &tap);
+	assert(obs_properties_get(props, "tap_refresh_status") != NULL);
+
+	obs_data_t *settings = obs_source_get_settings(filter);
+	assert(settings);
+	const char *silent_status = obs_data_get_string(settings, "tap_status_warning");
+	assert(strcmp(silent_status, "No audio on AudioTap.Mode.Track1 for 5 s.") == 0);
+	obs_data_release(settings);
+	obs_properties_destroy(props);
+
+	/* 2. Above-gate audio -> "Hearing audio on AudioTap.Mode.Track1." */
+	float tone[800];
+	for (size_t i = 0; i < 800u; i++)
+		tone[i] = 0.25f * sinf(6.28318530718f * 120.0f * (float)i / 48000.0f);
+	vs_analyzer_push_mono(&tap.analyzer, tone, 800u, 6000000000ULL);
+	vs_audio_tap_tick(&tap, filter, 800.0f / 48000.0f);
+
+	props = obs_properties_create();
+	vs_audio_tap_add_status_property_for_source(props, filter);
+	vs_audio_tap_add_properties_with_tap(props, filter, &tap);
+	settings = obs_source_get_settings(filter);
+	assert(settings);
+	const char *hearing_status = obs_data_get_string(settings, "tap_status_warning");
+	assert(strcmp(hearing_status, "Hearing audio on AudioTap.Mode.Track1.") == 0);
+	obs_data_release(settings);
+	obs_properties_destroy(props);
+
+	vs_audio_tap_destroy(&tap);
+	obs_source_release(filter);
+}
+
 int main(void)
 {
 	/* Headless libobs initialization only: no OBS executable, modules, video, audio, or user configuration. */
@@ -276,6 +326,7 @@ int main(void)
 	test_parent_tap_follows_its_filter();
 	test_named_tap_attaches_from_a_lookup();
 	test_deferred_named_configure_leaves_attach_to_retry();
+	test_audio_tap_live_status_property();
 	obs_shutdown();
 	puts("test-modulator-properties: all assertions passed");
 	return 0;

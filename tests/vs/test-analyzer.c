@@ -14,6 +14,7 @@
 #endif
 
 #include "core/analyzer.h"
+#include "core/fader-bridge.h"
 #include "wav-reader.h"
 
 #include <assert.h>
@@ -280,6 +281,132 @@ static void test_aligned_windows_with_delayed_startup(void)
 	vs_analyzer_free(&ana);
 }
 
+static void fill_kick_128bpm_chunk(float *out, size_t frames, size_t start_sample, uint32_t sr)
+{
+	const size_t beat_samples = 22500u; /* 60 / 128 s * 48000 Hz = 22500 samples */
+	for (size_t i = 0; i < frames; i++) {
+		const size_t pos = (start_sample + i) % beat_samples;
+		const float dt = (float)pos / (float)sr;
+		float s = 0.0f;
+		if (dt < 0.160f) {
+			const float env = (1.0f - expf(-dt / 0.002f)) * expf(-dt / 0.038f);
+			s = 0.65f * env * sinf(VS_WAV_TWO_PI * 90.0f * dt);
+		}
+		out[i] = s;
+	}
+}
+
+static void test_silence_freezes_beat_and_resume_restores_phase(void)
+{
+	const uint32_t sr = 48000u;
+	const size_t chunk = 800u; /* 60 fps */
+	const float dt = (float)chunk / (float)sr;
+
+	struct vs_analyzer_config cfg;
+	struct vs_analyzer ana;
+	vs_analyzer_default_config(&cfg);
+	assert(vs_analyzer_init(&ana, &cfg));
+	vs_fader_bridge_reset();
+
+	float buf[800];
+	struct vs_audio_frame frame;
+	uint64_t total_pushed = 0u;
+
+	/* 0. Before any above-gate audio, beat stays frozen at 0 and audio_present is false. */
+	memset(buf, 0, sizeof(buf));
+	for (size_t f = 0; f < 30u; f++) {
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+		assert(!frame.audio_present);
+		assert(frame.beat == 0.0f);
+		assert(frame.beat_confidence == 0.0f);
+	}
+
+	/* 1. 4.0 s of 128 BPM 90 Hz kicks: tempo locks to 128 BPM with high confidence and audio_present == true. */
+	const size_t play_frames = (sr * 4u) / chunk;
+	for (size_t f = 0; f < play_frames; f++) {
+		fill_kick_128bpm_chunk(buf, chunk, f * chunk, sr);
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+		(void)vs_fader_bridge_should_emit_signals(dt, &frame);
+	}
+	assert(frame.audio_present);
+	assert(fabsf(frame.estimated_bpm - 128.0f) <= 2.0f);
+	assert(frame.beat_confidence > 0.85f);
+
+	/* 2. 3.0 s of silence (180 frames): after 2.0 s hold, beat == 0, audio_present == false, and
+	 * signals_changed stops emitting (suppressed by the 1e-3 change gate). */
+	memset(buf, 0, sizeof(buf));
+	int post_hold_emits = 0;
+	for (size_t f = 0; f < 180u; f++) {
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+		const bool emitted = vs_fader_bridge_should_emit_signals(dt, &frame);
+		/* Allow the single transition event when the 2.0 s hold trips (~frame 120), then zero emits after. */
+		if (f >= 135u && emitted)
+			post_hold_emits++;
+	}
+	assert(frame.beat == 0.0f);
+	assert(!frame.audio_present);
+	assert(frame.beat_confidence == 0.0f);
+	assert(post_hold_emits == 0);
+
+	/* 3. Resume 128 BPM click track: audio_present returns immediately and phase restores within two kicks.
+	 * Kick 1 is at resume sample 0; Kick 2 is at resume sample 22500 (~frame 28.125). */
+	bool saw_kick_1 = false;
+	bool saw_kick_2_phase_reset = false;
+	for (size_t f = 0; f <= 31u; f++) {
+		fill_kick_128bpm_chunk(buf, chunk, f * chunk, sr);
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+		if (f <= 2u && frame.kick > 0.65f) {
+			saw_kick_1 = true;
+			assert(frame.audio_present);
+		}
+		if (f >= 27u && f <= 30u && frame.kick > 0.65f && frame.beat < 0.08f)
+			saw_kick_2_phase_reset = true;
+	}
+	assert(saw_kick_1);
+	assert(saw_kick_2_phase_reset);
+	assert(frame.audio_present);
+	assert(fabsf(frame.estimated_bpm - 128.0f) <= 2.0f);
+	assert(frame.beat_confidence >= 0.20f);
+
+	/* Advance to mid-beat after Kick 2 (~0.234 s = 14 frames past frame 28 -> frame 42) and check phase ~0.5. */
+	for (size_t f = 32u; f <= 42u; f++) {
+		fill_kick_128bpm_chunk(buf, chunk, f * chunk, sr);
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+	}
+	assert(fabsf(frame.beat - 0.5f) < 0.12f);
+
+	/* 4. Kickless breakdown (steady 440 Hz pad above gate): audio_present stays true while beat_confidence drops. */
+	for (size_t f = 0; f < 210u; f++) {
+		for (size_t i = 0; i < chunk; i++) {
+			const float t = (float)(f * chunk + i) / (float)sr;
+			buf[i] = 0.25f * sinf(VS_WAV_TWO_PI * 440.0f * t);
+		}
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+	}
+	assert(frame.audio_present);
+	assert(frame.beat_confidence < 0.20f);
+
+	vs_analyzer_free(&ana);
+}
+
 int main(void)
 {
 	assert(vs_wav_ensure_fixtures(VS_TEST_FIXTURES_DIR));
@@ -289,6 +416,7 @@ int main(void)
 	test_custom_hz_flux_after_analyzer_step();
 	test_custom_hz_zero_after_audio_stops();
 	test_aligned_windows_with_delayed_startup();
+	test_silence_freezes_beat_and_resume_restores_phase();
 	printf("test-analyzer: all WAV fixture assertions passed\n");
 	return 0;
 }

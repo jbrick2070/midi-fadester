@@ -58,15 +58,17 @@ enum vs_signal_id {
 	VS_SIG_FADER_FX_8 = 217
 };
 
+#define VS_SILENCE_HOLD_SEC 2.0f
+
 struct vs_audio_frame {
 	float level;                       /* [0.0, 1.0] RMS envelope */
 	float sub_bass;                    /* [0.0, 1.0] 20..60 Hz (from 4096-pt FFT) */
 	float bass;                        /* [0.0, 1.0] 20..250 Hz (from 4096-pt FFT) */
 	float mid;                         /* [0.0, 1.0] 250..4000 Hz (from 2048-pt FFT) */
 	float high;                        /* [0.0, 1.0] 4000..20000 Hz (from 2048-pt FFT) */
-	float kick;                        /* [0.0, 1.0] 40..130 Hz 4096-pt spectral-flux onset */
-	float snare;                       /* [0.0, 1.0] 150..4000 Hz 2048-pt transient onset */
-	float beat;                        /* [0.0, 1.0) phase-locked beat ramp/pulse */
+	float kick;                        /* [0.0, 1.0] 55..130 Hz 4096-pt spectral-flux onset */
+	float snare;                       /* [0.0, 1.0] 250..4000 Hz 2048-pt transient onset */
+	float beat;                        /* [0.0, 1.0) phase-locked beat ramp/pulse (0 after 2 s silence) */
 	float spectral_centroid;           /* [0.0, 1.0] normalized spectral brightness */
 	float spectral_flux;               /* [0.0, 1.0] wideband positive onset flux */
 	float spectrum[VS_SPECTRUM_BANDS]; /* [0.0, 1.0] 32 log-spaced bands (dual-FFT merged) */
@@ -75,6 +77,8 @@ struct vs_audio_frame {
 	float peak_raw;                    /* for obs-shaderfilter audio_peak compat */
 	float magnitude_raw;               /* for obs-shaderfilter audio_magnitude compat */
 	float estimated_bpm;               /* [60.0, 180.0] estimated tempo */
+	float beat_confidence;             /* [0.0, 1.0] IOI regularity & recency confidence */
+	bool audio_present;                /* true while hearing above-gate audio (with 2 s hold) */
 };
 
 struct vs_analyzer_config {
@@ -112,6 +116,8 @@ struct vs_analyzer {
 	float mag_mid[VS_MAX_BINS_MID];
 	uint64_t last_written_samples;
 	float time_since_audio_sec;
+	float silent_or_starved_sec;
+	bool has_seen_audio;
 	bool initialized;
 };
 

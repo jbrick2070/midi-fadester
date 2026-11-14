@@ -1652,7 +1652,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	/* Panel order: Panic's row while it is on, tap status row, Shader Source, Shader Parameters, the Panic hotkey hint,
 	 * Fader Control, then the audio analysis group last so a new user meets the effect before the DSP plumbing. */
 	vs_properties_add_panic_status(props, vs_fader_bridge_is_panic_active());
-	vs_audio_tap_add_status_property(props);
+	vs_audio_tap_add_status_property_for_source(props, sf ? sf->context : NULL);
 
 	/* Snapshot shader compiler state under graphics lock without holding the lock across OBS property creation */
 	char compile_err_snap[1024] = {0};
@@ -1958,7 +1958,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 				 f_grp);
 
 	/* 5. Audio Sidechain & Analysis group (defaulting to Track 1); advanced tuning hidden by default */
-	vs_audio_tap_add_properties(props, sf ? sf->context : NULL);
+	vs_audio_tap_add_properties_with_tap(props, sf ? sf->context : NULL, sf ? &sf->tap : NULL);
 
 	if (sf && sf->context) {
 		obs_data_t *cur_s = obs_source_get_settings(sf->context);

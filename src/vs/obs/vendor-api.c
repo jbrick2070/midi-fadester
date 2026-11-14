@@ -47,6 +47,8 @@ static void fill_signals_data(obs_data_t *data, const struct vs_audio_frame *f)
 	obs_data_set_double(data, "spectral_flux", (double)f->spectral_flux);
 	obs_data_set_double(data, "estimated_bpm", (double)f->estimated_bpm);
 	obs_data_set_double(data, "bpm", (double)f->estimated_bpm);
+	obs_data_set_bool(data, "audio_present", f->audio_present);
+	obs_data_set_double(data, "beat_confidence", (double)f->beat_confidence);
 
 	obs_data_array_t *spec_arr = obs_data_array_create();
 	for (size_t i = 0; i < VS_SPECTRUM_BANDS; i++) {

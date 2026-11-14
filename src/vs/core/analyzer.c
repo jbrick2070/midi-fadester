@@ -141,6 +141,8 @@ void vs_analyzer_reset(struct vs_analyzer *ana)
 		vs_envelope_channel_reset(&ana->env_spectrum[i]);
 	ana->last_written_samples = 0;
 	ana->time_since_audio_sec = 0.0f;
+	ana->silent_or_starved_sec = 0.0f;
+	ana->has_seen_audio = false;
 }
 
 void vs_analyzer_update_config(struct vs_analyzer *ana, const struct vs_analyzer_config *cfg)
@@ -239,6 +241,7 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 
 	const float gate_lin = powf(10.0f, ana->cfg.gate_db / 20.0f);
 	if (starved > VS_ENV_STARVATION_THRESHOLD_SEC || spec_frame.level <= gate_lin) {
+		ana->silent_or_starved_sec += dt_sec;
 		memset(out_frame->fft_bins, 0, sizeof(out_frame->fft_bins));
 		for (uint32_t i = 0; i < VS_FFT_TEX_BINS; i++)
 			out_frame->waveform[i] = 0.5f;
@@ -247,6 +250,8 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 		out_frame->kick = (starved > VS_ENV_STARVATION_THRESHOLD_SEC) ? 0.0f : onset_res.kick;
 		out_frame->snare = (starved > VS_ENV_STARVATION_THRESHOLD_SEC) ? 0.0f : onset_res.snare;
 	} else {
+		ana->silent_or_starved_sec = 0.0f;
+		ana->has_seen_audio = true;
 		memcpy(out_frame->fft_bins, spec_frame.fft_bins, sizeof(out_frame->fft_bins));
 		memcpy(out_frame->waveform, spec_frame.waveform, sizeof(out_frame->waveform));
 		out_frame->spectral_centroid = spec_frame.spectral_centroid;
@@ -255,7 +260,17 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 		out_frame->snare = onset_res.snare;
 	}
 
-	out_frame->beat = onset_res.beat;
+	if (!ana->has_seen_audio || ana->silent_or_starved_sec >= VS_SILENCE_HOLD_SEC) {
+		vs_onset_freeze_beat(&ana->onset);
+		out_frame->audio_present = false;
+		out_frame->beat = 0.0f;
+		out_frame->beat_confidence = 0.0f;
+	} else {
+		out_frame->audio_present = true;
+		out_frame->beat = onset_res.beat;
+		out_frame->beat_confidence = onset_res.beat_confidence;
+	}
+
 	out_frame->peak_raw = spec_frame.peak_raw;
 	out_frame->magnitude_raw = spec_frame.magnitude_raw;
 	out_frame->estimated_bpm = onset_res.estimated_bpm;

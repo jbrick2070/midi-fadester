@@ -69,6 +69,56 @@ void vs_onset_reset(struct vs_onset *onset)
 	vs_onset_init(onset, &saved);
 }
 
+void vs_onset_freeze_beat(struct vs_onset *onset)
+{
+	if (!onset)
+		return;
+	onset->beat_phase = 0.0f;
+	onset->beat_confidence = 0.0f;
+	onset->last_kick_onset_sec = -1.0;
+	onset->bpm_history_count = 0u;
+	onset->bpm_history_pos = 0u;
+}
+
+static float compute_beat_confidence(const struct vs_onset *onset)
+{
+	if (!onset || onset->bpm_history_count == 0u || onset->last_kick_onset_sec < 0.0)
+		return 0.0f;
+
+	const uint32_t count = onset->bpm_history_count;
+	float periods[VS_BEAT_IOI_HISTORY];
+	float sum_period = 0.0f;
+	for (uint32_t i = 0; i < count; i++) {
+		const float bpm = onset->bpm_history[i];
+		const float p = (bpm >= VS_BEAT_MIN_BPM * 0.5f) ? (60.0f / bpm) : 0.5f;
+		periods[i] = p;
+		sum_period += p;
+	}
+	const float mean_period = sum_period / (float)count;
+	if (mean_period <= 1e-6f)
+		return 0.0f;
+
+	float sum_sq = 0.0f;
+	for (uint32_t i = 0; i < count; i++) {
+		const float d = periods[i] - mean_period;
+		sum_sq += d * d;
+	}
+	const float stddev = sqrtf(sum_sq / (float)count);
+	const float cv = stddev / mean_period;
+	const float regularity = clamp01(1.0f - (cv / 0.20f));
+	const float fill = clamp01((float)count / 4.0f);
+
+	const double beat_period = (onset->estimated_bpm > 1.0f) ? (60.0 / (double)onset->estimated_bpm) : 0.5;
+	const double since_kick = onset->elapsed_sec - onset->last_kick_onset_sec;
+	float recency = 1.0f;
+	if (since_kick > 1.5 * beat_period) {
+		const float missed = (float)((since_kick / beat_period) - 1.5);
+		recency = clamp01(1.0f - (missed / 6.5f));
+	}
+
+	return clamp01(fill * regularity * recency);
+}
+
 void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *mag_mid, float dt_sec,
 		   struct vs_onset_result *out_res)
 {
@@ -205,10 +255,13 @@ void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *ma
 		out_beat -= floorf(out_beat);
 	}
 
+	onset->beat_confidence = compute_beat_confidence(onset);
+
 	out_res->kick = clamp01(onset->kick_env);
 	out_res->snare = clamp01(onset->snare_env);
 	out_res->beat = clamp01(out_beat);
 	out_res->estimated_bpm = onset->estimated_bpm;
+	out_res->beat_confidence = onset->beat_confidence;
 
 	onset->elapsed_sec += (double)dt_sec;
 

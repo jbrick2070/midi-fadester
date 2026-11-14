@@ -177,6 +177,10 @@ static void test_vendor_payload_fields_trigger_events(void)
 	assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
 	frame.estimated_bpm = 120.0f;
 	assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
+	frame.audio_present = true;
+	assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
+	frame.beat_confidence = 0.85f;
+	assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
 	for (size_t i = 0; i < VS_SPECTRUM_BANDS; i++) {
 		frame.spectrum[i] = 0.5f;
 		assert(vs_fader_bridge_should_emit_signals(0.04f, &frame));
@@ -254,6 +258,8 @@ struct signal_capture_ctx {
 	float snare;
 	float beat_phase;
 	float bpm;
+	float beat_confidence;
+	bool audio_present;
 	bool ok;
 };
 
@@ -269,6 +275,8 @@ static void on_visual_sidechain_signals_captured(void *data, calldata_t *cd)
 	cap->snare = (float)calldata_float(cd, "snare");
 	cap->beat_phase = (float)calldata_float(cd, "beat_phase");
 	cap->bpm = (float)calldata_float(cd, "bpm");
+	cap->beat_confidence = (float)calldata_float(cd, "beat_confidence");
+	cap->audio_present = calldata_bool(cd, "audio_present");
 	cap->ok = calldata_bool(cd, "ok");
 }
 
@@ -313,6 +321,8 @@ static void test_in_process_bridge_fake_proc_and_signal(void)
 	frame.snare = 0.12f;
 	frame.beat = 0.75f;
 	frame.estimated_bpm = 128.0f;
+	frame.beat_confidence = 0.92f;
+	frame.audio_present = true;
 
 	assert(vs_fader_bridge_on_tick(0.01667f, &frame));
 	assert(fake_fadester.poll_calls == 2); /* 1 at attach + 1 on this tick */
@@ -328,6 +338,8 @@ static void test_in_process_bridge_fake_proc_and_signal(void)
 	assert(float_near(sig_cap.snare, 0.12f, 1e-6f));
 	assert(float_near(sig_cap.beat_phase, 0.75f, 1e-6f));
 	assert(float_near(sig_cap.bpm, 128.0f, 1e-5f));
+	assert(float_near(sig_cap.beat_confidence, 0.92f, 1e-6f));
+	assert(sig_cap.audio_present);
 
 	/* Verify visual_sidechain_get_signals proc returns the exact contract fields */
 	struct calldata cd;
@@ -342,6 +354,8 @@ static void test_in_process_bridge_fake_proc_and_signal(void)
 	assert(float_near((float)calldata_float(&cd, "snare"), 0.12f, 1e-6f));
 	assert(float_near((float)calldata_float(&cd, "beat_phase"), 0.75f, 1e-6f));
 	assert(float_near((float)calldata_float(&cd, "bpm"), 128.0f, 1e-5f));
+	assert(float_near((float)calldata_float(&cd, "beat_confidence"), 0.92f, 1e-6f));
+	assert(calldata_bool(&cd, "audio_present"));
 	calldata_free(&cd);
 
 	/* Emit midi_fadester_fader_changed signal and verify immediate fader slot update without polling */
