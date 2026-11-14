@@ -58,7 +58,8 @@ enum mfd_mix_delivery {
 	MFD_MIX_CONFIRMED,
 	MFD_MIX_DECLINED,
 	MFD_MIX_UNAVAILABLE,
-	MFD_MIX_NO_REPLY
+	MFD_MIX_NO_REPLY,
+	MFD_MIX_CONFLICT
 };
 
 struct mfd_fader_slot {
@@ -406,6 +407,10 @@ struct mfd_engine {
 	struct mfd_pending_fader_emit pending_fader_emits[MFD_MAX_FADER_SLOTS];
 	/* Paces mix requests; each mix-master slot keeps its own latest one. The OBS call runs outside the slot lock. */
 	float mix_send_wait;
+	char mix_provider_id[64];
+	char last_mix_sent_id[64];
+	uint64_t last_mix_sent_ns;
+	bool mix_provider_conflict;
 
 	uint64_t config_topology_rev;
 	uint64_t telemetry_rev;

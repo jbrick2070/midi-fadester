@@ -2324,6 +2324,85 @@ int main(void)
 	memset(mix, 0, sizeof(*mix));
 	memset(mix2, 0, sizeof(*mix2));
 
+	/* Provider identity pinning: first provider.id pins for the session; a second provider.id latches conflict. */
+	mix->enabled = mix->cached_available = true;
+	mix->target_type = MFD_TARGET_MIX_MASTER;
+	mix->addr = (struct mfd_midi_addr){.type = MFD_MIDI_CC, .number = 23};
+	mfd_calibration_set(&mix->cal, false, 0, 127);
+	push_midi_cc(&eng, 0, 23, 100);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(mix->mix_delivery == MFD_MIX_WAITING);
+	obs_data_t *prov_a = obs_data_create();
+	obs_data_set_string(prov_a, "id", "11111111-1111-4111-8111-111111111111");
+	obs_data_set_string(prov_a, "name", "Fadester Companion");
+	obs_data_set_string(prov_a, "version", "1.0.0");
+	obs_data_t *prov_b = obs_data_create();
+	obs_data_set_string(prov_b, "id", "22222222-2222-4222-8222-222222222222");
+	obs_data_set_string(prov_b, "name", "Fadester Companion");
+	obs_data_set_string(prov_b, "version", "1.0.0");
+	obs_data_t *prov_reply = obs_data_create();
+	obs_data_t *prov_receipt = obs_data_create();
+	obs_data_set_string(prov_reply, "namespace", MFD_MIX_NAMESPACE);
+	obs_data_set_string(prov_reply, "op", "reply");
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
+	obs_data_set_bool(prov_reply, "ok", true);
+	obs_data_set_bool(prov_reply, "enabled", true);
+	obs_data_set_double(prov_reply, "db", -6.0);
+	obs_data_set_obj(prov_reply, "provider", prov_a);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(obs_data_get_bool(prov_receipt, "accepted") && mix->mix_delivery == MFD_MIX_CONFIRMED);
+	REQUIRE(strcmp(eng.mix_provider_id, "11111111-1111-4111-8111-111111111111") == 0);
+	/* A reply for an unrelated request id from another provider is ignored without falsely latching conflict. */
+	obs_data_set_string(prov_reply, "id", "00000000-0000-4000-8000-000000000099");
+	obs_data_set_obj(prov_reply, "provider", prov_b);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(!obs_data_get_bool(prov_receipt, "accepted") && !eng.mix_provider_conflict);
+	/* Second provider answering the same request id latches conflict and displays "Two mix providers are answering". */
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
+	obs_data_set_obj(prov_reply, "provider", prov_b);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(!obs_data_get_bool(prov_receipt, "accepted") && eng.mix_provider_conflict);
+	REQUIRE(mix->mix_delivery == MFD_MIX_CONFLICT);
+	char conflict_display[96];
+	mfd_engine_format_slot_display_value_ex(mix, 0.5f, false, conflict_display, sizeof(conflict_display));
+	REQUIRE(strcmp(conflict_display, "Two mix providers are answering") == 0);
+	/* Once conflict is latched, further MIDI moves refuse to broadcast mix.set requests. */
+	const int reqs_before_conflict_move = ws_log.mix_requests;
+	push_midi_cc(&eng, 0, 23, 30);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(ws_log.mix_requests == reqs_before_conflict_move && mix->mix_delivery == MFD_MIX_CONFLICT);
+	/* Resetting the Master slot clears the latched conflict; a silent-provider timeout also drops the pin so a restarted provider re-pins cleanly. */
+	mfd_engine_reset_slot_mode_state(&eng, mix, MFD_TARGET_MIX_MASTER);
+	REQUIRE(!eng.mix_provider_conflict && eng.mix_provider_id[0] == '\0');
+	push_midi_cc(&eng, 0, 23, 90);
+	mfd_engine_tick(&eng, 0.06f);
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
+	obs_data_set_obj(prov_reply, "provider", prov_a);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(strcmp(eng.mix_provider_id, "11111111-1111-4111-8111-111111111111") == 0);
+	push_midi_cc(&eng, 0, 23, 60);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(mix->mix_delivery == MFD_MIX_WAITING);
+	mix->mix_sent_ns = (os_gettime_ns() > 11000000000ULL) ? (os_gettime_ns() - 11000000000ULL) : 1ULL;
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(mix->mix_delivery == MFD_MIX_NO_REPLY && eng.mix_provider_id[0] == '\0' && !eng.mix_provider_conflict);
+	push_midi_cc(&eng, 0, 23, 80);
+	mfd_engine_tick(&eng, 0.06f);
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
+	obs_data_set_obj(prov_reply, "provider", prov_b);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(obs_data_get_bool(prov_receipt, "accepted") && mix->mix_delivery == MFD_MIX_CONFIRMED);
+	REQUIRE(!eng.mix_provider_conflict && strcmp(eng.mix_provider_id, "22222222-2222-4222-8222-222222222222") == 0);
+	obs_data_release(prov_a);
+	obs_data_release(prov_b);
+	obs_data_release(prov_reply);
+	obs_data_release(prov_receipt);
+	eng.mix_provider_id[0] = '\0';
+	eng.last_mix_sent_id[0] = '\0';
+	eng.last_mix_sent_ns = 0;
+	eng.mix_provider_conflict = false;
+	memset(mix, 0, sizeof(*mix));
+
 	/* 1. load_profile across verified + beta profiles and error check on unknown profile */
 	obs_data_t *req = obs_data_create();
 	obs_data_t *res = obs_data_create();
