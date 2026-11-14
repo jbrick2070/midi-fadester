@@ -784,6 +784,8 @@ static const struct mfd_scene_graph_ops g_fake_sg_ops = {
 	fake_op_get_filter_enabled,
 	fake_op_set_filter_enabled,
 	fake_op_get_output_source_name,
+	NULL,
+	NULL,
 };
 
 struct mt_stress_ctx {
@@ -4722,6 +4724,126 @@ int main(void)
 		}
 		REQUIRE(saw_color_host && saw_blue_host);
 		obs_data_array_release(cat_hosts);
+
+		/* P1-8: get_catalog layer entries expose has_internal_opacity and opacity_slot */
+		obs_data_array_t *cat_scenes = obs_data_get_array(res, "scenes");
+		REQUIRE(cat_scenes != NULL && obs_data_array_count(cat_scenes) >= 2U);
+		bool saw_color_layer = false;
+		bool saw_color2_layer = false;
+		for (size_t si = 0U; si < obs_data_array_count(cat_scenes); ++si) {
+			obs_data_t *so = obs_data_array_item(cat_scenes, si);
+			obs_data_array_t *slayers = obs_data_get_array(so, "layers");
+			REQUIRE(slayers != NULL);
+			for (size_t li = 0U; li < obs_data_array_count(slayers); ++li) {
+				obs_data_t *lo = obs_data_array_item(slayers, li);
+				const char *lnm = obs_data_get_string(lo, "name");
+				REQUIRE(obs_data_has_user_value(lo, "has_internal_opacity"));
+				REQUIRE(obs_data_has_user_value(lo, "opacity_slot"));
+				if (strcmp(lnm, "Color") == 0) {
+					saw_color_layer = true;
+					REQUIRE(obs_data_get_bool(lo, "has_internal_opacity"));
+					REQUIRE(strcmp(obs_data_get_string(lo, "opacity_slot"), "") == 0);
+				} else if (strcmp(lnm, "Color 2") == 0) {
+					saw_color2_layer = true;
+					REQUIRE(!obs_data_get_bool(lo, "has_internal_opacity"));
+					REQUIRE(strcmp(obs_data_get_string(lo, "opacity_slot"), "") == 0);
+				}
+				obs_data_release(lo);
+			}
+			obs_data_array_release(slayers);
+			obs_data_release(so);
+		}
+		REQUIRE(saw_color_layer && saw_color2_layer);
+		obs_data_array_release(cat_scenes);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		/* Assign fx_3 as an enabled layer_opacity slot on Color -> opacity_slot == "fx_3"; disable -> "" */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_3");
+		obs_data_set_string(req, "target_mode", "layer_opacity");
+		obs_data_set_string(req, "scene", "OneLayerScene");
+		obs_data_set_string(req, "source_a", "Color");
+		obs_data_set_bool(req, "enabled", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		mfd_vendor_handle_get_catalog(req, res, &eng);
+		cat_scenes = obs_data_get_array(res, "scenes");
+		REQUIRE(cat_scenes != NULL);
+		bool saw_one_layer_owned = false;
+		bool saw_blue_owned = false;
+		for (size_t si = 0U; si < obs_data_array_count(cat_scenes); ++si) {
+			obs_data_t *so = obs_data_array_item(cat_scenes, si);
+			const char *sc_nm = obs_data_get_string(so, "name");
+			obs_data_array_t *slayers = obs_data_get_array(so, "layers");
+			for (size_t li = 0U; li < obs_data_array_count(slayers); ++li) {
+				obs_data_t *lo = obs_data_array_item(slayers, li);
+				const char *lnm = obs_data_get_string(lo, "name");
+				if (strcmp(lnm, "Color") == 0) {
+					REQUIRE(obs_data_get_bool(lo, "has_internal_opacity"));
+					REQUIRE(strcmp(obs_data_get_string(lo, "opacity_slot"), "fx_3") == 0);
+					if (strcmp(sc_nm, "OneLayerScene") == 0) {
+						saw_one_layer_owned = true;
+					} else if (strcmp(sc_nm, "Blue") == 0) {
+						saw_blue_owned = true;
+					}
+				} else if (strcmp(lnm, "Color 2") == 0) {
+					REQUIRE(!obs_data_get_bool(lo, "has_internal_opacity"));
+					REQUIRE(strcmp(obs_data_get_string(lo, "opacity_slot"), "") == 0);
+				}
+				obs_data_release(lo);
+			}
+			obs_data_array_release(slayers);
+			obs_data_release(so);
+		}
+		REQUIRE(saw_one_layer_owned && saw_blue_owned);
+		obs_data_array_release(cat_scenes);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_3");
+		obs_data_set_bool(req, "enabled", false);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		mfd_vendor_handle_get_catalog(req, res, &eng);
+		cat_scenes = obs_data_get_array(res, "scenes");
+		for (size_t si = 0U; si < obs_data_array_count(cat_scenes); ++si) {
+			obs_data_t *so = obs_data_array_item(cat_scenes, si);
+			obs_data_array_t *slayers = obs_data_get_array(so, "layers");
+			for (size_t li = 0U; li < obs_data_array_count(slayers); ++li) {
+				obs_data_t *lo = obs_data_array_item(slayers, li);
+				if (strcmp(obs_data_get_string(lo, "name"), "Color") == 0) {
+					REQUIRE(strcmp(obs_data_get_string(lo, "opacity_slot"), "") == 0);
+				}
+				obs_data_release(lo);
+			}
+			obs_data_array_release(slayers);
+			obs_data_release(so);
+		}
+		obs_data_array_release(cat_scenes);
+		obs_data_release(req);
+		obs_data_release(res);
+
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_3");
+		obs_data_set_string(req, "target_mode", "unassigned");
+		obs_data_set_bool(req, "enabled", true);
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
 		obs_data_release(req);
 		obs_data_release(res);
 
