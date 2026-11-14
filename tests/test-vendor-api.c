@@ -5573,6 +5573,94 @@ int main(void)
 
 	fake_sg_cleanup_filters(&fake_sg);
 	mfd_vendor_set_event_sink(NULL, NULL);
+
+#ifdef MFD_TBAR_VECTORS_FILE
+	/* 17: Shared suite T-bar safety controller-disconnect vectors (tests/vectors/tbar-safety.json) */
+	{
+		obs_data_t *vec_root = obs_data_create_from_json_file(MFD_TBAR_VECTORS_FILE);
+		REQUIRE(vec_root != NULL);
+		obs_data_array_t *disc_vecs = obs_data_get_array(vec_root, "controller_disconnect_vectors");
+		REQUIRE(disc_vecs != NULL && obs_data_array_count(disc_vecs) > 0U);
+		const char *strict_env = getenv("MFD_STRICT_TBAR_CONTRACT");
+		bool strict_contract = (strict_env && strcmp(strict_env, "1") == 0);
+
+		for (size_t di = 0U; di < obs_data_array_count(disc_vecs); ++di) {
+			obs_data_t *dv = obs_data_array_item(disc_vecs, di);
+			const char *id = obs_data_get_string(dv, "id");
+			float throw_pos = (float)obs_data_get_double(dv, "throw_position");
+			obs_data_t *exp = obs_data_get_obj(dv, "contract_expected");
+			obs_data_t *divs = obs_data_get_obj(dv, "known_divergences");
+			obs_data_t *mf_div = divs ? obs_data_get_obj(divs, "midi_fadester") : NULL;
+			REQUIRE(exp != NULL);
+
+			struct mfd_engine *disc_eng = (struct mfd_engine *)calloc(1U, sizeof(*disc_eng));
+			REQUIRE(disc_eng != NULL);
+			REQUIRE(mfd_engine_init_mutex(disc_eng));
+			disc_eng->initialized = true;
+			disc_eng->tbar_driver = mock_tbar_driver;
+			disc_eng->tbar_unlatch = mock_tbar_unlatch;
+			disc_eng->studio_mode_override_set = true;
+			disc_eng->studio_mode_override = true;
+			mfd_engine_load_apc40_defaults(disc_eng);
+
+			g_mock_tbar_aborts = 0;
+			g_mock_tbar_completions = 0;
+			g_mock_tbar_latched = false;
+			g_mock_tbar_last_pos = 0;
+
+			char move_err[160] = {0};
+			REQUIRE(mfd_engine_set_slot_value(disc_eng, 0, throw_pos, false, "api", move_err,
+							  sizeof(move_err)));
+			REQUIRE(disc_eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+
+			/* Simulate physical USB MIDI unplug detected by health poll */
+			disc_eng->midi_dev.is_open = true;
+			disc_eng->midi_dev.handle = NULL;
+			snprintf(disc_eng->midi_dev.opened_name, sizeof(disc_eng->midi_dev.opened_name), "%s",
+				 "__unplugged_test_device__");
+			mfd_engine_poll_midi_health_on_ui_thread(disc_eng);
+			REQUIRE(!disc_eng->midi_dev.is_open);
+			REQUIRE(disc_eng->midi_dev.error_kind == MFD_WINMM_ERR_DISCONNECTED);
+
+			bool left_open = (disc_eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+			const char *slot_state = (disc_eng->fader_slots[0].tbar_state == MFD_TBAR_IDLE)
+							 ? "closed_idle"
+							 : "remains_throwing";
+
+			bool matches_contract = (strcmp(slot_state, obs_data_get_string(exp, "slot_state")) == 0) &&
+						(left_open == obs_data_get_bool(exp, "transition_left_open"));
+			if (matches_contract) {
+				REQUIRE(mf_div == NULL);
+				printf("  [VECTOR PASS] %s: slot_state=%s, transition_left_open=%s\n", id, slot_state,
+				       left_open ? "true" : "false");
+			} else {
+				REQUIRE(mf_div != NULL);
+				REQUIRE(strcmp(slot_state, obs_data_get_string(mf_div, "slot_state")) == 0);
+				REQUIRE(left_open == obs_data_get_bool(mf_div, "transition_left_open"));
+				printf("  [VECTOR FAIL (recorded divergence %s)] %s: expected(slot_state=%s, transition_left_open=%s) vs observed(slot_state=%s, transition_left_open=%s)\n",
+				       obs_data_get_string(mf_div, "decision_id"), id,
+				       obs_data_get_string(exp, "slot_state"),
+				       obs_data_get_bool(exp, "transition_left_open") ? "true" : "false", slot_state,
+				       left_open ? "true" : "false");
+				REQUIRE(!strict_contract);
+			}
+
+			mfd_engine_destroy_mutex(disc_eng);
+			free(disc_eng);
+			if (mf_div) {
+				obs_data_release(mf_div);
+			}
+			if (divs) {
+				obs_data_release(divs);
+			}
+			obs_data_release(exp);
+			obs_data_release(dv);
+		}
+		obs_data_array_release(disc_vecs);
+		obs_data_release(vec_root);
+	}
+#endif
+
 	mfd_text_set_lookup(NULL);
 	text_lookup_destroy(obs_module_lookup);
 	obs_module_lookup = NULL;
