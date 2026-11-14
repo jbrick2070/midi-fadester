@@ -5622,17 +5622,55 @@ int main(void)
 			REQUIRE(!disc_eng->midi_dev.is_open);
 			REQUIRE(disc_eng->midi_dev.error_kind == MFD_WINMM_ERR_DISCONNECTED);
 
+			/* Repeated ticks and health polls during the same disconnect must never send a second abort */
+			os_atomic_set_bool(&disc_eng->midi_dev.device_closed_unexpectedly, true);
+			mfd_engine_tick(disc_eng, 0.016f);
+			mfd_engine_tick(disc_eng, 0.016f);
+			mfd_engine_poll_midi_health_on_ui_thread(disc_eng);
+
 			bool left_open = (disc_eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
 			const char *slot_state = (disc_eng->fader_slots[0].tbar_state == MFD_TBAR_IDLE)
 							 ? "closed_idle"
 							 : "remains_throwing";
+			int max_aborts = (int)obs_data_get_int(exp, "max_aborts");
+			if (max_aborts <= 0) {
+				max_aborts = 1;
+			}
+			bool expected_auto_resume = obs_data_get_bool(exp, "auto_resume_on_reconnect");
 
-			bool matches_contract = (strcmp(slot_state, obs_data_get_string(exp, "slot_state")) == 0) &&
-						(left_open == obs_data_get_bool(exp, "transition_left_open"));
+			/* Simulate device reconnect while physical crossfader sits mid-track: must NOT auto-resume */
+			disc_eng->midi_dev.is_open = true;
+			os_atomic_set_bool(&disc_eng->midi_dev.device_closed_unexpectedly, false);
+			disc_eng->midi_disconnect_handled = false;
+			mfd_midi_parser_reset_cc_state(&disc_eng->midi_parser);
+			push_midi_cc(disc_eng, disc_eng->fader_slots[0].addr.channel,
+				     disc_eng->fader_slots[0].addr.number, 64U);
+			push_midi_cc(disc_eng, disc_eng->fader_slots[0].addr.channel,
+				     disc_eng->fader_slots[0].addr.number, 66U);
+			mfd_engine_tick(disc_eng, 0.016f);
+			bool auto_resumed = (disc_eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+
+			/* Also verify MIM_CLOSE / device_closed_unexpectedly path on video tick */
+			os_atomic_set_bool(&disc_eng->midi_dev.device_closed_unexpectedly, true);
+			REQUIRE(mfd_engine_set_slot_value(disc_eng, 0, throw_pos, false, "api", move_err,
+							  sizeof(move_err)));
+			REQUIRE(disc_eng->fader_slots[0].tbar_state == MFD_TBAR_THROWING);
+			int aborts_before_tick_disc = g_mock_tbar_aborts;
+			mfd_engine_tick(disc_eng, 0.016f);
+			mfd_engine_tick(disc_eng, 0.016f);
+			REQUIRE(disc_eng->fader_slots[0].tbar_state == MFD_TBAR_IDLE);
+			REQUIRE(g_mock_tbar_aborts - aborts_before_tick_disc == 1);
+
+			bool matches_contract =
+				(strcmp(slot_state, obs_data_get_string(exp, "slot_state")) == 0) &&
+				(left_open == obs_data_get_bool(exp, "transition_left_open")) &&
+				(aborts_before_tick_disc == 1 && aborts_before_tick_disc <= max_aborts) &&
+				(auto_resumed == expected_auto_resume);
 			if (matches_contract) {
 				REQUIRE(mf_div == NULL);
-				printf("  [VECTOR PASS] %s: slot_state=%s, transition_left_open=%s\n", id, slot_state,
-				       left_open ? "true" : "false");
+				printf("  [VECTOR PASS] %s: slot_state=%s, transition_left_open=%s, aborts=%d, auto_resume=%s\n",
+				       id, slot_state, left_open ? "true" : "false", aborts_before_tick_disc,
+				       auto_resumed ? "true" : "false");
 			} else {
 				REQUIRE(mf_div != NULL);
 				REQUIRE(strcmp(slot_state, obs_data_get_string(mf_div, "slot_state")) == 0);

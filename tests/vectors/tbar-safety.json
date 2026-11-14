@@ -5,7 +5,8 @@
     "obs_finish_min_tick": 921,
     "obs_cancel_max_tick": 102,
     "controller_rail_zone": 0.03,
-    "midi_start_deadband": 0.06
+    "midi_start_deadband": 0.06,
+    "companion_edge": 0.005
   },
   "tick_vectors": [
     {
@@ -69,6 +70,48 @@
       "obs_release_zone": "finish"
     }
   ],
+  "edge_vectors": [
+    {
+      "id": "companion_edge_cancel_at_0_005",
+      "start_position": 0.35,
+      "target_position": 0.005,
+      "contract_expected": {
+        "snapped_endpoint": "cancel",
+        "final_scene": "program",
+        "transition_left_open": false
+      }
+    },
+    {
+      "id": "companion_edge_finish_at_0_995",
+      "start_position": 0.35,
+      "target_position": 0.995,
+      "contract_expected": {
+        "snapped_endpoint": "finish",
+        "final_scene": "preview",
+        "transition_left_open": false
+      }
+    },
+    {
+      "id": "companion_edge_open_at_0_01",
+      "start_position": 0.0,
+      "target_position": 0.01,
+      "contract_expected": {
+        "snapped_endpoint": "open",
+        "final_scene": "preview",
+        "transition_left_open": true
+      }
+    },
+    {
+      "id": "companion_edge_open_at_0_99",
+      "start_position": 0.0,
+      "target_position": 0.99,
+      "contract_expected": {
+        "snapped_endpoint": "open",
+        "final_scene": "preview",
+        "transition_left_open": true
+      }
+    }
+  ],
   "release_once_vectors": [
     {
       "id": "complete_throw_with_overshoot",
@@ -126,10 +169,11 @@
         "writes_replayed": 0,
         "needs_operator_reset": false,
         "transition_left_open": false,
-        "outcome": "auto_closed"
+        "outcome": "auto_closed",
+        "companion_final_scene": "program"
       },
-      "known_divergences": {
-        "companion": {
+      "known_exceptions": {
+        "macos_host": {
           "decision_id": "DEC-1",
           "writes_replayed": 0,
           "needs_operator_reset": true,
@@ -147,10 +191,11 @@
         "writes_replayed": 0,
         "needs_operator_reset": false,
         "transition_left_open": false,
-        "outcome": "auto_closed"
+        "outcome": "auto_closed",
+        "companion_final_scene": "preview"
       },
-      "known_divergences": {
-        "companion": {
+      "known_exceptions": {
+        "macos_host": {
           "decision_id": "DEC-1",
           "writes_replayed": 0,
           "needs_operator_reset": true,
@@ -168,10 +213,11 @@
         "writes_replayed": 0,
         "needs_operator_reset": false,
         "transition_left_open": false,
-        "outcome": "auto_closed"
+        "outcome": "auto_closed",
+        "companion_final_scene": "preview"
       },
-      "known_divergences": {
-        "companion": {
+      "known_exceptions": {
+        "macos_host": {
           "decision_id": "DEC-1",
           "writes_replayed": 0,
           "needs_operator_reset": true,
@@ -188,14 +234,50 @@
         { "cursor": 0.45 },
         { "cursor": 0.45 }
       ],
+      "reconnect_transition": "Fade",
       "contract_expected": {
-        "action": "adopt_open_throw"
-      },
-      "known_divergences": {
-        "companion": {
-          "decision_id": "DEC-2",
-          "action": "cancel_to_program"
-        }
+        "action": "adopt_open_throw",
+        "companion_action": "cancel_to_program",
+        "companion_transition_left_open": false
+      }
+    },
+    {
+      "id": "reconnect_motionless_open_fade_above_half",
+      "samples": [
+        { "cursor": 0.65 },
+        { "cursor": 0.65 }
+      ],
+      "reconnect_transition": "Fade",
+      "contract_expected": {
+        "action": "adopt_open_throw",
+        "companion_action": "finish_to_preview",
+        "companion_transition_left_open": false
+      }
+    },
+    {
+      "id": "reconnect_non_fade_below_half",
+      "samples": [
+        { "cursor": 0.35 },
+        { "cursor": 0.35 }
+      ],
+      "reconnect_transition": "Cut",
+      "contract_expected": {
+        "action": "adopt_open_throw",
+        "companion_action": "cancel_to_program",
+        "companion_transition_left_open": false
+      }
+    },
+    {
+      "id": "reconnect_non_fade_above_half",
+      "samples": [
+        { "cursor": 0.65 },
+        { "cursor": 0.65 }
+      ],
+      "reconnect_transition": "Cut",
+      "contract_expected": {
+        "action": "adopt_open_throw",
+        "companion_action": "finish_to_preview",
+        "companion_transition_left_open": false
       }
     },
     {
@@ -204,8 +286,11 @@
         { "cursor": 0.3 },
         { "cursor": 0.55 }
       ],
+      "reconnect_transition": "Fade",
       "contract_expected": {
-        "action": "leave_alone"
+        "action": "leave_alone",
+        "companion_action": "leave_alone",
+        "companion_transition_left_open": false
       }
     }
   ],
@@ -235,12 +320,6 @@
       "obs_version": "33.0.2",
       "contract_expected": {
         "eligible": true
-      },
-      "known_divergences": {
-        "companion": {
-          "decision_id": "DEC-3",
-          "eligible": false
-        }
       }
     },
     {
@@ -250,12 +329,6 @@
       "obs_version": "33.1.0",
       "contract_expected": {
         "eligible": true
-      },
-      "known_divergences": {
-        "companion": {
-          "decision_id": "DEC-3",
-          "eligible": false
-        }
       }
     },
     {
@@ -292,14 +365,9 @@
       "throw_position": 0.5,
       "contract_expected": {
         "slot_state": "closed_idle",
-        "transition_left_open": false
-      },
-      "known_divergences": {
-        "midi_fadester": {
-          "decision_id": "DEC-4",
-          "slot_state": "remains_throwing",
-          "transition_left_open": true
-        }
+        "transition_left_open": false,
+        "max_aborts": 1,
+        "auto_resume_on_reconnect": false
       }
     }
   ]
