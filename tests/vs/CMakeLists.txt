@@ -75,6 +75,13 @@ visual_sidechain_add_test(
   ${_analyzer_srcs}
 )
 visual_sidechain_add_test(
+  test-vendor-api
+  test-vendor-api.c
+  "${CMAKE_SOURCE_DIR}/src/obs/vendor-api.c"
+  ${_analyzer_srcs}
+)
+target_link_libraries(test-vendor-api PRIVATE plugin-support)
+visual_sidechain_add_test(
   test-modulator-properties
   test-modulator-properties.c
   "${CMAKE_SOURCE_DIR}/src/obs/modulator-filter.c"

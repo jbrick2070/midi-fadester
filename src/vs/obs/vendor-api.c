@@ -29,11 +29,33 @@ struct obs_websocket_request_callback {
 
 static proc_handler_t *g_ws_ph = NULL;
 static obs_websocket_vendor g_vendor = NULL;
+static vs_safety_walk_schedule_fn g_safety_walk_scheduler = NULL;
+
+void vs_vendor_api_set_safety_walk_scheduler(vs_safety_walk_schedule_fn fn)
+{
+	g_safety_walk_scheduler = fn;
+}
+
+void vs_vendor_api_reset(void)
+{
+	g_ws_ph = NULL;
+	g_vendor = NULL;
+	g_safety_walk_scheduler = NULL;
+}
+
+static void fill_safety_data(obs_data_t *data, bool panic, int64_t since_ms)
+{
+	obs_data_set_string(data, "version", PLUGIN_VERSION);
+	obs_data_set_int(data, "api_version", 1);
+	obs_data_set_bool(data, "panic", panic);
+	obs_data_set_int(data, "since_ms", (long long)(panic ? since_ms : 0));
+}
 
 static void fill_signals_data(obs_data_t *data, const struct vs_audio_frame *f)
 {
 	obs_data_set_string(data, "version", PLUGIN_VERSION);
 	obs_data_set_int(data, "api_version", 1);
+	obs_data_set_bool(data, "panic", vs_fader_bridge_is_panic_active());
 	obs_data_set_double(data, "level", (double)f->level);
 	obs_data_set_double(data, "sub_bass", (double)f->sub_bass);
 	obs_data_set_double(data, "bass", (double)f->bass);
@@ -85,6 +107,84 @@ void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_d
 		tub_decks_describe(response_data);
 }
 
+void vs_vendor_handle_get_safety(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(request_data);
+	UNUSED_PARAMETER(priv_data);
+	if (!response_data)
+		return;
+
+	bool panic = false;
+	int64_t since_ms = 0;
+	vs_fader_bridge_get_safety(&panic, &since_ms);
+
+	obs_data_set_bool(response_data, "success", true);
+	fill_safety_data(response_data, panic, since_ms);
+}
+
+void vs_vendor_api_emit_safety_changed(void)
+{
+	if (!g_ws_ph || !g_vendor)
+		return;
+
+	bool panic = false;
+	int64_t since_ms = 0;
+	vs_fader_bridge_get_safety(&panic, &since_ms);
+
+	obs_data_t *event_data = obs_data_create();
+	fill_safety_data(event_data, panic, since_ms);
+
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_ptr(&cd, "vendor", g_vendor);
+	calldata_set_string(&cd, "type", "safety_changed");
+	calldata_set_ptr(&cd, "data", event_data);
+	proc_handler_call(g_ws_ph, "vendor_event_emit", &cd);
+	calldata_free(&cd);
+
+	obs_data_release(event_data);
+}
+
+void vs_vendor_handle_panic(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(request_data);
+	UNUSED_PARAMETER(priv_data);
+
+	vs_fader_bridge_trigger_panic();
+	if (g_safety_walk_scheduler)
+		g_safety_walk_scheduler(true);
+
+	bool panic = false;
+	int64_t since_ms = 0;
+	vs_fader_bridge_get_safety(&panic, &since_ms);
+
+	if (response_data) {
+		obs_data_set_bool(response_data, "success", true);
+		fill_safety_data(response_data, panic, since_ms);
+	}
+	vs_vendor_api_emit_safety_changed();
+}
+
+void vs_vendor_handle_restore(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(request_data);
+	UNUSED_PARAMETER(priv_data);
+
+	vs_fader_bridge_trigger_restore();
+	if (g_safety_walk_scheduler)
+		g_safety_walk_scheduler(false);
+
+	bool panic = false;
+	int64_t since_ms = 0;
+	vs_fader_bridge_get_safety(&panic, &since_ms);
+
+	if (response_data) {
+		obs_data_set_bool(response_data, "success", true);
+		fill_safety_data(response_data, panic, since_ms);
+	}
+	vs_vendor_api_emit_safety_changed();
+}
+
 void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
 			   bool is_primary_track)
 {
@@ -129,11 +229,8 @@ static bool register_one_vendor_request(proc_handler_t *ws_ph, obs_websocket_ven
 	return success;
 }
 
-bool vs_vendor_api_register(void)
+bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t *global_sh)
 {
-	proc_handler_t *global_ph = obs_get_proc_handler();
-	signal_handler_t *global_sh = obs_get_signal_handler();
-
 	vs_fader_bridge_attach(global_ph, global_sh);
 
 	if (!global_ph) {
@@ -168,8 +265,17 @@ bool vs_vendor_api_register(void)
 
 	const bool r1 = register_one_vendor_request(ws_ph, vendor, "get_signals", vs_vendor_handle_get_signals, NULL);
 	const bool r2 = register_one_vendor_request(ws_ph, vendor, "get_decks", vs_vendor_handle_get_decks, NULL);
+	const bool r3 = register_one_vendor_request(ws_ph, vendor, "get_safety", vs_vendor_handle_get_safety, NULL);
+	const bool r4 = register_one_vendor_request(ws_ph, vendor, "panic", vs_vendor_handle_panic, NULL);
+	const bool r5 = register_one_vendor_request(ws_ph, vendor, "restore", vs_vendor_handle_restore, NULL);
 
-	obs_log(LOG_INFO, "Registered obs-websocket vendor '%s' (get_signals=%d, get_decks=%d)", VS_VENDOR_NAME,
-		(int)r1, (int)r2);
-	return r1 && r2;
+	obs_log(LOG_INFO,
+		"Registered obs-websocket vendor '%s' (get_signals=%d, get_decks=%d, get_safety=%d, panic=%d, restore=%d)",
+		VS_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5);
+	return r1 && r2 && r3 && r4 && r5;
+}
+
+bool vs_vendor_api_register(void)
+{
+	return vs_vendor_api_register_with_ph(obs_get_proc_handler(), obs_get_signal_handler());
 }

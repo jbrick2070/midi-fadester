@@ -23,12 +23,21 @@ extern "C" {
 
 #define VS_VENDOR_NAME "visual-sidechain"
 
+typedef void (*vs_safety_walk_schedule_fn)(bool panic);
+
+void vs_vendor_api_set_safety_walk_scheduler(vs_safety_walk_schedule_fn fn);
 bool vs_vendor_api_register(void);
+bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t *global_sh);
+void vs_vendor_api_reset(void);
 void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
 			   bool is_primary_track);
+void vs_vendor_api_emit_safety_changed(void);
 
 void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_get_safety(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_panic(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_restore(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 
 #ifdef __cplusplus
 }

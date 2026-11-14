@@ -11,12 +11,14 @@
 
 #include "fader-bridge.h"
 
+#include <util/platform.h>
 #include <util/threading.h>
 
 #include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 static const char *const k_fader_slot_ids[VS_FADER_SLOT_COUNT] = {
 	"crossfader", "fader_1", "fader_2", "fader_3", "fader_4", "fader_5", "fader_6", "fader_7", "fader_8",
@@ -36,6 +38,7 @@ static signal_handler_t *g_sh = NULL;
 static bool g_midi_fadester_loaded = false;
 static int g_poll_slot_idx = 0;
 static volatile bool g_panic_active = false;
+static int64_t g_panic_since_ms = 0;
 
 static float g_fader_values[VS_FADER_SLOT_COUNT];
 /* the slot holds a value Midi Fadester gave (a poll that answered ok, a pushed change, a direct set), not the 0 it
@@ -154,6 +157,7 @@ void vs_fader_bridge_reset(void)
 	os_atomic_set_bool(&g_panic_active, false);
 
 	pthread_mutex_lock(&g_bridge_mutex);
+	g_panic_since_ms = 0;
 	g_poll_slot_idx = 0;
 	memset(&g_latest_signals, 0, sizeof(g_latest_signals));
 	memset(&g_last_emitted_signals, 0, sizeof(g_last_emitted_signals));
@@ -650,19 +654,47 @@ bool vs_fader_bridge_is_strobe_or_flash_param(const char *param_name)
 	       contains_word_ci(param_name, "reactivity");
 }
 
+static int64_t current_unix_ms(void)
+{
+	struct timespec ts;
+	if (timespec_get(&ts, TIME_UTC) == TIME_UTC)
+		return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000L);
+	const int64_t mono_ms = (int64_t)(os_gettime_ns() / 1000000ULL);
+	return mono_ms > 0 ? mono_ms : 1;
+}
+
 void vs_fader_bridge_trigger_panic(void)
 {
+	pthread_mutex_lock(&g_bridge_mutex);
+	if (!os_atomic_load_bool(&g_panic_active) || g_panic_since_ms <= 0)
+		g_panic_since_ms = current_unix_ms();
 	os_atomic_set_bool(&g_panic_active, true);
+	pthread_mutex_unlock(&g_bridge_mutex);
 }
 
 void vs_fader_bridge_trigger_restore(void)
 {
+	pthread_mutex_lock(&g_bridge_mutex);
 	os_atomic_set_bool(&g_panic_active, false);
+	g_panic_since_ms = 0;
+	pthread_mutex_unlock(&g_bridge_mutex);
 }
 
 bool vs_fader_bridge_is_panic_active(void)
 {
 	return os_atomic_load_bool(&g_panic_active);
+}
+
+void vs_fader_bridge_get_safety(bool *out_panic, int64_t *out_since_ms)
+{
+	pthread_mutex_lock(&g_bridge_mutex);
+	const bool active = os_atomic_load_bool(&g_panic_active);
+	const int64_t since = active ? g_panic_since_ms : 0;
+	pthread_mutex_unlock(&g_bridge_mutex);
+	if (out_panic)
+		*out_panic = active;
+	if (out_since_ms)
+		*out_since_ms = since;
 }
 
 bool vs_fader_bridge_should_shader_passthrough(bool filter_panic_passthrough, bool has_compiled_effect)

@@ -142,6 +142,7 @@ bool vs_fader_bridge_is_strobe_or_flash_param(const char *param_name);
 void vs_fader_bridge_trigger_panic(void);
 void vs_fader_bridge_trigger_restore(void);
 bool vs_fader_bridge_is_panic_active(void);
+void vs_fader_bridge_get_safety(bool *out_panic, int64_t *out_since_ms);
 bool vs_fader_bridge_should_shader_passthrough(bool filter_panic_passthrough, bool has_compiled_effect);
 void vs_fader_bridge_apply_panic_to_slots(struct vs_panic_param_slot *slots, size_t count);
 /*
