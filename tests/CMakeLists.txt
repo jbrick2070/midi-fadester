@@ -85,6 +85,10 @@ midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
 midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
 midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c" "${_core}/mfd-text.c")
 midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
+target_compile_definitions(
+  test-tbar-logic
+  PRIVATE "MFD_TBAR_VECTORS_FILE=\"${CMAKE_SOURCE_DIR}/tests/vectors/tbar-safety.json\""
+)
 midi_fadester_add_test(test-filter-mod test-filter-mod.c "${_core}/filter-math.c" "${_core}/mfd-text.c")
 midi_fadester_add_test(
   test-ui-sentences
@@ -123,6 +127,10 @@ add_executable(
 )
 target_include_directories(test-vendor-api PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_compile_definitions(test-vendor-api PRIVATE "MFD_TEST_LOCALE_FILE=\"${CMAKE_SOURCE_DIR}/data/locale/en-US.ini\"")
+target_compile_definitions(
+  test-vendor-api
+  PRIVATE "MFD_TBAR_VECTORS_FILE=\"${CMAKE_SOURCE_DIR}/tests/vectors/tbar-safety.json\""
+)
 target_link_libraries(test-vendor-api PRIVATE OBS::libobs OBS::obs-frontend-api plugin-support ${_midi_libraries})
 add_test(NAME test-vendor-api COMMAND test-vendor-api)
 set_tests_properties(test-vendor-api PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
