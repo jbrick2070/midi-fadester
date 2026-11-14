@@ -970,6 +970,15 @@ static void on_fake_signal(void *data, calldata_t *cd)
 	sig->value = (float)calldata_float(cd, "value");
 }
 
+static void on_dead_vs_proc(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(cd);
+	int *calls = (int *)data;
+	if (calls) {
+		++(*calls);
+	}
+}
+
 static bool start_config_test_throw(struct mfd_engine *eng)
 {
 	mfd_engine_cancel_setup_session(eng);
@@ -2596,6 +2605,9 @@ int main(void)
 	struct fake_signal_log sig_log;
 	memset(&sig_log, 0, sizeof(sig_log));
 	signal_handler_connect(fake_sh, "midi_fadester_fader_changed", on_fake_signal, &sig_log);
+	int dead_vs_proc_calls = 0;
+	proc_handler_add(fake_ph, "void visual_sidechain_set_fader_slot(in string slot, in float value)",
+			 on_dead_vs_proc, &dead_vs_proc_calls);
 
 	/* Advance tick so slot 1 is ready to emit immediately */
 	mfd_engine_tick(&eng, 0.05f);
@@ -2612,7 +2624,7 @@ int main(void)
 		0);
 	calldata_free(&cd);
 
-	/* 9b. Valid midi_fadester_set_fader_value emits midi_fadester_fader_changed signal */
+	/* 9b. Valid midi_fadester_set_fader_value emits midi_fadester_fader_changed signal without dead VS proc call */
 	calldata_init(&cd);
 	calldata_set_string(&cd, "slot", "fader_1");
 	calldata_set_float(&cd, "value", 0.625);
@@ -2622,6 +2634,7 @@ int main(void)
 	calldata_free(&cd);
 
 	REQUIRE(sig_log.count == 1);
+	REQUIRE(dead_vs_proc_calls == 0);
 	REQUIRE(strcmp(sig_log.slot, "fader_1") == 0);
 	REQUIRE(fabsf(sig_log.value - 0.625f) < 1e-5f);
 	REQUIRE(strcmp(sig_log.origin, "api") == 0);
