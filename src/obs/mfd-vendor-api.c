@@ -26,6 +26,34 @@ static void *g_event_sink_user_data = NULL;
 static volatile bool g_vendor_shutting_down = false;
 static volatile bool g_mix_reply_registered = false;
 
+static bool parse_mix_provider_id(obs_data_t *reply, bool *out_has_provider, char *out_id, size_t out_size)
+{
+	*out_has_provider = false;
+	if (out_size > 0)
+		out_id[0] = '\0';
+	obs_data_item_t *item = obs_data_item_byname(reply, "provider");
+	if (!item)
+		return true;
+	if (obs_data_item_gettype(item) != OBS_DATA_OBJECT) {
+		obs_data_item_release(&item);
+		return false;
+	}
+	obs_data_t *prov = obs_data_item_get_obj(item);
+	obs_data_item_release(&item);
+	if (!prov)
+		return false;
+	const char *pid = obs_data_get_string(prov, "id");
+	const char *pname = obs_data_get_string(prov, "name");
+	const char *pver = obs_data_get_string(prov, "version");
+	bool valid = pid && *pid && pname && *pname && pver && *pver;
+	if (valid) {
+		snprintf(out_id, out_size, "%s", pid);
+		*out_has_provider = true;
+	}
+	obs_data_release(prov);
+	return valid;
+}
+
 void mfd_vendor_handle_mix_reply(obs_data_t *reply, obs_data_t *response, void *priv)
 {
 	struct mfd_engine *eng = priv;
@@ -37,7 +65,29 @@ void mfd_vendor_handle_mix_reply(obs_data_t *reply, obs_data_t *response, void *
 	const char *id = obs_data_get_string(reply, "id");
 	if (!*id || !obs_data_has_user_value(reply, "ok") || !obs_data_has_user_value(reply, "enabled"))
 		return;
+	bool has_provider = false;
+	char reply_provider_id[64];
+	if (!parse_mix_provider_id(reply, &has_provider, reply_provider_id, sizeof(reply_provider_id)))
+		return;
 	mfd_engine_lock(eng);
+	if (eng->mix_provider_conflict) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	if (has_provider && eng->mix_provider_id[0] != '\0' && strcmp(eng->mix_provider_id, reply_provider_id) != 0) {
+		eng->mix_provider_conflict = true;
+		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+			struct mfd_fader_slot *slot = &eng->fader_slots[i];
+			if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER)
+				continue;
+			slot->mix_delivery = MFD_MIX_CONFLICT;
+			slot->mix_request_id[0] = '\0';
+			slot->mix_sent_ns = 0;
+		}
+		mfd_engine_mark_ui_dirty(eng, false);
+		mfd_engine_unlock(eng);
+		return;
+	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
 		if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER || strcmp(slot->mix_request_id, id) ||
@@ -61,6 +111,8 @@ void mfd_vendor_handle_mix_reply(obs_data_t *reply, obs_data_t *response, void *
 			snprintf(slot->mix_reason, sizeof(slot->mix_reason), "%s",
 				 obs_data_get_string(reply, "message"));
 		}
+		if (has_provider && eng->mix_provider_id[0] == '\0')
+			snprintf(eng->mix_provider_id, sizeof(eng->mix_provider_id), "%s", reply_provider_id);
 		slot->mix_request_id[0] = '\0';
 		slot->mix_sent_ns = 0;
 		obs_data_set_bool(response, "accepted", true);
@@ -82,6 +134,15 @@ void mfd_vendor_send_mix_set(struct mfd_engine *eng, int slot_index, uint64_t re
 	if (!slot->enabled || slot->target_type != MFD_TARGET_MIX_MASTER ||
 	    eng->slot_config_rev[slot_index] != revision ||
 	    (eng->setup_session.active && eng->setup_session.slot_index == slot_index)) {
+		mfd_engine_unlock(eng);
+		bfree(id);
+		return;
+	}
+	if (eng->mix_provider_conflict) {
+		slot->mix_delivery = MFD_MIX_CONFLICT;
+		slot->mix_request_id[0] = '\0';
+		slot->mix_sent_ns = 0;
+		mfd_engine_mark_ui_dirty(eng, false);
 		mfd_engine_unlock(eng);
 		bfree(id);
 		return;

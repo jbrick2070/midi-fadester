@@ -559,6 +559,9 @@ void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, 
 		case MFD_MIX_UNAVAILABLE:
 			label = mfd_text_or_english(translate, "Mix.Unavailable", "Mix request unavailable");
 			break;
+		case MFD_MIX_CONFLICT:
+			label = mfd_text_or_english(translate, "Mix.Conflict", "Two mix providers are answering");
+			break;
 		default:
 			label = mfd_text_or_english(translate, "Readout.MixMasterIdle", "Needs Fadester Companion");
 			break;
