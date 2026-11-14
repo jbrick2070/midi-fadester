@@ -231,3 +231,21 @@ set_tests_properties(
   check-shader-flash-safety-catches-faults
   PROPERTIES PASS_REGULAR_EXPRESSION "shader flash safety: .*ungated-flash\\.shader.*unguarded raw transient"
 )
+
+# Suite naming pass invariants across all locale files (P1-7)
+add_test(
+  NAME check-product-naming
+  COMMAND "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale" -P
+          "${CMAKE_CURRENT_SOURCE_DIR}/check-product-naming.cmake"
+)
+add_test(
+  NAME check-product-naming-catches-faults
+  COMMAND "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/product-naming-bad" -P
+          "${CMAKE_CURRENT_SOURCE_DIR}/check-product-naming.cmake"
+)
+set_tests_properties(
+  check-product-naming-catches-faults
+  PROPERTIES
+    PASS_REGULAR_EXPRESSION
+    "product naming check failed:.*contains legacy product name 'Stream Deck Fadester'.*Hotkey\\.Restore must say 'Restore visuals'"
+)

@@ -274,9 +274,8 @@ static bool consume_decks_tick_dirty(uint64_t now_ns)
 {
 	bool should_emit = false;
 	pthread_mutex_lock(&g_decks_mutex);
-	if (g_decks_tick_dirty &&
-	    (!g_decks_last_tick_emit_ns || now_ns < g_decks_last_tick_emit_ns ||
-	     now_ns - g_decks_last_tick_emit_ns >= TUB_DECKS_EVENT_INTERVAL_NS)) {
+	if (g_decks_tick_dirty && (!g_decks_last_tick_emit_ns || now_ns < g_decks_last_tick_emit_ns ||
+				   now_ns - g_decks_last_tick_emit_ns >= TUB_DECKS_EVENT_INTERVAL_NS)) {
 		g_decks_tick_dirty = false;
 		g_decks_last_tick_emit_ns = now_ns;
 		should_emit = true;
@@ -641,7 +640,7 @@ static const struct {
 	obs_hotkey_func func;
 } k_hotkeys[TUB_HOTKEY_COUNT] = {
 	{"tubester_deck.play_pause", "Tubester.Hotkey.PlayPause", "Play / Pause", on_hotkey_play_pause},
-	{"tubester_deck.cue_to_start", "Tubester.Hotkey.CueToStart", "Cue to Start", on_hotkey_cue_to_start},
+	{"tubester_deck.cue_to_start", "Tubester.Hotkey.CueToStart", "Cue to start", on_hotkey_cue_to_start},
 	{"tubester_deck.speed_up", "Tubester.Hotkey.SpeedUp", "Speed Up", on_hotkey_speed_up},
 	{"tubester_deck.speed_down", "Tubester.Hotkey.SpeedDown", "Speed Down", on_hotkey_speed_down},
 	{"tubester_deck.normal_speed", "Tubester.Hotkey.NormalSpeed", "Normal Speed", on_hotkey_normal_speed},
@@ -1995,8 +1994,8 @@ enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tu
 
 	for (size_t i = 0; i < count; i++) {
 		const char *source_name = "";
-		obs_source_t *parent_src =
-			candidates[i].parent ? obs_weak_source_get_source(candidates[i].parent) : NULL;
+		obs_source_t *parent_src = candidates[i].parent ? obs_weak_source_get_source(candidates[i].parent)
+								: NULL;
 		if (parent_src && obs_source_get_name(parent_src))
 			source_name = obs_source_get_name(parent_src);
 
