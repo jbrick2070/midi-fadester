@@ -381,6 +381,48 @@ static void test_vendor_tempo_requests_and_events(void)
 	assert(calldata_bool(&cd, "bpm_locked"));
 	calldata_free(&cd);
 
+	/* 5. After a tap chain while unlocked, live analyzer frames advance global BPM & bar_index so a later
+	 * lock_bpm or new tap chain never publishes stale tap values or rewinds bar_index. */
+	obs_data_t *unlock_req = obs_data_create();
+	obs_data_set_bool(unlock_req, "locked", false);
+	obs_data_t *unlock_resp = call_req_with_data("lock_bpm", unlock_req);
+	assert(obs_data_get_bool(unlock_resp, "success"));
+	obs_data_release(unlock_resp);
+	obs_data_release(unlock_req);
+
+	for (int i = 0; i < 4; i++) {
+		obs_data_t *resp = obs_data_create();
+		vs_vendor_tap_tempo_at(100.0 + (double)i * 0.5, resp);
+		obs_data_release(resp);
+	}
+
+	struct vs_audio_frame live_later;
+	memset(&live_later, 0, sizeof(live_later));
+	live_later.estimated_bpm = 134.0f;
+	live_later.bpm_locked = false;
+	live_later.beat = 0.25f;
+	live_later.beat_index = 2u;
+	live_later.bar_phase = 0.5625f;
+	live_later.bar_index = 25u;
+	live_later.audio_present = true;
+	vs_fader_bridge_publish_signals(&live_later);
+
+	obs_data_t *lock_live_req = obs_data_create();
+	obs_data_set_bool(lock_live_req, "locked", true);
+	obs_data_t *lock_live_resp = call_req_with_data("lock_bpm", lock_live_req);
+	assert(obs_data_get_bool(lock_live_resp, "success"));
+	assert(fabs(obs_data_get_double(lock_live_resp, "bpm") - 134.0) < 1e-4);
+	assert(obs_data_get_int(lock_live_resp, "beat_index") == 2);
+	assert(obs_data_get_int(lock_live_resp, "bar_index") == 25);
+	obs_data_release(lock_live_resp);
+	obs_data_release(lock_live_req);
+
+	obs_data_t *new_tap_resp = obs_data_create();
+	vs_vendor_tap_tempo_at(200.0, new_tap_resp);
+	assert(obs_data_get_bool(new_tap_resp, "success"));
+	assert(obs_data_get_int(new_tap_resp, "bar_index") >= 26);
+	obs_data_release(new_tap_resp);
+
 	vs_vendor_api_reset();
 	vs_fader_bridge_reset();
 	proc_handler_destroy(g_fake_ws_ph);

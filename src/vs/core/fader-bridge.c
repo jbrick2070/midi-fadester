@@ -570,7 +570,8 @@ void vs_fader_bridge_apply_tempo_snapshot(const struct vs_tempo_snapshot *snap)
 	g_latest_signals.beat = snap->beat_phase;
 	g_latest_signals.beat_index = snap->beat_index;
 	g_latest_signals.bar_phase = snap->bar_phase;
-	g_latest_signals.bar_index = snap->bar_index;
+	if (snap->bar_index > g_latest_signals.bar_index)
+		g_latest_signals.bar_index = snap->bar_index;
 	g_last_emitted_signals = g_latest_signals;
 	g_since_last_emit_sec = 0.0f;
 	g_has_emitted_once = true;

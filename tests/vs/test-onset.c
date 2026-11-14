@@ -469,6 +469,16 @@ static void test_tempo_tap_lock_gap_and_resync(void)
 	assert(res.bar_phase < 0.02f);
 	assert(res.bar_index == bar_before_resync + 1u);
 
+	/* 4. bar_phase and beat_phase stay strictly in [0, 1) even at double values just below 4.0. */
+	struct vs_tempo near_wrap;
+	struct vs_tempo_snapshot near_snap;
+	vs_tempo_init(&near_wrap, 120.0f);
+	near_wrap.bar_beats = nextafter(4.0, 0.0);
+	vs_tempo_snapshot(&near_wrap, &near_snap);
+	assert(near_snap.beat_index == 3u);
+	assert(near_snap.beat_phase >= 0.0f && near_snap.beat_phase < 1.0f);
+	assert(near_snap.bar_phase >= 0.0f && near_snap.bar_phase < 1.0f);
+
 	free(mag_low);
 	free(mag_mid);
 }

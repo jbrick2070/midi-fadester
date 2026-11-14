@@ -30,13 +30,14 @@ static inline bool is_finite_f64(double v)
 	return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
 }
 
-static float clamp01(float v)
+static float clamp01_open(double v)
 {
-	if (!is_finite_f32(v) || v <= 0.0f)
+	if (!is_finite_f64(v) || v <= 0.0)
 		return 0.0f;
-	if (v >= 1.0f)
-		return 1.0f;
-	return v;
+	const float f = (float)v;
+	if (f >= 1.0f)
+		return nextafterf(1.0f, 0.0f);
+	return f;
 }
 
 static float clamp_bpm(float bpm)
@@ -106,15 +107,15 @@ void vs_tempo_snapshot_with_sync_offset(const struct vs_tempo *t, float sync_off
 	if (shifted_beats < 0.0 || shifted_beats >= 4.0)
 		shifted_beats = 0.0;
 
-	const float b = (float)shifted_beats;
-	const uint32_t beat_idx = ((uint32_t)floorf(b)) % VS_TEMPO_BEATS_PER_BAR;
-	const float beat_frac = b - floorf(b);
+	const double beat_floor = floor(shifted_beats);
+	const uint32_t beat_idx = ((uint32_t)beat_floor) % VS_TEMPO_BEATS_PER_BAR;
+	const double beat_frac = shifted_beats - beat_floor;
 
 	out->bpm = bpm;
 	out->bpm_locked = t->bpm_locked;
-	out->beat_phase = clamp01(beat_frac);
+	out->beat_phase = clamp01_open(beat_frac);
 	out->beat_index = beat_idx;
-	out->bar_phase = clamp01(b * 0.25f);
+	out->bar_phase = clamp01_open(shifted_beats * 0.25);
 	out->bar_index = t->bar_index + extra_bars;
 	out->tap_count = t->tap_count;
 }
@@ -320,16 +321,14 @@ void vs_tempo_global_observe_live(float bpm, uint32_t beat_index, float bar_phas
 {
 	pthread_mutex_lock(&g_tempo_mutex);
 	ensure_global_inited_locked();
-	if (!g_global_tempo.bpm_locked && g_global_tempo.tap_count == 0u && is_finite_f32(bpm))
+	if (!g_global_tempo.bpm_locked && is_finite_f32(bpm))
 		g_global_tempo.bpm = clamp_bpm(bpm);
-	if (g_global_tempo.tap_count == 0u) {
-		if (is_finite_f32(bar_phase) && bar_phase >= 0.0f && bar_phase < 1.0f)
-			g_global_tempo.bar_beats = (double)bar_phase * 4.0;
-		else
-			g_global_tempo.bar_beats = (double)(beat_index % VS_TEMPO_BEATS_PER_BAR);
-		if (bar_index >= g_global_tempo.bar_index)
-			g_global_tempo.bar_index = bar_index;
-	}
+	if (is_finite_f32(bar_phase) && bar_phase >= 0.0f && bar_phase < 1.0f)
+		g_global_tempo.bar_beats = (double)bar_phase * 4.0;
+	else
+		g_global_tempo.bar_beats = (double)(beat_index % VS_TEMPO_BEATS_PER_BAR);
+	if (bar_index > g_global_tempo.bar_index)
+		g_global_tempo.bar_index = bar_index;
 	pthread_mutex_unlock(&g_tempo_mutex);
 }
 
@@ -421,7 +420,8 @@ bool vs_tempo_global_sync_instance(struct vs_tempo *t, bool *out_clear_ioi_histo
 			case VS_TEMPO_CMD_TAP:
 				t->bpm = c->bpm;
 				t->bar_beats = (double)c->beat_index;
-				t->bar_index = c->bar_index;
+				if (c->bar_index > t->bar_index)
+					t->bar_index = c->bar_index;
 				t->has_kick_aligned = true;
 				clear_ioi = true;
 				break;
