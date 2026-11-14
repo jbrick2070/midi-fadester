@@ -161,6 +161,29 @@
       }
     },
     {
+      "id": "mid_throw_helper_failure_10pct",
+      "kind": "mid_throw_uncertain",
+      "throw_position": 0.1,
+      "attempt_position": 0.2,
+      "contract_expected": {
+        "writes_replayed": 0,
+        "needs_operator_reset": false,
+        "transition_left_open": false,
+        "outcome": "auto_closed",
+        "final_scene": "program",
+        "companion_final_scene": "program"
+      },
+      "known_exceptions": {
+        "macos_host": {
+          "decision_id": "DEC-1",
+          "writes_replayed": 0,
+          "needs_operator_reset": true,
+          "transition_left_open": true,
+          "outcome": "latched_needs_reset"
+        }
+      }
+    },
+    {
       "id": "mid_throw_helper_failure_30pct",
       "kind": "mid_throw_uncertain",
       "throw_position": 0.3,
@@ -170,7 +193,54 @@
         "needs_operator_reset": false,
         "transition_left_open": false,
         "outcome": "auto_closed",
+        "final_scene": "program",
         "companion_final_scene": "program"
+      },
+      "known_exceptions": {
+        "macos_host": {
+          "decision_id": "DEC-1",
+          "writes_replayed": 0,
+          "needs_operator_reset": true,
+          "transition_left_open": true,
+          "outcome": "latched_needs_reset"
+        }
+      }
+    },
+    {
+      "id": "mid_throw_helper_failure_49pct",
+      "kind": "mid_throw_uncertain",
+      "throw_position": 0.49,
+      "attempt_position": 0.6,
+      "contract_expected": {
+        "writes_replayed": 0,
+        "needs_operator_reset": false,
+        "transition_left_open": false,
+        "outcome": "auto_closed",
+        "final_scene": "program",
+        "companion_final_scene": "program"
+      },
+      "known_exceptions": {
+        "macos_host": {
+          "decision_id": "DEC-1",
+          "writes_replayed": 0,
+          "needs_operator_reset": true,
+          "transition_left_open": true,
+          "outcome": "latched_needs_reset"
+        }
+      }
+    },
+    {
+      "id": "mid_throw_helper_failure_50pct",
+      "kind": "mid_throw_uncertain",
+      "throw_position": 0.5,
+      "attempt_position": 0.65,
+      "contract_expected": {
+        "writes_replayed": 0,
+        "needs_operator_reset": false,
+        "transition_left_open": false,
+        "outcome": "auto_closed",
+        "final_scene": "preview",
+        "companion_final_scene": "preview"
       },
       "known_exceptions": {
         "macos_host": {
@@ -192,6 +262,30 @@
         "needs_operator_reset": false,
         "transition_left_open": false,
         "outcome": "auto_closed",
+        "final_scene": "preview",
+        "companion_final_scene": "preview"
+      },
+      "known_exceptions": {
+        "macos_host": {
+          "decision_id": "DEC-1",
+          "writes_replayed": 0,
+          "needs_operator_reset": true,
+          "transition_left_open": true,
+          "outcome": "latched_needs_reset"
+        }
+      }
+    },
+    {
+      "id": "mid_throw_helper_failure_90pct",
+      "kind": "mid_throw_uncertain",
+      "throw_position": 0.9,
+      "attempt_position": 1.0,
+      "contract_expected": {
+        "writes_replayed": 0,
+        "needs_operator_reset": false,
+        "transition_left_open": false,
+        "outcome": "auto_closed",
+        "final_scene": "preview",
         "companion_final_scene": "preview"
       },
       "known_exceptions": {
@@ -214,6 +308,7 @@
         "needs_operator_reset": false,
         "transition_left_open": false,
         "outcome": "auto_closed",
+        "final_scene": "preview",
         "companion_final_scene": "preview"
       },
       "known_exceptions": {
