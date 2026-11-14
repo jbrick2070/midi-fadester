@@ -196,10 +196,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	grid->addWidget(card_volume_, 1, 1);
 	grid->addWidget(card_filter_, 2, 0);
 	card_master_mix_ = create_mode_card_button(page1, QStringLiteral("mfdCardMasterMix"), MFD_TARGET_MIX_MASTER,
-						   mfdText("Target.MixMaster", "Fadester mix master"),
+						   mfdText("Target.MixMaster", "Whole mix"),
 						   mfdText("Setup.Card.MixMaster.Description",
-							   "Fade all OBS mixer inputs together. Needs the Fadester "
-							   "Companion app."));
+							   "Fade all OBS mixer inputs together. Needs Fadester "
+							   "Companion."));
 	grid->addWidget(card_master_mix_, 2, 1);
 	p1_lay->addLayout(grid, 1);
 
@@ -245,8 +245,8 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p2_lay->addWidget(p2_prompt);
 	step2_master_mix_info_ = new QLabel(
 		mfdText("Setup.MixMaster.Help",
-			"Start the Fadester Companion app and turn on its option for all OBS mixer inputs. This control "
-			"then moves all of them together. The strip shows the app's answer."),
+			"Start Fadester Companion and turn on its option for all OBS mixer inputs. This control "
+			"then moves all of them together. The strip shows Fadester Companion's answer."),
 		page2);
 	step2_master_mix_info_->setWordWrap(true);
 	p2_lay->addWidget(step2_master_mix_info_);

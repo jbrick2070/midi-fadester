@@ -563,9 +563,8 @@ public:
 		auto *btn_sd_dismiss =
 			new QPushButton(mfdText("Dialog.StreamDeck.Hide", "Hide"), stream_deck_companion_card_);
 		btn_sd_dismiss->setObjectName(QStringLiteral("mfdBtnStreamDeckDismiss"));
-		btn_sd_dismiss->setToolTip(
-			mfdText("Dialog.StreamDeck.HideTip",
-				"Hide this card. The Stream Deck companion link stays available below."));
+		btn_sd_dismiss->setToolTip(mfdText("Dialog.StreamDeck.HideTip",
+						   "Hide this card. The Fadester for OBS link stays available below."));
 		btn_sd_dismiss->setCursor(Qt::PointingHandCursor);
 		btn_sd_dismiss->setStyleSheet(QStringLiteral(
 			"QPushButton { background-color: transparent; color: #c7d2fe; border: 1px solid #6366f1; "
@@ -1032,12 +1031,11 @@ private:
 		z3_lay->addWidget(btn_open_adv);
 
 		auto *btn_stream_deck =
-			new QPushButton(mfdText("Dialog.StreamDeck.Button", "Stream Deck companion..."), zone3);
+			new QPushButton(mfdText("Dialog.StreamDeck.Button", "Fadester for OBS..."), zone3);
 		btn_stream_deck->setObjectName(QStringLiteral("mfdBtnStreamDeckCompanion"));
 		btn_stream_deck->setProperty("destinationUrl", stream_deck_companion_url());
-		btn_stream_deck->setToolTip(
-			mfdText("Dialog.StreamDeck.ButtonTip",
-				"Learn about the optional Fadester for OBS Stream Deck companion."));
+		btn_stream_deck->setToolTip(mfdText("Dialog.StreamDeck.ButtonTip",
+						    "Learn about the optional Fadester for OBS Stream Deck plugin."));
 		btn_stream_deck->setCursor(Qt::PointingHandCursor);
 		btn_stream_deck->setStyleSheet(z1_btn_style);
 		connect(btn_stream_deck, &QPushButton::clicked, this, []() { open_stream_deck_companion_url(); });
@@ -1979,7 +1977,7 @@ private:
 					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
 			target_combo->addItem(mfdText("Target.Filter", "Filter or effect setting"),
 					      static_cast<int>(MFD_TARGET_FILTER_PARAM));
-			target_combo->addItem(mfdText("Target.MixMaster", "Fadester mix master"),
+			target_combo->addItem(mfdText("Target.MixMaster", "Whole mix"),
 					      static_cast<int>(MFD_TARGET_MIX_MASTER));
 			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot.target_type)));
 			adv_mode_combos_[row] = target_combo;
@@ -2463,7 +2461,7 @@ private:
 	struct mfd_engine *eng_ = nullptr;
 	bool owns_engine_notify_ = false;
 	std::atomic<bool> local_refresh_queued_{false};
-	struct mfd_ui_snapshot snap_ {};
+	struct mfd_ui_snapshot snap_{};
 	struct mfd_ui_catalog *adv_catalog_ = nullptr;
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
@@ -2504,7 +2502,7 @@ private:
 	QLabel *strip_assign_labels_[MFD_MAX_FADER_SLOTS]{};
 	QLabel *strip_status_labels_[MFD_MAX_FADER_SLOTS]{};
 	QPushButton *strip_action_btns_[MFD_MAX_FADER_SLOTS]{};
-	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS] {};
+	enum mfd_ui_strip_action strip_bottom_actions_[MFD_MAX_FADER_SLOTS]{};
 
 	QLabel *z3_status_label_ = nullptr;
 

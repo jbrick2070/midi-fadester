@@ -51,7 +51,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 - **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer (CoreMIDI on macOS is built in CI from `main`; the published 0.6.0 release binaries are Windows x64). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested on hardware. Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
-- **The obs-websocket server** turned on (it ships with OBS), only if you also use the Stream Deck companion or scripts.
+- **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
 
 No internet connection, account or other software is needed.
 
@@ -98,7 +98,7 @@ The jobs are saved with the scene collection and the controller settings per Win
 | **Mix two layers** | Crossfades the Left layer and the Right layer inside one scene. Left end shows Left, right end shows Right. | Both layers in the same scene. Which one is on top is detected automatically. |
 | **Show or hide a layer** | Fades one layer from invisible to fully visible. | The layer in a scene. |
 | **Volume** | Sets one audio source's volume on a cubic curve (volume = position cubed); the strip shows the dB value. OBS's own mixer slider uses a log curve, so the same position reads a different dB there. | A source that has audio. |
-| **Fadester mix master** | Fades all OBS mixer inputs together, from silence to 0 dB, on the same cubic curve, through the Fadester Companion app. The strip shows *Requested* until Fadester Companion confirms or declines. | The Fadester Companion app running, with its option for all OBS mixer inputs turned on (see [Set up the shared mix for MIDI](#set-up-the-shared-mix-for-midi)). |
+| **Whole mix** | Fades all OBS mixer inputs together, from silence to 0 dB, on the same cubic curve, through Fadester Companion. The strip shows *Requested* until Fadester Companion confirms or declines. | Fadester Companion running, with its option for all OBS mixer inputs turned on (see [Set up the shared mix for MIDI](#set-up-the-shared-mix-for-midi)). |
 | **Filter or effect setting** | Sweeps one numeric setting of one filter between a value *At 0 %* and a value *At 100 %*. | The filter already added to the source or scene in OBS. |
 
 A strip can also be **Not used**. Its MIDI control stays assigned, so you can give it a job later.
@@ -145,7 +145,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 
 ![Set up for a filter setting: filter, setting and the 0 % and 100 % values](docs/screenshots/12-setup-filter-step2.png)
 
-**Clean / All FX Off** resets every enabled filter-setting binding in both banks back to its *At 0 %* value and applies its bypass. Volumes, layer fades, two-layer mixes and the T-bar are left exactly where they are, media keeps playing, and Visual Sidechain's separate global **Panic / Restore** bypass is untouched. It is also available as the `reset_fx` request, instant or as a timed ramp, so a Stream Deck key can do the same.
+**Clean / All FX Off** resets every enabled filter-setting binding in both banks back to its *At 0 %* value and applies its bypass. Volumes, layer fades, two-layer mixes and the T-bar are left exactly where they are, media keeps playing, and Visual Sidechain's separate global **Panic / Restore visuals** bypass is untouched. It is also available as the `reset_fx` request, instant or as a timed ramp, so a Stream Deck key can do the same.
 
 ## Controllers
 
@@ -177,7 +177,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 
 ## Works with
 
-- **[Fadester for OBS](https://github.com/jbrick2070/streamdeck-fadester)**, a plugin for the Stream Deck and Stream Deck +. Its dials and keys move the same slots: a dial nudges a fader or an FX knob, a key starts a timed fade or presses Clean / All FX Off, and the dial screens show the live values. It talks to Midi Fadester through the obs-websocket server, not MIDI, so it never takes the MIDI port; turn the server on in OBS (**Tools → WebSocket Server Settings**) and give the Stream Deck plugin the password. The Midi Fadester dialog shows a *Use a Stream Deck?* card until you click **Hide**, and keeps a **Stream Deck companion...** button on the Strips screen. Midi Fadester works without a Stream Deck, and the FX bank and Clean / All FX Off need Midi Fadester 0.6.0 or later.
+- **[Fadester for OBS](https://github.com/jbrick2070/streamdeck-fadester)**, a plugin for the Stream Deck and Stream Deck +. Its dials and keys move the same slots: a dial nudges a fader or an FX knob, a key starts a timed fade or presses Clean / All FX Off, and the dial screens show the live values. It talks to Midi Fadester through the obs-websocket server, not MIDI, so it never takes the MIDI port; turn the server on in OBS (**Tools → WebSocket Server Settings**) and give the Stream Deck plugin the password. The Midi Fadester dialog shows a *Use a Stream Deck?* card until you click **Hide**, and keeps a **Fadester for OBS...** button on the Strips screen. Midi Fadester works without a Stream Deck, and the FX bank and Clean / All FX Off need Midi Fadester 0.6.0 or later.
 - **[Visual Sidechain](https://github.com/jbrick2070/visual-sidechain)**, an audio-reactive filter suite. An FX knob can trim its reactivity amount like any other filter setting, and Visual Sidechain can read the fader values inside OBS to drive its shaders.
 
 ## Control it from scripts and other programs
@@ -198,9 +198,9 @@ Midi Fadester registers an obs-websocket 5 vendor API. Call it with `CallVendorR
 
 ### Set up the shared mix for MIDI
 
-1. Open the **Fadester Companion** Windows app on the OBS computer. It supplies the shared mix service and works with a MIDI controller alone. In OBS, enable **Tools → WebSocket Server Settings** with authentication, then use the same local port in the companion. It can read OBS’s saved password, or you can enter the password shown by OBS.
-2. In the companion’s **Setup** tab, check **Enable All OBS mixer inputs**. For MIDI use, check **Run for Stream Deck, OpenDeck or MIDI only (no TourBox shortcuts)**. Click **Save & start controls** and leave the companion running. This service moves the public mixer inputs together, preserving their relative levels.
-3. In **OBS → Tools → Midi Fadester**, choose **Master → Set up → Fadester mix master**, then learn the fader if needed. The same assignment is available per slot under **Advanced**. **Volume** continues to operate one chosen OBS source directly.
+1. Open **Fadester Companion** on the OBS computer. It supplies the shared mix service and works with a MIDI controller alone. In OBS, enable **Tools → WebSocket Server Settings** with authentication, then use the same local port in Fadester Companion. It can read OBS’s saved password, or you can enter the password shown by OBS.
+2. In Fadester Companion’s **Setup** tab, check **Enable All OBS mixer inputs**. For MIDI use, check **Run for Stream Deck, OpenDeck or MIDI only (no TourBox shortcuts)**. Click **Save & start controls** and leave Fadester Companion running. This service moves the public mixer inputs together, preserving their relative levels.
+3. In **OBS → Tools → Midi Fadester**, choose **Master → Set up → Whole mix**, then learn the fader if needed. The same assignment is available per slot under **Advanced**. **Volume** continues to operate one chosen OBS source directly.
 
 The bottom stop requests silence, midpoint requests about −18.1 dB, and the top requests unity. **Requested** means the strip is waiting for Fadester Companion. **Confirmed** shows its reply. After ten seconds without a reply the strip shows *No answer from Fadester Companion*. Until the first request it shows *Needs Fadester Companion*. After starting Fadester Companion, move the fader again to send a fresh request.
 
@@ -283,7 +283,7 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**Unreleased:** macOS CoreMIDI backend and universal CI build; removed dead `visual_sidechain_set_fader_slot` proc call; clarified macOS support and how Clean / All FX Off differs from Visual Sidechain's Panic / Restore; Mix master slots pin the first whole-mix `provider.id` heard for the session and show *Two mix providers are answering* instead of sending commands if another provider replies; aborts an open T-bar throw back to Program once per unexpected MIDI controller disconnect without automatic resume on reconnect (`DEC-4`); added the shared suite T-bar safety test vectors (`tests/vectors/tbar-safety.json`) exercised in `test-tbar-logic` and `test-vendor-api`; `get_catalog` overview layer entries now include additive `has_internal_opacity` and `opacity_slot` fields (`P1-8`).
+**Unreleased:** macOS CoreMIDI backend and universal CI build; removed dead `visual_sidechain_set_fader_slot` proc call; clarified macOS support and how Clean / All FX Off differs from Visual Sidechain's Panic / Restore visuals; Whole mix (`mix_master`) slots pin the first whole-mix `provider.id` heard for the session and show *Two mix providers are answering* instead of sending commands if another provider replies; aborts an open T-bar throw back to Program once per unexpected MIDI controller disconnect without automatic resume on reconnect (`DEC-4`); added the shared suite T-bar safety test vectors (`tests/vectors/tbar-safety.json`) exercised in `test-tbar-logic` and `test-vendor-api`; `get_catalog` overview layer entries now include additive `has_internal_opacity` and `opacity_slot` fields (`P1-8`); suite naming pass unifying *Fadester for OBS*, *Fadester Companion*, and *Whole mix* across English UI strings (`P1-7`).
 
 **0.6.0** (November 2026) is the current release. Compared with 0.1.0 it adds the Strips screen and the three-step Set up sheet, the first-run offer, the live controller picture, the FX & Knobs bank with Clean / All FX Off, the filter-setting job, the four Beta desk layouts, `get_catalog` and `reset_fx`, the Stream Deck companion and translations. Visual Sidechain uses the same number; Fadester for OBS is versioned separately.
 
