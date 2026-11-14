@@ -12,6 +12,7 @@
 #pragma once
 
 #include <obs-data.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,35 @@ void tub_register_deck_filter(void);
  * (Midi Fadester loaded). `reported` is present only while `linked` is true; `current_tape` is false while it describes
  * an earlier tape. Any thread. */
 void tub_decks_describe(obs_data_t *out);
+
+enum tub_deck_op {
+	TUB_DECK_OP_PLAY_PAUSE = 0,
+	TUB_DECK_OP_CUE_TO_START,
+	TUB_DECK_OP_SPEED_SET,
+	TUB_DECK_OP_SPEED_STEP,
+	TUB_DECK_OP_NORMAL_SPEED,
+};
+
+enum tub_deck_cmd_status {
+	TUB_DECK_CMD_OK = 0,
+	TUB_DECK_CMD_NOT_FOUND,
+	TUB_DECK_CMD_NO_TAPE,
+};
+
+struct tub_deck_command_result {
+	char source[256];
+	char deck_id[32];
+	char state[32];
+	bool playing;
+	int speed_percent;
+	int effective_speed_percent;
+	bool speed_fader_live;
+};
+
+/* Applies a deck_command (`deck_target` matched by Browser Source name, preferring the owner filter, or by deck_id).
+ * `arg` is snapped percent (25..800) for SPEED_SET, signed steps for SPEED_STEP, and 0 otherwise. Any thread. */
+enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tub_deck_op op, int arg,
+						struct tub_deck_command_result *out);
 
 #ifdef __cplusplus
 }

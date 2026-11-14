@@ -79,6 +79,8 @@ visual_sidechain_add_test(
   test-vendor-api
   test-vendor-api.c
   "${CMAKE_SOURCE_DIR}/src/obs/vendor-api.c"
+  "${CMAKE_SOURCE_DIR}/src/tubester/speed.c"
+  "${CMAKE_SOURCE_DIR}/src/tubester/command.c"
   ${_analyzer_srcs}
 )
 target_link_libraries(test-vendor-api PRIVATE plugin-support)

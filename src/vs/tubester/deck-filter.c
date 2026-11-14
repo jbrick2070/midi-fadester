@@ -53,6 +53,7 @@
 #include "core/fader-bridge.h"
 #include "obs/property-status.h"
 #include "obs/text.h"
+#include "obs/vendor-api.h"
 #include "plugin-support.h"
 
 #include <obs-module.h>
@@ -78,6 +79,7 @@
 #define TUB_REGISTER_RETRY_MAX_NS 30000000000ULL
 /* One deck per Browser source; as many sources as the listener has decks */
 #define TUB_OWNERS_MAX 64
+#define TUB_DECKS_EVENT_INTERVAL_NS 33333333ULL
 #define S_SPEED_FADER_STATUS "tubester_speed_fader_status"
 #define S_SPEED_FADER_CLEAR "tubester_speed_fader_clear"
 
@@ -193,6 +195,15 @@ struct tub_deck_filter {
 	/* the state last written to the log, so each change is logged once */
 	enum tub_deck_state logged_state;
 	bool logged_valid;
+
+	/* decks_changed event tracking (mutex) */
+	bool in_decks_list;
+	bool decks_event_dirty;
+	enum tub_deck_state emitted_state;
+	bool emitted_state_valid;
+	double last_reported_rate_pct;
+	bool last_reported_paused;
+	bool last_reported_ended;
 };
 
 static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_null);
@@ -249,6 +260,39 @@ static void release_claim(struct tub_deck_filter *f)
 static pthread_mutex_t g_decks_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct tub_deck_filter *g_decks[TUB_OWNERS_MAX];
 static size_t g_deck_count;
+static bool g_decks_tick_dirty;
+static uint64_t g_decks_last_tick_emit_ns;
+
+static void mark_decks_tick_dirty(void)
+{
+	pthread_mutex_lock(&g_decks_mutex);
+	g_decks_tick_dirty = true;
+	pthread_mutex_unlock(&g_decks_mutex);
+}
+
+static bool consume_decks_tick_dirty(uint64_t now_ns)
+{
+	bool should_emit = false;
+	pthread_mutex_lock(&g_decks_mutex);
+	if (g_decks_tick_dirty &&
+	    (!g_decks_last_tick_emit_ns || now_ns < g_decks_last_tick_emit_ns ||
+	     now_ns - g_decks_last_tick_emit_ns >= TUB_DECKS_EVENT_INTERVAL_NS)) {
+		g_decks_tick_dirty = false;
+		g_decks_last_tick_emit_ns = now_ns;
+		should_emit = true;
+	}
+	pthread_mutex_unlock(&g_decks_mutex);
+	return should_emit;
+}
+
+static void note_decks_emitted_now(uint64_t now_ns)
+{
+	pthread_mutex_lock(&g_decks_mutex);
+	g_decks_tick_dirty = false;
+	g_decks_last_tick_emit_ns = now_ns;
+	pthread_mutex_unlock(&g_decks_mutex);
+	vs_vendor_api_emit_decks_changed();
+}
 
 static void decks_add(struct tub_deck_filter *f)
 {
@@ -256,6 +300,9 @@ static void decks_add(struct tub_deck_filter *f)
 	pthread_mutex_lock(&g_decks_mutex);
 	if (g_deck_count < TUB_OWNERS_MAX) {
 		g_decks[g_deck_count++] = f;
+		pthread_mutex_lock(&f->mutex);
+		f->in_decks_list = true;
+		pthread_mutex_unlock(&f->mutex);
 	} else if (!full_logged) {
 		/* far past the two decks Tubester is for; the deck works, it is only missing from get_decks */
 		full_logged = true;
@@ -268,6 +315,9 @@ static void decks_add(struct tub_deck_filter *f)
 static void decks_remove(struct tub_deck_filter *f)
 {
 	pthread_mutex_lock(&g_decks_mutex);
+	pthread_mutex_lock(&f->mutex);
+	f->in_decks_list = false;
+	pthread_mutex_unlock(&f->mutex);
 	for (size_t i = 0; i < g_deck_count; i++) {
 		if (g_decks[i] == f) {
 			g_decks[i] = g_decks[--g_deck_count];
@@ -303,12 +353,14 @@ static const char *state_text(enum tub_deck_state s)
 
 /* ---- settings ---- */
 
-static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings)
+static bool read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings)
 {
+	bool changed = false;
 	const char *tape = obs_data_get_string(settings, TUB_SETTING_TAPE);
 	if (!tape)
 		tape = "";
 	if (!f->tape || strcmp(f->tape, tape) != 0) {
+		changed = true;
 		bfree(f->tape);
 		bfree(f->tape_url);
 		f->tape = bstrdup(tape);
@@ -336,37 +388,55 @@ static void read_settings_locked(struct tub_deck_filter *f, obs_data_t *settings
 	/* a new speed reaches the page through the coalescer in the tick; a pitch change is sent at once */
 	int speed = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED));
 	bool pitch = obs_data_get_bool(settings, TUB_SETTING_TAPE_PITCH);
-	if (pitch != f->tape_pitch)
+	if (pitch != f->tape_pitch) {
 		f->send_rate = true;
+		changed = true;
+	}
+	if (speed != f->speed_pct)
+		changed = true;
 	f->speed_pct = speed;
 	f->tape_pitch = pitch;
 
 	long long slot = obs_data_get_int(settings, TUB_SETTING_SPEED_FADER);
-	f->fader_slot = (slot >= 0 && slot < VS_FADER_SLOT_COUNT) ? (int)slot : VS_FADER_SLOT_NONE;
-	f->fader_min_pct = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MIN));
-	f->fader_max_pct = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MAX));
+	int next_slot = (slot >= 0 && slot < VS_FADER_SLOT_COUNT) ? (int)slot : VS_FADER_SLOT_NONE;
+	int next_min = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MIN));
+	int next_max = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED_FADER_MAX));
+	if (next_slot != f->fader_slot || next_min != f->fader_min_pct || next_max != f->fader_max_pct)
+		changed = true;
+	f->fader_slot = next_slot;
+	f->fader_min_pct = next_min;
+	f->fader_max_pct = next_max;
 	/* the tick works out the fader's speed; without a live fader the slider's applies from now on */
 	if (f->fader_slot == VS_FADER_SLOT_NONE)
 		f->fader_live = false;
-	if (!f->fader_live)
+	if (!f->fader_live && f->want_pct != speed) {
 		f->want_pct = speed;
+		changed = true;
+	}
 
 	bool loop = obs_data_get_bool(settings, TUB_SETTING_LOOP);
-	if (loop != f->loop)
+	if (loop != f->loop) {
 		f->send_loop = true;
+		changed = true;
+	}
 	f->loop = loop;
 
 	/* Applies to the next tape load, to Cue to Start and to play after the end; it never moves a tape by itself */
 	double start = obs_data_get_double(settings, TUB_SETTING_START);
-	f->start_seconds = (isfinite(start) && start >= 0.0) ? start : 0.0;
+	double next_start = (isfinite(start) && start >= 0.0) ? start : 0.0;
+	if (fabs(next_start - f->start_seconds) > 1e-6)
+		changed = true;
+	f->start_seconds = next_start;
 
 	bool playing = obs_data_get_bool(settings, TUB_SETTING_PLAYING);
 	if (playing != f->playing) {
 		f->send_transport = true;
 		/* a new play state is a new occurrence for the repair's log */
 		f->play_repair_logged = false;
+		changed = true;
 	}
 	f->playing = playing;
+	return changed;
 }
 
 static void deck_update(void *data, obs_data_t *settings)
@@ -375,8 +445,11 @@ static void deck_update(void *data, obs_data_t *settings)
 	if (!f || !settings)
 		return;
 	pthread_mutex_lock(&f->mutex);
-	read_settings_locked(f, settings);
+	bool changed = read_settings_locked(f, settings);
+	bool emit = changed && f->in_decks_list;
 	pthread_mutex_unlock(&f->mutex);
+	if (emit)
+		note_decks_emitted_now(os_gettime_ns());
 }
 
 static void deck_get_defaults(obs_data_t *settings)
@@ -460,6 +533,8 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 {
 	struct tub_deck_filter *f = deck;
 	pthread_mutex_lock(&f->mutex);
+	bool prev_linked = f->link.linked;
+	enum tub_deck_state prev_state = tub_link_state(&f->link, now_ns);
 	enum tub_report_verdict v = tub_link_accept(&f->link, report, now_ns);
 	switch (v) {
 	case TUB_REPORT_NEW_PAGE:
@@ -471,6 +546,7 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 		f->resend_current = false;
 		/* a missed command on the new page is a new occurrence, logged again */
 		f->resend_logged = false;
+		f->decks_event_dirty = true;
 		obs_log(LOG_INFO, "tape deck %s: page connected", f->deck_id);
 		break;
 	case TUB_REPORT_ACCEPTED:
@@ -490,6 +566,19 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 				}
 				check_rate_locked(f, now_ns);
 				check_play_locked(f, now_ns);
+			}
+		}
+		{
+			enum tub_deck_state next_state = tub_link_state(&f->link, now_ns);
+			double rep_pct = f->link.last.rate * 100.0;
+			if (f->link.linked != prev_linked || next_state != prev_state ||
+			    f->link.last.paused != f->last_reported_paused ||
+			    f->link.last.ended != f->last_reported_ended ||
+			    fabs(rep_pct - f->last_reported_rate_pct) > TUB_RATE_TOLERANCE_PCT) {
+				f->last_reported_paused = f->link.last.paused;
+				f->last_reported_ended = f->link.last.ended;
+				f->last_reported_rate_pct = rep_pct;
+				f->decks_event_dirty = true;
 			}
 		}
 		if (strcmp(f->link.last.event, "watchdog") == 0) {
@@ -621,14 +710,11 @@ static void on_hotkey_normal_speed(void *data, obs_hotkey_id id, obs_hotkey_t *h
 }
 
 /* Play / Pause flips the playing setting, as the checkbox would. On a tape that has ended it plays the tape again from
- * the start position instead (D-11). */
-static void play_pause_hotkey(struct tub_deck_filter *f, obs_source_t *source)
+ * the start position instead (D-11). Shared by the hotkey and deck_command. */
+static void apply_play_pause(struct tub_deck_filter *f, obs_source_t *source, const char *via_label)
 {
-	obs_data_t *settings = obs_source_get_settings(source);
-	bool playing = obs_data_get_bool(settings, TUB_SETTING_PLAYING);
-	obs_data_release(settings);
-
 	pthread_mutex_lock(&f->mutex);
+	bool playing = f->playing;
 	/* Ended by the latest report, with no restart or cue already on its way: a report older than the last play or tape
 	 * command, or one while a cue or play waits to be sent, does not count, so a quick second press pauses rather than
 	 * restarting again */
@@ -640,31 +726,63 @@ static void play_pause_hotkey(struct tub_deck_filter *f, obs_source_t *source)
 		request_cue_locked(f);
 		f->send_transport = true;
 	}
+	bool next = ended ? true : !playing;
+	if (next != playing) {
+		f->playing = next;
+		f->send_transport = true;
+		f->play_repair_logged = false;
+	}
 	pthread_mutex_unlock(&f->mutex);
 
-	bool next = ended ? true : !playing;
 	if (next != playing) {
 		obs_data_t *patch = obs_data_create();
 		obs_data_set_bool(patch, TUB_SETTING_PLAYING, next);
 		obs_source_update(source, patch);
 		obs_data_release(patch);
 	}
-	obs_log(LOG_INFO, "tape deck %s: Play / Pause hotkey; %s", f->deck_id,
+	obs_log(LOG_INFO, "tape deck %s: Play / Pause %s; %s", f->deck_id, via_label,
 		ended  ? "the tape had ended, so it plays again from the start position"
 		: next ? "playing"
 		       : "paused");
 }
 
-static void cue_hotkey(struct tub_deck_filter *f)
+static bool apply_cue_to_start(struct tub_deck_filter *f, const char *via_label)
 {
 	pthread_mutex_lock(&f->mutex);
 	bool cued = request_cue_locked(f);
 	double start = f->start_seconds;
 	pthread_mutex_unlock(&f->mutex);
 	if (cued)
-		obs_log(LOG_INFO, "tape deck %s: Cue to Start hotkey; to %.1f s", f->deck_id, start);
+		obs_log(LOG_INFO, "tape deck %s: Cue to Start %s; to %.1f s", f->deck_id, via_label, start);
 	else
-		obs_log(LOG_INFO, "tape deck %s: Cue to Start hotkey; no tape to cue", f->deck_id);
+		obs_log(LOG_INFO, "tape deck %s: Cue to Start %s; no tape to cue", f->deck_id, via_label);
+	return cued;
+}
+
+static void apply_speed_op(struct tub_deck_filter *f, obs_source_t *source, enum tub_deck_op op, int arg,
+			   const char *via_label)
+{
+	pthread_mutex_lock(&f->mutex);
+	int pct = f->speed_pct;
+	int next = TUB_SPEED_NORMAL_PCT;
+	if (op == TUB_DECK_OP_SPEED_SET)
+		next = tub_speed_clamp_pct(arg);
+	else if (op == TUB_DECK_OP_SPEED_STEP)
+		next = tub_speed_step_n_pct(pct, arg);
+	f->speed_pct = next;
+	if (!f->fader_live)
+		f->want_pct = next;
+	bool fader_live = f->fader_live;
+	pthread_mutex_unlock(&f->mutex);
+
+	if (next != pct) {
+		obs_data_t *patch = obs_data_create();
+		obs_data_set_int(patch, TUB_SETTING_SPEED, next);
+		obs_source_update(source, patch);
+		obs_data_release(patch);
+	}
+	obs_log(LOG_INFO, "tape deck %s: %s; the Speed setting is %d%%%s", f->deck_id, via_label, next,
+		fader_live ? " (the Speed Fader drives the speed while it is live)" : "");
 }
 
 /* The transport hotkeys work as the Properties controls do. The speed hotkeys move the Speed setting along the ladder,
@@ -685,37 +803,21 @@ static void hotkey_on_ui_thread(void *param)
 		obs_source_release(source);
 		return;
 	}
-	if (action == HOTKEY_PLAY_PAUSE || action == HOTKEY_CUE_TO_START) {
-		if (action == HOTKEY_PLAY_PAUSE)
-			play_pause_hotkey(f, source);
-		else
-			cue_hotkey(f);
-		obs_source_release(source);
-		return;
+	bool emit = true;
+	if (action == HOTKEY_PLAY_PAUSE) {
+		apply_play_pause(f, source, "hotkey");
+	} else if (action == HOTKEY_CUE_TO_START) {
+		emit = apply_cue_to_start(f, "hotkey");
+	} else if (action == HOTKEY_SPEED_UP) {
+		apply_speed_op(f, source, TUB_DECK_OP_SPEED_STEP, 1, "Speed Up hotkey");
+	} else if (action == HOTKEY_SPEED_DOWN) {
+		apply_speed_op(f, source, TUB_DECK_OP_SPEED_STEP, -1, "Speed Down hotkey");
+	} else {
+		apply_speed_op(f, source, TUB_DECK_OP_NORMAL_SPEED, 0, "Normal Speed hotkey");
 	}
-
-	obs_data_t *settings = obs_source_get_settings(source);
-	int pct = tub_speed_pct_from_setting(obs_data_get_int(settings, TUB_SETTING_SPEED));
-	obs_data_release(settings);
-	int next = TUB_SPEED_NORMAL_PCT;
-	if (action == HOTKEY_SPEED_UP)
-		next = tub_speed_step_pct(pct, 1);
-	else if (action == HOTKEY_SPEED_DOWN)
-		next = tub_speed_step_pct(pct, -1);
-	if (next != pct) {
-		obs_data_t *patch = obs_data_create();
-		obs_data_set_int(patch, TUB_SETTING_SPEED, next);
-		obs_source_update(source, patch);
-		obs_data_release(patch);
-	}
-
-	pthread_mutex_lock(&f->mutex);
-	bool fader_live = f->fader_live;
-	pthread_mutex_unlock(&f->mutex);
-	obs_log(LOG_INFO, "tape deck %s: %s hotkey; the Speed setting is %d%%%s", f->deck_id,
-		k_hotkeys[action].log_name, next,
-		fader_live ? " (the Speed Fader drives the speed while it is live)" : "");
 	obs_source_release(source);
+	if (emit)
+		note_decks_emitted_now(os_gettime_ns());
 }
 
 /* A hotkey libobs gave no bindings takes them from the deck's own copy (see deck_save), when the copy belongs to this
@@ -1102,8 +1204,12 @@ static void update_wanted_speed(struct tub_deck_filter *f)
 
 	pthread_mutex_lock(&f->mutex);
 	/* a binding changed meanwhile is taken up on the next tick */
-	f->fader_live = live && f->fader_slot == slot;
-	f->want_pct = f->fader_live ? tub_speed_from_fader(value, f->fader_min_pct, f->fader_max_pct) : f->speed_pct;
+	bool next_live = live && f->fader_slot == slot;
+	int next_want = next_live ? tub_speed_from_fader(value, f->fader_min_pct, f->fader_max_pct) : f->speed_pct;
+	if (next_live != f->fader_live || next_want != f->want_pct)
+		f->decks_event_dirty = true;
+	f->fader_live = next_live;
+	f->want_pct = next_want;
 	pthread_mutex_unlock(&f->mutex);
 }
 
@@ -1136,7 +1242,10 @@ static void deck_video_tick(void *data, float seconds)
 		/* first deck to claim the source drives it; a waiting deck takes over when that deck is removed */
 		bool claimed = claim_parent(f, parent);
 		pthread_mutex_lock(&f->mutex);
-		f->role = claimed ? ROLE_OWNER : ROLE_WAITING;
+		enum deck_role next_role = claimed ? ROLE_OWNER : ROLE_WAITING;
+		if (next_role != f->role)
+			f->decks_event_dirty = true;
+		f->role = next_role;
 		if (claimed) {
 			f->recheck_parent = true;
 			f->hello_accum = TUB_HELLO_INTERVAL_S; /* the first hello goes as soon as the page can get it */
@@ -1197,14 +1306,30 @@ static void deck_video_tick(void *data, float seconds)
 		send_to_page(parent, c.rate);
 		send_to_page(parent, c.loop);
 	}
+	bool local_dirty = false;
 	pthread_mutex_lock(&f->mutex);
 	log_state_change_locked(f);
+	enum tub_deck_state cur_state = tub_link_state(&f->link, os_gettime_ns());
+	if (!f->emitted_state_valid || cur_state != f->emitted_state) {
+		if (f->emitted_state_valid)
+			f->decks_event_dirty = true;
+		f->emitted_state = cur_state;
+		f->emitted_state_valid = true;
+	}
+	if (f->decks_event_dirty) {
+		f->decks_event_dirty = false;
+		local_dirty = true;
+	}
 	pthread_mutex_unlock(&f->mutex);
 	pthread_mutex_unlock(&f->attach_mutex);
 
 	/* last, with no lock held: if this was the parent's final reference, its destruction removes this filter */
 	if (parent)
 		obs_source_release(parent);
+	if (local_dirty)
+		mark_decks_tick_dirty();
+	if (consume_decks_tick_dirty(now))
+		vs_vendor_api_emit_decks_changed();
 }
 
 /* ---- lifecycle ---- */
@@ -1237,6 +1362,7 @@ static void deck_filter_add(void *data, obs_source_t *parent)
 	f->awaiting_parent_update = false;
 	f->hello_accum = TUB_HELLO_INTERVAL_S;
 	f->logged_valid = false;
+	bool emit = f->in_decks_list;
 	pthread_mutex_unlock(&f->mutex);
 	pthread_mutex_unlock(&f->attach_mutex);
 
@@ -1246,6 +1372,8 @@ static void deck_filter_add(void *data, obs_source_t *parent)
 	} else if (!f->page_url) {
 		obs_log(LOG_ERROR, "tape deck %s: data/deck.html was not found; the deck cannot start", f->deck_id);
 	}
+	if (emit)
+		note_decks_emitted_now(os_gettime_ns());
 }
 
 static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_null)
@@ -1264,6 +1392,7 @@ static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_nu
 	pthread_mutex_lock(&f->mutex);
 	obs_weak_source_t *weak = f->parent;
 	bool owner = f->role == ROLE_OWNER;
+	bool emit = weak != NULL && f->in_decks_list;
 	f->parent = NULL;
 	f->parent_key = NULL;
 	f->parent_is_browser = false;
@@ -1289,6 +1418,8 @@ static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_nu
 		obs_source_release(promoted);
 	if (weak)
 		obs_weak_source_release(weak);
+	if (emit)
+		note_decks_emitted_now(os_gettime_ns());
 }
 
 static void deck_filter_remove(void *data, obs_source_t *parent)
@@ -1357,6 +1488,7 @@ static void *deck_create(obs_data_t *settings, obs_source_t *source)
 
 	deck_update(f, settings);
 	decks_add(f);
+	note_decks_emitted_now(os_gettime_ns());
 	return f;
 }
 
@@ -1367,6 +1499,7 @@ static void deck_destroy(void *data)
 		return;
 	/* first: neither get_decks nor a report callback may reach this memory after these lines */
 	decks_remove(f);
+	note_decks_emitted_now(os_gettime_ns());
 	if (f->registered)
 		tub_listener_unregister(f);
 	/* libobs calls filter_remove before destroy, so this normally finds nothing left to release */
@@ -1817,7 +1950,120 @@ void tub_decks_describe(obs_data_t *out)
 		obs_data_release(found[i].item);
 	}
 	obs_data_set_bool(out, "success", true);
+	obs_data_set_string(out, "version", PLUGIN_VERSION);
 	obs_data_set_int(out, "api_version", 1);
 	obs_data_set_array(out, "decks", decks);
 	obs_data_array_release(decks);
+}
+
+enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tub_deck_op op, int arg,
+						struct tub_deck_command_result *out)
+{
+	if (!deck_target || deck_target[0] == '\0')
+		return TUB_DECK_CMD_NOT_FOUND;
+
+	struct {
+		obs_weak_source_t *filter;
+		obs_weak_source_t *parent;
+		char deck_id[TUB_DECK_ID_CHARS + 2];
+		enum deck_role role;
+	} candidates[TUB_OWNERS_MAX];
+	size_t count = 0;
+
+	pthread_mutex_lock(&g_decks_mutex);
+	for (size_t i = 0; i < g_deck_count && count < TUB_OWNERS_MAX; i++) {
+		struct tub_deck_filter *f = g_decks[i];
+		obs_weak_source_t *filter = f->context ? obs_source_get_weak_source(f->context) : NULL;
+		pthread_mutex_lock(&f->mutex);
+		obs_weak_source_t *parent = f->parent;
+		if (parent)
+			obs_weak_source_addref(parent);
+		enum deck_role role = f->role;
+		snprintf(candidates[count].deck_id, sizeof(candidates[count].deck_id), "%s", f->deck_id);
+		pthread_mutex_unlock(&f->mutex);
+
+		candidates[count].filter = filter;
+		candidates[count].parent = parent;
+		candidates[count].role = role;
+		count++;
+	}
+	pthread_mutex_unlock(&g_decks_mutex);
+
+	size_t chosen = TUB_OWNERS_MAX;
+	int best_rank = 0; /* 3: source + owner, 2: source + non-owner, 1: deck_id */
+	char chosen_source[256] = "";
+
+	for (size_t i = 0; i < count; i++) {
+		const char *source_name = "";
+		obs_source_t *parent_src =
+			candidates[i].parent ? obs_weak_source_get_source(candidates[i].parent) : NULL;
+		if (parent_src && obs_source_get_name(parent_src))
+			source_name = obs_source_get_name(parent_src);
+
+		int rank = 0;
+		if (source_name[0] != '\0' && strcmp(source_name, deck_target) == 0)
+			rank = (candidates[i].role == ROLE_OWNER) ? 3 : 2;
+		else if (strcmp(candidates[i].deck_id, deck_target) == 0)
+			rank = 1;
+
+		if (rank > best_rank) {
+			best_rank = rank;
+			chosen = i;
+			snprintf(chosen_source, sizeof(chosen_source), "%s", source_name);
+		}
+		if (parent_src)
+			obs_source_release(parent_src);
+	}
+
+	obs_source_t *filter_source = NULL;
+	if (chosen < count && candidates[chosen].filter)
+		filter_source = obs_weak_source_get_source(candidates[chosen].filter);
+
+	for (size_t i = 0; i < count; i++) {
+		if (candidates[i].filter)
+			obs_weak_source_release(candidates[i].filter);
+		if (candidates[i].parent)
+			obs_weak_source_release(candidates[i].parent);
+	}
+
+	if (!filter_source)
+		return TUB_DECK_CMD_NOT_FOUND;
+
+	struct tub_deck_filter *f = obs_obj_get_data(filter_source);
+	if (!f) {
+		obs_source_release(filter_source);
+		return TUB_DECK_CMD_NOT_FOUND;
+	}
+
+	enum tub_deck_cmd_status status = TUB_DECK_CMD_OK;
+	if (op == TUB_DECK_OP_PLAY_PAUSE) {
+		apply_play_pause(f, filter_source, "deck_command");
+	} else if (op == TUB_DECK_OP_CUE_TO_START) {
+		if (!apply_cue_to_start(f, "deck_command"))
+			status = TUB_DECK_CMD_NO_TAPE;
+	} else if (op == TUB_DECK_OP_SPEED_SET) {
+		apply_speed_op(f, filter_source, TUB_DECK_OP_SPEED_SET, arg, "deck_command speed_set");
+	} else if (op == TUB_DECK_OP_SPEED_STEP) {
+		apply_speed_op(f, filter_source, TUB_DECK_OP_SPEED_STEP, arg, "deck_command speed_step");
+	} else {
+		apply_speed_op(f, filter_source, TUB_DECK_OP_NORMAL_SPEED, 0, "deck_command normal_speed");
+	}
+
+	if (status == TUB_DECK_CMD_OK && out) {
+		pthread_mutex_lock(&f->mutex);
+		enum tub_deck_state state = tub_link_state(&f->link, os_gettime_ns());
+		if (f->link.linked && f->send_tape && state != TUB_STATE_NO_CONNECTION)
+			state = TUB_STATE_READY;
+		snprintf(out->source, sizeof(out->source), "%s", chosen_source);
+		snprintf(out->deck_id, sizeof(out->deck_id), "%s", f->deck_id);
+		snprintf(out->state, sizeof(out->state), "%s", tub_deck_state_name(state));
+		out->playing = f->playing;
+		out->speed_percent = f->speed_pct;
+		out->effective_speed_percent = f->want_pct;
+		out->speed_fader_live = f->fader_live;
+		pthread_mutex_unlock(&f->mutex);
+	}
+
+	obs_source_release(filter_source);
+	return status;
 }

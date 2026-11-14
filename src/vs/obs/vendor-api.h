@@ -33,11 +33,13 @@ void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct v
 			   bool is_primary_track);
 void vs_vendor_api_emit_safety_changed(void);
 void vs_vendor_api_emit_signals_changed(void);
+void vs_vendor_api_emit_decks_changed(void);
 
 void vs_vendor_tap_tempo_at(double now_sec, obs_data_t *response_data);
 
 void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_deck_command(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void vs_vendor_handle_get_safety(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void vs_vendor_handle_panic(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void vs_vendor_handle_restore(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);

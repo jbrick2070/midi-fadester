@@ -9,8 +9,11 @@
 #endif
 
 #include "obs/vendor-api.h"
+#include "tubester/command.h"
 #include "tubester/deck-filter.h"
+#include "tubester/speed.h"
 
+#include <util/bmem.h>
 #include <util/platform.h>
 
 #include <assert.h>
@@ -35,12 +38,40 @@ struct emitted_event {
 	char type[64];
 	bool panic;
 	bool bpm_locked;
+	bool success;
 	long long since_ms;
 	long long api_version;
 	long long beat_index;
 	long long bar_index;
 	double bpm;
 	double bar_phase;
+	size_t deck_count;
+	char first_deck_source[64];
+	long long first_deck_speed_pct;
+	long long first_deck_effective_pct;
+	bool first_deck_playing;
+};
+
+struct fake_deck {
+	char source[64];
+	char deck_id[32];
+	char role[32];
+	char state[32];
+	char tape[128];
+	bool has_tape;
+	bool playing;
+	bool ended;
+	bool tape_pitch;
+	int speed_pct;
+	int want_pct;
+	bool fader_live;
+	int fader_pct;
+	double start_seconds;
+	int cue_count;
+	struct tub_coalesce coalesce;
+	int offered_pct;
+	int page_rate_cmds_sent;
+	char last_rate_json[256];
 };
 
 static int g_vendor_token = 42;
@@ -51,14 +82,119 @@ static struct emitted_event g_events[64];
 static size_t g_event_count = 0;
 static int g_panic_walks = 0;
 static int g_restore_walks = 0;
+static struct fake_deck g_fake_decks[8];
+static size_t g_fake_deck_count = 0;
 
 void tub_decks_describe(obs_data_t *out)
 {
 	obs_data_set_bool(out, "success", true);
+	obs_data_set_string(out, "version", "0.6.0");
 	obs_data_set_int(out, "api_version", 1);
 	obs_data_array_t *arr = obs_data_array_create();
+	for (size_t i = 0; i < g_fake_deck_count; i++) {
+		const struct fake_deck *d = &g_fake_decks[i];
+		obs_data_t *item = obs_data_create();
+		obs_data_set_string(item, "source", d->source);
+		obs_data_set_string(item, "filter", "Visual Sidechain: Tape Deck");
+		obs_data_set_string(item, "deck_id", d->deck_id);
+		obs_data_set_string(item, "role", d->role);
+		obs_data_set_string(item, "state", d->state);
+		obs_data_set_string(item, "tape", d->tape);
+		obs_data_set_int(item, "speed_percent", d->speed_pct);
+		obs_data_set_int(item, "effective_speed_percent", d->want_pct);
+		obs_data_set_bool(item, "playing", d->playing);
+		obs_data_t *fader = obs_data_create();
+		obs_data_set_int(fader, "slot", d->fader_live ? 0 : -1);
+		obs_data_set_string(fader, "slot_id", d->fader_live ? "crossfader" : "");
+		obs_data_set_int(fader, "min_percent", 50);
+		obs_data_set_int(fader, "max_percent", 200);
+		obs_data_set_bool(fader, "live", d->fader_live);
+		obs_data_set_obj(item, "speed_fader", fader);
+		obs_data_release(fader);
+		obs_data_array_push_back(arr, item);
+		obs_data_release(item);
+	}
 	obs_data_set_array(out, "decks", arr);
 	obs_data_array_release(arr);
+}
+
+enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tub_deck_op op, int arg,
+						struct tub_deck_command_result *out)
+{
+	size_t chosen = g_fake_deck_count;
+	int best_rank = 0;
+	for (size_t i = 0; i < g_fake_deck_count; i++) {
+		int rank = 0;
+		if (g_fake_decks[i].source[0] != '\0' && strcmp(g_fake_decks[i].source, deck_target) == 0)
+			rank = strcmp(g_fake_decks[i].role, "owner") == 0 ? 3 : 2;
+		else if (strcmp(g_fake_decks[i].deck_id, deck_target) == 0)
+			rank = 1;
+		if (rank > best_rank) {
+			best_rank = rank;
+			chosen = i;
+		}
+	}
+	if (chosen >= g_fake_deck_count)
+		return TUB_DECK_CMD_NOT_FOUND;
+
+	struct fake_deck *d = &g_fake_decks[chosen];
+	if (op == TUB_DECK_OP_PLAY_PAUSE) {
+		if (d->ended) {
+			d->ended = false;
+			d->cue_count++;
+			d->playing = true;
+			snprintf(d->state, sizeof(d->state), "%s", "playing");
+		} else {
+			d->playing = !d->playing;
+			snprintf(d->state, sizeof(d->state), "%s", d->playing ? "playing" : "paused");
+		}
+	} else if (op == TUB_DECK_OP_CUE_TO_START) {
+		if (!d->has_tape)
+			return TUB_DECK_CMD_NO_TAPE;
+		d->cue_count++;
+	} else if (op == TUB_DECK_OP_SPEED_SET) {
+		d->speed_pct = tub_speed_clamp_pct(arg);
+		d->want_pct = d->fader_live ? d->fader_pct : d->speed_pct;
+	} else if (op == TUB_DECK_OP_SPEED_STEP) {
+		d->speed_pct = tub_speed_step_n_pct(d->speed_pct, arg);
+		d->want_pct = d->fader_live ? d->fader_pct : d->speed_pct;
+	} else {
+		d->speed_pct = TUB_SPEED_NORMAL_PCT;
+		d->want_pct = d->fader_live ? d->fader_pct : d->speed_pct;
+	}
+
+	if (out) {
+		snprintf(out->source, sizeof(out->source), "%s", d->source);
+		snprintf(out->deck_id, sizeof(out->deck_id), "%s", d->deck_id);
+		snprintf(out->state, sizeof(out->state), "%s", d->state);
+		out->playing = d->playing;
+		out->speed_percent = d->speed_pct;
+		out->effective_speed_percent = d->want_pct;
+		out->speed_fader_live = d->fader_live;
+	}
+	return TUB_DECK_CMD_OK;
+}
+
+/* Mirrors deck_video_tick's per-frame speed coalescer (deck-filter.c:1041-1064): all speed_set calls inside one frame
+ * collapse to a single rate command sent on the video frame tick. */
+static void fake_deck_video_tick(struct fake_deck *d, uint64_t now_ns)
+{
+	int want = d->want_pct;
+	bool send_speed = false;
+	if (want != d->offered_pct) {
+		send_speed = tub_coalesce_offer(&d->coalesce, want, now_ns);
+	} else {
+		int held = 0;
+		send_speed = tub_coalesce_flush(&d->coalesce, now_ns, &held);
+	}
+	d->offered_pct = want;
+	if (send_speed) {
+		char *json = tub_command_rate(tub_speed_pct_to_rate(want), d->tape_pitch);
+		assert(json != NULL);
+		snprintf(d->last_rate_json, sizeof(d->last_rate_json), "%s", json);
+		bfree(json);
+		d->page_rate_cmds_sent++;
+	}
 }
 
 static void record_walk(bool panic)
@@ -109,6 +245,7 @@ static void proc_vendor_event_emit(void *unused, calldata_t *cd)
 	struct emitted_event *ev = &g_events[g_event_count++];
 	memset(ev, 0, sizeof(*ev));
 	snprintf(ev->type, sizeof(ev->type), "%s", type);
+	ev->success = obs_data_get_bool(data, "success");
 	ev->panic = obs_data_get_bool(data, "panic");
 	ev->bpm_locked = obs_data_get_bool(data, "bpm_locked");
 	ev->since_ms = obs_data_get_int(data, "since_ms");
@@ -117,6 +254,20 @@ static void proc_vendor_event_emit(void *unused, calldata_t *cd)
 	ev->bar_index = obs_data_get_int(data, "bar_index");
 	ev->bpm = obs_data_get_double(data, "bpm");
 	ev->bar_phase = obs_data_get_double(data, "bar_phase");
+	obs_data_array_t *decks = obs_data_get_array(data, "decks");
+	if (decks) {
+		ev->deck_count = obs_data_array_count(decks);
+		if (ev->deck_count > 0) {
+			obs_data_t *first = obs_data_array_item(decks, 0);
+			snprintf(ev->first_deck_source, sizeof(ev->first_deck_source), "%s",
+				 obs_data_get_string(first, "source"));
+			ev->first_deck_speed_pct = obs_data_get_int(first, "speed_percent");
+			ev->first_deck_effective_pct = obs_data_get_int(first, "effective_speed_percent");
+			ev->first_deck_playing = obs_data_get_bool(first, "playing");
+			obs_data_release(first);
+		}
+		obs_data_array_release(decks);
+	}
 }
 
 static const struct registered_req *find_req(const char *name)
@@ -164,9 +315,10 @@ static void test_vendor_safety_requests_and_events(void)
 
 	vs_vendor_api_set_safety_walk_scheduler(record_walk);
 	assert(vs_vendor_api_register_with_ph(global_ph, global_sh));
-	assert(g_req_count == 9u);
+	assert(g_req_count == 10u);
 	assert(find_req("get_signals") != NULL);
 	assert(find_req("get_decks") != NULL);
+	assert(find_req("deck_command") != NULL);
 	assert(find_req("get_safety") != NULL);
 	assert(find_req("panic") != NULL);
 	assert(find_req("restore") != NULL);
@@ -431,10 +583,248 @@ static void test_vendor_tempo_requests_and_events(void)
 	proc_handler_destroy(global_ph);
 }
 
+static void assert_deck_cmd_error(obs_data_t *req, const char *expected_sentence)
+{
+	const size_t before_events = g_event_count;
+	obs_data_t *resp = call_req_with_data("deck_command", req);
+	assert(!obs_data_get_bool(resp, "success"));
+	assert(obs_data_get_int(resp, "api_version") == 1);
+	assert(strcmp(obs_data_get_string(resp, "error"), expected_sentence) == 0);
+	assert(strcmp(obs_data_get_string(resp, "comment"), expected_sentence) == 0);
+	assert(g_event_count == before_events);
+	obs_data_release(resp);
+}
+
+static void test_vendor_deck_commands_and_events(void)
+{
+	g_req_count = 0;
+	g_event_count = 0;
+	g_fake_deck_count = 0;
+	vs_vendor_api_reset();
+	vs_fader_bridge_reset();
+
+	proc_handler_t *global_ph = proc_handler_create();
+	signal_handler_t *global_sh = signal_handler_create();
+	g_fake_ws_ph = proc_handler_create();
+
+	proc_handler_add(global_ph, "void obs_websocket_api_get_ph(out ptr ph)", proc_obs_websocket_api_get_ph, NULL);
+	proc_handler_add(g_fake_ws_ph, "void vendor_register(in string name, out ptr vendor)", proc_vendor_register,
+			 NULL);
+	proc_handler_add(
+		g_fake_ws_ph,
+		"void vendor_request_register(in ptr vendor, in string type, in ptr callback, out bool success)",
+		proc_vendor_request_register, NULL);
+	proc_handler_add(g_fake_ws_ph, "void vendor_event_emit(in ptr vendor, in string type, in ptr data)",
+			 proc_vendor_event_emit, NULL);
+
+	assert(vs_vendor_api_register_with_ph(global_ph, global_sh));
+
+	/* Register two fake decks on "Reel A" (one waiting, one owner) plus a tapeless deck "Empty Reel". */
+	memset(g_fake_decks, 0, sizeof(g_fake_decks));
+	g_fake_deck_count = 3;
+
+	snprintf(g_fake_decks[0].source, sizeof(g_fake_decks[0].source), "%s", "Reel A");
+	snprintf(g_fake_decks[0].deck_id, sizeof(g_fake_decks[0].deck_id), "%s", "d_waiting");
+	snprintf(g_fake_decks[0].role, sizeof(g_fake_decks[0].role), "%s", "waiting");
+	snprintf(g_fake_decks[0].state, sizeof(g_fake_decks[0].state), "%s", "ready");
+	g_fake_decks[0].speed_pct = 50;
+	g_fake_decks[0].want_pct = 50;
+
+	struct fake_deck *owner = &g_fake_decks[1];
+	snprintf(owner->source, sizeof(owner->source), "%s", "Reel A");
+	snprintf(owner->deck_id, sizeof(owner->deck_id), "%s", "d_owner");
+	snprintf(owner->role, sizeof(owner->role), "%s", "owner");
+	snprintf(owner->state, sizeof(owner->state), "%s", "playing");
+	snprintf(owner->tape, sizeof(owner->tape), "%s", "C:\\tapes\\loop.mp4");
+	owner->has_tape = true;
+	owner->playing = true;
+	owner->tape_pitch = true;
+	owner->speed_pct = 100;
+	owner->want_pct = 100;
+	owner->offered_pct = 100;
+	tub_coalesce_init(&owner->coalesce);
+
+	struct fake_deck *empty_deck = &g_fake_decks[2];
+	snprintf(empty_deck->source, sizeof(empty_deck->source), "%s", "Empty Reel");
+	snprintf(empty_deck->deck_id, sizeof(empty_deck->deck_id), "%s", "d_empty");
+	snprintf(empty_deck->role, sizeof(empty_deck->role), "%s", "owner");
+	snprintf(empty_deck->state, sizeof(empty_deck->state), "%s", "ready");
+	empty_deck->has_tape = false;
+	empty_deck->playing = true;
+	empty_deck->speed_pct = 100;
+	empty_deck->want_pct = 100;
+
+	/* 1. Validation sentences (never silent no-ops). */
+	obs_data_t *req = obs_data_create();
+	assert_deck_cmd_error(req, "Field 'deck' must name an active Tape Deck source.");
+	obs_data_set_string(req, "deck", "");
+	assert_deck_cmd_error(req, "Field 'deck' must name an active Tape Deck source.");
+	obs_data_set_string(req, "deck", "Reel A");
+	assert_deck_cmd_error(req,
+			      "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+	obs_data_set_string(req, "op", "rewind");
+	assert_deck_cmd_error(req,
+			      "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+
+	obs_data_set_string(req, "deck", "Missing Deck");
+	obs_data_set_string(req, "op", "play_pause");
+	assert_deck_cmd_error(req, "Tape Deck 'Missing Deck' was not found.");
+
+	obs_data_set_string(req, "deck", "Empty Reel");
+	obs_data_set_string(req, "op", "cue_to_start");
+	assert_deck_cmd_error(req, "Choose a video file in Tape Deck before cueing to start.");
+
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "speed_set");
+	assert_deck_cmd_error(req, "Field 'percent' must be a number between 25 and 800.");
+	obs_data_set_double(req, "percent", NAN);
+	assert_deck_cmd_error(req, "Field 'percent' must be a number between 25 and 800.");
+	obs_data_set_double(req, "percent", INFINITY);
+	assert_deck_cmd_error(req, "Field 'percent' must be a number between 25 and 800.");
+	obs_data_set_double(req, "percent", 24.9);
+	assert_deck_cmd_error(req, "Field 'percent' must be between 25 and 800.");
+	obs_data_set_double(req, "percent", 800.1);
+	assert_deck_cmd_error(req, "Field 'percent' must be between 25 and 800.");
+
+	obs_data_release(req);
+	req = obs_data_create();
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "speed_step");
+	assert_deck_cmd_error(req, "Field 'steps' must be a non-zero integer.");
+	obs_data_set_int(req, "steps", 0);
+	assert_deck_cmd_error(req, "Field 'steps' must be a non-zero integer.");
+	obs_data_set_double(req, "steps", 1.5);
+	assert_deck_cmd_error(req, "Field 'steps' must be a non-zero integer.");
+	obs_data_set_double(req, "steps", NAN);
+	assert_deck_cmd_error(req, "Field 'steps' must be a non-zero integer.");
+	obs_data_release(req);
+
+	/* 2. play_pause prefers the owner deck on "Reel A", toggles playing, restarts ended tapes, and emits decks_changed. */
+	req = obs_data_create();
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "play_pause");
+	obs_data_t *resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(strcmp(obs_data_get_string(resp, "deck_id"), "d_owner") == 0);
+	assert(!obs_data_get_bool(resp, "playing"));
+	assert(strcmp(obs_data_get_string(resp, "state"), "paused") == 0);
+	obs_data_release(resp);
+	assert(g_event_count == 1u);
+	assert(strcmp(g_events[0].type, "decks_changed") == 0);
+	assert(g_events[0].success);
+	assert(g_events[0].api_version == 1);
+	assert(g_events[0].deck_count == 3u);
+
+	/* Ended tape: play_pause cues to start and plays again (D-11). */
+	owner->ended = true;
+	owner->playing = true;
+	resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(obs_data_get_bool(resp, "playing"));
+	assert(owner->cue_count == 1);
+	assert(!owner->ended);
+	obs_data_release(resp);
+	obs_data_release(req);
+
+	/* 3. cue_to_start cues when a tape is loaded. */
+	req = obs_data_create();
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "cue_to_start");
+	resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(owner->cue_count == 2);
+	obs_data_release(resp);
+	obs_data_release(req);
+
+	/* 4. speed_set snaps to 1% integer like the filter window and reports applied value; rapid calls coalesce to one
+	 * rate command on the video frame tick. */
+	static const double burst_pcts[] = {120.2, 185.7, 250.4, 333.6};
+	static const int expected_snapped[] = {120, 186, 250, 334};
+	for (size_t i = 0; i < 4; i++) {
+		req = obs_data_create();
+		obs_data_set_string(req, "deck", "Reel A");
+		obs_data_set_string(req, "op", "speed_set");
+		obs_data_set_double(req, "percent", burst_pcts[i]);
+		resp = call_req_with_data("deck_command", req);
+		assert(obs_data_get_bool(resp, "success"));
+		assert(obs_data_get_int(resp, "speed_percent") == expected_snapped[i]);
+		assert(obs_data_get_int(resp, "effective_speed_percent") == expected_snapped[i]);
+		obs_data_release(resp);
+		obs_data_release(req);
+	}
+	assert(owner->page_rate_cmds_sent == 0);
+	fake_deck_video_tick(owner, 1000000000ULL);
+	assert(owner->page_rate_cmds_sent == 1);
+	assert(strstr(owner->last_rate_json, "\"rate\":3.34") != NULL);
+
+	/* 5. speed_step rides the 11-rung ladder signed steps; normal_speed resets to 100%. */
+	req = obs_data_create();
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "normal_speed");
+	resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(obs_data_get_int(resp, "speed_percent") == 100);
+	obs_data_release(resp);
+	obs_data_release(req);
+
+	req = obs_data_create();
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "speed_step");
+	obs_data_set_int(req, "steps", 2);
+	resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(obs_data_get_int(resp, "speed_percent") == 150);
+	obs_data_release(resp);
+
+	obs_data_set_int(req, "steps", -3);
+	resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(obs_data_get_int(resp, "speed_percent") == 75);
+	obs_data_release(resp);
+	obs_data_release(req);
+
+	/* 6. When a Speed Fader is live, speed_percent updates while effective_speed_percent stays at the fader's speed. */
+	owner->fader_live = true;
+	owner->fader_pct = 200;
+	owner->want_pct = 200;
+	req = obs_data_create();
+	obs_data_set_string(req, "deck", "Reel A");
+	obs_data_set_string(req, "op", "speed_set");
+	obs_data_set_int(req, "percent", 125);
+	resp = call_req_with_data("deck_command", req);
+	assert(obs_data_get_bool(resp, "success"));
+	assert(obs_data_get_int(resp, "speed_percent") == 125);
+	assert(obs_data_get_int(resp, "effective_speed_percent") == 200);
+	assert(obs_data_get_bool(resp, "speed_fader_live"));
+	obs_data_release(resp);
+	obs_data_release(req);
+
+	/* 7. Panic and Restore leave Tape Decks untouched. */
+	obs_data_t *p = call_req("panic");
+	assert(obs_data_get_bool(p, "panic"));
+	obs_data_release(p);
+	assert(owner->playing);
+	assert(owner->speed_pct == 125);
+	obs_data_t *r = call_req("restore");
+	assert(!obs_data_get_bool(r, "panic"));
+	obs_data_release(r);
+	assert(owner->playing);
+	assert(owner->speed_pct == 125);
+
+	g_fake_deck_count = 0;
+	vs_vendor_api_reset();
+	vs_fader_bridge_reset();
+	proc_handler_destroy(g_fake_ws_ph);
+	g_fake_ws_ph = NULL;
+	signal_handler_destroy(global_sh);
+	proc_handler_destroy(global_ph);
+}
+
 int main(void)
 {
 	test_vendor_safety_requests_and_events();
 	test_vendor_tempo_requests_and_events();
+	test_vendor_deck_commands_and_events();
 	puts("test-vendor-api: all assertions passed");
 	return 0;
 }

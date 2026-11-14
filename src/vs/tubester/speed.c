@@ -73,6 +73,30 @@ int tub_speed_step_pct(int pct, int direction)
 	return pct;
 }
 
+int tub_speed_step_n_pct(int pct, int steps)
+{
+	pct = tub_speed_clamp_pct(pct);
+	if (steps == 0)
+		return pct;
+	int dir = steps > 0 ? 1 : -1;
+	long long count = steps > 0 ? (long long)steps : -(long long)steps;
+	if (count > (long long)LADDER_COUNT)
+		count = (long long)LADDER_COUNT;
+	for (long long i = 0; i < count; i++)
+		pct = tub_speed_step_pct(pct, dir);
+	return pct;
+}
+
+bool tub_speed_snap_pct(double raw, int *out_pct)
+{
+	if (!isfinite(raw) || raw < (double)TUB_SPEED_MIN_PCT || raw > (double)TUB_SPEED_MAX_PCT)
+		return false;
+	int snapped = tub_speed_clamp_pct((int)llround(raw));
+	if (out_pct)
+		*out_pct = snapped;
+	return true;
+}
+
 void tub_coalesce_init(struct tub_coalesce *c)
 {
 	memset(c, 0, sizeof(*c));

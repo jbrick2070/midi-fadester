@@ -43,6 +43,13 @@ int tub_speed_from_fader(float value, int min_pct, int max_pct);
  * stay put. direction 0 returns the clamped value. */
 int tub_speed_step_pct(int pct, int direction);
 
+/* Steps pct by signed `steps` rungs along the ladder, clamping at 25 and 800. */
+int tub_speed_step_n_pct(int pct, int steps);
+
+/* Snaps a finite percent in [25, 800] to the filter Properties 1% integer grid via llround; returns false when raw is
+ * non-finite or outside [25, 800]. */
+bool tub_speed_snap_pct(double raw, int *out_pct);
+
 /* Last value wins. Offer every change; it says whether to send now. A change held back is returned by flush once the
  * interval has passed, so the final Knob position always arrives. */
 struct tub_coalesce {

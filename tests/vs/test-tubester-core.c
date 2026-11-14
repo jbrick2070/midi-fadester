@@ -146,6 +146,24 @@ static void test_speed_ladder(void)
 	while (pct > 25)
 		pct = tub_speed_step_pct(pct, -1);
 	assert(pct == 25);
+
+	/* signed multi-step ladder (P1-6) */
+	assert(tub_speed_step_n_pct(100, 2) == 150);
+	assert(tub_speed_step_n_pct(150, -3) == 75);
+	assert(tub_speed_step_n_pct(100, 50) == 800);
+	assert(tub_speed_step_n_pct(100, -50) == 25);
+	assert(tub_speed_step_n_pct(137, 0) == 137);
+
+	/* integer snapping and bounds check for speed_set (P1-6) */
+	int snapped = 0;
+	assert(tub_speed_snap_pct(25.0, &snapped) && snapped == 25);
+	assert(tub_speed_snap_pct(800.0, &snapped) && snapped == 800);
+	assert(tub_speed_snap_pct(133.6, &snapped) && snapped == 134);
+	assert(tub_speed_snap_pct(133.4, &snapped) && snapped == 133);
+	assert(!tub_speed_snap_pct(24.9, &snapped));
+	assert(!tub_speed_snap_pct(800.1, &snapped));
+	assert(!tub_speed_snap_pct(NAN, &snapped));
+	assert(!tub_speed_snap_pct(INFINITY, &snapped));
 	printf("  test_speed_ladder: PASS\n");
 }
 

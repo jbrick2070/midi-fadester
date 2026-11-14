@@ -11,6 +11,7 @@
 
 #include "vendor-api.h"
 #include "tubester/deck-filter.h"
+#include "tubester/speed.h"
 
 #include <obs-module.h>
 #include <plugin-support.h>
@@ -111,6 +112,25 @@ void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_d
 	UNUSED_PARAMETER(priv_data);
 	if (response_data)
 		tub_decks_describe(response_data);
+}
+
+void vs_vendor_api_emit_decks_changed(void)
+{
+	if (!g_ws_ph || !g_vendor)
+		return;
+
+	obs_data_t *event_data = obs_data_create();
+	tub_decks_describe(event_data);
+
+	struct calldata cd;
+	calldata_init(&cd);
+	calldata_set_ptr(&cd, "vendor", g_vendor);
+	calldata_set_string(&cd, "type", "decks_changed");
+	calldata_set_ptr(&cd, "data", event_data);
+	proc_handler_call(g_ws_ph, "vendor_event_emit", &cd);
+	calldata_free(&cd);
+
+	obs_data_release(event_data);
 }
 
 void vs_vendor_handle_get_safety(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -325,6 +345,134 @@ void vs_vendor_handle_resync_downbeat(obs_data_t *request_data, obs_data_t *resp
 	vs_vendor_api_emit_signals_changed();
 }
 
+void vs_vendor_handle_deck_command(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(priv_data);
+	obs_data_item_t *deck_item = request_data ? obs_data_item_byname(request_data, "deck") : NULL;
+	if (!deck_item || obs_data_item_gettype(deck_item) != OBS_DATA_STRING) {
+		if (deck_item)
+			obs_data_item_release(&deck_item);
+		fill_vendor_error(response_data, "Field 'deck' must name an active Tape Deck source.");
+		return;
+	}
+	const char *deck_str = obs_data_item_get_string(deck_item);
+	char deck_target[256];
+	snprintf(deck_target, sizeof(deck_target), "%s", deck_str ? deck_str : "");
+	obs_data_item_release(&deck_item);
+	if (deck_target[0] == '\0') {
+		fill_vendor_error(response_data, "Field 'deck' must name an active Tape Deck source.");
+		return;
+	}
+
+	obs_data_item_t *op_item = obs_data_item_byname(request_data, "op");
+	if (!op_item || obs_data_item_gettype(op_item) != OBS_DATA_STRING) {
+		if (op_item)
+			obs_data_item_release(&op_item);
+		fill_vendor_error(response_data,
+				  "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+		return;
+	}
+	const char *op_raw = obs_data_item_get_string(op_item);
+	char op_str[32];
+	snprintf(op_str, sizeof(op_str), "%s", op_raw ? op_raw : "");
+	obs_data_item_release(&op_item);
+
+	enum tub_deck_op op;
+	int arg = 0;
+	if (strcmp(op_str, "play_pause") == 0) {
+		op = TUB_DECK_OP_PLAY_PAUSE;
+	} else if (strcmp(op_str, "cue_to_start") == 0) {
+		op = TUB_DECK_OP_CUE_TO_START;
+	} else if (strcmp(op_str, "normal_speed") == 0) {
+		op = TUB_DECK_OP_NORMAL_SPEED;
+	} else if (strcmp(op_str, "speed_set") == 0) {
+		op = TUB_DECK_OP_SPEED_SET;
+		obs_data_item_t *pct_item = obs_data_item_byname(request_data, "percent");
+		if (!pct_item || obs_data_item_gettype(pct_item) != OBS_DATA_NUMBER) {
+			if (pct_item)
+				obs_data_item_release(&pct_item);
+			fill_vendor_error(response_data, "Field 'percent' must be a number between 25 and 800.");
+			return;
+		}
+		const double raw_pct = (obs_data_item_numtype(pct_item) == OBS_DATA_NUM_INT)
+					       ? (double)obs_data_item_get_int(pct_item)
+					       : obs_data_item_get_double(pct_item);
+		obs_data_item_release(&pct_item);
+		if (!isfinite(raw_pct)) {
+			fill_vendor_error(response_data, "Field 'percent' must be a number between 25 and 800.");
+			return;
+		}
+		if (!tub_speed_snap_pct(raw_pct, &arg)) {
+			fill_vendor_error(response_data, "Field 'percent' must be between 25 and 800.");
+			return;
+		}
+	} else if (strcmp(op_str, "speed_step") == 0) {
+		op = TUB_DECK_OP_SPEED_STEP;
+		obs_data_item_t *step_item = obs_data_item_byname(request_data, "steps");
+		if (!step_item || obs_data_item_gettype(step_item) != OBS_DATA_NUMBER) {
+			if (step_item)
+				obs_data_item_release(&step_item);
+			fill_vendor_error(response_data, "Field 'steps' must be a non-zero integer.");
+			return;
+		}
+		bool valid_int = false;
+		long long raw_steps = 0;
+		if (obs_data_item_numtype(step_item) == OBS_DATA_NUM_INT) {
+			raw_steps = obs_data_item_get_int(step_item);
+			valid_int = raw_steps != 0;
+		} else {
+			const double d = obs_data_item_get_double(step_item);
+			if (isfinite(d) && floor(d) == d && d != 0.0 && d >= -1000000.0 && d <= 1000000.0) {
+				raw_steps = (long long)d;
+				valid_int = raw_steps != 0;
+			}
+		}
+		obs_data_item_release(&step_item);
+		if (!valid_int) {
+			fill_vendor_error(response_data, "Field 'steps' must be a non-zero integer.");
+			return;
+		}
+		if (raw_steps > 64)
+			raw_steps = 64;
+		else if (raw_steps < -64)
+			raw_steps = -64;
+		arg = (int)raw_steps;
+	} else {
+		fill_vendor_error(response_data,
+				  "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+		return;
+	}
+
+	struct tub_deck_command_result res;
+	memset(&res, 0, sizeof(res));
+	const enum tub_deck_cmd_status st = tub_deck_command_apply(deck_target, op, arg, &res);
+	if (st == TUB_DECK_CMD_NOT_FOUND) {
+		char err[320];
+		snprintf(err, sizeof(err), "Tape Deck '%s' was not found.", deck_target);
+		fill_vendor_error(response_data, err);
+		return;
+	}
+	if (st == TUB_DECK_CMD_NO_TAPE) {
+		fill_vendor_error(response_data, "Choose a video file in Tape Deck before cueing to start.");
+		return;
+	}
+
+	if (response_data) {
+		obs_data_set_bool(response_data, "success", true);
+		obs_data_set_string(response_data, "version", PLUGIN_VERSION);
+		obs_data_set_int(response_data, "api_version", 1);
+		obs_data_set_string(response_data, "deck", res.source);
+		obs_data_set_string(response_data, "deck_id", res.deck_id);
+		obs_data_set_string(response_data, "op", op_str);
+		obs_data_set_bool(response_data, "playing", res.playing);
+		obs_data_set_int(response_data, "speed_percent", res.speed_percent);
+		obs_data_set_int(response_data, "effective_speed_percent", res.effective_speed_percent);
+		obs_data_set_bool(response_data, "speed_fader_live", res.speed_fader_live);
+		obs_data_set_string(response_data, "state", res.state);
+	}
+	vs_vendor_api_emit_decks_changed();
+}
+
 void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
 			   bool is_primary_track)
 {
@@ -388,19 +536,22 @@ bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t 
 
 	const bool r1 = register_one_vendor_request(ws_ph, vendor, "get_signals", vs_vendor_handle_get_signals, NULL);
 	const bool r2 = register_one_vendor_request(ws_ph, vendor, "get_decks", vs_vendor_handle_get_decks, NULL);
-	const bool r3 = register_one_vendor_request(ws_ph, vendor, "get_safety", vs_vendor_handle_get_safety, NULL);
-	const bool r4 = register_one_vendor_request(ws_ph, vendor, "panic", vs_vendor_handle_panic, NULL);
-	const bool r5 = register_one_vendor_request(ws_ph, vendor, "restore", vs_vendor_handle_restore, NULL);
-	const bool r6 = register_one_vendor_request(ws_ph, vendor, "tap_tempo", vs_vendor_handle_tap_tempo, NULL);
-	const bool r7 = register_one_vendor_request(ws_ph, vendor, "set_bpm", vs_vendor_handle_set_bpm, NULL);
-	const bool r8 = register_one_vendor_request(ws_ph, vendor, "lock_bpm", vs_vendor_handle_lock_bpm, NULL);
-	const bool r9 =
+	const bool r3 =
+		register_one_vendor_request(ws_ph, vendor, "deck_command", vs_vendor_handle_deck_command, NULL);
+	const bool r4 = register_one_vendor_request(ws_ph, vendor, "get_safety", vs_vendor_handle_get_safety, NULL);
+	const bool r5 = register_one_vendor_request(ws_ph, vendor, "panic", vs_vendor_handle_panic, NULL);
+	const bool r6 = register_one_vendor_request(ws_ph, vendor, "restore", vs_vendor_handle_restore, NULL);
+	const bool r7 = register_one_vendor_request(ws_ph, vendor, "tap_tempo", vs_vendor_handle_tap_tempo, NULL);
+	const bool r8 = register_one_vendor_request(ws_ph, vendor, "set_bpm", vs_vendor_handle_set_bpm, NULL);
+	const bool r9 = register_one_vendor_request(ws_ph, vendor, "lock_bpm", vs_vendor_handle_lock_bpm, NULL);
+	const bool r10 =
 		register_one_vendor_request(ws_ph, vendor, "resync_downbeat", vs_vendor_handle_resync_downbeat, NULL);
 
 	obs_log(LOG_INFO,
-		"Registered obs-websocket vendor '%s' (get_signals=%d, get_decks=%d, get_safety=%d, panic=%d, restore=%d, tap_tempo=%d, set_bpm=%d, lock_bpm=%d, resync_downbeat=%d)",
-		VS_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8, (int)r9);
-	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9;
+		"Registered obs-websocket vendor '%s' (get_signals=%d, get_decks=%d, deck_command=%d, get_safety=%d, panic=%d, restore=%d, tap_tempo=%d, set_bpm=%d, lock_bpm=%d, resync_downbeat=%d)",
+		VS_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8, (int)r9,
+		(int)r10);
+	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && r10;
 }
 
 bool vs_vendor_api_register(void)
