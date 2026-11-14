@@ -114,7 +114,7 @@ Selecting one of the four **Beta** profiles (`Akai APC mini mk2`, `Akai MIDImix`
 
 ### State 11 — `FX & Knobs (8)` Bank (`fx_1..fx_8` Dedicated Filter Strips & `[Clean / All FX Off]`)
 
-Switching the segmented bank bar on `Strips` to **`FX & Knobs (8)`** displays the 8 dedicated FX/knob cards (`FX 1..FX 8`, pre-mapped to `Ch 1 CC 16–23` on APC40 mkII and nanoKONTROL2, Row-3 knobs on MIDImix and Launch Control XL, and always active for Stream Deck + / `obs-websocket` even on knobless controllers), cyan-to-amber filter intensity bars, formatted `display_value` readouts (`14.0 px`, `62.0 %`), and the one-click **`[Clean / All FX Off]`** panic button.
+Switching the segmented bank bar on `Strips` to **`FX & Knobs (8)`** displays the 8 dedicated FX/knob cards (`FX 1..FX 8`, pre-mapped to `Ch 1 CC 16–23` on APC40 mkII and nanoKONTROL2, Row-3 knobs on MIDImix and Launch Control XL, and always active for Stream Deck + / `obs-websocket` even on knobless controllers), cyan-to-amber filter intensity bars, formatted `display_value` readouts (`14.0 px`, `62.0 %`), and the one-click **`[Clean / All FX Off]`** reset button (for Midi Fadester's own FX slots; Visual Sidechain's Panic is separate).
 
 ![State 11: FX & Knobs Bank](docs/screenshots/11-fx-bank-strips.png)
 
