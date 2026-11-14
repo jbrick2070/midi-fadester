@@ -2352,7 +2352,13 @@ int main(void)
 	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
 	REQUIRE(obs_data_get_bool(prov_receipt, "accepted") && mix->mix_delivery == MFD_MIX_CONFIRMED);
 	REQUIRE(strcmp(eng.mix_provider_id, "11111111-1111-4111-8111-111111111111") == 0);
+	/* A reply for an unrelated request id from another provider is ignored without falsely latching conflict. */
+	obs_data_set_string(prov_reply, "id", "00000000-0000-4000-8000-000000000099");
+	obs_data_set_obj(prov_reply, "provider", prov_b);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(!obs_data_get_bool(prov_receipt, "accepted") && !eng.mix_provider_conflict);
 	/* Second provider answering the same request id latches conflict and displays "Two mix providers are answering". */
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
 	obs_data_set_obj(prov_reply, "provider", prov_b);
 	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
 	REQUIRE(!obs_data_get_bool(prov_receipt, "accepted") && eng.mix_provider_conflict);
@@ -2365,11 +2371,35 @@ int main(void)
 	push_midi_cc(&eng, 0, 23, 30);
 	mfd_engine_tick(&eng, 0.06f);
 	REQUIRE(ws_log.mix_requests == reqs_before_conflict_move && mix->mix_delivery == MFD_MIX_CONFLICT);
+	/* Resetting the Master slot clears the latched conflict; a silent-provider timeout also drops the pin so a restarted provider re-pins cleanly. */
+	mfd_engine_reset_slot_mode_state(&eng, mix, MFD_TARGET_MIX_MASTER);
+	REQUIRE(!eng.mix_provider_conflict && eng.mix_provider_id[0] == '\0');
+	push_midi_cc(&eng, 0, 23, 90);
+	mfd_engine_tick(&eng, 0.06f);
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
+	obs_data_set_obj(prov_reply, "provider", prov_a);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(strcmp(eng.mix_provider_id, "11111111-1111-4111-8111-111111111111") == 0);
+	push_midi_cc(&eng, 0, 23, 60);
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(mix->mix_delivery == MFD_MIX_WAITING);
+	mix->mix_sent_ns = (os_gettime_ns() > 11000000000ULL) ? (os_gettime_ns() - 11000000000ULL) : 1ULL;
+	mfd_engine_tick(&eng, 0.06f);
+	REQUIRE(mix->mix_delivery == MFD_MIX_NO_REPLY && eng.mix_provider_id[0] == '\0' && !eng.mix_provider_conflict);
+	push_midi_cc(&eng, 0, 23, 80);
+	mfd_engine_tick(&eng, 0.06f);
+	obs_data_set_string(prov_reply, "id", ws_log.mix_id);
+	obs_data_set_obj(prov_reply, "provider", prov_b);
+	mfd_vendor_handle_mix_reply(prov_reply, prov_receipt, &eng);
+	REQUIRE(obs_data_get_bool(prov_receipt, "accepted") && mix->mix_delivery == MFD_MIX_CONFIRMED);
+	REQUIRE(!eng.mix_provider_conflict && strcmp(eng.mix_provider_id, "22222222-2222-4222-8222-222222222222") == 0);
 	obs_data_release(prov_a);
 	obs_data_release(prov_b);
 	obs_data_release(prov_reply);
 	obs_data_release(prov_receipt);
 	eng.mix_provider_id[0] = '\0';
+	eng.last_mix_sent_id[0] = '\0';
+	eng.last_mix_sent_ns = 0;
 	eng.mix_provider_conflict = false;
 	memset(mix, 0, sizeof(*mix));
 

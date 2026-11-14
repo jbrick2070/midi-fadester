@@ -408,6 +408,8 @@ struct mfd_engine {
 	/* Paces mix requests; each mix-master slot keeps its own latest one. The OBS call runs outside the slot lock. */
 	float mix_send_wait;
 	char mix_provider_id[64];
+	char last_mix_sent_id[64];
+	uint64_t last_mix_sent_ns;
 	bool mix_provider_conflict;
 
 	uint64_t config_topology_rev;
