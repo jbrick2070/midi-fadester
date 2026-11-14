@@ -107,8 +107,12 @@ static void proc_visual_sidechain_get_signals(void *data, calldata_t *cd)
 	calldata_set_float(cd, "kick", (double)snap.kick);
 	calldata_set_float(cd, "snare", (double)snap.snare);
 	calldata_set_float(cd, "beat_phase", (double)snap.beat);
+	calldata_set_float(cd, "bar_phase", (double)snap.bar_phase);
 	calldata_set_float(cd, "bpm", (double)snap.estimated_bpm);
 	calldata_set_float(cd, "beat_confidence", (double)snap.beat_confidence);
+	calldata_set_int(cd, "beat_index", (long long)snap.beat_index);
+	calldata_set_int(cd, "bar_index", (long long)snap.bar_index);
+	calldata_set_bool(cd, "bpm_locked", snap.bpm_locked);
 	calldata_set_bool(cd, "audio_present", snap.audio_present);
 	calldata_set_bool(cd, "ok", true);
 }
@@ -155,11 +159,13 @@ void vs_fader_bridge_reset(void)
 {
 	vs_fader_bridge_detach();
 	os_atomic_set_bool(&g_panic_active, false);
+	vs_tempo_global_reset();
 
 	pthread_mutex_lock(&g_bridge_mutex);
 	g_panic_since_ms = 0;
 	g_poll_slot_idx = 0;
 	memset(&g_latest_signals, 0, sizeof(g_latest_signals));
+	g_latest_signals.estimated_bpm = VS_BEAT_DEFAULT_BPM;
 	memset(&g_last_emitted_signals, 0, sizeof(g_last_emitted_signals));
 	g_since_last_emit_sec = VS_SIGNALS_MIN_INTERVAL_SEC;
 	g_has_emitted_once = false;
@@ -181,14 +187,14 @@ void vs_fader_bridge_attach(proc_handler_t *ph, signal_handler_t *sh)
 	if (ph) {
 		proc_handler_add(
 			ph,
-			"void visual_sidechain_get_signals(out float level, out float bass, out float mid, out float high, out float kick, out float snare, out float beat_phase, out float bpm, out float beat_confidence, out bool audio_present, out bool ok)",
+			"void visual_sidechain_get_signals(out float level, out float bass, out float mid, out float high, out float kick, out float snare, out float beat_phase, out float bar_phase, out float bpm, out float beat_confidence, out int beat_index, out int bar_index, out bool bpm_locked, out bool audio_present, out bool ok)",
 			proc_visual_sidechain_get_signals, NULL);
 	}
 
 	if (sh) {
 		signal_handler_add(
 			sh,
-			"void visual_sidechain_signals(float level, float bass, float mid, float high, float kick, float snare, float beat_phase, float bpm, float beat_confidence, bool audio_present, bool ok)");
+			"void visual_sidechain_signals(float level, float bass, float mid, float high, float kick, float snare, float beat_phase, float bar_phase, float bpm, float beat_confidence, int beat_index, int bar_index, bool bpm_locked, bool audio_present, bool ok)");
 		signal_handler_connect_global(sh, on_global_signal, NULL);
 	}
 
@@ -440,6 +446,7 @@ void vs_fader_bridge_publish_signals(const struct vs_audio_frame *frame)
 	pthread_mutex_lock(&g_bridge_mutex);
 	g_latest_signals = *frame;
 	pthread_mutex_unlock(&g_bridge_mutex);
+	vs_tempo_global_observe_live(frame->estimated_bpm, frame->beat_index, frame->bar_phase, frame->bar_index);
 }
 
 void vs_fader_bridge_get_signals(struct vs_audio_frame *out_frame)
@@ -454,6 +461,12 @@ void vs_fader_bridge_get_signals(struct vs_audio_frame *out_frame)
 static bool signals_differ_beyond_eps(const struct vs_audio_frame *a, const struct vs_audio_frame *b, float eps)
 {
 	if (a->audio_present != b->audio_present)
+		return true;
+	if (a->bpm_locked != b->bpm_locked)
+		return true;
+	if (a->beat_index != b->beat_index)
+		return true;
+	if (a->bar_index != b->bar_index)
 		return true;
 	if (fabsf(a->level - b->level) > eps)
 		return true;
@@ -470,6 +483,8 @@ static bool signals_differ_beyond_eps(const struct vs_audio_frame *a, const stru
 	if (fabsf(a->snare - b->snare) > eps)
 		return true;
 	if (fabsf(a->beat - b->beat) > eps)
+		return true;
+	if (fabsf(a->bar_phase - b->bar_phase) > eps)
 		return true;
 	if (fabsf(a->spectral_centroid - b->spectral_centroid) > eps)
 		return true;
@@ -528,12 +543,43 @@ static void emit_visual_sidechain_signal(signal_handler_t *sh, const struct vs_a
 	calldata_set_float(&cd, "kick", (double)frame->kick);
 	calldata_set_float(&cd, "snare", (double)frame->snare);
 	calldata_set_float(&cd, "beat_phase", (double)frame->beat);
+	calldata_set_float(&cd, "bar_phase", (double)frame->bar_phase);
 	calldata_set_float(&cd, "bpm", (double)frame->estimated_bpm);
 	calldata_set_float(&cd, "beat_confidence", (double)frame->beat_confidence);
+	calldata_set_int(&cd, "beat_index", (long long)frame->beat_index);
+	calldata_set_int(&cd, "bar_index", (long long)frame->bar_index);
+	calldata_set_bool(&cd, "bpm_locked", frame->bpm_locked);
 	calldata_set_bool(&cd, "audio_present", frame->audio_present);
 	calldata_set_bool(&cd, "ok", true);
 	signal_handler_signal(sh, "visual_sidechain_signals", &cd);
 	calldata_free(&cd);
+}
+
+void vs_fader_bridge_apply_tempo_snapshot(const struct vs_tempo_snapshot *snap)
+{
+	if (!snap)
+		return;
+
+	signal_handler_t *sh = NULL;
+	struct vs_audio_frame emit_snap;
+	memset(&emit_snap, 0, sizeof(emit_snap));
+
+	pthread_mutex_lock(&g_bridge_mutex);
+	g_latest_signals.estimated_bpm = snap->bpm;
+	g_latest_signals.bpm_locked = snap->bpm_locked;
+	g_latest_signals.beat = snap->beat_phase;
+	g_latest_signals.beat_index = snap->beat_index;
+	g_latest_signals.bar_phase = snap->bar_phase;
+	g_latest_signals.bar_index = snap->bar_index;
+	g_last_emitted_signals = g_latest_signals;
+	g_since_last_emit_sec = 0.0f;
+	g_has_emitted_once = true;
+	sh = g_sh;
+	emit_snap = g_latest_signals;
+	pthread_mutex_unlock(&g_bridge_mutex);
+
+	if (sh)
+		emit_visual_sidechain_signal(sh, &emit_snap);
 }
 
 bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
@@ -547,6 +593,8 @@ bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const 
 		g_latest_signals = *frame;
 		const bool has_ph = (g_ph != NULL);
 		pthread_mutex_unlock(&g_bridge_mutex);
+		vs_tempo_global_observe_live(frame->estimated_bpm, frame->beat_index, frame->bar_phase,
+					     frame->bar_index);
 
 		if (has_ph)
 			vs_fader_bridge_poll_once();
@@ -600,6 +648,10 @@ bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const 
 	}
 	pthread_mutex_unlock(&g_bridge_mutex);
 
+	if (check_emit) {
+		vs_tempo_global_observe_live(frame->estimated_bpm, frame->beat_index, frame->bar_phase,
+					     frame->bar_index);
+	}
 	if (do_poll)
 		vs_fader_bridge_poll_once();
 	if (did_emit && sh)

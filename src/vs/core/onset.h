@@ -13,6 +13,7 @@
 
 #include "flash-clock.h"
 #include "spectrum.h"
+#include "tempo.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,14 +43,19 @@ struct vs_onset_result {
 	float kick;
 	float snare;
 	float beat;
+	float bar_phase;
 	float estimated_bpm;
 	float beat_confidence;
+	uint32_t beat_index;
+	uint64_t bar_index;
+	bool bpm_locked;
 	bool kick_triggered;
 	bool snare_triggered;
 };
 
 struct vs_onset {
 	struct vs_onset_config cfg;
+	struct vs_tempo tempo;
 	float prev_mag_low[VS_MAX_BINS_LOW];
 	float prev_mag_mid[VS_MAX_BINS_MID];
 	float kick_env;
@@ -71,8 +77,13 @@ struct vs_onset {
 void vs_onset_default_config(struct vs_onset_config *cfg);
 bool vs_onset_init(struct vs_onset *onset, const struct vs_onset_config *cfg);
 void vs_onset_reset(struct vs_onset *onset);
-/* Freezes beat_phase and beat_confidence at 0 during extended silence while keeping estimated_bpm ready for resume. */
+/* Freezes beat_phase and beat_confidence at 0 during extended silence (when unlocked) while keeping estimated_bpm ready. */
 void vs_onset_freeze_beat(struct vs_onset *onset);
+
+bool vs_onset_tap_tempo(struct vs_onset *onset, double now_sec);
+bool vs_onset_set_bpm(struct vs_onset *onset, float bpm);
+void vs_onset_set_bpm_locked(struct vs_onset *onset, bool locked);
+void vs_onset_resync_downbeat(struct vs_onset *onset);
 
 void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *mag_mid, float dt_sec,
 		   struct vs_onset_result *out_res);

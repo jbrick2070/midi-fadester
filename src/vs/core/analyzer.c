@@ -224,6 +224,7 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 	struct vs_spectrum_frame spec_frame;
 	vs_spectrum_compute(&ana->spectrum, ana->win_mid, ana->mag_low, ana->mag_mid, &spec_frame);
 
+	const uint64_t pre_step_bar_index = ana->onset.tempo.bar_index;
 	struct vs_onset_result onset_res;
 	vs_onset_step(&ana->onset, ana->mag_low, ana->mag_mid, dt_sec, &onset_res);
 
@@ -260,14 +261,29 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 		out_frame->snare = onset_res.snare;
 	}
 
+	out_frame->bpm_locked = onset_res.bpm_locked;
 	if (!ana->has_seen_audio || ana->silent_or_starved_sec >= VS_SILENCE_HOLD_SEC) {
-		vs_onset_freeze_beat(&ana->onset);
 		out_frame->audio_present = false;
-		out_frame->beat = 0.0f;
 		out_frame->beat_confidence = 0.0f;
+		if (onset_res.bpm_locked) {
+			out_frame->beat = onset_res.beat;
+			out_frame->bar_phase = onset_res.bar_phase;
+			out_frame->beat_index = onset_res.beat_index;
+			out_frame->bar_index = onset_res.bar_index;
+		} else {
+			vs_onset_freeze_beat(&ana->onset);
+			ana->onset.tempo.bar_index = pre_step_bar_index;
+			out_frame->beat = 0.0f;
+			out_frame->bar_phase = 0.0f;
+			out_frame->beat_index = 0u;
+			out_frame->bar_index = pre_step_bar_index;
+		}
 	} else {
 		out_frame->audio_present = true;
 		out_frame->beat = onset_res.beat;
+		out_frame->bar_phase = onset_res.bar_phase;
+		out_frame->beat_index = onset_res.beat_index;
+		out_frame->bar_index = onset_res.bar_index;
 		out_frame->beat_confidence = onset_res.beat_confidence;
 	}
 

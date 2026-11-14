@@ -104,6 +104,7 @@ int vs_fader_bridge_map_int_param(float value, double min_val, double max_val, i
 
 void vs_fader_bridge_publish_signals(const struct vs_audio_frame *frame);
 void vs_fader_bridge_get_signals(struct vs_audio_frame *out_frame);
+void vs_fader_bridge_apply_tempo_snapshot(const struct vs_tempo_snapshot *snap);
 
 /*
  * Coalesces outbound `visual_sidechain_signals` and `signals_changed` events

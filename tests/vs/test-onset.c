@@ -389,6 +389,90 @@ static void test_shared_flash_clock_caps_two_clients(void)
 	assert_combined_window_cap(env_a, env_b, 180, 3);
 }
 
+static void test_tempo_tap_lock_gap_and_resync(void)
+{
+	vs_tempo_global_reset();
+
+	struct vs_onset_config cfg;
+	struct vs_onset onset;
+	vs_onset_default_config(&cfg);
+	assert(vs_onset_init(&onset, &cfg));
+
+	float *mag_low = (float *)calloc(VS_MAX_BINS_LOW, sizeof(float));
+	float *mag_mid = (float *)calloc(VS_MAX_BINS_MID, sizeof(float));
+	struct vs_onset_result res;
+	assert(mag_low && mag_mid);
+
+	/* 1. Four taps at 500 ms intervals give 120 BPM within 1 and step beat_index 0..3. */
+	assert(vs_onset_tap_tempo(&onset, 10.000));
+	assert(onset.tempo.tap_count == 1u);
+	assert(vs_onset_tap_tempo(&onset, 10.500));
+	assert(vs_onset_tap_tempo(&onset, 11.000));
+	assert(vs_onset_tap_tempo(&onset, 11.500));
+	assert(onset.tempo.tap_count == 4u);
+	assert(fabsf(onset.estimated_bpm - 120.0f) <= 1.0f);
+
+	/* Switch bounce < 200 ms is ignored; a tap > 2.5 s later starts a fresh chain on beat 0. */
+	assert(!vs_onset_tap_tempo(&onset, 11.600));
+	assert(onset.tempo.tap_count == 4u);
+	assert(vs_onset_tap_tempo(&onset, 15.000));
+	assert(onset.tempo.tap_count == 1u);
+	assert(onset.tempo.bar_beats == 0.0);
+
+	/* 2. Lock BPM at 120: a 4 s kickless gap leaves bar_phase continuous (even across vs_onset_freeze_beat). */
+	assert(vs_onset_set_bpm(&onset, 120.0f));
+	vs_onset_set_bpm_locked(&onset, true);
+	vs_onset_resync_downbeat(&onset);
+
+	const float gap_dt = 1.0f / 64.0f; /* exact IEEE-754 power-of-2 step: 256 frames == 4.0 s == 2 full bars */
+	float prev_bar_phase = 0.0f;
+	uint64_t start_bar = onset.tempo.bar_index;
+	for (int frame = 0; frame < 256; frame++) {
+		if (frame == 160) {
+			/* Even if silence hold attempts to freeze at > 2.0 s, locked mode keeps bar_phase running. */
+			vs_onset_freeze_beat(&onset);
+		}
+		vs_onset_step(&onset, mag_low, mag_mid, gap_dt, &res);
+		assert(res.bpm_locked);
+		assert(fabsf(res.estimated_bpm - 120.0f) < 1e-4f);
+
+		float delta = res.bar_phase - prev_bar_phase;
+		if (delta < 0.0f)
+			delta += 1.0f;
+		assert(fabsf(delta - (1.0f / 128.0f)) < 1e-5f);
+		prev_bar_phase = res.bar_phase;
+	}
+	/* 4.0 s at 120 BPM is 8 beats == 2 full 4-beat bars. */
+	assert(res.bar_index == start_bar + 2u);
+
+	/* Off-beat kicks at 0.40 s intervals (150 BPM) while locked never change BPM and ignore mid-beat hits. */
+	const float dt = 0.010f;
+	for (int frame = 0; frame < 200; frame++) {
+		mag_low[8] = (frame % 40 == 25) ? 0.9f : 0.0f;
+		vs_onset_step(&onset, mag_low, mag_mid, dt, &res);
+		assert(fabsf(res.estimated_bpm - 120.0f) < 1e-4f);
+	}
+	mag_low[8] = 0.0f;
+
+	/* 3. resync_downbeat from mid-bar sets beat_index to 0 on the next event without decreasing bar_index. */
+	assert(vs_onset_set_bpm(&onset, 120.0f));
+	vs_onset_resync_downbeat(&onset);
+	/* Step 1.25 s (2.5 beats -> beat_index == 2). */
+	for (int frame = 0; frame < 125; frame++)
+		vs_onset_step(&onset, mag_low, mag_mid, dt, &res);
+	assert(res.beat_index == 2u);
+	const uint64_t bar_before_resync = res.bar_index;
+
+	vs_onset_resync_downbeat(&onset);
+	vs_onset_step(&onset, mag_low, mag_mid, dt, &res);
+	assert(res.beat_index == 0u);
+	assert(res.bar_phase < 0.02f);
+	assert(res.bar_index == bar_before_resync + 1u);
+
+	free(mag_low);
+	free(mag_mid);
+}
+
 int main(void)
 {
 	test_onset_kick_and_snare_separation();
@@ -397,6 +481,7 @@ int main(void)
 	test_flash_limiter_caps_flash_rate();
 	test_flash_limiter_peak_zeroed_mid_fall();
 	test_shared_flash_clock_caps_two_clients();
+	test_tempo_tap_lock_gap_and_resync();
 	printf("test-onset: all assertions passed\n");
 	return 0;
 }

@@ -79,8 +79,12 @@ struct vs_audio_frame {
 	float waveform[VS_FFT_TEX_BINS];   /* [0.0, 1.0] 512 mono samples for Row 1 of audio_fft */
 	float peak_raw;                    /* for obs-shaderfilter audio_peak compat */
 	float magnitude_raw;               /* for obs-shaderfilter audio_magnitude compat */
-	float estimated_bpm;               /* [60.0, 180.0] estimated tempo */
+	float estimated_bpm;               /* [30.0, 300.0] estimated or manual tempo */
 	float beat_confidence;             /* [0.0, 1.0] IOI regularity & recency confidence */
+	float bar_phase;                   /* [0.0, 1.0) 4-beat bar phase (0 after 2 s silence when unlocked) */
+	uint32_t beat_index;               /* 0..3 beat within 4-beat bar */
+	uint64_t bar_index;                /* monotonic 0-based bar counter */
+	bool bpm_locked;                   /* true when tempo is locked by operator */
 	bool audio_present;                /* true while hearing above-gate audio (with 2 s hold) */
 };
 

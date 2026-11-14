@@ -47,6 +47,7 @@ set(
   "${_core}/analyzer.c"
   "${_core}/fader-bridge.c"
   "${_core}/flash-clock.c"
+  "${_core}/tempo.c"
   "${_core}/onset.c"
   "${_core}/envelope.c"
   "${_core}/spectrum.c"
@@ -57,7 +58,7 @@ visual_sidechain_add_test(test-audio-ring test-audio-ring.c "${_core}/audio-ring
 visual_sidechain_add_test(test-fft test-fft.c "${_core}/fft.c")
 visual_sidechain_add_test(test-spectrum test-spectrum.c "${_core}/spectrum.c" "${_core}/fft.c")
 visual_sidechain_add_test(test-envelope test-envelope.c "${_core}/envelope.c")
-visual_sidechain_add_test(test-onset test-onset.c "${_core}/onset.c" "${_core}/flash-clock.c")
+visual_sidechain_add_test(test-onset test-onset.c "${_core}/onset.c" "${_core}/tempo.c" "${_core}/flash-clock.c")
 visual_sidechain_add_test(test-analyzer test-analyzer.c ${_analyzer_srcs})
 visual_sidechain_add_test(test-modulation test-modulation.c "${_core}/modulation.c" "${_core}/flash-clock.c")
 visual_sidechain_add_test(test-modulator-baseline test-modulator-baseline.c "${_core}/baseline.c")

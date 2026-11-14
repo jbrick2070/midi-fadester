@@ -57,7 +57,9 @@ bool vs_onset_init(struct vs_onset *onset, const struct vs_onset_config *cfg)
 	if (onset->cfg.refractory_sec <= 0.0f)
 		onset->cfg.refractory_sec = VS_ONSET_REFRACTORY_SEC;
 	onset->last_kick_onset_sec = -1.0;
-	onset->estimated_bpm = VS_BEAT_DEFAULT_BPM;
+	vs_tempo_init(&onset->tempo, VS_BEAT_DEFAULT_BPM);
+	vs_tempo_global_sync_instance(&onset->tempo, NULL);
+	onset->estimated_bpm = onset->tempo.bpm;
 	return true;
 }
 
@@ -73,11 +75,59 @@ void vs_onset_freeze_beat(struct vs_onset *onset)
 {
 	if (!onset)
 		return;
-	onset->beat_phase = 0.0f;
 	onset->beat_confidence = 0.0f;
 	onset->last_kick_onset_sec = -1.0;
 	onset->bpm_history_count = 0u;
 	onset->bpm_history_pos = 0u;
+	if (!onset->tempo.bpm_locked) {
+		onset->beat_phase = 0.0f;
+		vs_tempo_freeze(&onset->tempo);
+	}
+}
+
+bool vs_onset_tap_tempo(struct vs_onset *onset, double now_sec)
+{
+	if (!onset)
+		return false;
+	const bool ok = vs_tempo_tap(&onset->tempo, now_sec);
+	if (ok) {
+		onset->estimated_bpm = onset->tempo.bpm;
+		onset->beat_phase = (float)(onset->tempo.bar_beats - floor(onset->tempo.bar_beats));
+		onset->bpm_history_count = 0u;
+		onset->bpm_history_pos = 0u;
+		onset->last_kick_onset_sec = -1.0;
+	}
+	return ok;
+}
+
+bool vs_onset_set_bpm(struct vs_onset *onset, float bpm)
+{
+	if (!onset)
+		return false;
+	const bool ok = vs_tempo_set_bpm(&onset->tempo, bpm);
+	if (ok) {
+		onset->estimated_bpm = onset->tempo.bpm;
+		onset->bpm_history_count = 0u;
+		onset->bpm_history_pos = 0u;
+		onset->last_kick_onset_sec = -1.0;
+	}
+	return ok;
+}
+
+void vs_onset_set_bpm_locked(struct vs_onset *onset, bool locked)
+{
+	if (!onset)
+		return;
+	vs_tempo_set_locked(&onset->tempo, locked);
+	onset->estimated_bpm = onset->tempo.bpm;
+}
+
+void vs_onset_resync_downbeat(struct vs_onset *onset)
+{
+	if (!onset)
+		return;
+	vs_tempo_resync_downbeat(&onset->tempo);
+	onset->beat_phase = 0.0f;
 }
 
 static float compute_beat_confidence(const struct vs_onset *onset)
@@ -208,12 +258,27 @@ void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *ma
 
 	const float refractory = onset->cfg.refractory_sec;
 
+	bool clear_ioi = false;
+	if (vs_tempo_global_sync_instance(&onset->tempo, &clear_ioi)) {
+		onset->estimated_bpm = onset->tempo.bpm;
+		if (clear_ioi) {
+			onset->bpm_history_count = 0u;
+			onset->bpm_history_pos = 0u;
+			onset->last_kick_onset_sec = -1.0;
+		}
+	}
+
+	if (dt_sec > 0.0f)
+		vs_tempo_advance(&onset->tempo, dt_sec);
+
 	if (kick_flux > kick_thresh && kick_peak_mag > 0.08f && onset->kick_cooldown_sec <= 0.0f) {
 		onset->kick_env = 1.0f;
 		onset->kick_cooldown_sec = refractory;
 		out_res->kick_triggered = true;
 
 		/* Update beat tracker from inter-onset interval (IOI). */
+		bool has_valid_ioi = false;
+		float ioi_bpm = onset->estimated_bpm;
 		if (onset->last_kick_onset_sec >= 0.0) {
 			const double ioi = onset->elapsed_sec - onset->last_kick_onset_sec;
 			if (ioi >= 0.28 && ioi <= 1.10) {
@@ -231,14 +296,13 @@ void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *ma
 				float sum_bpm = 0.0f;
 				for (uint32_t i = 0; i < onset->bpm_history_count; i++)
 					sum_bpm += onset->bpm_history[i];
-				onset->estimated_bpm = sum_bpm / (float)onset->bpm_history_count;
+				ioi_bpm = sum_bpm / (float)onset->bpm_history_count;
+				has_valid_ioi = true;
 			}
 		}
+		vs_tempo_on_kick(&onset->tempo, ioi_bpm, has_valid_ioi);
+		onset->estimated_bpm = onset->tempo.bpm;
 		onset->last_kick_onset_sec = onset->elapsed_sec;
-		onset->beat_phase = 0.0f;
-	} else if (dt_sec > 0.0f) {
-		onset->beat_phase += dt_sec * (onset->estimated_bpm / 60.0f);
-		onset->beat_phase -= floorf(onset->beat_phase);
 	}
 
 	if (snare_flux > snare_thresh && snare_peak_mag > 0.04f && onset->snare_cooldown_sec <= 0.0f) {
@@ -247,19 +311,20 @@ void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *ma
 		out_res->snare_triggered = true;
 	}
 
-	/* Apply negative sync_offset_ms phase advance to beat output (R-ANA-3, R-ANA-9). */
-	float out_beat = onset->beat_phase;
-	if (onset->cfg.sync_offset_ms < 0.0f) {
-		const float advance_sec = -onset->cfg.sync_offset_ms * 0.001f;
-		out_beat += advance_sec * (onset->estimated_bpm / 60.0f);
-		out_beat -= floorf(out_beat);
-	}
-
+	/* Apply negative sync_offset_ms phase advance to beat and bar output (R-ANA-3, R-ANA-9). */
+	struct vs_tempo_snapshot tempo_snap;
+	vs_tempo_snapshot_with_sync_offset(&onset->tempo, onset->cfg.sync_offset_ms, &tempo_snap);
+	onset->beat_phase = (float)(onset->tempo.bar_beats - floor(onset->tempo.bar_beats));
+	onset->estimated_bpm = tempo_snap.bpm;
 	onset->beat_confidence = compute_beat_confidence(onset);
 
 	out_res->kick = clamp01(onset->kick_env);
 	out_res->snare = clamp01(onset->snare_env);
-	out_res->beat = clamp01(out_beat);
+	out_res->beat = tempo_snap.beat_phase;
+	out_res->bar_phase = tempo_snap.bar_phase;
+	out_res->beat_index = tempo_snap.beat_index;
+	out_res->bar_index = tempo_snap.bar_index;
+	out_res->bpm_locked = tempo_snap.bpm_locked;
 	out_res->estimated_bpm = onset->estimated_bpm;
 	out_res->beat_confidence = onset->beat_confidence;
 

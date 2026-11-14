@@ -404,6 +404,27 @@ static void test_silence_freezes_beat_and_resume_restores_phase(void)
 	assert(frame.audio_present);
 	assert(frame.beat_confidence < 0.20f);
 
+	/* 5. With BPM locked, a 4 s silent gap reports audio_present=false after 2 s while keeping bar_phase continuous. */
+	assert(vs_onset_set_bpm(&ana.onset, 120.0f));
+	vs_onset_set_bpm_locked(&ana.onset, true);
+	vs_onset_resync_downbeat(&ana.onset);
+	memset(buf, 0, sizeof(buf));
+	float prev_bar = 0.0f;
+	for (size_t f = 0; f < 240u; f++) {
+		total_pushed += chunk;
+		const uint64_t ts_ns = total_pushed * 1000000000ULL / sr;
+		vs_analyzer_push_mono(&ana, buf, chunk, ts_ns);
+		vs_analyzer_step(&ana, dt, &frame);
+		float d_bar = frame.bar_phase - prev_bar;
+		if (d_bar < 0.0f)
+			d_bar += 1.0f;
+		assert(d_bar > 0.004f && d_bar < 0.015f);
+		prev_bar = frame.bar_phase;
+	}
+	assert(!frame.audio_present);
+	assert(frame.bpm_locked);
+	assert(fabsf(frame.estimated_bpm - 120.0f) < 1e-4f);
+
 	vs_analyzer_free(&ana);
 }
 
