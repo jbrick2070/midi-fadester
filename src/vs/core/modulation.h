@@ -33,6 +33,7 @@ enum vs_prop_type {
 struct vs_mod_slot_config {
 	bool enabled;
 	char target_filter[128];
+	char target_filter_id[64];
 	char target_setting[128];
 	enum vs_prop_type prop_type;
 	enum vs_signal_id signal_id;
@@ -46,6 +47,7 @@ struct vs_mod_slot_config {
 	double max_value;     /* upper bound of target range */
 	int64_t int_step;     /* step size for VS_PROP_INT (>= 1) */
 	bool invert;
+	bool flash_guard;      /* default true: caps transient -> luminance-class bindings via shared flash clock */
 	uint32_t rate_divider; /* 1, 2, or 4 video frames */
 };
 
@@ -54,6 +56,7 @@ struct vs_mod_slot_state {
 	bool has_last_written;
 	double last_written_float;
 	int64_t last_written_int;
+	struct vs_flash_limiter flash_limiter;
 };
 
 struct vs_mod_eval_result {
@@ -68,6 +71,17 @@ void vs_mod_slot_reset_state(struct vs_mod_slot_state *state);
 /* Earlier enabled slots own a target setting so one instance never fights itself. */
 bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, size_t earlier_count,
 				      const struct vs_mod_slot_config *candidate);
+
+/* Flash-safety helpers (P0-1): explicit *_safe signals and Flash Guard on transient -> luminance-class targets. */
+bool vs_mod_is_safe_signal(enum vs_signal_id sig);
+bool vs_mod_is_transient_signal(enum vs_signal_id sig, enum vs_hz_band_mode custom_mode);
+bool vs_mod_is_luminance_target(const char *filter_id, const char *setting_name);
+bool vs_mod_slot_uses_flash_clock(const struct vs_mod_slot_config *cfg);
+/* Gates raw_signal_01 through state->flash_limiter on `clock` (or the process-wide flash clock when `clock` is NULL)
+ * whenever vs_mod_slot_uses_flash_clock(cfg) is true; otherwise returns raw_signal_01 unchanged. */
+float vs_mod_slot_filter_signal(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state,
+				struct vs_flash_clock *clock, uint64_t frame_token, float raw_signal_01, float dt_sec,
+				bool panic_active);
 
 /*
  * Evaluates one modulation slot for the current video tick.

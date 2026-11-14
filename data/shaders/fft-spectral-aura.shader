@@ -58,7 +58,7 @@ float4 mainImage(VertData v_in) : TARGET
 	float fft_val = vs_sample_fft(norm_angle);
 	float spec_val = vs_sample_spectrum(norm_angle);
 	float drive = saturate(lerp(0.35, 1.0, fft_reactivity) * (0.65 * fft_val + 0.35 * spec_val) +
-			       0.45 * audio_kick + 0.25 * audio_bass + 0.20 * audio_custom_band);
+			       0.45 * audio_kick_safe + 0.25 * audio_bass + 0.20 * audio_custom_band);
 
 	/* Sample 8 directions around current pixel to detect alpha silhouette edge */
 	float radius = aura_radius_px * (0.5 + 0.9 * drive);

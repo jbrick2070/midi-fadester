@@ -61,6 +61,7 @@ void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg)
 	cfg->max_value = 1.0;
 	cfg->int_step = 1;
 	cfg->invert = false;
+	cfg->flash_guard = true;
 	cfg->rate_divider = 1u;
 }
 
@@ -68,7 +69,110 @@ void vs_mod_slot_reset_state(struct vs_mod_slot_state *state)
 {
 	if (!state)
 		return;
+	/* Keep since_admit_sec / has_admitted across retargets and enable toggles so spacing never resets early. */
+	const double kept_since_admit = state->flash_limiter.since_admit_sec;
+	const bool kept_has_admitted = state->flash_limiter.has_admitted;
 	memset(state, 0, sizeof(*state));
+	state->flash_limiter.since_admit_sec = kept_since_admit;
+	state->flash_limiter.has_admitted = kept_has_admitted;
+}
+
+bool vs_mod_is_safe_signal(enum vs_signal_id sig)
+{
+	return sig == VS_SIG_KICK_SAFE || sig == VS_SIG_SNARE_SAFE || sig == VS_SIG_FLUX_SAFE;
+}
+
+bool vs_mod_is_transient_signal(enum vs_signal_id sig, enum vs_hz_band_mode custom_mode)
+{
+	if (sig == VS_SIG_KICK || sig == VS_SIG_SNARE || sig == VS_SIG_FLUX || sig == VS_SIG_BEAT)
+		return true;
+	if (sig == VS_SIG_CUSTOM_HZ && custom_mode == VS_HZ_MODE_FLUX)
+		return true;
+	return false;
+}
+
+static bool is_canonical_luminance_setting(const char *setting_name)
+{
+	static const char *const k_settings[] = {
+		"brightness", "contrast", "gamma", "opacity", "color_multiply", "color_add",
+	};
+	if (!setting_name || setting_name[0] == '\0')
+		return false;
+	for (size_t i = 0; i < sizeof(k_settings) / sizeof(k_settings[0]); i++) {
+		if (strcmp(setting_name, k_settings[i]) == 0)
+			return true;
+	}
+	return false;
+}
+
+bool vs_mod_is_luminance_target(const char *filter_id, const char *setting_name)
+{
+	if (!setting_name || setting_name[0] == '\0')
+		return false;
+
+	/* Fail closed when target filter kind is not yet resolved or in pure-C callers. */
+	if (!filter_id || filter_id[0] == '\0')
+		return is_canonical_luminance_setting(setting_name);
+
+	if (strcmp(filter_id, "color_filter") == 0 || strcmp(filter_id, "color_filter_v2") == 0 ||
+	    strcmp(filter_id, "color_key_filter") == 0 || strcmp(filter_id, "color_key_filter_v2") == 0 ||
+	    strcmp(filter_id, "chroma_key_filter") == 0 || strcmp(filter_id, "chroma_key_filter_v2") == 0) {
+		return is_canonical_luminance_setting(setting_name);
+	}
+
+	if (strcmp(filter_id, "luma_key_filter") == 0 || strcmp(filter_id, "luma_key_filter_v2") == 0) {
+		return strcmp(setting_name, "luma_max") == 0 || strcmp(setting_name, "luma_min") == 0;
+	}
+
+	if (strcmp(filter_id, "hdr_tonemap_filter") == 0) {
+		return strcmp(setting_name, "sdr_white_level") == 0 || strcmp(setting_name, "hdr_input_maximum") == 0 ||
+		       strcmp(setting_name, "hdr_output_maximum") == 0;
+	}
+
+	if (strcmp(filter_id, "visual_sidechain_shader_filter") == 0) {
+		static const char *const k_shader_luma_params[] = {
+			"vs_effect_mix_pct", "flash_intensity", "bloom_intensity", "aura_intensity",
+			"vignette_strength", "hex_opacity",     "tunnel_opacity",  "overlay_opacity",
+		};
+		for (size_t i = 0; i < sizeof(k_shader_luma_params) / sizeof(k_shader_luma_params[0]); i++) {
+			if (strcmp(setting_name, k_shader_luma_params[i]) == 0)
+				return true;
+		}
+	}
+
+	return false;
+}
+
+bool vs_mod_slot_uses_flash_clock(const struct vs_mod_slot_config *cfg)
+{
+	if (!cfg || !cfg->enabled || cfg->prop_type == VS_PROP_NONE || cfg->target_filter[0] == '\0' ||
+	    cfg->target_setting[0] == '\0') {
+		return false;
+	}
+	if (vs_mod_is_safe_signal(cfg->signal_id))
+		return true;
+	if (cfg->flash_guard && vs_mod_is_transient_signal(cfg->signal_id, cfg->custom_mode) &&
+	    vs_mod_is_luminance_target(cfg->target_filter_id, cfg->target_setting)) {
+		return true;
+	}
+	return false;
+}
+
+float vs_mod_slot_filter_signal(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state,
+				struct vs_flash_clock *clock, uint64_t frame_token, float raw_signal_01, float dt_sec,
+				bool panic_active)
+{
+	if (!cfg || !state || !vs_mod_slot_uses_flash_clock(cfg))
+		return raw_signal_01;
+
+	const float over = panic_active ? 0.0f : vs_flash_trigger_over(raw_signal_01, VS_FLASH_DEFAULT_THRESHOLD);
+	const float env = clock ? vs_flash_clock_step(clock, &state->flash_limiter, frame_token, over,
+						      (float)VS_FLASH_RATE_MAX_HZ, dt_sec)
+				: vs_flash_clock_global_step(&state->flash_limiter, frame_token, over,
+							     (float)VS_FLASH_RATE_MAX_HZ, dt_sec);
+	if (panic_active)
+		state->flash_limiter.peak = 0.0f;
+	return panic_active ? 0.0f : env;
 }
 
 bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, size_t earlier_count,

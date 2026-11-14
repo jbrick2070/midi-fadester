@@ -286,6 +286,92 @@ static void test_extreme_and_invalid_numeric_bounds(void)
 	assert(res.should_write && double_near(res.float_val, 80.0, 1e-6));
 }
 
+/* Counts direction changes (reversals between +1 rising and -1 falling) in a 60-frame (1.0 s) window starting at
+ * `start_frame`. Each admitted flash has 1 rise and 1 fall, so 3 flashes/s in any 1.0 s window can reverse direction
+ * at most 6 times (3 rises and 3 falls). */
+static int max_direction_changes_per_second(const double *series, int total_frames, int fps)
+{
+	int max_changes = 0;
+	for (int start = 0; start + fps <= total_frames; start++) {
+		int changes = 0;
+		int prev_dir = 0;
+		for (int i = start + 1; i < start + fps; i++) {
+			const double diff = series[i] - series[i - 1];
+			int dir = 0;
+			if (diff > 1e-6)
+				dir = 1;
+			else if (diff < -1e-6)
+				dir = -1;
+			if (dir != 0 && dir != prev_dir) {
+				if (prev_dir != 0)
+					changes++;
+				prev_dir = dir;
+			}
+		}
+		if (changes > max_changes)
+			max_changes = changes;
+	}
+	return max_changes;
+}
+
+static void test_modulation_flash_guard_caps_luminance_direction_changes(void)
+{
+	const int fps = 60;
+	const int frames = 180; /* 3.0 s */
+	const float dt = 1.0f / (float)fps;
+	double live_series[180];
+
+	struct vs_mod_slot_config cfg;
+	struct vs_mod_slot_state state;
+	struct vs_flash_clock clock;
+	vs_mod_slot_default_config(&cfg);
+	assert(cfg.flash_guard); /* On by default so legacy settings without the key stay guarded */
+
+	cfg.enabled = true;
+	snprintf(cfg.target_filter, sizeof(cfg.target_filter), "Color Correction");
+	snprintf(cfg.target_filter_id, sizeof(cfg.target_filter_id), "color_filter");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "brightness");
+	cfg.prop_type = VS_PROP_FLOAT;
+	cfg.signal_id = VS_SIG_KICK;
+	cfg.min_value = 0.0;
+	cfg.max_value = 1.0;
+	cfg.amount = 1.0;
+	assert(vs_mod_slot_uses_flash_clock(&cfg));
+
+	/* 10 Hz kick-shaped transient (every 6 frames at 60 fps): without Flash Guard this produces 20 direction
+	 * changes/s (10 rises + 10 falls); with Flash Guard on it must produce <= 6 direction changes/s (3 rises + 3
+	 * falls), for both positive and negative (ducking) modulation amounts. */
+	const double amounts[] = {1.0, -1.0};
+	for (size_t a = 0; a < sizeof(amounts) / sizeof(amounts[0]); a++) {
+		cfg.amount = amounts[a];
+		memset(&state, 0, sizeof(state));
+		vs_flash_clock_reset(&clock);
+		double live_brightness = amounts[a] >= 0.0 ? cfg.min_value : cfg.max_value;
+		for (int i = 0; i < frames; i++) {
+			const int age = i % 6;
+			const float raw_kick = (float)exp(-(double)age * (double)dt / 0.065);
+			const float sig =
+				vs_mod_slot_filter_signal(&cfg, &state, &clock, (uint64_t)(i + 1), raw_kick, dt, false);
+			struct vs_mod_eval_result res;
+			vs_mod_slot_eval(&cfg, &state, sig, &res);
+			if (res.should_write)
+				live_brightness = res.float_val;
+			live_series[i] = live_brightness;
+		}
+		const int max_dir = max_direction_changes_per_second(live_series, frames, fps);
+		assert(max_dir > 0 && max_dir <= 6);
+	}
+
+	/* Non-luminance target (e.g. NVIDIA Blur intensity) stays unguarded on raw VS_SIG_KICK, while explicit
+	 * VS_SIG_KICK_SAFE still gates through the shared flash clock on any target. */
+	snprintf(cfg.target_filter_id, sizeof(cfg.target_filter_id), "nvidia_blur_filter");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "intensity");
+	cfg.signal_id = VS_SIG_KICK;
+	assert(!vs_mod_slot_uses_flash_clock(&cfg));
+	cfg.signal_id = VS_SIG_KICK_SAFE;
+	assert(vs_mod_slot_uses_flash_clock(&cfg));
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -297,6 +383,7 @@ int main(void)
 	test_modulation_depth_fader_scaling_and_ducking_zero_continuity();
 	test_duplicate_target_has_one_owner();
 	test_extreme_and_invalid_numeric_bounds();
+	test_modulation_flash_guard_caps_luminance_direction_changes();
 	printf("test-modulation: all assertions passed\n");
 	return 0;
 }

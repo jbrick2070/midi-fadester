@@ -279,11 +279,32 @@ static void test_fx_uniforms_are_live_host_values(void)
 	/* Full-effect declarations remain host-owned and must not get editable defaults. */
 	source = "uniform float fader_fx_1 = 0.9;\n"
 		 "uniform float fader_fx_8 = 0.8;\n"
+		 "uniform float audio_kick_safe = 0.7;\n"
+		 "uniform float audio_snare_safe = 0.6;\n"
+		 "uniform float audio_spectral_flux_safe = 0.5;\n"
+		 "uniform float audio_flux_safe = 0.4;\n"
 		 "uniform float amount = 0.5;\n";
 	assert(vs_shader_ExpandAndParse(source, "", true, NULL, NULL, &res) == VS_SHADER_OK);
 	assert(res.param_count == 1u);
 	assert(strcmp(res.params[0].name, "amount") == 0);
 	vs_shader_parse_result_free(&res);
+
+	static const char *const safe_uniforms[] = {
+		"audio_kick_safe",
+		"audio_snare_safe",
+		"audio_spectral_flux_safe",
+		"audio_flux_safe",
+	};
+	for (size_t i = 0; i < sizeof(safe_uniforms) / sizeof(safe_uniforms[0]); i++) {
+		char decl[128];
+		snprintf(decl, sizeof(decl), "uniform float %s;\n", safe_uniforms[i]);
+		const char *frag =
+			"float4 mainImage(VertData v_in) : TARGET { return float4(audio_kick_safe, audio_snare_safe, audio_flux_safe, 1.0); }\n";
+		assert(vs_shader_ExpandAndParse(frag, "", false, NULL, NULL, &res) == VS_SHADER_OK);
+		assert(res.param_count == 0u);
+		assert(strstr(res.full_effect_source, decl) != NULL);
+		vs_shader_parse_result_free(&res);
+	}
 }
 
 static void test_host_control_setting_names_are_reserved(void)
@@ -295,6 +316,7 @@ static void test_host_control_setting_names_are_reserved(void)
 		"shader_file_path",
 		"override_entire_effect",
 		"shader_text",
+		"vs_custom_shader_flash_notice",
 		"reload_shader",
 		"compile_status",
 		"custom_low_hz",

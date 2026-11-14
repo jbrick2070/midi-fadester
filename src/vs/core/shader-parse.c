@@ -44,6 +44,10 @@ static const char *const k_effect_template_begin =
 	"uniform float audio_beat;\n"
 	"uniform float audio_spectral_centroid;\n"
 	"uniform float audio_spectral_flux;\n"
+	"uniform float audio_kick_safe;\n"
+	"uniform float audio_snare_safe;\n"
+	"uniform float audio_spectral_flux_safe;\n"
+	"uniform float audio_flux_safe;\n"
 	"uniform float audio_custom_band;\n"
 	"uniform float audio_peak;\n"
 	"uniform float audio_magnitude;\n"
@@ -301,6 +305,10 @@ static bool is_builtin_uniform_name(const char *name)
 		"audio_beat",
 		"audio_spectral_centroid",
 		"audio_spectral_flux",
+		"audio_kick_safe",
+		"audio_snare_safe",
+		"audio_spectral_flux_safe",
+		"audio_flux_safe",
 		"audio_custom_band",
 		"audio_peak",
 		"audio_magnitude",
@@ -348,6 +356,7 @@ static bool is_host_property_name(const char *name)
 		"shader_file_path",
 		"override_entire_effect",
 		"shader_text",
+		"vs_custom_shader_flash_notice",
 		"reload_shader",
 		"compile_status",
 		"custom_low_hz",

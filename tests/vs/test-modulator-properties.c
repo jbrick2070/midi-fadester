@@ -8,6 +8,7 @@
 #undef NDEBUG
 #endif
 
+#include "core/flash-clock.h"
 #include "obs/audio-tap.h"
 #include "obs/modulator-filter.h"
 #include "obs/vendor-api.h"
@@ -81,6 +82,25 @@ static struct obs_source_info test_av_input = {
 	.destroy = test_input_destroy,
 	.get_width = test_input_get_size,
 	.get_height = test_input_get_size,
+};
+
+static obs_properties_t *test_color_filter_properties(void *unused)
+{
+	(void)unused;
+	obs_properties_t *p = obs_properties_create();
+	obs_properties_add_float_slider(p, "brightness", "Brightness", -1.0, 1.0, 0.01);
+	obs_properties_add_float_slider(p, "opacity", "Opacity", 0.0, 1.0, 0.01);
+	return p;
+}
+
+static struct obs_source_info test_color_filter = {
+	.id = "color_filter",
+	.type = OBS_SOURCE_TYPE_FILTER,
+	.output_flags = OBS_SOURCE_VIDEO,
+	.get_name = test_input_get_name,
+	.create = test_input_create,
+	.destroy = test_input_destroy,
+	.get_properties = test_color_filter_properties,
 };
 
 static obs_source_t *create_modulator_aimed_at(const char *name, const char *target_filter)
@@ -283,6 +303,64 @@ static void test_audio_tap_live_status_property(void)
 	obs_source_release(filter);
 }
 
+/* Legacy saved settings omit slot_1_flash_guard: loading them defaults Flash Guard on, and a live Kick -> Color
+ * Correction brightness binding ticked at 60 Hz against a 10 Hz kick burst changes direction <= 6 times/s (P0-1). */
+static void test_flash_guard_defaults_and_live_color_filter_cap(void)
+{
+	vs_flash_clock_global_reset();
+	obs_source_t *parent = obs_source_create("vs_test_video_input", "vs-fg-parent", NULL, NULL);
+	obs_source_t *cc = obs_source_create("color_filter", "Color Correction", NULL, NULL);
+	obs_data_t *legacy = obs_data_create();
+	obs_data_set_bool(legacy, "slot_1_enabled", true);
+	obs_data_set_string(legacy, "slot_1_target_filter", "Color Correction");
+	obs_data_set_string(legacy, "slot_1_target_setting", "brightness");
+	obs_data_set_int(legacy, "slot_1_signal", (long long)VS_SIG_KICK_SAFE);
+	obs_data_set_double(legacy, "slot_1_min_value", 0.0);
+	obs_data_set_double(legacy, "slot_1_max_value", 1.0);
+	assert(!obs_data_has_user_value(legacy, "slot_1_flash_guard"));
+
+	obs_source_t *mod = obs_source_create("visual_sidechain_modulator_filter", "Mod", legacy, NULL);
+	obs_data_release(legacy);
+	assert(parent && cc && mod);
+	obs_source_filter_add(parent, cc);
+	obs_source_filter_add(parent, mod);
+
+	obs_data_t *mod_s = obs_source_get_settings(mod);
+	assert(mod_s && obs_data_get_bool(mod_s, "slot_1_flash_guard"));
+	/* Switch to raw VS_SIG_KICK with Flash Guard still defaulted to true to test automatic luminance guarding. */
+	obs_data_set_int(mod_s, "slot_1_signal", (long long)VS_SIG_KICK);
+	obs_source_update(mod, mod_s);
+	obs_data_release(mod_s);
+
+	obs_properties_t *props = obs_source_properties(mod);
+	assert(props);
+	obs_property_t *grp1 = obs_properties_get(props, "mod_slot_group_1");
+	assert(grp1);
+	obs_properties_t *g1_content = obs_property_group_content(grp1);
+	obs_property_t *fg_prop = obs_properties_get(g1_content, "slot_1_flash_guard");
+	assert(fg_prop && obs_property_get_type(fg_prop) == OBS_PROPERTY_BOOL && obs_property_visible(fg_prop));
+	obs_property_t *sig_prop = obs_properties_get(g1_content, "slot_1_signal");
+	assert(sig_prop);
+	bool found_kick_safe = false, found_snare_safe = false, found_flux_safe = false;
+	for (size_t i = 0; i < obs_property_list_item_count(sig_prop); i++) {
+		const long long v = obs_property_list_item_int(sig_prop, i);
+		if (v == (long long)VS_SIG_KICK_SAFE)
+			found_kick_safe = true;
+		else if (v == (long long)VS_SIG_SNARE_SAFE)
+			found_snare_safe = true;
+		else if (v == (long long)VS_SIG_FLUX_SAFE)
+			found_flux_safe = true;
+	}
+	assert(found_kick_safe && found_snare_safe && found_flux_safe);
+	obs_properties_destroy(props);
+
+	obs_source_filter_remove(parent, mod);
+	obs_source_filter_remove(parent, cc);
+	obs_source_release(mod);
+	obs_source_release(cc);
+	obs_source_release(parent);
+}
+
 int main(void)
 {
 	/* Headless libobs initialization only: no OBS executable, modules, video, audio, or user configuration. */
@@ -290,6 +368,7 @@ int main(void)
 	obs_register_source(&vs_modulator_filter_info);
 	obs_register_source(&test_video_input);
 	obs_register_source(&test_av_input);
+	obs_register_source(&test_color_filter);
 	obs_properties_t *props = vs_modulator_filter_info.get_properties(NULL);
 	assert(props);
 	const char *suffixes[] = {"amount_pct", "min_value", "max_value", "custom_low_hz", "custom_high_hz"};
@@ -327,6 +406,7 @@ int main(void)
 	test_named_tap_attaches_from_a_lookup();
 	test_deferred_named_configure_leaves_attach_to_retry();
 	test_audio_tap_live_status_property();
+	test_flash_guard_defaults_and_live_color_filter_cap();
 	obs_shutdown();
 	puts("test-modulator-properties: all assertions passed");
 	return 0;

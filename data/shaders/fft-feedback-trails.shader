@@ -53,11 +53,12 @@ float4 mainImage(VertData v_in) : TARGET
 	float2 uv = v_in.uv;
 	float4 current_col = image.Sample(texture_sampler, uv);
 
-	float energy = saturate(0.45 * audio_bass + 0.35 * audio_kick + 0.20 * vs_sample_spectrum(0.25));
-	float decay = clamp(base_persistence + fft_persistence_boost * energy, 0.0, 0.965);
+	float geom_energy = saturate(0.45 * audio_bass + 0.35 * audio_kick + 0.20 * vs_sample_spectrum(0.25));
+	float luma_energy = saturate(0.45 * audio_bass + 0.35 * audio_kick_safe + 0.20 * vs_sample_spectrum(0.25));
+	float decay = clamp(base_persistence + fft_persistence_boost * luma_energy, 0.0, 0.965);
 
 	float2 centered = uv - float2(0.5, 0.5);
-	float zoom = 1.0 - trail_zoom_drift * (0.4 + 0.6 * energy);
+	float zoom = 1.0 - trail_zoom_drift * (0.4 + 0.6 * geom_energy);
 	float2 prev_uv = clamp(float2(0.5, 0.5) + centered * zoom, 0.0, 1.0);
 
 	float4 prev_col = previous_output.Sample(texture_sampler, prev_uv);

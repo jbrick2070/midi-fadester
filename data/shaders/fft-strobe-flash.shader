@@ -45,10 +45,10 @@ float4 mainImage(VertData v_in) : TARGET
 {
 	float4 base = image.Sample(texture_sampler, v_in.uv);
 
-	/* Photosensitivity cap (R-SHD-3 (8)): the host admits at most max_flash_rate_hz flashes per second, whatever the
-	 * audio, and hands this shader vs_flash_envelope: one rise and one fall back to exactly 0 per flash. Its limiter
-	 * reads onset_threshold and max_flash_rate_hz and triggers on max(audio_kick, audio_snare * 0.85,
-	 * audio_spectral_flux). */
+	/* Photosensitivity cap (R-SHD-3 (8), P0-1): the shared process-wide flash clock admits at most 3 flashes per second
+	 * across all Visual Sidechain filters (or fewer when max_flash_rate_hz is lower), whatever the audio, and hands this
+	 * shader vs_flash_envelope: one rise and one fall back to exactly 0 per flash. Its limiter reads onset_threshold and
+	 * max_flash_rate_hz and triggers on max(audio_kick, audio_snare * 0.85, audio_spectral_flux). */
 	float flash_amt = saturate(vs_flash_envelope) * flash_intensity;
 
 	float3 tinted = lerp(base.rgb, flash_tint.rgb, flash_amt);

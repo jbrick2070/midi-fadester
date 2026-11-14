@@ -68,8 +68,8 @@ float4 mainImage(VertData v_in) : TARGET
 	float b = image.Sample(texture_sampler, uv_b).b;
 	float3 prism_rgb = float3(r, base_g.g, b);
 
-	/* 8-tap highlight bloom scaled by audio_mid + audio_high + audio_kick */
-	float bloom_drive = bloom_intensity * (0.45 * audio_kick + 0.35 * audio_mid + 0.40 * audio_high);
+	/* 8-tap highlight bloom scaled by audio_mid + audio_high + audio_kick_safe */
+	float bloom_drive = bloom_intensity * (0.45 * audio_kick_safe + 0.35 * audio_mid + 0.40 * audio_high);
 	float2 bloom_step = uv_pixel_interval * (3.0 + 10.0 * bloom_drive);
 	float3 bloom_accum = float3(0.0, 0.0, 0.0);
 

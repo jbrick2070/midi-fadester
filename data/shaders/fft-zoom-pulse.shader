@@ -45,6 +45,7 @@ float4 mainImage(VertData v_in) : TARGET
 
 	float4 col = image.Sample(texture_sampler, sample_uv);
 
-	float vig = 1.0 - saturate(r2 * 2.2 * vignette_strength * (0.4 + 0.6 * pulse));
+	float vig_pulse = 0.65 * audio_kick_safe + 0.35 * audio_bass + 0.25 * audio_custom_band;
+	float vig = 1.0 - saturate(r2 * 2.2 * vignette_strength * (0.4 + 0.6 * vig_pulse));
 	return float4(col.rgb * vig, col.a);
 }

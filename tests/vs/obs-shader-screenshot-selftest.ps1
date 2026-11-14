@@ -5,6 +5,8 @@
 #   (b) A shader that outputs the source at 50 % opacity over black measures 50 % brightness (within 1 %), not 25 %.
 #   (c) The Spectral Aura preset with Aura Intensity 0 and the border aura off leaves a half-alpha red source as it is
 #       (within 1 %): premultiplied colour in, premultiplied colour out, with no second multiply by alpha.
+#   (d) Every built-in shader preset fed a 10 Hz kick+click track produces at most 3 luminance flash reversals (peaks)
+#       in any 1.0 s window (P0-1).
 
 $ErrorActionPreference = "Stop"
 
@@ -24,6 +26,89 @@ function Convert-SrgbToLinear([double]$u) {
     if ($u -le 0.04045) { return $u / 12.92 }
     return [Math]::Pow(($u + 0.055) / 1.055, 2.4)
 }
+
+function Write-TenHzClickTrackWav([string]$wavPath, [double]$durationSec = 4.0, [int]$sampleRate = 48000) {
+    $numSamples = [int]($durationSec * $sampleRate)
+    $periodSamples = [int]($sampleRate / 10.0)
+    $dataBytes = $numSamples * 2
+    $fs = [System.IO.File]::Open($wavPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+    $bw = New-Object System.IO.BinaryWriter($fs)
+    try {
+        $bw.Write([System.Text.Encoding]::ASCII.GetBytes("RIFF"))
+        $bw.Write([int](36 + $dataBytes))
+        $bw.Write([System.Text.Encoding]::ASCII.GetBytes("WAVEfmt "))
+        $bw.Write([int]16)
+        $bw.Write([int16]1)
+        $bw.Write([int16]1)
+        $bw.Write([int]$sampleRate)
+        $bw.Write([int]($sampleRate * 2))
+        $bw.Write([int16]2)
+        $bw.Write([int16]16)
+        $bw.Write([System.Text.Encoding]::ASCII.GetBytes("data"))
+        $bw.Write([int]$dataBytes)
+
+        for ($i = 0; $i -lt $numSamples; $i++) {
+            $inBurst = $i % $periodSamples
+            $t = [double]$inBurst / [double]$sampleRate
+            $sample = 0.0
+            if ($t -lt 0.045) {
+                $kick = 0.72 * [Math]::Sin(2.0 * [Math]::PI * 80.0 * $t) * [Math]::Exp(-$t / 0.018)
+                $click = 0.14 * ([Math]::Sin(2.0 * [Math]::PI * 900.0 * $t) + [Math]::Sin(2.0 * [Math]::PI * 2400.0 * $t)) * [Math]::Exp(-$t / 0.006)
+                $sample = $kick + $click
+            }
+            $clamped = [Math]::Max(-1.0, [Math]::Min(1.0, $sample))
+            $pcm = [int16][Math]::Round($clamped * 32000.0)
+            $bw.Write($pcm)
+        }
+    } finally {
+        $bw.Close()
+        $fs.Close()
+    }
+}
+
+function Measure-MaxFlashReversalsPerSec($samples, [double]$hysteresis = 0.02) {
+    if ($samples.Count -lt 3) { return 0 }
+    $peakTimes = New-Object System.Collections.Generic.List[double]
+    $state = 0 # 0 = idle/falling, 1 = rising
+    $extreme = [double]$samples[0].y
+    $peakTime = [double]$samples[0].t
+    for ($i = 1; $i -lt $samples.Count; $i++) {
+        $y = [double]$samples[$i].y
+        $t = [double]$samples[$i].t
+        if ($state -eq 0) {
+            if ($y -lt $extreme) {
+                $extreme = $y
+            } elseif (($y - $extreme) -ge $hysteresis) {
+                $state = 1
+                $extreme = $y
+                $peakTime = $t
+            }
+        } else {
+            if ($y -gt $extreme) {
+                $extreme = $y
+                $peakTime = $t
+            } elseif (($extreme - $y) -ge $hysteresis) {
+                $peakTimes.Add($peakTime)
+                $state = 0
+                $extreme = $y
+            }
+        }
+    }
+    $maxInOneSec = 0
+    for ($a = 0; $a -lt $peakTimes.Count; $a++) {
+        $count = 0
+        $winStart = $peakTimes[$a]
+        for ($b = $a; $b -lt $peakTimes.Count; $b++) {
+            if (($peakTimes[$b] - $winStart) -lt 1.0) {
+                $count++
+            }
+        }
+        if ($count -gt $maxInOneSec) { $maxInOneSec = $count }
+    }
+    return $maxInOneSec
+}
+
+$clickWavPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vs_selftest_10hz_click_" + [Guid]::NewGuid().ToString("N") + ".wav")
 
 $proc = Start-Process -FilePath "$obsBin\obs64.exe" -ArgumentList "--portable","--disable-updater","--multi" -WorkingDirectory $obsBin -PassThru
 
@@ -226,17 +311,99 @@ try {
     $statusC = if ($passC) { "PASS" } else { "FAIL" }
     Write-Host ("[visual-sidechain] SCREENSHOT CHECK (c) aura half-alpha [{0}]: measured_lin=({1:F4}, {2:F4}, {3:F4}) source_lin=({4:F4}, {5:F4}, {6:F4}) max_err={7:F4} (<= 0.0100)" -f $statusC, $resC.lin_r, $resC.lin_g, $resC.lin_b, $srcAlpha.lin_r, $srcAlpha.lin_g, $srcAlpha.lin_b, $maxErrC)
 
-    if ($origScene -and $origScene -ne "__vs_selftest_scene__" -and $origScene -ne "__vs_selftest_alpha_scene__") {
+    # Check (d): 10 Hz click+kick track across all 11 built-in shaders -> at most 3 luminance reversals/s (P0-1)
+    Write-TenHzClickTrackWav -wavPath $clickWavPath
+    $shaderDir = Resolve-Path (Join-Path $PSScriptRoot "..\data\shaders")
+    $shaderFiles = @(Get-ChildItem -Path $shaderDir -Filter "*.shader" | Sort-Object Name)
+    if ($shaderFiles.Count -lt 11) {
+        throw "Expected at least 11 built-in shaders in $shaderDir, found $($shaderFiles.Count)"
+    }
+
+    $null = Call-ObsReq "CreateScene" @{ sceneName = "__vs_selftest_flash_scene__" }
+    $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = "__vs_selftest_flash_scene__" }
+    $null = Call-ObsReq "CreateInput" @{
+        sceneName        = "__vs_selftest_flash_scene__"
+        inputName        = "__vs_selftest_flash_color__"
+        inputKind        = "color_source_v3"
+        # ABGR 0xFF405060: mid-tone slate so both brightening and darkening flashes are measurable
+        inputSettings    = @{ color = 4282404960; width = 640; height = 360 }
+        sceneItemEnabled = $true
+    }
+    $null = Call-ObsReq "CreateInput" @{
+        sceneName        = "__vs_selftest_flash_scene__"
+        inputName        = "__vs_selftest_click__"
+        inputKind        = "ffmpeg_source"
+        inputSettings    = @{
+            local_file       = $clickWavPath
+            is_local_file    = $true
+            looping          = $true
+            restart_on_activate = $true
+        }
+        sceneItemEnabled = $true
+    }
+    $null = Call-ObsReq "SetInputMute" @{ inputName = "__vs_selftest_click__"; inputMuted = $true }
+    $null = Call-ObsReq "CreateSourceFilter" @{
+        sourceName     = "__vs_selftest_flash_color__"
+        filterName     = "__vs_selftest_flash_shader__"
+        filterKind     = "visual_sidechain_shader_filter"
+        filterSettings = @{
+            preset_shader    = $shaderFiles[0].Name
+            tap_mode         = 7
+            tap_source_name  = "__vs_selftest_click__"
+            react_when_muted = $true
+            auto_gain        = $true
+        }
+    }
+    Start-Sleep -Milliseconds 1200
+
+    $passD = $true
+    foreach ($sf in $shaderFiles) {
+        $null = Call-ObsReq "SetSourceFilterSettings" @{
+            sourceName     = "__vs_selftest_flash_color__"
+            filterName     = "__vs_selftest_flash_shader__"
+            filterSettings = @{
+                preset_shader    = $sf.Name
+                tap_mode         = 7
+                tap_source_name  = "__vs_selftest_click__"
+                react_when_muted = $true
+                auto_gain        = $true
+            }
+            overlay        = $false
+        }
+        Start-Sleep -Milliseconds 350
+        $samples = New-Object System.Collections.Generic.List[object]
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 2.0) {
+            $tNow = $sw.Elapsed.TotalSeconds
+            $m = Measure-SceneScreenshot "__vs_selftest_flash_scene__"
+            $lum = 0.2126 * $m.lin_r + 0.7152 * $m.lin_g + 0.0722 * $m.lin_b
+            $samples.Add([PSCustomObject]@{ t = $tNow; y = $lum })
+            Start-Sleep -Milliseconds 25
+        }
+        $maxRevPerSec = Measure-MaxFlashReversalsPerSec -samples $samples -hysteresis 0.02
+        $presetOk = ($maxRevPerSec -le 3)
+        if (-not $presetOk) { $passD = $false }
+        $presetStatus = if ($presetOk) { "PASS" } else { "FAIL" }
+        Write-Host ("[visual-sidechain] SCREENSHOT CHECK (d) 10Hz flash cap [{0}] {1}: samples={2} max_reversals_per_1s={3} (<= 3)" -f $presetStatus, $sf.Name, $samples.Count, $maxRevPerSec)
+    }
+
+    if ($origScene -and $origScene -ne "__vs_selftest_scene__" -and $origScene -ne "__vs_selftest_alpha_scene__" -and $origScene -ne "__vs_selftest_flash_scene__") {
         $null = Call-ObsReq "SetCurrentProgramScene" @{ sceneName = $origScene }
     }
+    $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_click__" }
+    $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_flash_color__" }
+    $null = Call-ObsReq "RemoveScene" @{ sceneName = "__vs_selftest_flash_scene__" }
     $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_half_alpha__" }
     $null = Call-ObsReq "RemoveScene" @{ sceneName = "__vs_selftest_alpha_scene__" }
     $null = Call-ObsReq "RemoveInput" @{ inputName = "__vs_selftest_color__" }
     $null = Call-ObsReq "RemoveScene" @{ sceneName = "__vs_selftest_scene__" }
     $ws.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "done", $ct).GetAwaiter().GetResult() | Out-Null
 
-    $allPassed = ($passA -and $passB -and $passC)
+    $allPassed = ($passA -and $passB -and $passC -and $passD)
 } finally {
+    if (Test-Path -LiteralPath $clickWavPath) {
+        Remove-Item -LiteralPath $clickWavPath -Force -ErrorAction SilentlyContinue
+    }
     if ($proc -and -not $proc.HasExited) {
         Write-Host "OBS remains open (PID=$($proc.Id)). Close it manually, then inspect its shutdown leak report."
     }
@@ -246,5 +413,5 @@ if (-not $allPassed) {
     Write-Host "[visual-sidechain] GetSourceScreenshot self-test FAILED"
     exit 1
 }
-Write-Host "[visual-sidechain] GetSourceScreenshot self-test PASSED (check_a=PASS check_b=PASS check_c=PASS)"
+Write-Host "[visual-sidechain] GetSourceScreenshot self-test PASSED (check_a=PASS check_b=PASS check_c=PASS check_d=PASS)"
 exit 0

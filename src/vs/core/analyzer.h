@@ -37,6 +37,9 @@ enum vs_signal_id {
 	VS_SIG_CENTROID = 8,
 	VS_SIG_FLUX = 9,
 	VS_SIG_CUSTOM_HZ = 10,
+	VS_SIG_KICK_SAFE = 11,         /* Kick onset gated through shared <= 3 Hz flash clock */
+	VS_SIG_SNARE_SAFE = 12,        /* Snare onset gated through shared <= 3 Hz flash clock */
+	VS_SIG_FLUX_SAFE = 13,         /* Wideband spectral flux gated through shared <= 3 Hz flash clock */
 	VS_SIG_SPECTRUM_BAND_0 = 100,  /* 100..131 address spectrum[0..31] */
 	VS_SIG_FADER_CROSSFADER = 200, /* 200..217 address the 18 Fadester slots; legacy IDs stay unchanged. */
 	VS_SIG_FADER_1 = 201,

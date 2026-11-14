@@ -307,6 +307,88 @@ static void test_flash_limiter_peak_zeroed_mid_fall(void)
 	assert(vs_flash_limiter_step(&lim, 0.7f, 3.0f, k_flash_dt) == 0.7f);
 }
 
+static void assert_combined_window_cap(const float *env_a, const float *env_b, int frames, int max_per_second)
+{
+	int rises[FLASH_TEST_FRAMES * 2];
+	int rise_count = 0;
+	float prev_a = 0.0f;
+	float prev_b = 0.0f;
+	for (int i = 0; i < frames; i++) {
+		if (env_a[i] > prev_a) {
+			assert(prev_a == 0.0f);
+			rises[rise_count++] = i;
+		}
+		if (env_b[i] > prev_b) {
+			assert(prev_b == 0.0f);
+			rises[rise_count++] = i;
+		}
+		prev_a = env_a[i];
+		prev_b = env_b[i];
+	}
+	for (int r = 0; r < rise_count; r++) {
+		int in_win = 0;
+		for (int q = r; q < rise_count && (double)(rises[q] - rises[r]) * (double)k_flash_dt < 1.0; q++)
+			in_win++;
+		assert(in_win <= max_per_second);
+	}
+}
+
+/* Two limiter clients sharing one flash clock (explicit or process-wide) fed a 10 Hz transient admit a combined total
+ * of at most 3 flashes in any 1 s window, whether aligned, interleaved by 50 ms, or running with different personal
+ * rate limits (P0-1). */
+static void test_shared_flash_clock_caps_two_clients(void)
+{
+	float env_a[FLASH_TEST_FRAMES];
+	float env_b[FLASH_TEST_FRAMES];
+	struct vs_flash_clock clock;
+	struct vs_flash_limiter lim_a;
+	struct vs_flash_limiter lim_b;
+
+	/* 1. Interleaved 10 Hz pulses (50 ms offset, where independent per-filter limiters interleaved to 6 Hz). */
+	vs_flash_clock_reset(&clock);
+	vs_flash_limiter_reset(&lim_a);
+	vs_flash_limiter_reset(&lim_b);
+	for (int i = 0; i < 180; i++) {
+		const uint64_t tok = (uint64_t)(i + 1);
+		const float oa = (i % 6 == 0) ? 1.0f : 0.0f;
+		const float ob = (i % 6 == 3) ? 1.0f : 0.0f;
+		env_a[i] = vs_flash_clock_step(&clock, &lim_a, tok, oa, 3.0f, k_flash_dt);
+		env_b[i] = vs_flash_clock_step(&clock, &lim_b, tok, ob, 3.0f, k_flash_dt);
+	}
+	const int inter_a = check_flash_contract(env_a, 180, 3.0, 3);
+	const int inter_b = check_flash_contract(env_b, 180, 3.0, 3);
+	assert(inter_a > 0 && inter_b > 0);
+	assert(inter_a + inter_b <= 9);
+	assert_combined_window_cap(env_a, env_b, 180, 3);
+
+	/* 2. Simultaneous 10 Hz kick-shaped pulses on the process-wide global clock (with B asking for 100 Hz). */
+	vs_flash_clock_global_reset();
+	vs_flash_limiter_reset(&lim_a);
+	vs_flash_limiter_reset(&lim_b);
+	for (int i = 0; i < 180; i++) {
+		const uint64_t tok = (uint64_t)(i + 1);
+		const float okick = kick_over(i % 6);
+		env_a[i] = vs_flash_clock_global_step(&lim_a, tok, okick, 3.0f, k_flash_dt);
+		env_b[i] = vs_flash_clock_global_step(&lim_b, tok, okick, 100.0f, k_flash_dt);
+	}
+	assert(check_flash_contract(env_a, 180, 3.0, 3) + check_flash_contract(env_b, 180, 3.0, 3) == 9);
+	assert_combined_window_cap(env_a, env_b, 180, 3);
+
+	/* 3. Client A lowered to 1.0 Hz personal rate while Client B runs at 3.0 Hz on the same global clock. */
+	vs_flash_clock_global_reset();
+	vs_flash_limiter_reset(&lim_a);
+	vs_flash_limiter_reset(&lim_b);
+	for (int i = 0; i < 180; i++) {
+		const uint64_t tok = (uint64_t)(i + 1);
+		const float okick = kick_over(i % 6);
+		env_a[i] = vs_flash_clock_global_step(&lim_a, tok, okick, 1.0f, k_flash_dt);
+		env_b[i] = vs_flash_clock_global_step(&lim_b, tok, okick, 3.0f, k_flash_dt);
+	}
+	assert(check_flash_contract(env_a, 180, 1.0, 1) <= 3);
+	assert(check_flash_contract(env_b, 180, 3.0, 3) <= 9);
+	assert_combined_window_cap(env_a, env_b, 180, 3);
+}
+
 int main(void)
 {
 	test_onset_kick_and_snare_separation();
@@ -314,6 +396,7 @@ int main(void)
 	test_onset_beat_tempo_and_sync_advance();
 	test_flash_limiter_caps_flash_rate();
 	test_flash_limiter_peak_zeroed_mid_fall();
+	test_shared_flash_clock_caps_two_clients();
 	printf("test-onset: all assertions passed\n");
 	return 0;
 }

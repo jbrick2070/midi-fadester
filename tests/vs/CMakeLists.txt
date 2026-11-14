@@ -46,6 +46,7 @@ set(
   _analyzer_srcs
   "${_core}/analyzer.c"
   "${_core}/fader-bridge.c"
+  "${_core}/flash-clock.c"
   "${_core}/onset.c"
   "${_core}/envelope.c"
   "${_core}/spectrum.c"
@@ -56,9 +57,9 @@ visual_sidechain_add_test(test-audio-ring test-audio-ring.c "${_core}/audio-ring
 visual_sidechain_add_test(test-fft test-fft.c "${_core}/fft.c")
 visual_sidechain_add_test(test-spectrum test-spectrum.c "${_core}/spectrum.c" "${_core}/fft.c")
 visual_sidechain_add_test(test-envelope test-envelope.c "${_core}/envelope.c")
-visual_sidechain_add_test(test-onset test-onset.c "${_core}/onset.c")
+visual_sidechain_add_test(test-onset test-onset.c "${_core}/onset.c" "${_core}/flash-clock.c")
 visual_sidechain_add_test(test-analyzer test-analyzer.c ${_analyzer_srcs})
-visual_sidechain_add_test(test-modulation test-modulation.c "${_core}/modulation.c")
+visual_sidechain_add_test(test-modulation test-modulation.c "${_core}/modulation.c" "${_core}/flash-clock.c")
 visual_sidechain_add_test(test-modulator-baseline test-modulator-baseline.c "${_core}/baseline.c")
 visual_sidechain_add_test(test-shader-parser test-shader-parser.c "${_core}/shader-parse.c")
 visual_sidechain_add_test(
@@ -201,4 +202,22 @@ add_test(
 set_tests_properties(
   check-shader-locale-catches-faults
   PROPERTIES PASS_REGULAR_EXPRESSION "shader locale: 1 missing, 1 different, 1 extra"
+)
+
+# Built-in shaders may only use raw transient uniforms for allow-listed spatial geometry, never colour/luminance (P0-1)
+add_test(
+  NAME check-shader-flash-safety
+  COMMAND
+    "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_SOURCE_DIR}/data/shaders" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-flash-safety.cmake"
+)
+add_test(
+  NAME check-shader-flash-safety-catches-faults
+  COMMAND
+    "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-flash-bad" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-flash-safety.cmake"
+)
+set_tests_properties(
+  check-shader-flash-safety-catches-faults
+  PROPERTIES PASS_REGULAR_EXPRESSION "shader flash safety: .*ungated-flash\\.shader.*unguarded raw transient"
 )

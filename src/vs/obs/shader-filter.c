@@ -30,8 +30,9 @@
 #include <util/platform.h>
 #include <util/threading.h>
 
-#include <math.h>
+#include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,7 @@
 #define S_FADER_NOT_LOADED "vs_shader_fader_not_loaded"
 #define S_PANIC_HINT "vs_panic_hint"
 #define S_FLASH_LIMIT_STATUS "vs_flash_limit_status"
+#define S_CUSTOM_FLASH_NOTICE "vs_custom_shader_flash_notice"
 
 #define PRESET_CUSTOM_FILE "__custom_file__"
 #define PRESET_CUSTOM_TEXT "__custom_text__"
@@ -138,6 +140,10 @@ struct vs_shader_filter {
 	gs_eparam_t *p_audio_beat;
 	gs_eparam_t *p_audio_spectral_centroid;
 	gs_eparam_t *p_audio_spectral_flux;
+	gs_eparam_t *p_audio_kick_safe;
+	gs_eparam_t *p_audio_snare_safe;
+	gs_eparam_t *p_audio_spectral_flux_safe;
+	gs_eparam_t *p_audio_flux_safe;
 	gs_eparam_t *p_audio_custom_band;
 	gs_eparam_t *p_audio_peak;
 	gs_eparam_t *p_audio_magnitude;
@@ -154,9 +160,19 @@ struct vs_shader_filter {
 	int reactivity_fader_slot;
 	struct vs_shader_param_fader_cfg param_faders[VS_SHADER_PARAM_FADER_SLOTS];
 
-	/* Photosensitivity flash limiter (R-SHD-3 (8)): the tick steps it, the render binds its envelope */
+	/* Photosensitivity flash limiter (R-SHD-3 (8), P0-1): per-channel clients share the process-wide <= 3 Hz clock */
 	struct vs_flash_limiter flash_limiter;
+	struct vs_flash_limiter kick_safe_limiter;
+	struct vs_flash_limiter snare_safe_limiter;
+	struct vs_flash_limiter flux_safe_limiter;
 	float flash_envelope;
+	float kick_safe_envelope;
+	float snare_safe_envelope;
+	float flux_safe_envelope;
+	bool uses_flash_envelope;
+	bool uses_kick_safe;
+	bool uses_snare_safe;
+	bool uses_flux_safe;
 	gs_eparam_t *p_vs_flash_envelope;
 	int flash_threshold_param; /* index of the FLOAT parameter onset_threshold, or -1 */
 	int flash_rate_param;      /* index of the FLOAT parameter max_flash_rate_hz, or -1 */
@@ -240,12 +256,23 @@ static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 	memset(sf->user_bindings, 0, sizeof(sf->user_bindings));
 	memset(sf->panic_slots, 0, sizeof(sf->panic_slots));
 	sf->p_audio_custom_band = NULL;
+	sf->p_audio_kick_safe = NULL;
+	sf->p_audio_snare_safe = NULL;
+	sf->p_audio_spectral_flux_safe = NULL;
+	sf->p_audio_flux_safe = NULL;
 	sf->p_vs_effect_mix = NULL;
 	sf->p_vs_reactivity_scale = NULL;
 	sf->p_vs_flash_envelope = NULL;
 	sf->flash_threshold_param = -1;
 	sf->flash_rate_param = -1;
 	sf->flash_envelope = 0.0f;
+	sf->kick_safe_envelope = 0.0f;
+	sf->snare_safe_envelope = 0.0f;
+	sf->flux_safe_envelope = 0.0f;
+	sf->uses_flash_envelope = false;
+	sf->uses_kick_safe = false;
+	sf->uses_snare_safe = false;
+	sf->uses_flux_safe = false;
 	/* The flash limiter survives recompiles: resetting it here would let a Reload or an inline edit start a flash
 	 * before the photosensitivity cap allows (R-SHD-3 (8)). create starts it at zero. */
 }
@@ -269,6 +296,52 @@ static void destroy_shader_effect(struct vs_shader_filter *sf)
 	obs_enter_graphics();
 	destroy_shader_effect_locked(sf);
 	obs_leave_graphics();
+}
+
+static bool is_ident_char(char c)
+{
+	return isalnum((unsigned char)c) || c == '_';
+}
+
+/* True when `ident` appears in HLSL code outside comments and string literals, so only shaders that read a limited
+ * transient uniform draw from the shared process-wide flash clock. */
+static bool shader_code_uses_ident(const char *src, const char *ident)
+{
+	if (!src || !ident || ident[0] == '\0')
+		return false;
+	const size_t ident_len = strlen(ident);
+	for (size_t i = 0; src[i] != '\0';) {
+		if (src[i] == '/' && src[i + 1] == '/') {
+			while (src[i] != '\0' && src[i] != '\n')
+				i++;
+			continue;
+		}
+		if (src[i] == '/' && src[i + 1] == '*') {
+			const char *end = strstr(src + i + 2, "*/");
+			if (!end)
+				return false;
+			i = (size_t)(end - src) + 2u;
+			continue;
+		}
+		if (src[i] == '"') {
+			i++;
+			while (src[i] != '\0' && src[i] != '"') {
+				if (src[i] == '\\' && src[i + 1] != '\0')
+					i += 2u;
+				else
+					i++;
+			}
+			if (src[i] == '"')
+				i++;
+			continue;
+		}
+		if (strncmp(src + i, ident, ident_len) == 0 && (i == 0 || !is_ident_char(src[i - 1])) &&
+		    !is_ident_char(src[i + ident_len])) {
+			return true;
+		}
+		i++;
+	}
+	return false;
 }
 
 static char *read_text_file_utf8(const char *path)
@@ -469,6 +542,11 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 	const bool uses_fb =
 		(local_parsed.expanded_source && (strstr(local_parsed.expanded_source, "previous_output") != NULL ||
 						  strstr(local_parsed.expanded_source, "previous_image") != NULL));
+	const bool uses_flash_env = shader_code_uses_ident(local_parsed.expanded_source, "vs_flash_envelope");
+	const bool uses_kick_safe = shader_code_uses_ident(local_parsed.expanded_source, "audio_kick_safe");
+	const bool uses_snare_safe = shader_code_uses_ident(local_parsed.expanded_source, "audio_snare_safe");
+	const bool uses_flux_safe = shader_code_uses_ident(local_parsed.expanded_source, "audio_flux_safe") ||
+				    shader_code_uses_ident(local_parsed.expanded_source, "audio_spectral_flux_safe");
 
 	char *gs_err = NULL;
 	obs_enter_graphics();
@@ -478,6 +556,10 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 	destroy_shader_effect_locked(sf);
 	sf->compile_error[0] = '\0';
 	sf->uses_feedback = uses_fb;
+	sf->uses_flash_envelope = uses_flash_env;
+	sf->uses_kick_safe = uses_kick_safe;
+	sf->uses_snare_safe = uses_snare_safe;
+	sf->uses_flux_safe = uses_flux_safe;
 	sf->feedback_seeded = false;
 	sf->parsed = local_parsed;
 
@@ -510,6 +592,10 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		sf->p_audio_beat = gs_effect_get_param_by_name(sf->effect, "audio_beat");
 		sf->p_audio_spectral_centroid = gs_effect_get_param_by_name(sf->effect, "audio_spectral_centroid");
 		sf->p_audio_spectral_flux = gs_effect_get_param_by_name(sf->effect, "audio_spectral_flux");
+		sf->p_audio_kick_safe = gs_effect_get_param_by_name(sf->effect, "audio_kick_safe");
+		sf->p_audio_snare_safe = gs_effect_get_param_by_name(sf->effect, "audio_snare_safe");
+		sf->p_audio_spectral_flux_safe = gs_effect_get_param_by_name(sf->effect, "audio_spectral_flux_safe");
+		sf->p_audio_flux_safe = gs_effect_get_param_by_name(sf->effect, "audio_flux_safe");
 		sf->p_audio_custom_band = gs_effect_get_param_by_name(sf->effect, "audio_custom_band");
 		sf->p_audio_peak = gs_effect_get_param_by_name(sf->effect, "audio_peak");
 		sf->p_audio_magnitude = gs_effect_get_param_by_name(sf->effect, "audio_magnitude");
@@ -925,6 +1011,12 @@ static float clamp_unit(float v)
 	return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;
 }
 
+static float effective_mix_scale(const struct vs_shader_filter *sf, const float faders[VS_FADER_SLOT_COUNT],
+				 bool fadester_loaded)
+{
+	return sf->effect_mix * fader_snapshot_scale(faders, sf->mix_fader_slot, fadester_loaded);
+}
+
 static void shader_filter_video_tick(void *data, float seconds)
 {
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
@@ -958,38 +1050,81 @@ static void shader_filter_video_tick(void *data, float seconds)
 		}
 	}
 
-	/* Photosensitivity flash limiter (R-SHD-3 (8)). The trigger the strobe shader used to compute, from the same
-	 * reactivity-scaled values it receives, through the shader's own threshold and rate parameters (0.30 and 3 Hz
-	 * when it has none). The limiter admits at most that many flashes a second; Panic keeps the envelope at 0. */
+	/* Photosensitivity flash clock (R-SHD-3 (8), P0-1): all active Visual Sidechain filters draw from one <= 3 Hz
+	 * process-wide flash budget in arrival order; per-shader max_flash_rate_hz can only lower that filter's limit.
+	 * Only channels actually referenced by the compiled shader step the shared clock; disabled or 0%-mix filters never
+	 * admit flashes. */
 	float faders[VS_FADER_SLOT_COUNT];
 	vs_fader_bridge_get_slots(faders);
 	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
+	const float mix = effective_mix_scale(sf, faders, fadester_loaded);
 	const float react =
 		sf->audio_reactivity * fader_snapshot_scale(faders, sf->reactivity_fader_slot, fadester_loaded);
 	const struct vs_audio_frame *fr = &sf->tap.current_frame;
-	const float trig = fmaxf(fr->kick, fmaxf(fr->snare * 0.85f, fr->spectral_flux)) * react;
 	const float thr =
 		sf->flash_threshold_param >= 0
 			? effective_float_param_locked(sf, (size_t)sf->flash_threshold_param, faders, fadester_loaded)
-			: 0.30f;
+			: VS_FLASH_DEFAULT_THRESHOLD;
 	const float rate = sf->flash_rate_param >= 0 ? effective_float_param_locked(sf, (size_t)sf->flash_rate_param,
 										    faders, fadester_loaded)
 						     : (float)VS_FLASH_RATE_DEFAULT_HZ;
-	const float over = clamp_unit((trig - thr) / fmaxf(1.0f - thr, 1e-4f));
 	const bool panic = vs_fader_bridge_is_panic_active();
-	const float env = vs_flash_limiter_step(&sf->flash_limiter, panic ? 0.0f : over, rate, seconds);
-	/* Panic ends a flash in flight for good: a zero peak keeps since_admit_sec, so the spacing holds, and no tail of
-	 * it is left to show after Restore. */
-	if (panic)
-		sf->flash_limiter.peak = 0.0f;
-	sf->flash_envelope = panic ? 0.0f : env;
-	obs_leave_graphics();
-}
+	const bool can_admit = (!panic && (!sf->context || obs_source_enabled(sf->context)) && mix > 0.0f);
+	uint64_t frame_token = obs_get_video_frame_time();
+	if (frame_token == 0 &&
+	    (sf->uses_flash_envelope || sf->uses_kick_safe || sf->uses_snare_safe || sf->uses_flux_safe)) {
+		frame_token = vs_flash_clock_next_fallback_token();
+	}
 
-static float effective_mix_scale(const struct vs_shader_filter *sf, const float faders[VS_FADER_SLOT_COUNT],
-				 bool fadester_loaded)
-{
-	return sf->effect_mix * fader_snapshot_scale(faders, sf->mix_fader_slot, fadester_loaded);
+	if (sf->uses_flash_envelope) {
+		const float trig = fmaxf(fr->kick, fmaxf(fr->snare * 0.85f, fr->spectral_flux)) * react;
+		const float over = can_admit ? vs_flash_trigger_over(trig, thr) : 0.0f;
+		const float env = vs_flash_clock_global_step(&sf->flash_limiter, frame_token, over, rate, seconds);
+		if (panic)
+			sf->flash_limiter.peak = 0.0f;
+		sf->flash_envelope = panic ? 0.0f : env;
+	} else {
+		if (panic)
+			sf->flash_limiter.peak = 0.0f;
+		sf->flash_envelope = 0.0f;
+	}
+
+	if (sf->uses_kick_safe) {
+		const float over = can_admit ? vs_flash_trigger_over(fr->kick * react, thr) : 0.0f;
+		const float env = vs_flash_clock_global_step(&sf->kick_safe_limiter, frame_token, over, rate, seconds);
+		if (panic)
+			sf->kick_safe_limiter.peak = 0.0f;
+		sf->kick_safe_envelope = panic ? 0.0f : env;
+	} else {
+		if (panic)
+			sf->kick_safe_limiter.peak = 0.0f;
+		sf->kick_safe_envelope = 0.0f;
+	}
+
+	if (sf->uses_snare_safe) {
+		const float over = can_admit ? vs_flash_trigger_over(fr->snare * react, thr) : 0.0f;
+		const float env = vs_flash_clock_global_step(&sf->snare_safe_limiter, frame_token, over, rate, seconds);
+		if (panic)
+			sf->snare_safe_limiter.peak = 0.0f;
+		sf->snare_safe_envelope = panic ? 0.0f : env;
+	} else {
+		if (panic)
+			sf->snare_safe_limiter.peak = 0.0f;
+		sf->snare_safe_envelope = 0.0f;
+	}
+
+	if (sf->uses_flux_safe) {
+		const float over = can_admit ? vs_flash_trigger_over(fr->spectral_flux * react, thr) : 0.0f;
+		const float env = vs_flash_clock_global_step(&sf->flux_safe_limiter, frame_token, over, rate, seconds);
+		if (panic)
+			sf->flux_safe_limiter.peak = 0.0f;
+		sf->flux_safe_envelope = panic ? 0.0f : env;
+	} else {
+		if (panic)
+			sf->flux_safe_limiter.peak = 0.0f;
+		sf->flux_safe_envelope = 0.0f;
+	}
+	obs_leave_graphics();
 }
 
 static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, uint32_t cy,
@@ -1055,6 +1190,15 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 		gs_effect_set_float(sf->p_audio_spectral_centroid, f->spectral_centroid);
 	if (sf->p_audio_spectral_flux)
 		gs_effect_set_float(sf->p_audio_spectral_flux, f->spectral_flux * react_scale);
+	const float safe_react_gate = clamp_unit(react_scale);
+	if (sf->p_audio_kick_safe)
+		gs_effect_set_float(sf->p_audio_kick_safe, sf->kick_safe_envelope * safe_react_gate);
+	if (sf->p_audio_snare_safe)
+		gs_effect_set_float(sf->p_audio_snare_safe, sf->snare_safe_envelope * safe_react_gate);
+	if (sf->p_audio_spectral_flux_safe)
+		gs_effect_set_float(sf->p_audio_spectral_flux_safe, sf->flux_safe_envelope * safe_react_gate);
+	if (sf->p_audio_flux_safe)
+		gs_effect_set_float(sf->p_audio_flux_safe, sf->flux_safe_envelope * safe_react_gate);
 	if (sf->p_audio_custom_band)
 		gs_effect_set_float(sf->p_audio_custom_band, sf->current_custom_band * react_scale);
 
@@ -1302,6 +1446,7 @@ static bool on_preset_changed(obs_properties_t *props, obs_property_t *property,
 
 	obs_property_set_visible(obs_properties_get(props, S_SHADER_FILE_PATH), is_file);
 	obs_property_set_visible(obs_properties_get(props, S_SHADER_TEXT), is_text);
+	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_FLASH_NOTICE), is_file || is_text);
 	obs_property_set_visible(obs_properties_get(props, S_OVERRIDE_EFFECT), is_file || is_text);
 	return true;
 }
@@ -1731,6 +1876,10 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	obs_property_t *p_text =
 		obs_properties_add_text(sh_grp, S_SHADER_TEXT, obs_module_text("Shader.Text"), OBS_TEXT_MULTILINE);
 	obs_property_set_visible(p_text, is_text);
+
+	obs_property_t *p_custom_notice =
+		vs_properties_add_info(sh_grp, S_CUSTOM_FLASH_NOTICE, obs_module_text("Shader.CustomFlashNotice"));
+	obs_property_set_visible(p_custom_notice, is_file || is_text);
 
 	obs_property_t *p_ov =
 		obs_properties_add_bool(sh_grp, S_OVERRIDE_EFFECT, obs_module_text("Shader.OverrideEffect"));

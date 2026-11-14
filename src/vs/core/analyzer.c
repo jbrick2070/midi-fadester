@@ -298,14 +298,17 @@ float vs_analyzer_get_signal(const struct vs_analyzer *ana, const struct vs_audi
 	case VS_SIG_HIGH:
 		return frame->high;
 	case VS_SIG_KICK:
+	case VS_SIG_KICK_SAFE:
 		return frame->kick;
 	case VS_SIG_SNARE:
+	case VS_SIG_SNARE_SAFE:
 		return frame->snare;
 	case VS_SIG_BEAT:
 		return frame->beat;
 	case VS_SIG_CENTROID:
 		return frame->spectral_centroid;
 	case VS_SIG_FLUX:
+	case VS_SIG_FLUX_SAFE:
 		return frame->spectral_flux;
 	case VS_SIG_CUSTOM_HZ:
 		if (!ana || !ana->initialized)

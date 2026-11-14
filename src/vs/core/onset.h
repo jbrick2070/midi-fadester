@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "flash-clock.h"
 #include "spectrum.h"
 
 #include <stdbool.h>
@@ -76,23 +77,8 @@ void vs_onset_freeze_beat(struct vs_onset *onset);
 void vs_onset_step(struct vs_onset *onset, const float *mag_low, const float *mag_mid, float dt_sec,
 		   struct vs_onset_result *out_res);
 
-/* The Maximum Flash Rate range of fft-strobe-flash.shader; the limiter enforces it whatever the setting says. */
-#define VS_FLASH_RATE_MIN_HZ 0.5
-#define VS_FLASH_RATE_MAX_HZ 3.0
-#define VS_FLASH_RATE_DEFAULT_HZ 3.0
-#define VS_FLASH_FALL_MAX_SEC 0.15
-
-/* Photosensitivity flash limiter (R-SHD-3 (8)). A flash starts only when the trigger is over its threshold and
- * at least 1 / max_rate_hz seconds have passed since the last admitted flash; each flash falls back to exactly 0
- * well before the next may start. */
-struct vs_flash_limiter {
-	double since_admit_sec;
-	float peak;
-	bool has_admitted;
-};
-void vs_flash_limiter_reset(struct vs_flash_limiter *lim);
-/* over_01: how far the trigger is past its threshold, 0..1 (0 = below). max_rate_hz is clamped to 0.5..3 (the
- * shader slider's range); NaN or infinity means 3. Call once per video frame. Returns the envelope, 0..1. */
+/* Standalone single-client wrapper around vs_flash_clock_step(NULL, ...); live filters use vs_flash_clock_global_step
+ * so all Visual Sidechain transient paths share one <= 3 Hz process-wide flash budget. */
 float vs_flash_limiter_step(struct vs_flash_limiter *lim, float over_01, float max_rate_hz, float dt_sec);
 
 #ifdef __cplusplus
