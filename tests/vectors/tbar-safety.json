@@ -5,8 +5,7 @@
     "obs_finish_min_tick": 921,
     "obs_cancel_max_tick": 102,
     "controller_rail_zone": 0.03,
-    "midi_start_deadband": 0.06,
-    "companion_edge": 0.005
+    "midi_start_deadband": 0.06
   },
   "tick_vectors": [
     {
@@ -70,45 +69,85 @@
       "obs_release_zone": "finish"
     }
   ],
-  "edge_vectors": [
+  "step_vectors": [
     {
-      "id": "companion_edge_cancel_at_0_005",
-      "start_position": 0.35,
-      "target_position": 0.005,
+      "id": "step_forward_lands_0_96_stays_open",
+      "start_position": 0.91,
+      "delta": 0.05,
       "contract_expected": {
-        "snapped_endpoint": "cancel",
+        "endpoint": "open",
+        "landing_position": 0.96,
+        "transition_left_open": true
+      }
+    },
+    {
+      "id": "step_forward_lands_0_97_finishes",
+      "start_position": 0.92,
+      "delta": 0.05,
+      "contract_expected": {
+        "endpoint": "finish",
+        "final_scene": "preview",
+        "transition_left_open": false
+      }
+    },
+    {
+      "id": "step_back_lands_0_04_stays_open",
+      "start_position": 0.09,
+      "delta": -0.05,
+      "contract_expected": {
+        "endpoint": "open",
+        "landing_position": 0.04,
+        "transition_left_open": true
+      }
+    },
+    {
+      "id": "step_back_lands_0_03_cancels",
+      "start_position": 0.08,
+      "delta": -0.05,
+      "contract_expected": {
+        "endpoint": "cancel",
         "final_scene": "program",
         "transition_left_open": false
       }
     },
     {
-      "id": "companion_edge_finish_at_0_995",
-      "start_position": 0.35,
-      "target_position": 0.995,
+      "id": "fine_step_forward_from_rest_opens",
+      "start_position": 0.0,
+      "delta": 0.005,
       "contract_expected": {
-        "snapped_endpoint": "finish",
-        "final_scene": "preview",
+        "endpoint": "open",
+        "landing_position": 0.005,
+        "transition_left_open": true
+      }
+    },
+    {
+      "id": "fine_step_back_returns_to_rest",
+      "start_position": 0.005,
+      "delta": -0.005,
+      "contract_expected": {
+        "endpoint": "cancel",
+        "final_scene": "program",
         "transition_left_open": false
       }
     },
     {
-      "id": "companion_edge_open_at_0_01",
-      "start_position": 0.0,
-      "target_position": 0.01,
+      "id": "step_forward_inside_origin_rail_never_cancels",
+      "start_position": 0.01,
+      "delta": 0.01,
       "contract_expected": {
-        "snapped_endpoint": "open",
-        "final_scene": "preview",
+        "endpoint": "open",
+        "landing_position": 0.02,
         "transition_left_open": true
       }
     },
     {
-      "id": "companion_edge_open_at_0_99",
+      "id": "step_back_at_rest_is_ignored",
       "start_position": 0.0,
-      "target_position": 0.99,
+      "delta": -0.05,
       "contract_expected": {
-        "snapped_endpoint": "open",
-        "final_scene": "preview",
-        "transition_left_open": true
+        "endpoint": "ignored",
+        "final_scene": "program",
+        "transition_left_open": false
       }
     }
   ],
