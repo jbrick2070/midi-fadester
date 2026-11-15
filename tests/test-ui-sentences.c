@@ -716,7 +716,20 @@ int main(void)
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_TWO_SOURCE_MIX), "Mix two layers") == 0);
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_SINGLE_LAYER), "Show or hide a layer") == 0);
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_AUDIO_VOLUME), "Volume") == 0);
+	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_MIX_MASTER), "Whole mix") == 0);
 	REQUIRE(strcmp(mfd_ui_target_plain_name(MFD_TARGET_FILTER_PARAM), "Filter or effect setting") == 0);
+
+	/* P1-7: Whole mix assignment & SVG strip label use "Whole mix", never "Mix master" / "Fadester mix master". */
+	struct mfd_ui_strip_input mix_in = {0};
+	mix_in.slot_index = 9;
+	mix_in.enabled = true;
+	mix_in.addr_type = MFD_MIDI_CC;
+	mix_in.target_type = MFD_TARGET_MIX_MASTER;
+	mix_in.available = true;
+	struct mfd_ui_strip_presentation mix_pres = {0};
+	mfd_ui_format_strip_presentation(&mix_in, &mix_pres);
+	REQUIRE(strcmp(mix_pres.assignment_sentence, "Whole mix") == 0);
+	REQUIRE(strcmp(mix_pres.svg_short_label, "Whole mix") == 0);
 	REQUIRE(strcmp(mfd_ui_curve_plain_name(MFD_CURVE_DIP_FREE), "Dip-free") == 0);
 	REQUIRE(strcmp(mfd_ui_curve_plain_name(MFD_CURVE_COSINE), "Equal power") == 0);
 

@@ -393,8 +393,8 @@ static void format_assignment(const struct mfd_ui_strip_input *in, struct mfd_ui
 		}
 		break;
 	case MFD_TARGET_MIX_MASTER:
-		say(as, as_size, mfd_text("Target.MixMaster", "Fadester mix master"), NULL, NULL, NULL, NULL);
-		say(sl, sl_size, mfd_text("Svg.MixMaster", "Mix master"), NULL, NULL, NULL, NULL);
+		say(as, as_size, mfd_text("Target.MixMaster", "Whole mix"), NULL, NULL, NULL, NULL);
+		say(sl, sl_size, mfd_text("Svg.MixMaster", "Whole mix"), NULL, NULL, NULL, NULL);
 		break;
 	case MFD_TARGET_FILTER_PARAM:
 		if (has_text(in->filter_name) && has_text(fp)) {
@@ -782,7 +782,7 @@ const char *mfd_ui_target_plain_name(enum mfd_target_type target_type)
 	case MFD_TARGET_AUDIO_VOLUME:
 		return mfd_text("Target.Volume", "Volume");
 	case MFD_TARGET_MIX_MASTER:
-		return mfd_text("Target.MixMaster", "Fadester mix master");
+		return mfd_text("Target.MixMaster", "Whole mix");
 	case MFD_TARGET_FILTER_PARAM:
 		return mfd_text("Target.Filter", "Filter or effect setting");
 	case MFD_TARGET_UNASSIGNED:

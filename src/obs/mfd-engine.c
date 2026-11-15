@@ -2161,7 +2161,7 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 				break;
 
 			case MFD_TARGET_MIX_MASTER:
-				snprintf(lbl, sizeof(lbl), "Fadester mix master");
+				snprintf(lbl, sizeof(lbl), "Whole mix");
 				avail = true; /* Can request; the external mix provider confirms application. */
 				mfd_msg_clear(&rsn);
 				break;
