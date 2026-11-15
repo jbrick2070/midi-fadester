@@ -6,7 +6,9 @@
 
 #include "core/tbar-logic.h"
 #include <math.h>
+#include <obs-data.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define ASSERT_TRUE(cond)                                                               \
@@ -345,6 +347,138 @@ int main(void)
 	ASSERT_TRUE(sm_starts == 1);
 	ASSERT_TRUE(sm_cancels == 1);
 	ASSERT_TRUE(sm_state == MFD_TBAR_IDLE);
+
+	/*
+	 * 12. Shared suite T-bar safety vectors (tests/vectors/tbar-safety.json):
+	 *     Verifies constants, tick mapping, release-at-most-once throws, and pre-write refusals.
+	 */
+#ifdef MFD_TBAR_VECTORS_FILE
+	{
+		obs_data_t *root = obs_data_create_from_json_file(MFD_TBAR_VECTORS_FILE);
+		ASSERT_TRUE(root != NULL);
+		ASSERT_TRUE(obs_data_get_int(root, "contract_version") == 1);
+
+		obs_data_t *consts = obs_data_get_obj(root, "constants");
+		ASSERT_TRUE(consts != NULL);
+		ASSERT_TRUE(obs_data_get_int(consts, "slider_max") == MFD_TBAR_RANGE_MAX);
+		ASSERT_TRUE(obs_data_get_int(consts, "obs_finish_min_tick") == MFD_TBAR_OBS_MIN_RELEASE_POS);
+		ASSERT_TRUE(obs_data_get_int(consts, "obs_cancel_max_tick") == MFD_TBAR_CLAMP);
+		ASSERT_TRUE(fabsf((float)obs_data_get_double(consts, "controller_rail_zone") - MFD_TBAR_RAIL_ZONE) <
+			    1e-6f);
+		ASSERT_TRUE(fabsf((float)obs_data_get_double(consts, "midi_start_deadband") - MFD_TBAR_START_ZONE) <
+			    1e-6f);
+		obs_data_release(consts);
+
+		obs_data_array_t *ticks = obs_data_get_array(root, "tick_vectors");
+		ASSERT_TRUE(ticks != NULL && obs_data_array_count(ticks) > 0U);
+		for (size_t ti = 0U; ti < obs_data_array_count(ticks); ++ti) {
+			obs_data_t *tv = obs_data_array_item(ticks, ti);
+			const char *id = obs_data_get_string(tv, "id");
+			float norm = (float)obs_data_get_double(tv, "normalized");
+			int exp_tick = (int)obs_data_get_int(tv, "tick");
+			const char *exp_zone = obs_data_get_string(tv, "obs_release_zone");
+
+			int actual_tick = (int)lroundf(norm * (float)MFD_TBAR_RANGE_MAX);
+			const char *actual_zone =
+				actual_tick <= MFD_TBAR_CLAMP
+					? "cancel"
+					: (actual_tick >= MFD_TBAR_OBS_MIN_RELEASE_POS ? "finish" : "open");
+			ASSERT_TRUE(actual_tick == exp_tick);
+			ASSERT_TRUE(strcmp(actual_zone, exp_zone) == 0);
+			printf("  [VECTOR PASS] %s: normalized=%.4f -> tick=%d (%s)\n", id, (double)norm, actual_tick,
+			       actual_zone);
+			obs_data_release(tv);
+		}
+		obs_data_array_release(ticks);
+
+		obs_data_array_t *rel_vecs = obs_data_get_array(root, "release_once_vectors");
+		ASSERT_TRUE(rel_vecs != NULL && obs_data_array_count(rel_vecs) > 0U);
+		for (size_t ri = 0U; ri < obs_data_array_count(rel_vecs); ++ri) {
+			obs_data_t *rv = obs_data_array_item(rel_vecs, ri);
+			const char *id = obs_data_get_string(rv, "id");
+			obs_data_t *exp = obs_data_get_obj(rv, "contract_expected");
+			obs_data_array_t *steps = obs_data_get_array(rv, "steps");
+			ASSERT_TRUE(exp != NULL && steps != NULL && obs_data_array_count(steps) > 1U);
+
+			enum mfd_tbar_state st = MFD_TBAR_IDLE;
+			bool latched = false;
+			int cur_pos = 0;
+			int releases = 0;
+			int post_release_writes = 0;
+			const char *final_scene = "program";
+
+			for (size_t si = 0U; si < obs_data_array_count(steps); ++si) {
+				obs_data_t *step_obj = obs_data_array_item(steps, si);
+				float x = (float)obs_data_get_double(step_obj, "position");
+				obs_data_release(step_obj);
+
+				memset(&in, 0, sizeof(in));
+				in.studio_mode_active = true;
+				in.slider_tbar_found = true;
+				in.state = st;
+				in.release_latched = latched;
+				in.in_origin_rail_zone = mfd_tbar_is_in_origin_rail_zone(x, false);
+				in.in_target_rail_zone = mfd_tbar_is_in_target_rail_zone(x, false);
+				in.in_start_deadband = !mfd_tbar_is_past_start_zone(x, false);
+				in.t_norm = mfd_tbar_rescale_from_start_zone(x, false);
+				in.last_pos_1024 = cur_pos;
+				mfd_tbar_compute_action_full(&in, &act);
+
+				if (releases > 0 && (act.call_set_tbar || act.call_release_tbar)) {
+					++post_release_writes;
+				}
+				if (act.call_release_tbar) {
+					++releases;
+					cur_pos = 0;
+					if (act.completed_throw) {
+						latched = true;
+						final_scene = "preview";
+					} else if (act.aborted_throw) {
+						final_scene = "program";
+					}
+				} else if (act.call_set_tbar) {
+					cur_pos = act.target_pos_1024;
+				}
+				st = act.next_state;
+			}
+
+			bool left_open = (st == MFD_TBAR_THROWING);
+			ASSERT_TRUE(releases == (int)obs_data_get_int(exp, "releases"));
+			ASSERT_TRUE(post_release_writes == (int)obs_data_get_int(exp, "post_release_writes"));
+			ASSERT_TRUE(strcmp(final_scene, obs_data_get_string(exp, "final_scene")) == 0);
+			ASSERT_TRUE(left_open == obs_data_get_bool(exp, "transition_left_open"));
+			printf("  [VECTOR PASS] %s: releases=%d, post_release_writes=%d, final_scene=%s\n", id,
+			       releases, post_release_writes, final_scene);
+
+			obs_data_array_release(steps);
+			obs_data_release(exp);
+			obs_data_release(rv);
+		}
+		obs_data_array_release(rel_vecs);
+
+		obs_data_array_t *fail_vecs = obs_data_get_array(root, "failure_vectors");
+		ASSERT_TRUE(fail_vecs != NULL && obs_data_array_count(fail_vecs) > 0U);
+		obs_data_t *pre_refusal = obs_data_array_item(fail_vecs, 0U);
+		ASSERT_TRUE(strcmp(obs_data_get_string(pre_refusal, "id"), "pre_write_refusal") == 0);
+		float attempt_pos = (float)obs_data_get_double(pre_refusal, "attempt_position");
+		obs_data_t *pre_exp = obs_data_get_obj(pre_refusal, "contract_expected");
+		ASSERT_TRUE(pre_exp != NULL);
+		for (int guard_case = 0; guard_case < 2; ++guard_case) {
+			mfd_tbar_compute_action(guard_case == 1, false, attempt_pos, 0, &act);
+			ASSERT_TRUE(!act.allow_frontend_calls);
+			ASSERT_TRUE(!act.call_set_tbar && !act.call_release_tbar);
+			ASSERT_TRUE(act.next_state == MFD_TBAR_IDLE);
+		}
+		ASSERT_TRUE(obs_data_get_int(pre_exp, "writes_replayed") == 0);
+		ASSERT_TRUE(!obs_data_get_bool(pre_exp, "transition_left_open"));
+		printf("  [VECTOR PASS] pre_write_refusal: frontend guards wrote nothing and left state idle\n");
+		obs_data_release(pre_exp);
+		obs_data_release(pre_refusal);
+		obs_data_array_release(fail_vecs);
+
+		obs_data_release(root);
+	}
+#endif
 
 	printf("test-tbar-logic: PASS\n");
 	return 0;

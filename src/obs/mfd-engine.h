@@ -419,6 +419,7 @@ struct mfd_engine {
 	struct mfd_midi_queue midi_queue;
 	struct mfd_midi_parser midi_parser;
 	struct mfd_winmm_device midi_dev;
+	bool midi_disconnect_handled;
 
 	char configured_device_name[MFD_MIDI_DEV_NAME_MAX];
 	char active_profile_name[MFD_PROFILE_NAME_MAX];

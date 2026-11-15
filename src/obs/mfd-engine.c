@@ -665,6 +665,35 @@ void mfd_engine_abort_tbar_for_config_change_locked(struct mfd_engine *eng, stru
 	slot->tbar_from_idle_band = false;
 }
 
+static void abort_open_tbar_slots_on_midi_disconnect_locked(struct mfd_engine *eng)
+{
+	if (!eng || eng->midi_disconnect_handled) {
+		return;
+	}
+	eng->midi_disconnect_handled = true;
+	mfd_midi_queue_init(&eng->midi_queue);
+	bool aborted_any = false;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *slot = &eng->fader_slots[i];
+		if (!slot->enabled || slot->target_type != MFD_TARGET_TBAR) {
+			continue;
+		}
+		bool was_throwing = (slot->tbar_state == MFD_TBAR_THROWING);
+		mfd_engine_abort_tbar_for_config_change_locked(eng, slot);
+		slot->takeover.state = MFD_TAKEOVER_WAITING;
+		slot->takeover.target_obs = 0.0f;
+		slot->takeover.rescale_origin = slot->takeover.polarity_reversed ? 1.0f : 0.0f;
+		slot->takeover.has_last_fader = false;
+		slot->takeover.hint = MFD_HINT_NONE;
+		if (was_throwing) {
+			aborted_any = true;
+		}
+	}
+	if (aborted_any) {
+		mfd_engine_notify_state_changed(eng);
+	}
+}
+
 void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_slot *slot,
 				      enum mfd_target_type new_target)
 {
@@ -4654,6 +4683,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	mfd_engine_lock(eng);
 
 	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+		abort_open_tbar_slots_on_midi_disconnect_locked(eng);
 		mfd_engine_mark_ui_dirty(eng, true);
 	}
 	sync_volume_slots_from_live_locked(eng);
@@ -6395,6 +6425,9 @@ bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)
 	}
 	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	bool ok = mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name);
+	if (ok) {
+		eng->midi_disconnect_handled = false;
+	}
 	refresh_apc40_detected_locked(eng);
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
@@ -6464,6 +6497,7 @@ void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
 	mfd_engine_lock(eng);
 	if (eng->midi_dev.is_open) {
 		if (!mfd_winmm_check_health(&eng->midi_dev)) {
+			abort_open_tbar_slots_on_midi_disconnect_locked(eng);
 			refresh_apc40_detected_locked(eng);
 			mfd_engine_notify_state_changed(eng);
 		}
@@ -6503,6 +6537,7 @@ void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
 	if (candidate_present) {
 		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 		if (mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name)) {
+			eng->midi_disconnect_handled = false;
 			refresh_apc40_detected_locked(eng);
 			mfd_engine_notify_state_changed(eng);
 		}
@@ -6536,7 +6571,9 @@ bool mfd_engine_init(void)
 	mfd_engine_load_apc40_defaults(&g_engine);
 	bool had_global_cfg = load_global_config_if_present(&g_engine);
 
-	mfd_winmm_open_by_name(&g_engine.midi_dev, g_engine.configured_device_name);
+	if (mfd_winmm_open_by_name(&g_engine.midi_dev, g_engine.configured_device_name)) {
+		g_engine.midi_disconnect_handled = false;
+	}
 	if (!had_global_cfg && g_engine.midi_dev.is_open) {
 		enum mfd_controller_profile detected = mfd_profile_match_device_name(g_engine.midi_dev.opened_name);
 		if (detected != MFD_PROFILE_GENERIC && detected != MFD_PROFILE_APC40_MK2) {
