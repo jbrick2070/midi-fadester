@@ -1128,6 +1128,52 @@ bool mfd_engine_source_has_audio(const struct mfd_engine *eng, const char *sourc
 	return has_audio;
 }
 
+static void check_internal_opacity_filter_cb(const char *filter_name, const char *type_id, bool enabled, void *param)
+{
+	UNUSED_PARAMETER(enabled);
+	bool *found = (bool *)param;
+	if (!found || *found) {
+		return;
+	}
+	if ((filter_name && strcmp(filter_name, MFD_INTERNAL_OPACITY_FILTER_NAME) == 0) ||
+	    (type_id && strcmp(type_id, MFD_LAYER_FILTER_ID) == 0)) {
+		*found = true;
+	}
+}
+
+bool mfd_engine_source_has_internal_opacity(const struct mfd_engine *eng, const char *source_name)
+{
+	if (!source_name || source_name[0] == '\0') {
+		return false;
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->source_has_internal_opacity) {
+		return eng->scene_graph_ops->source_has_internal_opacity(source_name, eng->scene_graph_user_data);
+	}
+	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->enum_source_filters) {
+		bool found = false;
+		(void)eng->scene_graph_ops->enum_source_filters(source_name, NULL, check_internal_opacity_filter_cb,
+								&found, eng->scene_graph_user_data);
+		return found;
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_source_by_name(source_name);
+	if (!src) {
+		return false;
+	}
+	bool has_opacity = false;
+	if (!obs_source_removed(src)) {
+		obs_source_t *flt = obs_source_get_filter_by_name(src, MFD_INTERNAL_OPACITY_FILTER_NAME);
+		if (flt) {
+			has_opacity = !obs_source_removed(flt);
+			obs_source_release(flt);
+		}
+	}
+	obs_source_release(src);
+	return has_opacity;
+}
+
 static int sg_scene_item_stack_index(const struct mfd_engine *eng, const char *scene_name, const char *source_name)
 {
 	if (!scene_name || scene_name[0] == '\0' || !source_name || source_name[0] == '\0') {
@@ -3134,34 +3180,80 @@ static void append_vendor_host_cb(const char *source_name, bool is_scene, void *
 	obs_data_release(hobj);
 }
 
+static const char *find_layer_opacity_slot_locked(const struct mfd_engine *eng, const char *scene_name,
+						  const char *layer_name)
+{
+	if (!eng || !layer_name || layer_name[0] == '\0') {
+		return "";
+	}
+	const char *any_scene_match = NULL;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (!s->enabled || s->target_type != MFD_TARGET_SINGLE_LAYER) {
+			continue;
+		}
+		if (strcmp(s->source_a_name, layer_name) != 0) {
+			continue;
+		}
+		if (!scene_name || scene_name[0] == '\0' || s->scene_name[0] == '\0' ||
+		    strcmp(s->scene_name, scene_name) == 0) {
+			return s->id;
+		}
+		if (!any_scene_match) {
+			any_scene_match = s->id;
+		}
+	}
+	return any_scene_match ? any_scene_match : "";
+}
+
+struct mfd_live_vendor_scene_items_ctx {
+	const struct mfd_engine *eng;
+	const char *scene_name;
+	obs_data_array_t *layers_arr;
+};
+
+struct mfd_live_vendor_scenes_ctx {
+	const struct mfd_engine *eng;
+	obs_data_array_t *scenes_arr;
+};
+
 static bool append_live_vendor_scene_items_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 {
 	UNUSED_PARAMETER(scene);
-	obs_data_array_t *layers_arr = (obs_data_array_t *)param;
+	struct mfd_live_vendor_scene_items_ctx *ctx = (struct mfd_live_vendor_scene_items_ctx *)param;
 	obs_source_t *src = obs_sceneitem_get_source(item);
-	if (!layers_arr || !src || obs_source_removed(src)) {
+	if (!ctx || !ctx->layers_arr || !src || obs_source_removed(src)) {
 		return true;
 	}
 	const char *nm = obs_source_get_name(src);
-	if (is_internal_source_name(nm) || obs_array_contains_string_field(layers_arr, "name", nm)) {
+	if (is_internal_source_name(nm) || obs_array_contains_string_field(ctx->layers_arr, "name", nm)) {
 		return true;
+	}
+	bool has_internal_opacity = false;
+	obs_source_t *op_flt = obs_source_get_filter_by_name(src, MFD_INTERNAL_OPACITY_FILTER_NAME);
+	if (op_flt) {
+		has_internal_opacity = !obs_source_removed(op_flt);
+		obs_source_release(op_flt);
 	}
 	obs_data_t *lobj = obs_data_create();
 	obs_data_set_string(lobj, "name", nm);
 	obs_data_set_bool(lobj, "has_audio", (obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) != 0U);
-	obs_data_array_push_back(layers_arr, lobj);
+	obs_data_set_bool(lobj, "has_internal_opacity", has_internal_opacity);
+	obs_data_set_string(lobj, "opacity_slot", find_layer_opacity_slot_locked(ctx->eng, ctx->scene_name, nm));
+	obs_data_array_push_back(ctx->layers_arr, lobj);
 	obs_data_release(lobj);
 	return true;
 }
 
 static bool append_live_vendor_scenes_cb(void *param, obs_source_t *scene_src)
 {
-	obs_data_array_t *scenes_arr = (obs_data_array_t *)param;
-	if (!scenes_arr || !scene_src || obs_source_removed(scene_src) || !obs_source_is_scene(scene_src)) {
+	struct mfd_live_vendor_scenes_ctx *ctx = (struct mfd_live_vendor_scenes_ctx *)param;
+	if (!ctx || !ctx->scenes_arr || !scene_src || obs_source_removed(scene_src) ||
+	    !obs_source_is_scene(scene_src)) {
 		return true;
 	}
 	const char *sc_name = obs_source_get_name(scene_src);
-	if (!sc_name || !sc_name[0] || obs_array_contains_string_field(scenes_arr, "name", sc_name)) {
+	if (!sc_name || !sc_name[0] || obs_array_contains_string_field(ctx->scenes_arr, "name", sc_name)) {
 		return true;
 	}
 	obs_data_t *sobj = obs_data_create();
@@ -3169,11 +3261,12 @@ static bool append_live_vendor_scenes_cb(void *param, obs_source_t *scene_src)
 	obs_data_array_t *layers_arr = obs_data_array_create();
 	obs_scene_t *scene = obs_scene_from_source(scene_src);
 	if (scene) {
-		obs_scene_enum_items(scene, append_live_vendor_scene_items_cb, layers_arr);
+		struct mfd_live_vendor_scene_items_ctx ictx = {ctx->eng, sc_name, layers_arr};
+		obs_scene_enum_items(scene, append_live_vendor_scene_items_cb, &ictx);
 	}
 	obs_data_set_array(sobj, "layers", layers_arr);
 	obs_data_array_release(layers_arr);
-	obs_data_array_push_back(scenes_arr, sobj);
+	obs_data_array_push_back(ctx->scenes_arr, sobj);
 	obs_data_release(sobj);
 	return true;
 }
@@ -3246,9 +3339,15 @@ bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const cha
 				obs_data_set_string(sobj, "name", cat->scenes[i].name);
 				obs_data_array_t *larr = obs_data_array_create();
 				for (size_t j = 0U; j < cat->scenes[i].layer_count; ++j) {
+					const char *lnm = cat->scenes[i].layers[j];
 					obs_data_t *lobj = obs_data_create();
-					obs_data_set_string(lobj, "name", cat->scenes[i].layers[j]);
+					obs_data_set_string(lobj, "name", lnm);
 					obs_data_set_bool(lobj, "has_audio", cat->scenes[i].layer_has_audio[j]);
+					obs_data_set_bool(lobj, "has_internal_opacity",
+							  mfd_engine_source_has_internal_opacity(eng, lnm));
+					obs_data_set_string(lobj, "opacity_slot",
+							    find_layer_opacity_slot_locked(eng, cat->scenes[i].name,
+											   lnm));
 					obs_data_array_push_back(larr, lobj);
 					obs_data_release(lobj);
 				}
@@ -3269,7 +3368,8 @@ bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const cha
 			mfd_ui_catalog_destroy(cat);
 		}
 	} else if (obs_initialized()) {
-		obs_enum_scenes(append_live_vendor_scenes_cb, scenes_arr);
+		struct mfd_live_vendor_scenes_ctx sctx = {eng, scenes_arr};
+		obs_enum_scenes(append_live_vendor_scenes_cb, &sctx);
 		obs_enum_sources(append_live_vendor_audio_cb, audio_arr);
 	}
 

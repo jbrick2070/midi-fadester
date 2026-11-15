@@ -348,6 +348,9 @@ struct mfd_scene_graph_ops {
 
 	/* Optional: read a source's volume multiplier (headless tests). */
 	bool (*get_volume)(const char *source_name, float *out_mul, void *user_data);
+
+	/* Optional: check whether Midi Fadester's internal opacity filter is attached (headless tests). */
+	bool (*source_has_internal_opacity)(const char *source_name, void *user_data);
 };
 
 /*
@@ -617,6 +620,7 @@ bool mfd_engine_import_config_file_and_reopen(struct mfd_engine *eng, const char
 bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_name);
 bool mfd_engine_scene_exists(const struct mfd_engine *eng, const char *scene_name);
 bool mfd_engine_source_has_audio(const struct mfd_engine *eng, const char *source_name);
+bool mfd_engine_source_has_internal_opacity(const struct mfd_engine *eng, const char *source_name);
 bool mfd_engine_find_other_scene_with_layer(const struct mfd_engine *eng, const char *source_name,
 					    const char *exclude_scene, char *out_scene, size_t out_size);
 bool mfd_engine_is_studio_mode_active(const struct mfd_engine *eng);
