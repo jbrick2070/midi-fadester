@@ -559,6 +559,9 @@ void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, 
 		case MFD_MIX_UNAVAILABLE:
 			label = mfd_text_or_english(translate, "Mix.Unavailable", "Mix request unavailable");
 			break;
+		case MFD_MIX_CONFLICT:
+			label = mfd_text_or_english(translate, "Mix.Conflict", "Two mix providers are answering");
+			break;
 		default:
 			label = mfd_text_or_english(translate, "Readout.MixMasterIdle", "Needs Fadester Companion");
 			break;
@@ -672,6 +675,16 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 	mfd_engine_abort_tbar_for_config_change_locked(eng, slot);
 	enum mfd_target_type prev_target = slot->target_type;
 	slot->target_type = new_target;
+	if (prev_target == MFD_TARGET_MIX_MASTER || new_target == MFD_TARGET_MIX_MASTER) {
+		slot->mix_request_id[0] = '\0';
+		slot->mix_delivery = MFD_MIX_IDLE;
+		slot->mix_sent_ns = 0;
+		slot->mix_pending = false;
+		eng->mix_provider_id[0] = '\0';
+		eng->last_mix_sent_id[0] = '\0';
+		eng->last_mix_sent_ns = 0;
+		eng->mix_provider_conflict = false;
+	}
 	if (prev_target != new_target) {
 		slot->mix_request_id[0] = '\0';
 		slot->mix_delivery = MFD_MIX_IDLE;
@@ -4652,6 +4665,10 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			s->mix_sent_ns = 0;
 			s->mix_request_id[0] = '\0';
 			s->mix_delivery = MFD_MIX_NO_REPLY;
+			eng->mix_provider_id[0] = '\0';
+			eng->last_mix_sent_id[0] = '\0';
+			eng->last_mix_sent_ns = 0;
+			eng->mix_provider_conflict = false;
 			mfd_engine_mark_ui_dirty(eng, false);
 		}
 	}
