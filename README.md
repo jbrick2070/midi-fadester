@@ -1,5 +1,7 @@
 # Midi Fadester
 
+> **Setting up the Fadester Suite?** Start with **[START-HERE.md](https://github.com/jbrick2070/streamdeck-fadester/blob/main/docs/START-HERE.md)** for what to install for your controller, which video player to pick, first-run OBS settings, and the compatibility matrix.
+
 [![Latest release](https://img.shields.io/github/v/release/jbrick2070/midi-fadester?label=release)](https://github.com/jbrick2070/midi-fadester/releases/latest)
 [![Build](https://github.com/jbrick2070/midi-fadester/actions/workflows/push.yaml/badge.svg)](https://github.com/jbrick2070/midi-fadester/actions/workflows/push.yaml)
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
