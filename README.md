@@ -46,7 +46,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows. The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer (CoreMIDI on macOS is built in CI from `main`; the published 0.6.0 release binaries are Windows x64). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested on hardware. Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use the Stream Deck companion or scripts.
@@ -143,7 +143,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 
 ![Set up for a filter setting: filter, setting and the 0 % and 100 % values](docs/screenshots/12-setup-filter-step2.png)
 
-**Clean / All FX Off** is the panic button. One click takes every filter setting in both banks back to its *At 0 %* value and applies the bypass. Volumes, layer fades, two-layer mixes and the T-bar are left exactly where they are, and media keeps playing. It is also available as the `reset_fx` request, instant or as a timed ramp, so a Stream Deck key can do the same.
+**Clean / All FX Off** resets every enabled filter-setting binding in both banks back to its *At 0 %* value and applies its bypass. Volumes, layer fades, two-layer mixes and the T-bar are left exactly where they are, media keeps playing, and Visual Sidechain's separate global **Panic / Restore** bypass is untouched. It is also available as the `reset_fx` request, instant or as a timed ramp, so a Stream Deck key can do the same.
 
 ## Controllers
 
@@ -268,7 +268,7 @@ language.
 
 ## Not yet
 
-- Windows only. The MIDI layer uses the Windows multimedia API, and no macOS or Linux build exists.
+- No Linux build yet (Windows uses WinMM; macOS uses CoreMIDI in `src/midi/coremidi-device.c` and builds in CI, with published release archives currently Windows x64).
 - OBS 33.0.0 or newer only.
 - No lights: the desk's LEDs and knob rings are not driven yet.
 - Faders and knobs only: pads, buttons and hotkeys are not mapped yet.
@@ -280,6 +280,8 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 ## Releases
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
+
+**Unreleased:** macOS CoreMIDI backend and universal CI build; removed dead `visual_sidechain_set_fader_slot` proc call; clarified macOS support and how Clean / All FX Off differs from Visual Sidechain's Panic / Restore.
 
 **0.6.0** (November 2026) is the current release. Compared with 0.1.0 it adds the Strips screen and the three-step Set up sheet, the first-run offer, the live controller picture, the FX & Knobs bank with Clean / All FX Off, the filter-setting job, the four Beta desk layouts, `get_catalog` and `reset_fx`, the Stream Deck companion and translations. Visual Sidechain uses the same number; Fadester for OBS is versioned separately.
 

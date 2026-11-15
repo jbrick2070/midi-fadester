@@ -20,7 +20,6 @@
 #include "plugin-support.h"
 
 static obs_websocket_vendor g_vendor = NULL;
-static proc_handler_t *g_bridge_ph = NULL;
 static signal_handler_t *g_bridge_sh = NULL;
 static mfd_vendor_event_sink_fn g_event_sink = NULL;
 static void *g_event_sink_user_data = NULL;
@@ -330,16 +329,6 @@ void mfd_vendor_emit_fader_changed_ex(const char *slot_id, float value, const ch
 		calldata_free(&cd);
 	}
 
-	/* Also notify Visual Sidechain's fader slot proc if registered on the proc_handler */
-	if (g_bridge_ph) {
-		struct calldata vs_cd;
-		calldata_init(&vs_cd);
-		calldata_set_string(&vs_cd, "slot", slot_id);
-		calldata_set_float(&vs_cd, "value", (double)clamped);
-		proc_handler_call(g_bridge_ph, "visual_sidechain_set_fader_slot", &vs_cd);
-		calldata_free(&vs_cd);
-	}
-
 	/* 2. Emit obs-websocket vendor event `fader_changed` */
 	obs_data_t *ev = obs_data_create();
 	obs_data_set_string(ev, "slot", slot_id);
@@ -562,7 +551,6 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 bool mfd_bridge_register_with_handlers(proc_handler_t *ph, signal_handler_t *sh, struct mfd_engine *eng)
 {
 	os_atomic_store_bool(&g_vendor_shutting_down, false);
-	g_bridge_ph = ph;
 	g_bridge_sh = sh;
 
 	if (ph) {
@@ -1412,7 +1400,6 @@ void mfd_vendor_api_shutdown(struct mfd_engine *eng)
 		mfd_engine_unlock(eng);
 	}
 	g_vendor = NULL;
-	g_bridge_ph = NULL;
 	g_bridge_sh = NULL;
 	g_event_sink = NULL;
 	g_event_sink_user_data = NULL;
