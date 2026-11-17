@@ -164,6 +164,11 @@ int main(void)
 		return 1;
 	}
 
+	/* CI sets VS_GPU_REQUIRE_ALL=1: there a renderer that cannot create its device is a failure, not a skip, so the
+	 * job cannot go green without both translators having built every shader */
+	const char *require_env = getenv("VS_GPU_REQUIRE_ALL");
+	const bool require_all = require_env && strcmp(require_env, "1") == 0;
+
 	char modules[4096];
 	snprintf(modules, sizeof(modules), "%s", VS_GPU_MODULES);
 	int failures = 0, tested = 0;
@@ -171,8 +176,13 @@ int main(void)
 		if (!*module)
 			continue;
 		int r = check_renderer(module);
-		if (r < 0)
+		if (r < 0) {
+			if (require_all) {
+				printf("  FAIL: VS_GPU_REQUIRE_ALL=1 and this renderer was skipped\n");
+				failures++;
+			}
 			continue;
+		}
 		tested++;
 		failures += r;
 	}
