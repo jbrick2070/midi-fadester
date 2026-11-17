@@ -65,9 +65,8 @@ float4 mainImage(VertData v_in) : TARGET
 	float2 step_uv = uv_pixel_interval * radius;
 
 	float neighbor_alpha = 0.0;
-	[unroll]
 	for (int i = 0; i < 8; i++) {
-		float theta = (float)i * 0.78539816;
+		float theta = float(i) * 0.78539816;
 		float2 dir = float2(cos(theta), sin(theta));
 		float2 sample_uv = clamp(uv + dir * step_uv, 0.0, 1.0);
 		neighbor_alpha = max(neighbor_alpha, image.Sample(texture_sampler, sample_uv).a);

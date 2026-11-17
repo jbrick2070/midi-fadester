@@ -60,7 +60,7 @@ float4 mainImage(VertData v_in) : TARGET
 		m_uv = clamp(m_uv + float2(kick_offset, -kick_offset) * 0.35, 0.0, 1.0);
 	} else {
 		/* FFT Slice displacement + alternating mirror */
-		float slices = max((float)slice_count, 2.0);
+		float slices = max(float(slice_count), 2.0);
 		float s_idx = floor(uv.y * slices);
 		float s_u = (s_idx + 0.5) / slices;
 		float bin_val = vs_sample_fft(s_u);

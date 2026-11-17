@@ -278,6 +278,27 @@ set_tests_properties(
   PROPERTIES PASS_REGULAR_EXPRESSION "shader flash safety: .*ungated-flash\\.shader.*unguarded raw transient"
 )
 
+# Built-in shaders use no HLSL-only form that the Mac's GLSL and Metal compilers refuse (R-PLAT-9), checked on every
+# platform; the second test proves a cast and an attribute are each caught
+add_test(
+  NAME check-shader-portability
+  COMMAND
+    "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_SOURCE_DIR}/data/shaders" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-portability.cmake"
+)
+add_test(
+  NAME check-shader-portability-catches-faults
+  COMMAND
+    "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-portability-bad" -P
+    "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-portability.cmake"
+)
+set_tests_properties(
+  check-shader-portability-catches-faults
+  PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "hlsl-only\\.shader: C-style cast '\\(float\\)i'.*hlsl-only\\.shader: HLSL attribute '\\[unroll\\]'"
+)
+
 # Suite naming pass invariants across all locale files (P1-7)
 add_test(
   NAME check-product-naming

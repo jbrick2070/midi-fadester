@@ -61,7 +61,7 @@ float4 mainImage(VertData v_in) : TARGET
 {
 	float4 base = image.Sample(texture_sampler, v_in.uv);
 	float aspect = uv_size.x / max(uv_size.y, 1.0);
-	float cells = clamp((float)hex_cells, 4.0, 32.0);
+	float cells = clamp(float(hex_cells), 4.0, 32.0);
 	float2 p = (v_in.uv - float2(0.5, 0.5)) * float2(aspect, 1.0) * cells;
 
 	/* Two offset rectangular grids form triangularly spaced hex centers. */

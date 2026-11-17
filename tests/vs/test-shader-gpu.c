@@ -24,6 +24,7 @@
 
 #include "core/shader-parse.h"
 
+#include <obs.h>
 #include <graphics/graphics.h>
 #include <util/base.h>
 #include <util/dstr.h>
@@ -156,6 +157,13 @@ int main(void)
 	base_set_log_handler(log_handler, NULL);
 	printf("test-shader-gpu: shaders in %s\n", VS_SHADERS_DIR);
 
+	/* libobs-metal connects to the core's signal handler when it creates its device, so the core must be up; no
+	 * video or audio is started */
+	if (!obs_startup("en-US", NULL, NULL)) {
+		printf("test-shader-gpu: obs_startup failed\n");
+		return 1;
+	}
+
 	char modules[4096];
 	snprintf(modules, sizeof(modules), "%s", VS_GPU_MODULES);
 	int failures = 0, tested = 0;
@@ -168,6 +176,7 @@ int main(void)
 		tested++;
 		failures += r;
 	}
+	obs_shutdown();
 	dstr_free(&g_errors);
 
 	if (failures) {
