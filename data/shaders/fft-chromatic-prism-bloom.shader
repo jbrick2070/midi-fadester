@@ -73,9 +73,8 @@ float4 mainImage(VertData v_in) : TARGET
 	float2 bloom_step = uv_pixel_interval * (3.0 + 10.0 * bloom_drive);
 	float3 bloom_accum = float3(0.0, 0.0, 0.0);
 
-	[unroll]
 	for (int i = 0; i < 8; i++) {
-		float ang = (float)i * 0.78539816;
+		float ang = float(i) * 0.78539816;
 		float2 tap_uv = clamp(uv + float2(cos(ang), sin(ang)) * bloom_step, 0.0, 1.0);
 		float3 tap_c = image.Sample(texture_sampler, tap_uv).rgb;
 		float luma = dot(tap_c, float3(0.2126, 0.7152, 0.0722));

@@ -22,48 +22,131 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The Windows rules, checked on every platform */
+#define win_usable(path) tub_path_is_usable_as((path), TUB_PATH_STYLE_WINDOWS)
+#define win_url(path, out, size) tub_path_to_file_url_as((path), TUB_PATH_STYLE_WINDOWS, (out), (size))
+/* The POSIX (macOS) rules, checked on every platform */
+#define posix_usable(path) tub_path_is_usable_as((path), TUB_PATH_STYLE_POSIX)
+#define posix_url(path, out, size) tub_path_to_file_url_as((path), TUB_PATH_STYLE_POSIX, (out), (size))
+
+static void test_posix_path_usable(void)
+{
+	assert(posix_usable("/Users/me/Movies/reel.mp4"));
+	assert(posix_usable("/Volumes/NAS share/reel.mp4"));
+	assert(posix_usable("/Users/me/it's 100% #1 & \xC3\xBC\xC3\xAF \xE6\x97\xA5\xE6\x9C\xAC.mp4"));
+	assert(posix_usable("/a"));
+	assert(posix_usable("/tapes/back\\slash.mp4")); /* a backslash is part of a name */
+	assert(!posix_usable(NULL));
+	assert(!posix_usable(""));
+	assert(!posix_usable("/"));
+	assert(!posix_usable("///"));
+	assert(!posix_usable("reel.mp4"));
+	assert(!posix_usable("tapes/reel.mp4"));
+	assert(!posix_usable("~/reel.mp4"));
+	assert(!posix_usable("C:\\tapes\\reel.mp4"));
+	assert(!posix_usable("\\\\nas\\share\\reel.mp4"));
+	assert(!posix_usable("/tapes/re\nel.mp4"));
+	assert(!posix_usable("/tapes/re\x7f"
+			     "el.mp4"));
+	assert(!posix_usable("/tapes/re*el.mp4"));
+	assert(!posix_usable("/tapes/re\"el.mp4"));
+	char *too_long = malloc(TUB_PATH_MAX + 2);
+	memset(too_long, 'a', TUB_PATH_MAX + 1);
+	too_long[0] = '/';
+	too_long[TUB_PATH_MAX + 1] = '\0';
+	assert(!posix_usable(too_long));
+	too_long[TUB_PATH_MAX] = '\0';
+	assert(posix_usable(too_long));
+	free(too_long);
+	printf("  test_posix_path_usable: PASS\n");
+}
+
+static void test_posix_path_to_url(void)
+{
+	char out[512];
+	assert(posix_url("/Users/me/reel.mp4", out, sizeof(out)) == strlen("file:///Users/me/reel.mp4"));
+	assert(strcmp(out, "file:///Users/me/reel.mp4") == 0);
+	assert(posix_url("/Users/me/it's 100% #1 & \xC3\xBC.mp4", out, sizeof(out)) > 0);
+	assert(strcmp(out, "file:///Users/me/it%27s%20100%25%20%231%20%26%20%C3%BC.mp4") == 0);
+	/* the plugin's own page inside the bundle: spaces in Application Support */
+	assert(posix_url("/Library/Application Support/obs-studio/plugins/visual-sidechain.plugin/Contents/Resources/"
+			 "deck.html",
+			 out, sizeof(out)) > 0);
+	assert(strcmp(out, "file:///Library/Application%20Support/obs-studio/plugins/visual-sidechain.plugin/Contents/"
+			   "Resources/deck.html") == 0);
+	/* a colon and a backslash are characters of a name, not separators */
+	assert(posix_url("/a:b\\c.mp4", out, sizeof(out)) > 0);
+	assert(strcmp(out, "file:///a%3Ab%5Cc.mp4") == 0);
+	/* doubled slashes are written once */
+	assert(posix_url("//Users//me///reel.mp4", out, sizeof(out)) > 0);
+	assert(strcmp(out, "file:///Users/me/reel.mp4") == 0);
+	assert(posix_url("reel.mp4", out, sizeof(out)) == 0 && out[0] == '\0');
+	for (size_t size = 1; size <= strlen("file:///a"); size++) {
+		memset(out, 'x', sizeof(out));
+		assert(posix_url("/a", out, size) == 0 && out[0] == '\0');
+	}
+	assert(posix_url("/a", out, strlen("file:///a") + 1) == strlen("file:///a"));
+	printf("  test_posix_path_to_url: PASS\n");
+}
+
+/* The plain functions follow the system the plugin runs on */
+static void test_host_path_style(void)
+{
+	char out[64];
+#ifdef _WIN32
+	assert(TUB_PATH_STYLE_HOST == TUB_PATH_STYLE_WINDOWS);
+	assert(tub_path_is_usable("C:\\tapes\\reel.mp4") && !tub_path_is_usable("/tapes/reel.mp4"));
+	assert(tub_path_to_file_url("C:\\a.mp4", out, sizeof(out)) > 0 && strcmp(out, "file:///C:/a.mp4") == 0);
+#else
+	assert(TUB_PATH_STYLE_HOST == TUB_PATH_STYLE_POSIX);
+	assert(tub_path_is_usable("/tapes/reel.mp4") && !tub_path_is_usable("C:\\tapes\\reel.mp4"));
+	assert(tub_path_to_file_url("/a.mp4", out, sizeof(out)) > 0 && strcmp(out, "file:///a.mp4") == 0);
+#endif
+	printf("  test_host_path_style: PASS\n");
+}
+
 static void test_path_usable(void)
 {
-	assert(tub_path_is_usable("C:\\tapes\\reel.mp4"));
-	assert(tub_path_is_usable("c:/tapes/reel.mp4"));
-	assert(tub_path_is_usable("\\\\nas\\share\\reel.mp4"));
-	assert(tub_path_is_usable("D:\\it's 100% #1 & \xC3\xBC\xC3\xAF \xE6\x97\xA5\xE6\x9C\xAC.mp4"));
-	assert(!tub_path_is_usable(NULL));
-	assert(!tub_path_is_usable(""));
-	assert(!tub_path_is_usable("C:"));
+	assert(win_usable("C:\\tapes\\reel.mp4"));
+	assert(win_usable("c:/tapes/reel.mp4"));
+	assert(win_usable("\\\\nas\\share\\reel.mp4"));
+	assert(win_usable("D:\\it's 100% #1 & \xC3\xBC\xC3\xAF \xE6\x97\xA5\xE6\x9C\xAC.mp4"));
+	assert(!win_usable(NULL));
+	assert(!win_usable(""));
+	assert(!win_usable("C:"));
 	/* a drive root alone names no file */
-	assert(!tub_path_is_usable("C:\\"));
-	assert(!tub_path_is_usable("C:/"));
-	assert(!tub_path_is_usable("C:\\\\/"));
-	assert(tub_path_is_usable("C:\\a"));
-	assert(!tub_path_is_usable("reel.mp4"));
-	assert(!tub_path_is_usable("\\reel.mp4"));
-	assert(!tub_path_is_usable("/tapes/reel.mp4"));
-	assert(!tub_path_is_usable("C:reel.mp4"));
-	assert(!tub_path_is_usable("\\\\\\reel.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re*el.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re?el.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re\nel.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re\"el.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re<el.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re>el.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re|el.mp4"));
-	assert(!tub_path_is_usable("C:\\tapes\\re\x7f"
-				   "el.mp4"));
+	assert(!win_usable("C:\\"));
+	assert(!win_usable("C:/"));
+	assert(!win_usable("C:\\\\/"));
+	assert(win_usable("C:\\a"));
+	assert(!win_usable("reel.mp4"));
+	assert(!win_usable("\\reel.mp4"));
+	assert(!win_usable("/tapes/reel.mp4"));
+	assert(!win_usable("C:reel.mp4"));
+	assert(!win_usable("\\\\\\reel.mp4"));
+	assert(!win_usable("C:\\tapes\\re*el.mp4"));
+	assert(!win_usable("C:\\tapes\\re?el.mp4"));
+	assert(!win_usable("C:\\tapes\\re\nel.mp4"));
+	assert(!win_usable("C:\\tapes\\re\"el.mp4"));
+	assert(!win_usable("C:\\tapes\\re<el.mp4"));
+	assert(!win_usable("C:\\tapes\\re>el.mp4"));
+	assert(!win_usable("C:\\tapes\\re|el.mp4"));
+	assert(!win_usable("C:\\tapes\\re\x7f"
+			   "el.mp4"));
 	/* UNC needs a server, a share and a path; device forms are not shares */
-	assert(tub_path_is_usable("//nas/share/reel.mp4"));
-	assert(!tub_path_is_usable("\\\\nas"));
-	assert(!tub_path_is_usable("\\\\nas\\"));
-	assert(!tub_path_is_usable("\\\\nas\\\\reel.mp4"));
-	assert(!tub_path_is_usable("\\\\.\\C:\\reel.mp4"));
-	assert(!tub_path_is_usable("\\\\?\\C:\\reel.mp4"));
+	assert(win_usable("//nas/share/reel.mp4"));
+	assert(!win_usable("\\\\nas"));
+	assert(!win_usable("\\\\nas\\"));
+	assert(!win_usable("\\\\nas\\\\reel.mp4"));
+	assert(!win_usable("\\\\.\\C:\\reel.mp4"));
+	assert(!win_usable("\\\\?\\C:\\reel.mp4"));
 	char *too_long = malloc(TUB_PATH_MAX + 2);
 	memset(too_long, 'a', TUB_PATH_MAX + 1);
 	memcpy(too_long, "C:\\", 3);
 	too_long[TUB_PATH_MAX + 1] = '\0';
-	assert(!tub_path_is_usable(too_long));
+	assert(!win_usable(too_long));
 	too_long[TUB_PATH_MAX] = '\0';
-	assert(tub_path_is_usable(too_long));
+	assert(win_usable(too_long));
 	free(too_long);
 	printf("  test_path_usable: PASS\n");
 }
@@ -71,32 +154,32 @@ static void test_path_usable(void)
 static void test_path_to_url(void)
 {
 	char out[512];
-	assert(tub_path_to_file_url("C:\\tapes\\reel.mp4", out, sizeof(out)) == strlen("file:///C:/tapes/reel.mp4"));
+	assert(win_url("C:\\tapes\\reel.mp4", out, sizeof(out)) == strlen("file:///C:/tapes/reel.mp4"));
 	assert(strcmp(out, "file:///C:/tapes/reel.mp4") == 0);
-	assert(tub_path_to_file_url("c:/tapes/reel.mp4", out, sizeof(out)) > 0);
+	assert(win_url("c:/tapes/reel.mp4", out, sizeof(out)) > 0);
 	assert(strcmp(out, "file:///c:/tapes/reel.mp4") == 0);
 	/* the characters the probes proved: space, apostrophe, percent, hash, ampersand, umlauts, kanji */
-	assert(tub_path_to_file_url("D:\\it's 100% #1 & \xC3\xBC.mp4", out, sizeof(out)) > 0);
+	assert(win_url("D:\\it's 100% #1 & \xC3\xBC.mp4", out, sizeof(out)) > 0);
 	assert(strcmp(out, "file:///D:/it%27s%20100%25%20%231%20%26%20%C3%BC.mp4") == 0);
-	assert(tub_path_to_file_url("E:\\\xE6\x97\xA5\xE6\x9C\xAC\\a.mp4", out, sizeof(out)) > 0);
+	assert(win_url("E:\\\xE6\x97\xA5\xE6\x9C\xAC\\a.mp4", out, sizeof(out)) > 0);
 	assert(strcmp(out, "file:///E:/%E6%97%A5%E6%9C%AC/a.mp4") == 0);
 	/* a second colon is not a drive separator */
-	assert(tub_path_to_file_url("C:\\a:b.mp4", out, sizeof(out)) > 0);
+	assert(win_url("C:\\a:b.mp4", out, sizeof(out)) > 0);
 	assert(strcmp(out, "file:///C:/a%3Ab.mp4") == 0);
-	assert(tub_path_to_file_url("\\\\nas\\share\\reel.mp4", out, sizeof(out)) > 0);
+	assert(win_url("\\\\nas\\share\\reel.mp4", out, sizeof(out)) > 0);
 	assert(strcmp(out, "file://nas/share/reel.mp4") == 0);
 	/* unusable paths and small buffers give an empty string and 0 */
-	assert(tub_path_to_file_url("reel.mp4", out, sizeof(out)) == 0 && out[0] == '\0');
-	assert(tub_path_to_file_url("C:\\tapes\\reel.mp4", out, 10) == 0 && out[0] == '\0');
+	assert(win_url("reel.mp4", out, sizeof(out)) == 0 && out[0] == '\0');
+	assert(win_url("C:\\tapes\\reel.mp4", out, 10) == 0 && out[0] == '\0');
 	for (size_t size = 1; size <= 9; size++) {
 		memset(out, 'x', sizeof(out));
-		assert(tub_path_to_file_url("C:\\tapes\\reel.mp4", out, size) == 0 && out[0] == '\0');
+		assert(win_url("C:\\tapes\\reel.mp4", out, size) == 0 && out[0] == '\0');
 		memset(out, 'x', sizeof(out));
-		assert(tub_path_to_file_url("\\\\nas\\share\\reel.mp4", out, size) == 0 && out[0] == '\0');
+		assert(win_url("\\\\nas\\share\\reel.mp4", out, size) == 0 && out[0] == '\0');
 	}
-	assert(tub_path_to_file_url("C:\\tapes\\reel.mp4", out, strlen("file:///C:/tapes/reel.mp4")) == 0);
-	assert(tub_path_to_file_url("C:\\tapes\\reel.mp4", out, strlen("file:///C:/tapes/reel.mp4") + 1) > 0);
-	assert(tub_path_to_file_url("C:\\tapes\\reel.mp4", NULL, 0) == 0);
+	assert(win_url("C:\\tapes\\reel.mp4", out, strlen("file:///C:/tapes/reel.mp4")) == 0);
+	assert(win_url("C:\\tapes\\reel.mp4", out, strlen("file:///C:/tapes/reel.mp4") + 1) > 0);
+	assert(win_url("C:\\tapes\\reel.mp4", NULL, 0) == 0);
 	printf("  test_path_to_url: PASS\n");
 }
 
@@ -257,6 +340,9 @@ int main(void)
 	printf("test-tubester-core\n");
 	test_path_usable();
 	test_path_to_url();
+	test_posix_path_usable();
+	test_posix_path_to_url();
+	test_host_path_style();
 	test_speed_range();
 	test_speed_ladder();
 	test_coalesce();

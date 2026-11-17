@@ -88,7 +88,7 @@ float4 mainImage(VertData v_in) : TARGET
 	/* Audio offsets never multiply elapsed time, so a transient cannot jump the clock. */
 	float rotation = elapsed_time * clamp(tunnel_rotation_speed, -0.3, 0.3) + bass * 0.18 + kick * 0.12;
 	float angle = atan2(p.y, p.x + 1e-6) + rotation;
-	float sector = 6.28318530 / clamp((float)tunnel_sides, 3.0, 8.0);
+	float sector = 6.28318530 / clamp(float(tunnel_sides), 3.0, 8.0);
 	float folded = angle - sector * floor(angle / sector + 0.5);
 	float radius = max(length(p) * cos(folded), 0.0001);
 	float phase = log2(radius) * clamp(tunnel_depth, 2.0, 8.0) -

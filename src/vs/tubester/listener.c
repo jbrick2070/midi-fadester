@@ -13,11 +13,7 @@
 #include "tubester/deck-link.h"
 #include "tubester/http-parse.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+#include "tubester/socket-compat.h"
 
 #include <util/bmem.h>
 #include <util/platform.h>
@@ -50,25 +46,25 @@ struct deck_entry {
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static struct {
-	bool wsa_ready;
+	bool wsa_ready; /* Windows only: WSAStartup has run */
 	bool running;
 	bool stopping; /* between tub_listener_stop's first and last lock: no new start */
 	bool start_failure_logged;
 	volatile bool stop;
 	pthread_t thread;
-	SOCKET sock;
+	tub_socket_t sock;
 	int port;
 	struct deck_entry decks[TUB_DECKS_MAX];
 	size_t deck_count;
-} g = {.sock = INVALID_SOCKET};
+} g = {.sock = TUB_INVALID_SOCKET};
 
-static void respond(SOCKET client, const char *status_line)
+static void respond(tub_socket_t client, const char *status_line)
 {
 	char reply[160];
 	int n = snprintf(reply, sizeof(reply), "%s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", status_line);
 	if (n > 0)
-		send(client, reply, n, 0);
-	shutdown(client, SD_SEND);
+		tub_send(client, reply, (size_t)n);
+	shutdown(client, TUB_SHUT_WR);
 }
 
 static void dispatch(const char *body, size_t len)
@@ -92,7 +88,7 @@ static void dispatch(const char *body, size_t len)
 /* Reads up to want bytes into dst. Returns the count, 0 when the peer closed, or -1 on an error, at the deadline, or
  * when the listener is stopping. No single wait is longer than TUB_POLL_US, so neither a slow client nor a stop can
  * hold the thread past the deadline. */
-static int recv_by(SOCKET client, char *dst, size_t want, uint64_t deadline_ns)
+static int recv_by(tub_socket_t client, char *dst, size_t want, uint64_t deadline_ns)
 {
 	for (;;) {
 		if (os_atomic_load_bool(&g.stop))
@@ -103,25 +99,20 @@ static int recv_by(SOCKET client, char *dst, size_t want, uint64_t deadline_ns)
 		uint64_t wait_us = (deadline_ns - now) / 1000;
 		if (wait_us > TUB_POLL_US)
 			wait_us = TUB_POLL_US;
-		fd_set set;
-		FD_ZERO(&set);
-		FD_SET(client, &set);
-		struct timeval wait = {.tv_sec = 0, .tv_usec = (long)wait_us};
-		int ready = select(0, &set, NULL, NULL, &wait);
+		int ready = tub_socket_wait_readable(client, wait_us);
 		if (ready < 0)
 			return -1;
 		if (ready == 0)
 			continue;
-		int n = recv(client, dst, (int)want, 0);
+		int n = tub_recv(client, dst, want);
 		return n < 0 ? -1 : n;
 	}
 }
 
 /* One request per connection: read the headers, then exactly Content-Length bytes, answer, close. */
-static void handle_connection(SOCKET client)
+static void handle_connection(tub_socket_t client)
 {
-	DWORD send_timeout = 1000;
-	setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&send_timeout, sizeof(send_timeout));
+	tub_socket_set_timeout(client, SO_SNDTIMEO, 1000);
 	uint64_t deadline = os_gettime_ns() + TUB_CONNECTION_DEADLINE_NS;
 
 	size_t cap = TUB_HEADERS_MAX + TUB_HTTP_BODY_MAX;
@@ -177,23 +168,19 @@ static void *listener_thread(void *param)
 	UNUSED_PARAMETER(param);
 	os_set_thread_name("tubester-listener");
 	while (!os_atomic_load_bool(&g.stop)) {
-		fd_set set;
-		FD_ZERO(&set);
-		FD_SET(g.sock, &set);
-		struct timeval wait = {.tv_sec = 0, .tv_usec = TUB_POLL_US};
-		int ready = select(0, &set, NULL, NULL, &wait);
+		int ready = tub_socket_wait_readable(g.sock, TUB_POLL_US);
 		if (ready <= 0)
 			continue;
 		struct sockaddr_in from;
-		int from_len = sizeof(from);
-		SOCKET client = accept(g.sock, (struct sockaddr *)&from, &from_len);
-		if (client == INVALID_SOCKET)
+		tub_socklen_t from_len = sizeof(from);
+		tub_socket_t client = accept(g.sock, (struct sockaddr *)&from, &from_len);
+		if (client == TUB_INVALID_SOCKET)
 			continue;
-		SetHandleInformation((HANDLE)client, HANDLE_FLAG_INHERIT, 0);
+		tub_socket_no_inherit(client);
 		/* Bound to 127.0.0.1, so every peer is local; the check costs nothing and documents the intent. */
 		if (from.sin_addr.s_addr == htonl(INADDR_LOOPBACK))
 			handle_connection(client);
-		closesocket(client);
+		tub_socket_close(client);
 	}
 	return NULL;
 }
@@ -213,6 +200,7 @@ static bool start_locked(void)
 		return true;
 	if (g.stopping)
 		return false;
+#ifdef _WIN32
 	if (!g.wsa_ready) {
 		WSADATA wsa;
 		int err = WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -224,31 +212,42 @@ static bool start_locked(void)
 	}
 	/* Not inheritable, so no process OBS starts holds a copy of the port; overlapped like socket(), so the send
 	 * timeout still applies */
-	SOCKET s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
-			      WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
-	if (s == INVALID_SOCKET) {
-		log_start_failure("socket", WSAGetLastError());
+	tub_socket_t s = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+				    WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+	if (s == TUB_INVALID_SOCKET) {
+		log_start_failure("socket", tub_socket_error());
 		return false;
 	}
 	/* No other socket, even one of the same user with SO_REUSEADDR, may bind this port while it is ours */
 	BOOL exclusive = TRUE;
 	if (setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&exclusive, sizeof(exclusive)) != 0) {
-		log_start_failure("SO_EXCLUSIVEADDRUSE", WSAGetLastError());
-		closesocket(s);
+		log_start_failure("SO_EXCLUSIVEADDRUSE", tub_socket_error());
+		tub_socket_close(s);
 		return false;
 	}
+#else
+	tub_socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (s == TUB_INVALID_SOCKET) {
+		log_start_failure("socket", tub_socket_error());
+		return false;
+	}
+	/* Close-on-exec, so no process OBS starts holds a copy of the port. Neither SO_REUSEADDR nor SO_REUSEPORT is set:
+	 * on POSIX that alone keeps every other socket, even one of the same user with SO_REUSEADDR, from binding this
+	 * address and port while it is ours (the hold Windows gets from SO_EXCLUSIVEADDRUSE). */
+	tub_socket_no_inherit(s);
+#endif
 	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = 0};
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(s, 16) != 0) {
-		log_start_failure("bind or listen", WSAGetLastError());
-		closesocket(s);
+		log_start_failure("bind or listen", tub_socket_error());
+		tub_socket_close(s);
 		return false;
 	}
 	struct sockaddr_in bound;
-	int bound_len = sizeof(bound);
+	tub_socklen_t bound_len = sizeof(bound);
 	if (getsockname(s, (struct sockaddr *)&bound, &bound_len) != 0) {
-		log_start_failure("getsockname", WSAGetLastError());
-		closesocket(s);
+		log_start_failure("getsockname", tub_socket_error());
+		tub_socket_close(s);
 		return false;
 	}
 	g.sock = s;
@@ -256,8 +255,8 @@ static bool start_locked(void)
 	os_atomic_set_bool(&g.stop, false);
 	if (pthread_create(&g.thread, NULL, listener_thread, NULL) != 0) {
 		log_start_failure("thread start", 0);
-		closesocket(s);
-		g.sock = INVALID_SOCKET;
+		tub_socket_close(s);
+		g.sock = TUB_INVALID_SOCKET;
 		g.port = 0;
 		return false;
 	}
@@ -335,15 +334,17 @@ void tub_listener_stop(void)
 	pthread_mutex_unlock(&g_mutex);
 	if (was_running) {
 		pthread_join(g.thread, NULL);
-		closesocket(g.sock);
+		tub_socket_close(g.sock);
 	}
 	pthread_mutex_lock(&g_mutex);
-	g.sock = INVALID_SOCKET;
+	g.sock = TUB_INVALID_SOCKET;
 	g.port = 0;
+#ifdef _WIN32
 	if (g.wsa_ready) {
 		WSACleanup();
 		g.wsa_ready = false;
 	}
+#endif
 	g.stopping = false;
 	pthread_mutex_unlock(&g_mutex);
 }

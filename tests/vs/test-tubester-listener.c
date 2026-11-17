@@ -15,11 +15,11 @@
 
 #include "tubester/listener.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+#include "tubester/socket-compat.h"
+
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 #include <util/platform.h>
 #include <assert.h>
@@ -44,31 +44,30 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 /* Sends raw bytes to the listener and returns the status code of the reply, or 0 */
 static int send_raw(int port, const char *request, size_t len)
 {
-	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	assert(s != INVALID_SOCKET);
+	tub_socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	assert(s != TUB_INVALID_SOCKET);
 	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	assert(connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0);
-	DWORD timeout = 3000;
-	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+	tub_socket_set_timeout(s, SO_RCVTIMEO, 3000);
 	size_t sent = 0;
 	while (sent < len) {
-		int n = send(s, request + sent, (int)(len - sent), 0);
+		int n = tub_send(s, request + sent, len - sent);
 		assert(n > 0);
 		sent += (size_t)n;
 	}
-	shutdown(s, SD_SEND);
+	shutdown(s, TUB_SHUT_WR);
 	char reply[512] = {0};
 	size_t have = 0;
 	for (;;) {
-		int n = recv(s, reply + have, (int)(sizeof(reply) - 1 - have), 0);
+		int n = tub_recv(s, reply + have, sizeof(reply) - 1 - have);
 		if (n <= 0)
 			break;
 		have += (size_t)n;
 		if (have >= sizeof(reply) - 1)
 			break;
 	}
-	closesocket(s);
+	tub_socket_close(s);
 	int code = 0;
 	if (sscanf(reply, "HTTP/1.1 %d", &code) != 1)
 		return 0;
@@ -80,10 +79,10 @@ static int send_raw(int port, const char *request, size_t len)
 
 #define SEC 1000000000ULL
 
-static SOCKET connect_to(int port)
+static tub_socket_t connect_to(int port)
 {
-	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	assert(s != INVALID_SOCKET);
+	tub_socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	assert(s != TUB_INVALID_SOCKET);
 	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	assert(connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0);
@@ -91,13 +90,9 @@ static SOCKET connect_to(int port)
 }
 
 /* True once the server has answered or closed: the socket is readable */
-static bool answered(SOCKET s)
+static bool answered(tub_socket_t s)
 {
-	fd_set set;
-	FD_ZERO(&set);
-	FD_SET(s, &set);
-	struct timeval zero = {0, 0};
-	return select(0, &set, NULL, NULL, &zero) > 0;
+	return tub_socket_wait_readable(s, 0) > 0;
 }
 
 static int post(int port, const char *body)
@@ -114,8 +109,13 @@ static int post(int port, const char *body)
 int main(void)
 {
 	printf("test-tubester-listener\n");
+#ifdef _WIN32
 	WSADATA wsa;
 	assert(WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
+#else
+	/* the trickling client below keeps sending after the server has closed; that must fail, not end the test */
+	signal(SIGPIPE, SIG_IGN);
+#endif
 
 	assert(tub_listener_port() == 0);
 	struct deck_spy a = {0}, b = {0};
@@ -161,13 +161,13 @@ int main(void)
 
 	/* the port is held exclusively: not even a socket with SO_REUSEADDR can bind it */
 	{
-		SOCKET thief = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-		BOOL on = TRUE;
+		tub_socket_t thief = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		int on = 1;
 		assert(setsockopt(thief, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof(on)) == 0);
 		struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
 		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 		assert(bind(thief, (struct sockaddr *)&addr, sizeof(addr)) != 0);
-		closesocket(thief);
+		tub_socket_close(thief);
 	}
 
 	/* a client that trickles bytes and never finishes its headers is cut off at the deadline, and the next report
@@ -176,17 +176,17 @@ int main(void)
 		/* timed from before the connect, so the server's whole 1.5 s window is inside the measurement; a busy runner
 		 * can only make it longer, which the upper bound allows for */
 		uint64_t t0 = os_gettime_ns();
-		SOCKET slow = connect_to(port);
+		tub_socket_t slow = connect_to(port);
 		const char *head = "POST /report HTTP/1.1\r\n";
-		assert(send(slow, head, (int)strlen(head), 0) == (int)strlen(head));
+		assert(tub_send(slow, head, strlen(head)) == (int)strlen(head));
 		bool done = false;
 		while (!done && os_gettime_ns() - t0 < 8 * SEC) {
 			os_sleep_ms(250);
-			send(slow, "X", 1, 0); /* fails once the server has closed; that is fine */
+			tub_send(slow, "X", 1); /* fails once the server has closed; that is fine */
 			done = answered(slow);
 		}
 		double secs = (double)(os_gettime_ns() - t0) / (double)SEC;
-		closesocket(slow);
+		tub_socket_close(slow);
 		printf("  a trickling client was cut off after %.2f s\n", secs);
 		assert(done && secs >= 1.4 && secs < 4.0);
 		uint64_t t1 = os_gettime_ns();
@@ -198,15 +198,15 @@ int main(void)
 	/* a body that never completes is refused at the deadline and reaches no deck */
 	{
 		uint64_t t0 = os_gettime_ns();
-		SOCKET slow = connect_to(port);
+		tub_socket_t slow = connect_to(port);
 		const char *partial = "POST /report HTTP/1.1\r\nContent-Length: 49\r\n\r\n{\"deck\":\"deck-a\"";
-		assert(send(slow, partial, (int)strlen(partial), 0) == (int)strlen(partial));
+		assert(tub_send(slow, partial, strlen(partial)) == (int)strlen(partial));
 		while (!answered(slow) && os_gettime_ns() - t0 < 8 * SEC)
 			os_sleep_ms(50);
 		double secs = (double)(os_gettime_ns() - t0) / (double)SEC;
 		char reply[64] = {0};
-		recv(slow, reply, sizeof(reply) - 1, 0);
-		closesocket(slow);
+		tub_recv(slow, reply, sizeof(reply) - 1);
+		tub_socket_close(slow);
 		assert(secs >= 1.4 && secs < 4.0);
 		assert(strncmp(reply, "HTTP/1.1 400", 12) == 0);
 		assert(a.calls == 1);
@@ -218,17 +218,17 @@ int main(void)
 		char head[256];
 		int n = snprintf(head, sizeof(head), "POST /report HTTP/1.1\r\nContent-Length: %zu\r\n\r\n",
 				 strlen(body));
-		SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		tub_socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
 		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 		assert(connect(s, (struct sockaddr *)&addr, sizeof(addr)) == 0);
-		assert(send(s, head, n, 0) == n);
-		assert(send(s, body, 10, 0) == 10);
+		assert(tub_send(s, head, n) == n);
+		assert(tub_send(s, body, 10) == 10);
 		os_sleep_ms(50);
-		assert(send(s, body + 10, (int)strlen(body) - 10, 0) == (int)strlen(body) - 10);
+		assert(tub_send(s, body + 10, strlen(body) - 10) == (int)strlen(body) - 10);
 		char reply[64] = {0};
-		recv(s, reply, sizeof(reply) - 1, 0);
-		closesocket(s);
+		tub_recv(s, reply, sizeof(reply) - 1);
+		tub_socket_close(s);
 		assert(strncmp(reply, "HTTP/1.1 204", 12) == 0);
 		assert(a.calls == 2 && strcmp(a.last_event, "playing") == 0 && a.last_seq == 2);
 	}
@@ -253,11 +253,11 @@ int main(void)
 	assert(tub_listener_port() == 0);
 	tub_listener_stop();
 	{
-		SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		tub_socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
 		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 		assert(connect(s, (struct sockaddr *)&addr, sizeof(addr)) != 0);
-		closesocket(s);
+		tub_socket_close(s);
 	}
 	struct deck_spy c = {0};
 	assert(tub_listener_register("deck-c", on_report, &c));
@@ -268,14 +268,14 @@ int main(void)
 
 	/* a stop in the middle of a slow request returns at once instead of waiting for the client */
 	{
-		SOCKET slow = connect_to(port2);
+		tub_socket_t slow = connect_to(port2);
 		const char *head = "POST /report HTTP/1.1\r\n";
-		assert(send(slow, head, (int)strlen(head), 0) == (int)strlen(head));
+		assert(tub_send(slow, head, strlen(head)) == (int)strlen(head));
 		os_sleep_ms(150); /* the listener is now inside that request */
 		uint64_t t0 = os_gettime_ns();
 		tub_listener_stop();
 		double secs = (double)(os_gettime_ns() - t0) / (double)SEC;
-		closesocket(slow);
+		tub_socket_close(slow);
 		printf("  stop with a slow client connected took %.3f s\n", secs);
 		assert(secs < 1.0);
 		assert(tub_listener_port() == 0);
@@ -283,7 +283,9 @@ int main(void)
 	/* unregistering after stop is harmless (a deck destroyed after module unload does this) */
 	tub_listener_unregister(&c);
 
+#ifdef _WIN32
 	WSACleanup();
+#endif
 	printf("test-tubester-listener: ALL PASS\n");
 	return 0;
 }

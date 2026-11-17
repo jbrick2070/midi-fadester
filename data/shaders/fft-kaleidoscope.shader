@@ -50,7 +50,7 @@ float4 mainImage(VertData v_in) : TARGET
 	float r = length(p);
 	float a = atan2(p.y, p.x + 1e-6);
 
-	float folds = max((float)symmetry_folds, 2.0);
+	float folds = max(float(symmetry_folds), 2.0);
 	float sector = 6.28318530 / folds;
 
 	a += elapsed_time * rotation_speed + audio_beat * 0.65 + audio_kick * 0.25;
