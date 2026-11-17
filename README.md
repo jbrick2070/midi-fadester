@@ -48,7 +48,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.1 release has Windows x64 files and an experimental macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.2 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -57,7 +57,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.7.1, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 0.7.2, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -66,12 +66,12 @@ Download one file from the [latest release](https://github.com/jbrick2070/midi-f
 | `midi-fadester-<version>-windows-x64-Installer.exe` | OBS is installed the normal way | Installs into `C:\ProgramData\obs-studio\plugins\midi-fadester\` |
 | `midi-fadester-<version>-windows-x64.zip` | Same, but you prefer to unpack it yourself | Extract into `C:\ProgramData\obs-studio\plugins\` |
 | `midi-fadester-<version>-windows-x64-Portable.zip` | You run a portable OBS | Extract into the portable OBS folder, the one that holds `bin`, `core` and `data`; the zip adds a `plugins` folder there |
-| `midi-fadester-<version>-macos-universal.pkg` | Mac (experimental) | Installs the plugin into OBS's plugins folder under `Library/Application Support/obs-studio/plugins` |
-| `midi-fadester-<version>-macos-universal.tar.xz` | Mac, unpack it yourself (experimental) | The same `midi-fadester.plugin` bundle as the `.pkg` |
+| `midi-fadester-<version>-macos-universal.pkg` | Mac | Installs the plugin into OBS's plugins folder under `Library/Application Support/obs-studio/plugins` |
+| `midi-fadester-<version>-macos-universal.tar.xz` | Mac, unpack it yourself | The same `midi-fadester.plugin` bundle as the `.pkg` |
 
 On Windows you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugins\midi-fadester\data\`. Then start OBS.
 
-> **Mac users, please read.** The macOS build is new and experimental: it is built automatically but has not yet been run on a real Mac, so expect rough edges and please report what you find. The `.pkg` is not signed or notarized by Apple, so macOS will refuse to open it the first time. To allow it, right-click (or Control-click) the `.pkg` and choose **Open**, then **Open** again; or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+> **Mac users, please read.** The macOS build is new. On 2026-11-17 it was installed in OBS 33.0.1 on an Apple Silicon Mac (M6, macOS 27.3) and checked: it loads, its vendor requests answer, and OBS quits with 0 memory leaks. The full hands-on test with a controller is still to come, so please report what you find. The `.pkg` is not signed or notarized by Apple, so macOS will refuse to open it the first time. To allow it, right-click (or Control-click) the `.pkg` and choose **Open**, then **Open** again; or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
 - The builds are not code-signed, so Windows SmartScreen may warn before the installer runs. Choose **More info**, then **Run anyway**. Every release page lists the SHA-256 checksum of each file.
 - To check that it loaded: the **Tools** menu has a **Midi Fadester** entry, and **Tools → Plugin Manager** lists it without a *Legacy* badge (that badge marks plugins installed in the old folder layout). The dialog's title bar shows the version and the commit it was built from.
@@ -275,7 +275,7 @@ language.
 ## Not yet
 
 - No Linux build yet (Windows uses WinMM; macOS uses CoreMIDI in `src/midi/coremidi-device.c`).
-- The macOS build is experimental: it is built and packaged in CI but has not yet been run on a real Mac.
+- The macOS build has had a first check in OBS 33.0.1 on an Apple Silicon Mac (it loads, its vendor requests answer, OBS quits with 0 memory leaks), but not yet the full hands-on test with a controller. It is not signed or notarized.
 - OBS 33.0.0 or newer only.
 - No lights: the desk's LEDs and knob rings are not driven yet.
 - Faders and knobs only: pads, buttons and hotkeys are not mapped yet.
@@ -288,7 +288,7 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.7.1** (November 2026) is the current release. It has the same features as 0.7.0, which was never published; the number moved so Midi Fadester and Visual Sidechain keep sharing one version (Visual Sidechain 0.7.1 fixes its hotkeys). Since 0.6.0: macOS CoreMIDI backend and universal CI build; removed dead `visual_sidechain_set_fader_slot` proc call; clarified macOS support and how Clean / All FX Off differs from Visual Sidechain's Panic / Restore visuals; Whole mix (`mix_master`) slots pin the first whole-mix `provider.id` heard for the session and show *Two mix providers are answering* instead of sending commands if another provider replies; aborts an open T-bar throw back to Program once per unexpected MIDI controller disconnect without automatic resume on reconnect (`DEC-4`); added the shared suite T-bar safety test vectors (`tests/vectors/tbar-safety.json`) exercised in `test-tbar-logic` and `test-vendor-api`; `get_catalog` overview layer entries now include additive `has_internal_opacity` and `opacity_slot` fields (`P1-8`); suite naming pass unifying *Fadester for OBS*, *Fadester Companion*, and *Whole mix* across English UI strings (`P1-7`).
+**0.7.2** (November 2026) is the current release. It has the same features as 0.7.1, which was never published (nor was 0.7.0); the number moved so Midi Fadester and Visual Sidechain keep sharing one version (Visual Sidechain 0.7.2 adds its macOS build; 0.7.1 fixed its hotkeys). Since 0.6.0: macOS CoreMIDI backend and universal CI build; removed dead `visual_sidechain_set_fader_slot` proc call; clarified macOS support and how Clean / All FX Off differs from Visual Sidechain's Panic / Restore visuals; Whole mix (`mix_master`) slots pin the first whole-mix `provider.id` heard for the session and show *Two mix providers are answering* instead of sending commands if another provider replies; aborts an open T-bar throw back to Program once per unexpected MIDI controller disconnect without automatic resume on reconnect (`DEC-4`); added the shared suite T-bar safety test vectors (`tests/vectors/tbar-safety.json`) exercised in `test-tbar-logic` and `test-vendor-api`; `get_catalog` overview layer entries now include additive `has_internal_opacity` and `opacity_slot` fields (`P1-8`); suite naming pass unifying *Fadester for OBS*, *Fadester Companion*, and *Whole mix* across English UI strings (`P1-7`).
 
 **0.6.0** (November 2026). Compared with 0.1.0 it adds the Strips screen and the three-step Set up sheet, the first-run offer, the live controller picture, the FX & Knobs bank with Clean / All FX Off, the filter-setting job, the four Beta desk layouts, `get_catalog` and `reset_fx`, the Stream Deck companion and translations. Visual Sidechain uses the same number; Fadester for OBS is versioned separately.
 
