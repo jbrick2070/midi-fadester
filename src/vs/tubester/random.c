@@ -11,12 +11,39 @@
 
 #include "tubester/random.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
+#elif defined(__APPLE__)
+#include <stdlib.h> /* arc4random_buf: the kernel's CSPRNG, never fails */
+#else
+#include <unistd.h> /* getentropy */
+#endif
 
 #include <util/bmem.h>
+
+/* Fills raw with bytes from the operating system's cryptographic generator. False when the system refuses. */
+static bool system_random(unsigned char *raw, size_t bytes)
+{
+#if defined(_WIN32)
+	NTSTATUS status = BCryptGenRandom(NULL, raw, (ULONG)bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+	return BCRYPT_SUCCESS(status);
+#elif defined(__APPLE__)
+	arc4random_buf(raw, bytes);
+	return true;
+#else
+	/* getentropy gives at most 256 bytes a call */
+	for (size_t done = 0; done < bytes;) {
+		size_t n = bytes - done > 256 ? 256 : bytes - done;
+		if (getentropy(raw + done, n) != 0)
+			return false;
+		done += n;
+	}
+	return true;
+#endif
+}
 
 bool tub_random_hex(char *out, size_t chars)
 {
@@ -27,8 +54,7 @@ bool tub_random_hex(char *out, size_t chars)
 		return true;
 	size_t bytes = (chars + 1) / 2;
 	unsigned char *raw = bmalloc(bytes);
-	NTSTATUS status = BCryptGenRandom(NULL, raw, (ULONG)bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-	if (!BCRYPT_SUCCESS(status)) {
+	if (!system_random(raw, bytes)) {
 		bfree(raw);
 		return false;
 	}

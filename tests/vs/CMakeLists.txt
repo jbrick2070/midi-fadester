@@ -2,6 +2,16 @@
 # Copyright (C) 2026 Jeffrey A. Brick
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+if(OS_MACOS)
+  # Test executables live outside OBS.app and find libobs.framework and the obs-deps dylibs in .deps at run time.
+  set(CMAKE_SKIP_RPATH FALSE)
+  set(CMAKE_XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "")
+  set(CMAKE_BUILD_RPATH "${CMAKE_SOURCE_DIR}/.deps/Frameworks;${CMAKE_SOURCE_DIR}/.deps/lib")
+  foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
+    list(APPEND CMAKE_BUILD_RPATH "${_prefix}/lib")
+  endforeach()
+endif()
+
 # Directories holding libobs and its dependency DLLs, put on the test PATH so nothing is copied and nothing is taken
 # from an installed OBS or a developer PATH (REQUIREMENTS R-TST-1).
 set(_test_dll_dirs "")
@@ -108,9 +118,11 @@ visual_sidechain_add_test(
   "${_tubester}/speed.c"
 )
 # The report listener (R-LNK-2): request parsing and the token source alone, then the listener over a real loopback
-# socket. Both are Windows-only, like the plugin (R-PLAT-9).
+# socket. Winsock and BCrypt on Windows, POSIX sockets and arc4random_buf on macOS (R-PLAT-9).
 visual_sidechain_add_test(test-tubester-http test-tubester-http.c "${_tubester}/http-parse.c" "${_tubester}/random.c")
-target_link_libraries(test-tubester-http PRIVATE bcrypt)
+if(OS_WINDOWS)
+  target_link_libraries(test-tubester-http PRIVATE bcrypt)
+endif()
 visual_sidechain_add_test(
   test-tubester-listener
   test-tubester-listener.c
@@ -118,7 +130,41 @@ visual_sidechain_add_test(
   "${_tubester}/http-parse.c"
   "${_tubester}/deck-link.c"
 )
-target_link_libraries(test-tubester-listener PRIVATE ws2_32)
+if(OS_WINDOWS)
+  target_link_libraries(test-tubester-listener PRIVATE ws2_32)
+endif()
+
+# Every built-in shader built by OBS's own renderers (R-PLAT-9): on macOS, libobs-opengl (HLSL to GLSL) and
+# libobs-metal (HLSL to Metal), built from the same OBS sources by cmake/common/buildspec_common.cmake. The test exits
+# 77 (reported as skipped) when no renderer can create a device on the machine.
+if(OS_MACOS)
+  file(GLOB _obs_build_dirs LIST_DIRECTORIES true "${CMAKE_SOURCE_DIR}/.deps/obs-studio-*/build_universal")
+  set(_gpu_modules "")
+  foreach(_module IN ITEMS libobs-opengl libobs-metal)
+    set(_found "")
+    foreach(_dir IN LISTS _obs_build_dirs)
+      file(GLOB_RECURSE _candidates LIST_DIRECTORIES false "${_dir}/${_module}/*${_module}.dylib")
+      list(FILTER _candidates EXCLUDE REGEX "[.]dSYM/")
+      list(FILTER _candidates INCLUDE REGEX "/Release/")
+      if(_candidates)
+        list(GET _candidates 0 _found)
+        break()
+      endif()
+    endforeach()
+    if(_found)
+      list(APPEND _gpu_modules "${_found}")
+    else()
+      message(WARNING "visual-sidechain tests: ${_module}.dylib not found; test-shader-gpu will not use it")
+    endif()
+  endforeach()
+  message(STATUS "visual-sidechain tests: renderer modules: ${_gpu_modules}")
+  if(_gpu_modules)
+    list(JOIN _gpu_modules "|" _gpu_modules_define)
+    visual_sidechain_add_test(test-shader-gpu test-shader-gpu.c "${_core}/shader-parse.c")
+    target_compile_definitions(test-shader-gpu PRIVATE "VS_GPU_MODULES=\"${_gpu_modules_define}\"")
+    set_tests_properties(test-shader-gpu PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
+endif()
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
