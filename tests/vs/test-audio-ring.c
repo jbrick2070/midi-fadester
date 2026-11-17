@@ -11,6 +11,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "core/audio-ring.h"
 
@@ -166,9 +169,11 @@ static void test_ring_underrun_zero_pad(void)
 
 int main(void)
 {
+#ifdef _WIN32
 	_set_error_mode(_OUT_TO_STDERR);
 	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#endif
 
 	test_ring_wrap_around();
 	test_ring_sync_offset_delay();
