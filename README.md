@@ -48,7 +48,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.3 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.4 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -57,7 +57,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.7.3, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 0.7.4, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -286,9 +286,21 @@ on *Show or hide a layer* strips. They work whether or not the pads light up.
 | Row 3 | **Fade** the layer out over the pad fade time; press again to fade it back to where it was. |
 | Stop All Clips | **Clean:** every effect off (Clean / All FX Off) and every blend back to Normal. |
 | Shift + Stop All Clips | **Fade every layer out.** |
+| Tempo knob | **Video speed** 0.05x faster or slower per click; with Shift held, 0.25x. |
+| Nudge − / Nudge + | **Video speed** 0.25x slower / faster. |
+| Tap Tempo | **Video speed back to 1x.** |
+| Play | **Play or pause the video.** |
 
-Only the clip pads, Shift and Stop All Clips are used: in the desk's default mode they are momentary, while Solo latches
-and Track Select moves the Device knobs onto other MIDI channels. Darken is not a punch mode, because fading a Darken
+The video speed controls drive VJster (the Chrome extension or the OBS video page) through
+[Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester) 0.1.15 or later with its controls and VJster on:
+an OBS media source restarts its clip when its speed changes, so live speed is VJster's. Midi Fadester adds the clicks up
+and sends them at most 20 times a second as the obs-websocket vendor event `vjster_action`
+(`{"action": "vjster.speed.step", "steps": n}`, n × 0.05x, or `{"action": "vjster.speed.reset"}` /
+`{"action": "vjster.playPause"}`); without the Companion nothing happens. The speed stays between 0.25x and 4x.
+
+Only the clip pads, Shift, Stop All Clips and the transport controls are used: in the desk's default mode they are
+momentary, while Solo latches and Track Select moves the Device knobs onto other MIDI channels. MIDI Learn skips the
+endless Tempo and Cue Level knobs, which send clicks rather than a position. Darken is not a punch mode, because fading a Darken
 layer down turns its rectangle black. A strip learned onto a pad keeps that pad. The bottom row shows each strip's blend
 by colour, row 2 lights while flashing and row 3 turns red while faded out; the lights need the desk's MIDI Out, and the
 pads work without them. The Advanced tab turns the pads off and sets the fade time; the obs-websocket `get_state` reply
@@ -310,7 +322,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.7.3** (November 2026) is the current release. It fixes a T-bar hazard on the APC40 mkII: Cue Level (CC 47) and the track knobs (CC 48..55) sit on the 14-bit partner numbers of the crossfader and the Device knobs, so turning one within 3 ms of the other could merge them and let Cue Level drive the T-bar; with an APC40 mkII open, CCs are never paired. It adds the APC40 mkII pads: blend punch and punch modes, flash, fades and Clean on the clip pads, lit through the desk's MIDI Out (Windows and macOS), with an Advanced tab switch and fade time, and an additive `vj_pads` block in `get_state`. Visual Sidechain moves to 0.7.3 with it so the two keep sharing one version.
+**0.7.4** (November 2026) is the current release. It adds video speed on the APC40 mkII's transport controls (Tempo knob, Nudge − / +, Tap Tempo, Play) through Fadester Companion 0.1.15 and VJster, as the vendor event `vjster_action`, and MIDI Learn now skips the APC40's endless Tempo and Cue Level knobs. Visual Sidechain moves to 0.7.4 with it.
+
+**0.7.3** (November 2026). It fixes a T-bar hazard on the APC40 mkII: Cue Level (CC 47) and the track knobs (CC 48..55) sit on the 14-bit partner numbers of the crossfader and the Device knobs, so turning one within 3 ms of the other could merge them and let Cue Level drive the T-bar; with an APC40 mkII open, CCs are never paired. It adds the APC40 mkII pads: blend punch and punch modes, flash, fades and Clean on the clip pads, lit through the desk's MIDI Out (Windows and macOS), with an Advanced tab switch and fade time, and an additive `vj_pads` block in `get_state`. Visual Sidechain moves to 0.7.3 with it so the two keep sharing one version.
 
 **0.7.2** (November 2026). It has the same features as 0.7.1, which was never published (nor was 0.7.0); the number moved so Midi Fadester and Visual Sidechain keep sharing one version (Visual Sidechain 0.7.2 adds its macOS build; 0.7.1 fixed its hotkeys). Since 0.6.0: macOS CoreMIDI backend and universal CI build; removed dead `visual_sidechain_set_fader_slot` proc call; clarified macOS support and how Clean / All FX Off differs from Visual Sidechain's Panic / Restore visuals; Whole mix (`mix_master`) slots pin the first whole-mix `provider.id` heard for the session and show *Two mix providers are answering* instead of sending commands if another provider replies; aborts an open T-bar throw back to Program once per unexpected MIDI controller disconnect without automatic resume on reconnect (`DEC-4`); added the shared suite T-bar safety test vectors (`tests/vectors/tbar-safety.json`) exercised in `test-tbar-logic` and `test-vendor-api`; `get_catalog` overview layer entries now include additive `has_internal_opacity` and `opacity_slot` fields (`P1-8`); suite naming pass unifying *Fadester for OBS*, *Fadester Companion*, and *Whole mix* across English UI strings (`P1-7`).
 

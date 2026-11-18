@@ -19,6 +19,14 @@
  *   Stop All Clips (note 81)                Clean / All FX Off, and every strip's blend back to Normal
  *   Shift (note 98) + Stop All Clips        fade every layer strip out
  *
+ * The transport section sets the video speed through Fadester Companion and VJster (an OBS media source restarts when
+ * its speed changes, so live video speed is VJster's): the engine adds the steps up and sends them as one vendor event.
+ *
+ *   Tempo knob (CC 13, relative)            each detent 0.05x faster or slower; with Shift held 0.25x
+ *   Nudge - / Nudge + (notes 100 / 101)     0.25x slower / faster
+ *   Tap Tempo (note 99)                     back to 1x
+ *   Play (note 91)                          play or pause the video
+ *
  * Darken is left out of the punch modes: fading a Darken layer down turns its rectangle black.
  * It also says which colour each pad should show.
  */
@@ -41,6 +49,12 @@ extern "C" {
 #define MFD_VJ_NOTE_ROW_FADE 16U /* third row: notes 16..23 */
 #define MFD_VJ_NOTE_STOP_ALL 81U
 #define MFD_VJ_NOTE_SHIFT 98U
+#define MFD_VJ_NOTE_PLAY 91U
+#define MFD_VJ_NOTE_TAP_TEMPO 99U
+#define MFD_VJ_NOTE_NUDGE_DOWN 100U
+#define MFD_VJ_NOTE_NUDGE_UP 101U
+#define MFD_VJ_CC_TEMPO 13U   /* endless knob, relative: 1..63 is +n detents, 64..127 is n - 128 */
+#define MFD_VJ_COARSE_STEPS 5 /* Shift + Tempo and Nudge: 5 steps of 0.05x = 0.25x */
 
 enum mfd_vj_blend {
 	MFD_VJ_BLEND_NORMAL = 0,
@@ -61,12 +75,16 @@ enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_FADE_TOGGLE,  /* strip: out when it shows, back in when a pad faded it out */
 	MFD_VJ_ACTION_CLEAN,        /* Clean / All FX Off and every strip's blend back to Normal */
 	MFD_VJ_ACTION_FADE_ALL_OUT, /* every layer strip out */
+	MFD_VJ_ACTION_SPEED_STEPS,  /* steps: video speed by steps x 0.05x (through Fadester Companion) */
+	MFD_VJ_ACTION_SPEED_RESET,  /* video back to 1x */
+	MFD_VJ_ACTION_PLAY_PAUSE,   /* play or pause the video */
 };
 
 struct mfd_vj_action {
 	enum mfd_vj_action_kind kind;
 	int strip; /* 0..7, -1 when the action is not about one strip */
 	enum mfd_vj_blend blend;
+	int steps; /* SPEED_STEPS only, signed */
 };
 
 /* One LED: the note and channel the desk lights it by, and the velocity (an RGB pad's colour). */
@@ -98,6 +116,16 @@ bool mfd_vj_pads_is_button(uint8_t channel, uint8_t note);
  */
 bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint8_t note, struct mfd_vj_action *out,
 		      size_t max, size_t *out_count);
+
+/*
+ * Feeds one control change. Returns false when it is not the Tempo knob (nothing changes). A detent (or a fast turn's
+ * several) becomes one SPEED_STEPS action; Shift held makes each detent MFD_VJ_COARSE_STEPS steps.
+ */
+bool mfd_vj_pads_feed_cc(struct mfd_vj_pads *p, uint8_t channel, uint8_t cc, uint8_t value, struct mfd_vj_action *out,
+			 size_t max, size_t *out_count);
+
+/* Whether this control change address is the Tempo knob. */
+bool mfd_vj_pads_is_knob(uint8_t channel, uint8_t cc);
 
 /* The MIDI controller went away: actions that let go of every held pad (flash off), Shift cleared. */
 size_t mfd_vj_pads_release_all(struct mfd_vj_pads *p, struct mfd_vj_action *out, size_t max);

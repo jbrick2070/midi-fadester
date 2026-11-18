@@ -425,6 +425,21 @@ void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char 
 	mfd_vendor_emit_fader_changed_ex(slot_id, value, NULL, origin);
 }
 
+void mfd_vendor_emit_vjster_action(const char *action, int steps)
+{
+	if (!action || !*action || os_atomic_load_bool(&g_vendor_shutting_down)) {
+		return;
+	}
+	obs_data_t *ev = obs_data_create();
+	obs_data_set_string(ev, "action", action);
+	if (steps != 0) {
+		obs_data_set_int(ev, "steps", steps);
+	}
+	obs_data_set_string(ev, "origin", "apc40");
+	emit_vendor_event("vjster_action", ev);
+	obs_data_release(ev);
+}
+
 void mfd_vendor_emit_state_changed(struct mfd_engine *eng)
 {
 	if (!eng || os_atomic_load_bool(&g_vendor_shutting_down)) {

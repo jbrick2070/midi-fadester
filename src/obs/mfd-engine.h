@@ -481,6 +481,15 @@ struct mfd_engine {
 	bool vj_was_active;                   /* the pads applied last tick (to turn the lights off when they stop) */
 	bool vj_state_dirty;                  /* a pad changed something: tell obs-websocket clients once */
 	char vj_said[MFD_VJ_STRIPS][96];      /* the last "why not" line per strip, said once */
+	/* APC40 video speed for Fadester Companion: Tempo / Nudge steps added up, and Tap Tempo / Play pressed, sent as
+	 * vendor events by mfd_engine_unlock after the lock is let go (steps at most every 50 ms). */
+#define MFD_VJ_SPEED_RESET_BIT 1U
+#define MFD_VJ_SPEED_PLAY_BIT 2U
+#define MFD_VJ_SPEED_MAX_STEPS 80        /* 0.25x..4x is 75 steps of 0.05x */
+#define MFD_VJ_SPEED_SEND_NS 50000000ULL /* 20 sends a second at most */
+	int vj_speed_steps;
+	unsigned vj_speed_actions; /* MFD_VJ_SPEED_RESET_BIT | MFD_VJ_SPEED_PLAY_BIT */
+	uint64_t vj_speed_sent_ns;
 
 	bool signals_connected;
 	float health_check_accum_sec;
