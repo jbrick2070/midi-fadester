@@ -2339,6 +2339,10 @@ static int test_vj_pads_drive_layers(void)
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_tick(eng, 0.016f);
 	REQUIRE(eng->vj.has_layer == 0x03U);
+	/* The APC40 mkII layout never pairs CCs into 14-bit: Cue Level (CC 47) stays apart from the crossfader (CC 15),
+	 * the track knobs (CC 48..55) from the Device knobs (CC 16..23). */
+	REQUIRE(eng->midi_parser.cc_lsb_independent[0][15] && eng->midi_parser.cc_lsb_independent[0][16] &&
+		eng->midi_parser.cc_lsb_independent[0][23]);
 
 	/* 1. Bottom pad 1: punch Top to Screen, again back to Normal. A strip without a layer: nothing. */
 	vj_tap(eng, 0);

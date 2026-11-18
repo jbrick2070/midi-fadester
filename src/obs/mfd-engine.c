@@ -4742,6 +4742,17 @@ static float normalize_decoded_sample(struct mfd_engine *eng, struct mfd_midi_ad
 static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
 {
 	mfd_midi_parser_clear_lsb_independent(&eng->midi_parser);
+	/* The APC40 mkII sends only 7-bit CCs, but its controls sit on 14-bit LSB numbers: Cue Level (CC 47) is the
+	 * crossfader's (CC 15) partner and the track knobs (CC 48..55) the Device knobs' (CC 16..23). Turning one within
+	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar. Another desk on
+	 * the default profile keeps 14-bit pairing. */
+	if (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) {
+		for (uint8_t ch = 0; ch < 16U; ++ch) {
+			for (uint8_t cc = 32U; cc < 64U; ++cc) {
+				mfd_midi_parser_set_lsb_independent(&eng->midi_parser, ch, cc, true);
+			}
+		}
+	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		const struct mfd_midi_addr *a = &eng->fader_slots[i].addr;
 		if (a->type == MFD_MIDI_CC && !a->is_14bit && a->number >= 32U && a->number < 64U) {
