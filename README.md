@@ -296,7 +296,7 @@ The video speed controls drive VJster (the Chrome extension or the OBS video pag
 an OBS media source restarts its clip when its speed changes, so live speed is VJster's. Midi Fadester adds the clicks up
 and sends them at most 20 times a second as the obs-websocket vendor event `vjster_action`
 (`{"action": "vjster.speed.step", "steps": n}`, n × 0.05x, or `{"action": "vjster.speed.reset"}` /
-`{"action": "vjster.playPause"}`); without the Companion nothing happens. The speed stays between 0.25x and 4x.
+`{"action": "vjster.playPause"}`); without the Companion nothing happens. The Companion keeps the speed between 0.25x and 4x.
 
 Only the clip pads, Shift, Stop All Clips and the transport controls are used: in the desk's default mode they are
 momentary, while Solo latches and Track Select moves the Device knobs onto other MIDI channels. MIDI Learn skips the
