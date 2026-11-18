@@ -54,6 +54,10 @@ struct mfd_winmm_device {
 	char opened_name[MFD_MIDI_DEV_NAME_MAX];
 	char last_error[MFD_MIDI_ERROR_MAX]; /* English, for logs and the API */
 	volatile bool device_closed_unexpectedly;
+	/* The same controller's MIDI Out (WinMM HMIDIOUT / CoreMIDI destination), for the VJ buttons' LEDs; NULL
+	 * when the desk has none or it could not be opened (the buttons still work, unlit). */
+	void *out_handle;
+	char out_name[MFD_MIDI_DEV_NAME_MAX];
 };
 
 /*
@@ -77,6 +81,15 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
  * and sets dev->last_error and dev->error_kind so the UI shows a disconnected status without crashing.
  */
 bool mfd_winmm_check_health(struct mfd_winmm_device *dev);
+
+/*
+ * Sends one 3-byte message (a note on for an LED) to the opened controller's MIDI Out. False when there is no MIDI
+ * Out. Call from the video tick or the UI thread, never from the MIDI In callback.
+ */
+bool mfd_winmm_send_short(struct mfd_winmm_device *dev, uint8_t status, uint8_t data1, uint8_t data2);
+
+/* Whether the opened controller's MIDI Out is available. */
+bool mfd_winmm_has_output(const struct mfd_winmm_device *dev);
 
 /* Stable id of an error kind for the obs-websocket API's device.error_code ("" for MFD_WINMM_OK). */
 const char *mfd_winmm_error_slug(enum mfd_winmm_error_kind kind);

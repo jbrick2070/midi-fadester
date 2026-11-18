@@ -161,6 +161,9 @@ bool mfd_engine_init_mutex(struct mfd_engine *eng)
 	if (eng->state_mutex_initialized) {
 		return true;
 	}
+	mfd_vj_pads_init(&eng->vj);
+	memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+	eng->vj_refresh_pending = true;
 	if (pthread_mutex_init_recursive(&eng->state_mutex) != 0) {
 		return false;
 	}
@@ -2379,6 +2382,7 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 		return;
 	}
 	mfd_engine_lock(eng);
+	eng->vj_refresh_pending = true;
 	bool any_changed = false;
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
@@ -2413,6 +2417,9 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 			}
 			slot->auto_fade_active = false;
 			slot->auto_fade_is_reset_fx = false;
+			if (i >= 1 && i <= (int)MFD_VJ_STRIPS && (eng->vj.faded & (1U << (unsigned)(i - 1)))) {
+				mfd_vj_pads_set_faded(&eng->vj, i - 1, false);
+			}
 			slot->has_last_written_mapped = false;
 			mfd_smoother_reset(&slot->smoother, slot->last_applied_val);
 			if (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_THROWING) {
@@ -4482,7 +4489,10 @@ void mfd_engine_apply_slot_output_ex(struct mfd_engine *eng, struct mfd_fader_sl
 		slot->last_alpha_a = val;
 		slot->last_alpha_b = 0.0f;
 		++slot->output_write_count;
-		apply_source_opacity_and_afv(eng, slot->source_a_name, val, slot->audio_follows_video);
+		/* A held APC40 flash pad keeps the layer at 100 %; the strip's value carries on underneath. */
+		if (!slot->vj_flash_held) {
+			apply_source_opacity_and_afv(eng, slot->source_a_name, val, slot->audio_follows_video);
+		}
 		break;
 
 	case MFD_TARGET_TWO_SOURCE_MIX: {
@@ -4732,6 +4742,17 @@ static float normalize_decoded_sample(struct mfd_engine *eng, struct mfd_midi_ad
 static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
 {
 	mfd_midi_parser_clear_lsb_independent(&eng->midi_parser);
+	/* The APC40 mkII sends only 7-bit CCs, but its controls sit on 14-bit LSB numbers: Cue Level (CC 47) is the
+	 * crossfader's (CC 15) partner and the track knobs (CC 48..55) the Device knobs' (CC 16..23). Turning one within
+	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar. Another desk on
+	 * the default profile keeps 14-bit pairing. */
+	if (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) {
+		for (uint8_t ch = 0; ch < 16U; ++ch) {
+			for (uint8_t cc = 32U; cc < 64U; ++cc) {
+				mfd_midi_parser_set_lsb_independent(&eng->midi_parser, ch, cc, true);
+			}
+		}
+	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		const struct mfd_midi_addr *a = &eng->fader_slots[i].addr;
 		if (a->type == MFD_MIDI_CC && !a->is_14bit && a->number >= 32U && a->number < 64U) {
@@ -4771,6 +4792,436 @@ static void sync_volume_slots_from_live_locked(struct mfd_engine *eng)
 	}
 }
 
+/* ---- APC40 mkII VJ pads (core/vj-pads.h) ------------------------------------------------------------------- */
+
+#define MFD_VJ_DEFAULT_FADE_MS 1000
+
+static int vj_effective_fade_ms(const struct mfd_engine *eng)
+{
+	int ms = eng ? eng->vj_fade_ms : 0;
+	return (ms < 50 || ms > 20000) ? MFD_VJ_DEFAULT_FADE_MS : ms;
+}
+
+/* The pads belong to the APC40 mkII layout; another profile's pads mean other things. */
+static bool vj_active(const struct mfd_engine *eng)
+{
+	/* Only with an APC40 mkII open: the default profile is the APC40's, but another desk on it keeps its notes. */
+	return eng && !eng->vj_disabled && eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name) &&
+	       strcmp(effective_profile_name(eng), MFD_DEFAULT_PROFILE_NAME) == 0;
+}
+
+/* Strip k (0..7) is fader_(k+1), slot k + 1 (slot 0 is the crossfader). */
+static struct mfd_fader_slot *vj_slot(struct mfd_engine *eng, int strip)
+{
+	return (strip >= 0 && strip < (int)MFD_VJ_STRIPS) ? &eng->fader_slots[strip + 1] : NULL;
+}
+
+/* The scene item a strip's pads act on: a Layer Opacity strip's source, a Two-Source Mix strip's upper source. */
+static bool vj_strip_layer(struct mfd_engine *eng, int strip, const char **out_scene, const char **out_source)
+{
+	struct mfd_fader_slot *slot = vj_slot(eng, strip);
+	if (!slot || !slot->enabled) {
+		return false;
+	}
+	const char *source = NULL;
+	if (slot->target_type == MFD_TARGET_SINGLE_LAYER) {
+		source = slot->source_a_name;
+	} else if (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX) {
+		source = slot->a_is_above_b ? slot->source_a_name : slot->source_b_name;
+	} else {
+		return false;
+	}
+	const char *scene = slot->scene_name[0] != '\0' ? slot->scene_name : slot->resolved_scene_name;
+	if (!source || source[0] == '\0' || !scene || scene[0] == '\0') {
+		return false;
+	}
+	*out_scene = scene;
+	*out_source = source;
+	return true;
+}
+
+static const enum obs_blending_type k_vj_obs_blend[MFD_VJ_BLEND_COUNT] = {
+	OBS_BLEND_NORMAL,   OBS_BLEND_LIGHTEN,  OBS_BLEND_SCREEN, OBS_BLEND_ADDITIVE,
+	OBS_BLEND_MULTIPLY, OBS_BLEND_SUBTRACT, OBS_BLEND_DARKEN,
+};
+
+static bool vj_blend_from_obs(int obs_mode, enum mfd_vj_blend *out)
+{
+	for (int i = 0; i < (int)MFD_VJ_BLEND_COUNT; ++i) {
+		if ((int)k_vj_obs_blend[i] == obs_mode) {
+			*out = (enum mfd_vj_blend)i;
+			return true;
+		}
+	}
+	return false;
+}
+
+struct vj_blend_find {
+	const char *source;
+	bool set;
+	enum obs_blending_type mode;
+	bool found;
+	enum obs_blending_type read;
+};
+
+/* obs_scene_enum_items holds the scene's lock and a reference on each item, so an item removed on another thread
+ * cannot go away under us (obs_scene_find_source returns an unreferenced item). Items come bottom first: the last
+ * match is the topmost copy, the one the layer-order checks use. */
+static bool vj_blend_enum_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct vj_blend_find *f = param;
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	const char *name = src ? obs_source_get_name(src) : NULL;
+	if (name && strcmp(name, f->source) == 0) {
+		f->found = true;
+		f->read = obs_sceneitem_get_blending_mode(item);
+		if (f->set) {
+			obs_sceneitem_set_blending_mode(item, f->mode);
+		}
+	}
+	return true;
+}
+
+/* Reads (set == false) or writes a scene item's blend mode. The video tick holds no scene lock (the layer-order
+ * reads take the same lock from here). */
+static bool vj_blend_io(struct mfd_engine *eng, const char *scene, const char *source, bool set,
+			enum mfd_vj_blend *mode)
+{
+	if (eng->scene_graph_ops &&
+	    (set ? eng->scene_graph_ops->set_blend_mode != NULL : eng->scene_graph_ops->get_blend_mode != NULL)) {
+		if (set) {
+			return eng->scene_graph_ops->set_blend_mode(scene, source, (int)k_vj_obs_blend[*mode],
+								    eng->scene_graph_user_data);
+		}
+		int got = 0;
+		return eng->scene_graph_ops->get_blend_mode(scene, source, &got, eng->scene_graph_user_data) &&
+		       vj_blend_from_obs(got, mode);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *scene_src = obs_get_source_by_name(scene);
+	if (!scene_src) {
+		return false;
+	}
+	struct vj_blend_find f = {source, set, k_vj_obs_blend[*mode], false, OBS_BLEND_NORMAL};
+	obs_scene_t *sc = obs_scene_from_source(scene_src);
+	if (sc) {
+		/* A write gives every copy of the source in the scene the mode, as the opacity filter (on the source)
+		 * already reaches every copy; a read reports the topmost copy. */
+		obs_scene_enum_items(sc, vj_blend_enum_cb, &f);
+	}
+	obs_source_release(scene_src);
+	if (!f.found) {
+		return false;
+	}
+	return set ? true : vj_blend_from_obs((int)f.read, mode);
+}
+
+/* A line for the log once per strip and reason, not on every press. */
+static void vj_say_once(struct mfd_engine *eng, int strip, const char *msg)
+{
+	if (strip < 0 || strip >= (int)MFD_VJ_STRIPS || strcmp(eng->vj_said[strip], msg) == 0) {
+		return;
+	}
+	snprintf(eng->vj_said[strip], sizeof(eng->vj_said[strip]), "%s", msg);
+	obs_log(LOG_INFO, "APC40 pads, strip %d: %s", strip + 1, msg);
+}
+
+/* The same start as the obs-websocket auto_fade request, for a Layer Opacity strip. */
+static void vj_start_fade_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot, float to_val)
+{
+	bool was_parked = slot->takeover.state == MFD_TAKEOVER_PARKED;
+	slot->auto_fade_from = slot->last_applied_val;
+	slot->auto_fade_to = clamp01(to_val);
+	slot->auto_fade_duration_sec = (float)vj_effective_fade_ms(eng) / 1000.0f;
+	slot->auto_fade_elapsed_sec = 0.0f;
+	slot->auto_fade_active = true;
+	slot->auto_fade_is_reset_fx = false;
+	slot->pending_clean_apply_on_avail = false;
+	if (was_parked) {
+		mfd_takeover_unpark_from_api(&slot->takeover, slot->auto_fade_from);
+		mfd_engine_notify_state_changed(eng);
+	}
+	mfd_engine_mark_ui_dirty(eng, false);
+}
+
+static bool vj_fadeable(struct mfd_engine *eng, struct mfd_fader_slot *slot)
+{
+	return slot && slot->enabled && slot->target_type == MFD_TARGET_SINGLE_LAYER &&
+	       mfd_engine_is_slot_writable(eng, slot);
+}
+
+static void vj_fade_out_locked(struct mfd_engine *eng, int strip)
+{
+	struct mfd_fader_slot *slot = vj_slot(eng, strip);
+	if (!vj_fadeable(eng, slot) || slot->last_applied_val <= 0.0005f) {
+		return;
+	}
+	eng->vj_fade_restore[strip] = slot->last_applied_val;
+	vj_start_fade_locked(eng, slot, 0.0f);
+	mfd_vj_pads_set_faded(&eng->vj, strip, true);
+}
+
+static void vj_set_blend_locked(struct mfd_engine *eng, int s, enum mfd_vj_blend b)
+{
+	const char *scene = NULL, *source = NULL;
+	if (!vj_strip_layer(eng, s, &scene, &source)) {
+		vj_say_once(eng, s, "no Layer Opacity or Two-Source Mix layer on this strip, so no blend mode");
+		mfd_vj_pads_set_has_layer(&eng->vj, s, false);
+		return;
+	}
+	if (!vj_blend_io(eng, scene, source, true, &b)) {
+		vj_say_once(eng, s, "its layer is not in the scene; blend mode not changed");
+		enum mfd_vj_blend now = MFD_VJ_BLEND_NORMAL;
+		vj_blend_io(eng, scene, source, false, &now);
+		mfd_vj_pads_set_current(&eng->vj, s, now);
+		return;
+	}
+	obs_log(LOG_INFO, "APC40 pads: %s blend %s", source, mfd_vj_blend_name(b));
+	mfd_vj_pads_set_current(&eng->vj, s, b);
+	eng->vj_state_dirty = true;
+}
+
+static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
+{
+	int s = a->strip;
+	switch (a->kind) {
+	case MFD_VJ_ACTION_SET_BLEND:
+		vj_set_blend_locked(eng, s, a->blend);
+		break;
+	case MFD_VJ_ACTION_FLASH_ON: {
+		struct mfd_fader_slot *slot = vj_slot(eng, s);
+		if (!vj_fadeable(eng, slot)) {
+			vj_say_once(eng, s, "flash needs a Layer Opacity strip");
+			eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
+			break;
+		}
+		/* An override on top of the strip: its value, smoothing, fade and takeover carry on underneath. */
+		slot->vj_flash_held = true;
+		apply_source_opacity_and_afv(eng, slot->source_a_name, 1.0f, slot->audio_follows_video);
+		eng->vj_state_dirty = true;
+		break;
+	}
+	case MFD_VJ_ACTION_FLASH_OFF: {
+		struct mfd_fader_slot *slot = vj_slot(eng, s);
+		if (slot && slot->vj_flash_held) {
+			slot->vj_flash_held = false;
+			apply_source_opacity_and_afv(eng, slot->source_a_name, slot->last_applied_val,
+						     slot->audio_follows_video);
+			eng->vj_state_dirty = true;
+		}
+		break;
+	}
+	case MFD_VJ_ACTION_FADE_TOGGLE: {
+		struct mfd_fader_slot *slot = vj_slot(eng, s);
+		if (!vj_fadeable(eng, slot)) {
+			vj_say_once(eng, s, "fades need a Layer Opacity strip");
+			break;
+		}
+		if (eng->vj.faded & (1U << (unsigned)s)) {
+			float back = eng->vj_fade_restore[s] > 0.001f ? eng->vj_fade_restore[s] : 1.0f;
+			vj_start_fade_locked(eng, slot, back);
+			mfd_vj_pads_set_faded(&eng->vj, s, false);
+		} else if (slot->last_applied_val > 0.0005f) {
+			vj_fade_out_locked(eng, s);
+		} else {
+			vj_start_fade_locked(eng, slot, 1.0f);
+		}
+		eng->vj_state_dirty = true;
+		break;
+	}
+	case MFD_VJ_ACTION_CLEAN:
+		mfd_engine_reset_fx(eng, 0, NULL, NULL, NULL, NULL, 0);
+		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+			const char *scene = NULL, *source = NULL;
+			enum mfd_vj_blend b = MFD_VJ_BLEND_NORMAL;
+			if (vj_strip_layer(eng, i, &scene, &source) && vj_blend_io(eng, scene, source, true, &b)) {
+				mfd_vj_pads_set_current(&eng->vj, i, b);
+			}
+		}
+		obs_log(LOG_INFO, "APC40 pads: Clean / All FX Off, every blend back to Normal");
+		eng->vj_state_dirty = true;
+		break;
+	case MFD_VJ_ACTION_FADE_ALL_OUT:
+		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+			if (!(eng->vj.faded & (1U << (unsigned)i))) {
+				vj_fade_out_locked(eng, i);
+			}
+		}
+		obs_log(LOG_INFO, "APC40 pads: every layer strip fading out");
+		eng->vj_state_dirty = true;
+		break;
+	case MFD_VJ_ACTION_NONE:
+	default:
+		break;
+	}
+}
+
+/* A note on / note off for the VJ pads, unless a learned strip owns that address. True when it was one. Runs after
+ * MIDI Learn, and never while learning or while Set up edits a strip. */
+static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded *dec)
+{
+	/* A held flash pad is always let go, whatever changed while it was held (Learn, Set up, the pads turned off). */
+	if (dec->addr.type == MFD_MIDI_NOTE_OFF && dec->addr.channel == 0U &&
+	    dec->addr.number >= MFD_VJ_NOTE_ROW_FLASH && dec->addr.number < MFD_VJ_NOTE_ROW_FLASH + MFD_VJ_STRIPS &&
+	    (eng->vj.flashing & (1U << (unsigned)(dec->addr.number - MFD_VJ_NOTE_ROW_FLASH)))) {
+		struct mfd_vj_action off[MFD_VJ_MAX_ACTIONS];
+		size_t n_off = 0;
+		mfd_vj_pads_feed(&eng->vj, false, 0U, (uint8_t)dec->addr.number, off, MFD_VJ_MAX_ACTIONS, &n_off);
+		for (size_t i = 0; i < n_off; ++i) {
+			vj_run_locked(eng, &off[i]);
+		}
+		return true;
+	}
+	if (dec->addr.type == MFD_MIDI_NOTE_OFF && dec->addr.channel == 0U && dec->addr.number == MFD_VJ_NOTE_SHIFT &&
+	    eng->vj.shift) {
+		eng->vj.shift = false; /* a held Shift is always let go too */
+		return vj_active(eng);
+	}
+	if (!vj_active(eng) || eng->setup_session.active || eng->learning_slot_index >= 0 ||
+	    (dec->addr.type != MFD_MIDI_NOTE_ON && dec->addr.type != MFD_MIDI_NOTE_OFF)) {
+		return false;
+	}
+	struct mfd_midi_addr as_on = dec->addr;
+	as_on.type = MFD_MIDI_NOTE_ON; /* a strip learned on this pad's note on owns its note off too */
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		if (eng->fader_slots[i].enabled && mfd_midi_addr_matches(&eng->fader_slots[i].addr, &as_on)) {
+			return false;
+		}
+	}
+	struct mfd_vj_action acts[MFD_VJ_MAX_ACTIONS];
+	size_t n = 0;
+	if (!mfd_vj_pads_feed(&eng->vj, dec->addr.type == MFD_MIDI_NOTE_ON, dec->addr.channel,
+			      (uint8_t)dec->addr.number, acts, MFD_VJ_MAX_ACTIONS, &n)) {
+		return false;
+	}
+	for (size_t i = 0; i < n; ++i) {
+		vj_run_locked(eng, &acts[i]);
+	}
+	mfd_engine_mark_ui_dirty(eng, false);
+	return true;
+}
+
+/* Each strip's layer and its blend mode as OBS has them now (scene change, graph change, a strip edited). */
+static void vj_refresh_locked(struct mfd_engine *eng)
+{
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		const char *scene = NULL, *source = NULL;
+		bool has = vj_strip_layer(eng, i, &scene, &source);
+		mfd_vj_pads_set_has_layer(&eng->vj, i, has);
+		enum mfd_vj_blend b = MFD_VJ_BLEND_NORMAL;
+		if (has && vj_blend_io(eng, scene, source, false, &b)) {
+			mfd_vj_pads_set_current(&eng->vj, i, b);
+		}
+	}
+}
+
+/* Keeps the pad state true to the strips: a strip raised by hand (or by obs-websocket) after a pad faded it out is
+ * no longer faded out; a flash on a strip that is no longer a Layer Opacity strip, or whose pad is no longer held, ends. */
+static void vj_tidy_locked(struct mfd_engine *eng)
+{
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		struct mfd_fader_slot *slot = vj_slot(eng, i);
+		unsigned b = 1U << (unsigned)i;
+		if (!slot) {
+			continue;
+		}
+		if ((eng->vj.faded & b) && !slot->auto_fade_active && slot->last_applied_val > 0.0005f) {
+			mfd_vj_pads_set_faded(&eng->vj, i, false);
+			eng->vj_state_dirty = true;
+		}
+		if (slot->vj_flash_held && (!(eng->vj.flashing & b) || !vj_fadeable(eng, slot))) {
+			slot->vj_flash_held = false;
+			eng->vj.flashing &= (uint8_t)~b;
+			apply_source_opacity_and_afv(eng, slot->source_a_name, slot->last_applied_val,
+						     slot->audio_follows_video);
+			eng->vj_state_dirty = true;
+		}
+	}
+}
+
+/* Sends the LEDs that changed (a dirty table, so a quiet tick sends nothing). */
+static void vj_flush_leds_locked(struct mfd_engine *eng)
+{
+	if (!vj_active(eng) || !mfd_winmm_has_output(&eng->midi_dev) ||
+	    os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+		return;
+	}
+	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
+	size_t n = mfd_vj_pads_leds(&eng->vj, leds, MFD_VJ_MAX_LEDS);
+	for (size_t i = 0; i < n; ++i) {
+		if (eng->vj_led_sent[i] == leds[i].velocity) {
+			continue;
+		}
+		if (!mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
+					  leds[i].velocity)) {
+			break; /* the desk is going away: try again next tick, not 24 times now */
+		}
+		eng->vj_led_sent[i] = leds[i].velocity;
+	}
+}
+
+/* Turns off every LED the pads lit (pads turned off, OBS closing). */
+static void vj_leds_off_locked(struct mfd_engine *eng)
+{
+	if (mfd_winmm_has_output(&eng->midi_dev)) {
+		struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
+		size_t n = mfd_vj_pads_leds(&eng->vj, leds, MFD_VJ_MAX_LEDS);
+		for (size_t i = 0; i < n; ++i) {
+			if (eng->vj_led_sent[i] != 0U && eng->vj_led_sent[i] != 255U) {
+				mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
+						     0U);
+			}
+		}
+	}
+	memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+}
+
+/* The controller went away: let go of held pads (a flash goes back to the fader's level). */
+static void vj_release_all_locked(struct mfd_engine *eng)
+{
+	struct mfd_vj_action acts[MFD_VJ_MAX_ACTIONS];
+	size_t n = mfd_vj_pads_release_all(&eng->vj, acts, MFD_VJ_MAX_ACTIONS);
+	for (size_t i = 0; i < n; ++i) {
+		vj_run_locked(eng, &acts[i]);
+	}
+	memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+}
+
+void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	bool was = vj_active(eng);
+	eng->vj_disabled = !enabled;
+	eng->vj_fade_ms = (fade_ms < 50 || fade_ms > 20000) ? MFD_VJ_DEFAULT_FADE_MS : fade_ms;
+	if (was && !vj_active(eng)) {
+		vj_leds_off_locked(eng); /* first: it only turns off what the table says is lit */
+		vj_release_all_locked(eng);
+	}
+	eng->vj_was_active = vj_active(eng);
+	eng->vj_refresh_pending = true;
+	if (obs_initialized()) {
+		eng->pending_config_save = true;
+	}
+	mfd_engine_notify_state_changed(eng);
+	mfd_engine_unlock(eng);
+}
+
+bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng)
+{
+	return eng && !eng->vj_disabled;
+}
+
+int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
+{
+	return vj_effective_fade_ms(eng);
+}
+
 void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 {
 	if (!eng) {
@@ -4783,8 +5234,29 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	mfd_engine_lock(eng);
 
 	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+		bool first = !eng->midi_disconnect_handled;
 		abort_open_tbar_slots_on_midi_disconnect_locked(eng);
+		if (first) {
+			vj_release_all_locked(eng);
+		}
 		mfd_engine_mark_ui_dirty(eng, true);
+	}
+	{
+		/* The pads stopped applying (profile changed, the desk changed): lights off, held pads let go. */
+		bool active = vj_active(eng);
+		if (eng->vj_was_active && !active) {
+			vj_leds_off_locked(eng);
+			vj_release_all_locked(eng);
+		} else if (!eng->vj_was_active && active) {
+			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all. */
+			memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+			eng->vj_refresh_pending = true;
+		}
+		eng->vj_was_active = active;
+	}
+	if (eng->vj_refresh_pending && vj_active(eng)) {
+		eng->vj_refresh_pending = false;
+		vj_refresh_locked(eng);
 	}
 	sync_volume_slots_from_live_locked(eng);
 
@@ -4846,6 +5318,10 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 				mfd_engine_notify_state_changed(eng);
 			}
 			eng->learning_slot_index = -1;
+		}
+
+		if (vj_feed_locked(eng, &dec)) {
+			continue;
 		}
 
 		if (dec.addr.type == MFD_MIDI_NOTE_OFF) {
@@ -5142,6 +5618,12 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (mix_count > 0) {
 			eng->mix_send_wait = 0.05f;
 		}
+	}
+	vj_tidy_locked(eng);
+	vj_flush_leds_locked(eng);
+	if (eng->vj_state_dirty) {
+		eng->vj_state_dirty = false;
+		mfd_engine_notify_state_changed(eng);
 	}
 	mfd_engine_unlock(eng);
 	for (int k = 0; k < mix_count; ++k) {
@@ -6372,6 +6854,17 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
 	obs_data_set_bool(data, "first_run_offer_dismissed", eng->first_run_offer_dismissed);
 	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
+	obs_data_set_bool(data, "vj_buttons_enabled", !eng->vj_disabled);
+	obs_data_set_int(data, "vj_fade_ms", vj_effective_fade_ms(eng));
+	obs_data_array_t *punch = obs_data_array_create();
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		obs_data_t *item = obs_data_create();
+		obs_data_set_string(item, "blend", mfd_vj_blend_id(eng->vj.punch[i]));
+		obs_data_array_push_back(punch, item);
+		obs_data_release(item);
+	}
+	obs_data_set_array(data, "vj_punch", punch);
+	obs_data_array_release(punch);
 	serialize_calibrations(eng, data);
 	serialize_slots(eng, data);
 	mfd_engine_unlock(eng);
@@ -6435,6 +6928,25 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	} else if (!user_file) {
 		/* Existing users have not seen the companion card, so show it once after upgrading. */
 		eng->stream_deck_companion_dismissed = false;
+	}
+	if (obs_data_has_user_value(data, "vj_buttons_enabled")) {
+		eng->vj_disabled = !obs_data_get_bool(data, "vj_buttons_enabled");
+	}
+	if (obs_data_has_user_value(data, "vj_fade_ms")) {
+		long long ms = obs_data_get_int(data, "vj_fade_ms");
+		eng->vj_fade_ms = (ms < 50 || ms > 20000) ? 0 : (int)ms;
+	}
+	obs_data_array_t *punch = obs_data_get_array(data, "vj_punch");
+	if (punch) {
+		for (size_t i = 0; i < obs_data_array_count(punch) && i < MFD_VJ_STRIPS; ++i) {
+			obs_data_t *item = obs_data_array_item(punch, i);
+			enum mfd_vj_blend b;
+			if (item && mfd_vj_blend_from_id(obs_data_get_string(item, "blend"), &b)) {
+				mfd_vj_pads_set_punch(&eng->vj, (int)i, b);
+			}
+			obs_data_release(item);
+		}
+		obs_data_array_release(punch);
 	}
 	deserialize_calibrations(eng, data);
 	deserialize_slots(eng, data);
@@ -6598,6 +7110,7 @@ void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
 	if (eng->midi_dev.is_open) {
 		if (!mfd_winmm_check_health(&eng->midi_dev)) {
 			abort_open_tbar_slots_on_midi_disconnect_locked(eng);
+			vj_release_all_locked(eng);
 			refresh_apc40_detected_locked(eng);
 			mfd_engine_notify_state_changed(eng);
 		}
@@ -6715,6 +7228,9 @@ void mfd_engine_shutdown(void)
 	obs_frontend_remove_event_callback(on_frontend_event, &g_engine);
 
 	mfd_engine_save_global_config(&g_engine);
+	mfd_engine_lock(&g_engine);
+	vj_leds_off_locked(&g_engine);
+	mfd_engine_unlock(&g_engine);
 	mfd_winmm_close(&g_engine.midi_dev);
 	mfd_engine_destroy_mutex(&g_engine);
 }

@@ -85,6 +85,7 @@ midi_fadester_add_test(test-takeover test-takeover.c "${_core}/takeover.c")
 midi_fadester_add_test(test-mixer-math test-mixer-math.c "${_core}/mixer-math.c")
 midi_fadester_add_test(test-apc40-profile test-apc40-profile.c "${_core}/apc40-profile.c" "${_core}/mfd-text.c")
 midi_fadester_add_test(test-tbar-logic test-tbar-logic.c "${_core}/tbar-logic.c")
+midi_fadester_add_test(test-vj-pads test-vj-pads.c "${_core}/vj-pads.c")
 target_compile_definitions(
   test-tbar-logic
   PRIVATE "MFD_TBAR_VECTORS_FILE=\"${CMAKE_SOURCE_DIR}/tests/vectors/tbar-safety.json\""
@@ -120,6 +121,7 @@ add_executable(
   "${_core}/mixer-math.c"
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.c"
+  "${_core}/vj-pads.c"
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
@@ -158,6 +160,7 @@ add_executable(
   "${_core}/mixer-math.c"
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.c"
+  "${_core}/vj-pads.c"
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
@@ -201,6 +204,8 @@ set(
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.h"
   "${_core}/tbar-logic.c"
+  "${_core}/vj-pads.h"
+  "${_core}/vj-pads.c"
   "${_core}/filter-math.h"
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.h"

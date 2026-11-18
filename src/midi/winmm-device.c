@@ -86,11 +86,99 @@ void mfd_winmm_init(struct mfd_winmm_device *dev, struct mfd_midi_queue *queue)
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 }
 
+/* The device part of a port name: "MIDIIN2 (APC40 mkII)" and "MIDIOUT2 (APC40 mkII)" both give "APC40 mkII";
+ * a name without brackets is itself. */
+static void port_device_part(const char *name, char *out, size_t out_size)
+{
+	const char *open = strchr(name, '(');
+	const char *close = open ? strrchr(name, ')') : NULL;
+	if (open && close && close > open + 1) {
+		size_t len = (size_t)(close - open - 1);
+		if (len >= out_size) {
+			len = out_size - 1U;
+		}
+		memcpy(out, open + 1, len);
+		out[len] = '\0';
+	} else {
+		snprintf(out, out_size, "%s", name);
+	}
+}
+
+/* Opens the MIDI Out with the input's name, else one for the same device ("MIDIOUT2 (…)" beside "MIDIIN2 (…)"). */
+static void open_output(struct mfd_winmm_device *dev)
+{
+	UINT n = midiOutGetNumDevs();
+	int exact = -1, partial = -1;
+	char name[MFD_MIDI_DEV_NAME_MAX];
+	char in_part[MFD_MIDI_DEV_NAME_MAX];
+	char out_part[MFD_MIDI_DEV_NAME_MAX];
+	port_device_part(dev->opened_name, in_part, sizeof(in_part));
+	for (UINT i = 0U; i < n; ++i) {
+		MIDIOUTCAPSW caps;
+		memset(&caps, 0, sizeof(caps));
+		if (midiOutGetDevCapsW(i, &caps, sizeof(caps)) != MMSYSERR_NOERROR) {
+			continue;
+		}
+		wide_to_utf8(caps.szPname, name, sizeof(name));
+		port_device_part(name, out_part, sizeof(out_part));
+		if (exact < 0 && strcmp(name, dev->opened_name) == 0) {
+			exact = (int)i;
+		} else if (partial < 0 && in_part[0] != '\0' && strcmp(out_part, in_part) == 0) {
+			partial = (int)i;
+		}
+	}
+	int chosen = exact >= 0 ? exact : partial;
+	if (chosen < 0) {
+		obs_log(LOG_INFO, "No MIDI Out for '%s': the VJ buttons work unlit", dev->opened_name);
+		return;
+	}
+	HMIDIOUT hmo = NULL;
+	MMRESULT res = midiOutOpen(&hmo, (UINT)chosen, 0, 0, CALLBACK_NULL);
+	if (res != MMSYSERR_NOERROR) {
+		obs_log(LOG_INFO, "MIDI Out for '%s' could not be opened (WinMM error %u): the VJ buttons work unlit",
+			dev->opened_name, (unsigned)res);
+		return;
+	}
+	MIDIOUTCAPSW caps;
+	memset(&caps, 0, sizeof(caps));
+	if (midiOutGetDevCapsW((UINT)chosen, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
+		wide_to_utf8(caps.szPname, dev->out_name, sizeof(dev->out_name));
+	}
+	dev->out_handle = (void *)hmo;
+	obs_log(LOG_INFO, "Opened MIDI Out device '%s' for the button lights", dev->out_name);
+}
+
+static void close_output(struct mfd_winmm_device *dev)
+{
+	if (dev->out_handle) {
+		HMIDIOUT hmo = (HMIDIOUT)dev->out_handle;
+		dev->out_handle = NULL;
+		midiOutClose(hmo);
+		obs_log(LOG_INFO, "Closed MIDI Out device '%s'", dev->out_name);
+	}
+	dev->out_name[0] = '\0';
+}
+
+bool mfd_winmm_send_short(struct mfd_winmm_device *dev, uint8_t status, uint8_t data1, uint8_t data2)
+{
+	if (!dev || !dev->out_handle) {
+		return false;
+	}
+	DWORD msg = (DWORD)status | ((DWORD)(data1 & 0x7FU) << 8) | ((DWORD)(data2 & 0x7FU) << 16);
+	return midiOutShortMsg((HMIDIOUT)dev->out_handle, msg) == MMSYSERR_NOERROR;
+}
+
+bool mfd_winmm_has_output(const struct mfd_winmm_device *dev)
+{
+	return dev && dev->out_handle != NULL;
+}
+
 void mfd_winmm_close(struct mfd_winmm_device *dev)
 {
 	if (!dev) {
 		return;
 	}
+	close_output(dev);
 	if (dev->handle) {
 		HMIDIIN hmi = (HMIDIIN)dev->handle;
 		dev->handle = NULL;
@@ -211,6 +299,10 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	dev->error_kind = MFD_WINMM_OK;
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 	obs_log(LOG_INFO, "Opened MIDI In device '%s' (WinMM index %u)", dev->opened_name, (unsigned)winmm_id);
+	/* Only an APC40 mkII has lights to drive; another desk's MIDI Out stays free for other apps. */
+	if (mfd_is_apc40_mk2_name(dev->opened_name)) {
+		open_output(dev);
+	}
 	return true;
 }
 

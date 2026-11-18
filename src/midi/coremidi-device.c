@@ -129,11 +129,84 @@ void mfd_winmm_init(struct mfd_winmm_device *dev, struct mfd_midi_queue *queue)
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 }
 
+struct mfd_coremidi_out {
+	MIDIPortRef port;
+	MIDIEndpointRef dest;
+};
+
+/* The same desk's MIDI Out: the destination of the source's entity, else a destination with the source's name. */
+static void open_output(struct mfd_winmm_device *dev, MIDIEndpointRef source)
+{
+	MIDIEndpointRef dest = 0;
+	MIDIEntityRef entity = 0;
+	if (MIDIEndpointGetEntity(source, &entity) == noErr && entity &&
+	    MIDIEntityGetNumberOfDestinations(entity) > 0) {
+		dest = MIDIEntityGetDestination(entity, 0);
+	}
+	char name[MFD_MIDI_DEV_NAME_MAX];
+	for (ItemCount i = 0; !dest && i < MIDIGetNumberOfDestinations(); ++i) {
+		MIDIEndpointRef ep = MIDIGetDestination(i);
+		endpoint_name(ep, name, sizeof(name));
+		if (ep && strcmp(name, dev->opened_name) == 0) {
+			dest = ep;
+		}
+	}
+	if (!dest) {
+		obs_log(LOG_INFO, "No MIDI Out for '%s': the VJ buttons work unlit", dev->opened_name);
+		return;
+	}
+	struct mfd_coremidi_out *o = bzalloc(sizeof(*o));
+	o->dest = dest;
+	OSStatus st = MIDIOutputPortCreate(g_client, CFSTR("Midi Fadester Out"), &o->port);
+	if (st != noErr) {
+		bfree(o);
+		obs_log(LOG_INFO,
+			"MIDI Out for '%s' could not be opened (CoreMIDI error %d): the VJ buttons work unlit",
+			dev->opened_name, (int)st);
+		return;
+	}
+	endpoint_name(dest, dev->out_name, sizeof(dev->out_name));
+	dev->out_handle = o;
+	obs_log(LOG_INFO, "Opened MIDI Out device '%s' for the button lights", dev->out_name);
+}
+
+static void close_output(struct mfd_winmm_device *dev)
+{
+	if (dev->out_handle) {
+		struct mfd_coremidi_out *o = (struct mfd_coremidi_out *)dev->out_handle;
+		dev->out_handle = NULL;
+		MIDIPortDispose(o->port);
+		bfree(o);
+		obs_log(LOG_INFO, "Closed MIDI Out device '%s'", dev->out_name);
+	}
+	dev->out_name[0] = 0;
+}
+
+bool mfd_winmm_send_short(struct mfd_winmm_device *dev, uint8_t status, uint8_t data1, uint8_t data2)
+{
+	if (!dev || !dev->out_handle) {
+		return false;
+	}
+	struct mfd_coremidi_out *o = (struct mfd_coremidi_out *)dev->out_handle;
+	MIDIEventList list;
+	MIDIEventPacket *pkt = MIDIEventListInit(&list, kMIDIProtocol_1_0);
+	/* One UMP word: type 2 (MIDI 1.0 channel voice), group 0. */
+	UInt32 word = 0x20000000U | ((UInt32)status << 16) | ((UInt32)(data1 & 0x7FU) << 8) | (UInt32)(data2 & 0x7FU);
+	pkt = MIDIEventListAdd(&list, sizeof(list), pkt, 0, 1, &word);
+	return pkt && MIDISendEventList(o->port, o->dest, &list) == noErr;
+}
+
+bool mfd_winmm_has_output(const struct mfd_winmm_device *dev)
+{
+	return dev && dev->out_handle != NULL;
+}
+
 void mfd_winmm_close(struct mfd_winmm_device *dev)
 {
 	if (!dev) {
 		return;
 	}
+	close_output(dev);
 	if (dev->handle) {
 		struct mfd_coremidi_port *p = (struct mfd_coremidi_port *)dev->handle;
 		dev->handle = NULL;
@@ -287,6 +360,10 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 	obs_log(LOG_INFO, "Opened MIDI In device '%s' (CoreMIDI source %u)", dev->opened_name,
 		(unsigned)list[selected_idx].index);
+	/* Only an APC40 mkII has lights to drive; another desk's MIDI Out stays free for other apps. */
+	if (mfd_is_apc40_mk2_name(dev->opened_name)) {
+		open_output(dev, source);
+	}
 	return true;
 }
 

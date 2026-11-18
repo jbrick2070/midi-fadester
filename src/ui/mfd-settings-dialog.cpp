@@ -32,6 +32,7 @@
 #include <QAbstractItemView>
 #include <QAbstractNativeEventFilter>
 #include <QCheckBox>
+#include <QSpinBox>
 #include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
@@ -1153,6 +1154,38 @@ private:
 		applies_note->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
 		root->addWidget(applies_note);
 
+		/* APC40 mkII VJ pads (core/vj-pads.h): on/off, the fade time and what each pad row does. */
+		auto *vj_bar = new QHBoxLayout();
+		vj_check_ = new QCheckBox(mfdText("Dialog.VjPads", "APC40 mkII pads: blend modes, flash and fades"),
+					  adv_tab);
+		vj_check_->setObjectName(QStringLiteral("mfdAdvVjCheck"));
+		vj_check_->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
+		vj_bar->addWidget(vj_check_);
+		vj_bar->addSpacing(12);
+		auto *lbl_vj_fade = new QLabel(mfdText("Dialog.VjFadeTime", "Pad fade time:"), adv_tab);
+		lbl_vj_fade->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
+		vj_bar->addWidget(lbl_vj_fade);
+		vj_fade_spin_ = new QSpinBox(adv_tab);
+		vj_fade_spin_->setObjectName(QStringLiteral("mfdAdvVjFadeSpin"));
+		vj_fade_spin_->setRange(50, 20000);
+		vj_fade_spin_->setSingleStep(100);
+		vj_fade_spin_->setSuffix(mfdText("Dialog.Suffix.Ms", " ms"));
+		vj_bar->addWidget(vj_fade_spin_);
+		vj_bar->addStretch(1);
+		root->addLayout(vj_bar);
+		auto *vj_legend = new QLabel(
+			mfdText("Dialog.VjPadsLegend",
+				"Bottom pad row: blend punch, the strip's layer between Normal and its punch mode (Shift + pad: next "
+				"punch mode). Row 2: flash the layer to 100 % while held. Row 3: fade the layer out; press again to "
+				"fade it back. Stop All Clips: Clean, every effect off and every blend Normal (Shift + Stop All "
+				"Clips: fade every layer out). Blend punch works on strips set to “Show or hide a layer” or "
+				"“Mix two layers”; flash and fade on “Show or hide a layer” strips."),
+			adv_tab);
+		vj_legend->setObjectName(QStringLiteral("mfdAdvVjLegend"));
+		vj_legend->setWordWrap(true);
+		vj_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
+		root->addWidget(vj_legend);
+
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 				if (snap_.slots[i].enabled && snap_.slots[i].target_type == MFD_TARGET_TBAR &&
@@ -1314,6 +1347,19 @@ private:
 		connect(flip_check_, &QCheckBox::toggled, this, [this](bool checked) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_tbar_bidirectional_flip(eng_, checked);
+				mfd_engine_save_global_config(eng_);
+			}
+		});
+
+		connect(vj_check_, &QCheckBox::toggled, this, [this](bool checked) {
+			if (!rebuilding_adv_table_) {
+				mfd_engine_set_vj_buttons(eng_, checked, vj_fade_spin_->value());
+				mfd_engine_save_global_config(eng_);
+			}
+		});
+		connect(vj_fade_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int ms) {
+			if (!rebuilding_adv_table_) {
+				mfd_engine_set_vj_buttons(eng_, vj_check_->isChecked(), ms);
 				mfd_engine_save_global_config(eng_);
 			}
 		});
@@ -1864,6 +1910,17 @@ private:
 		flip_check_->blockSignals(true);
 		flip_check_->setChecked(snap_.tbar_bidirectional_flip);
 		flip_check_->blockSignals(false);
+
+		if (vj_check_ && vj_fade_spin_) {
+			vj_check_->blockSignals(true);
+			vj_check_->setChecked(mfd_engine_vj_buttons_enabled(eng_));
+			vj_check_->blockSignals(false);
+			if (!vj_fade_spin_->hasFocus()) {
+				vj_fade_spin_->blockSignals(true);
+				vj_fade_spin_->setValue(mfd_engine_vj_fade_ms(eng_));
+				vj_fade_spin_->blockSignals(false);
+			}
+		}
 
 		if (profile_combo_ && !(profile_combo_->view() && profile_combo_->view()->isVisible())) {
 			const int idx = profile_combo_->findData(static_cast<int>(snap_.active_profile));
@@ -2521,6 +2578,8 @@ private:
 	QPushButton *btn_defaults_ = nullptr;
 	QDoubleSpinBox *tau_spin_ = nullptr;
 	QCheckBox *flip_check_ = nullptr;
+	QCheckBox *vj_check_ = nullptr;
+	QSpinBox *vj_fade_spin_ = nullptr;
 	QTableWidget *table_ = nullptr;
 	QPointer<QLabel> addr_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> learn_buttons_[MFD_MAX_FADER_SLOTS];
