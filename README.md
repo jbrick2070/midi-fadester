@@ -274,8 +274,9 @@ language.
 
 ## APC40 mkII pads
 
-With the APC40 mkII layout, the clip pads under your fingers play the layers on the strips set to *Show or hide a
-layer* or *Mix two layers* (strip 1 is the first column). They work whether or not the pads light up.
+With an APC40 mkII connected, the clip pads under your fingers play the layers of the eight strips (strip 1 is the
+first column): blend punch on strips set to *Show or hide a layer* or *Mix two layers* (the upper layer), flash and fade
+on *Show or hide a layer* strips. They work whether or not the pads light up.
 
 | Pads | What they do |
 | --- | --- |

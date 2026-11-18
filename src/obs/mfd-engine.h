@@ -478,6 +478,7 @@ struct mfd_engine {
 	float vj_fade_restore[MFD_VJ_STRIPS]; /* the level a Clip Stop faded out from */
 	uint8_t vj_led_sent[MFD_VJ_MAX_LEDS]; /* the velocity last sent per mfd_vj_pads_leds index; 255 = unknown */
 	bool vj_refresh_pending;              /* re-read the strips' layers and blend modes on the next tick */
+	bool vj_was_active;                   /* the pads applied last tick (to turn the lights off when they stop) */
 	bool vj_state_dirty;                  /* a pad changed something: tell obs-websocket clients once */
 	char vj_said[MFD_VJ_STRIPS][96];      /* the last "why not" line per strip, said once */
 

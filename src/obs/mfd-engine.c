@@ -4797,7 +4797,9 @@ static int vj_effective_fade_ms(const struct mfd_engine *eng)
 /* The pads belong to the APC40 mkII layout; another profile's pads mean other things. */
 static bool vj_active(const struct mfd_engine *eng)
 {
-	return eng && !eng->vj_disabled && strcmp(effective_profile_name(eng), MFD_DEFAULT_PROFILE_NAME) == 0;
+	/* Only on an APC40 mkII: the default profile is the APC40's, but another desk on it must keep its notes. */
+	return eng && !eng->vj_disabled && eng->apc40_controller_detected &&
+	       strcmp(effective_profile_name(eng), MFD_DEFAULT_PROFILE_NAME) == 0;
 }
 
 /* Strip k (0..7) is fader_(k+1), slot k + 1 (slot 0 is the crossfader). */
@@ -5053,6 +5055,18 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
  * MIDI Learn, and never while learning or while Set up edits a strip. */
 static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded *dec)
 {
+	/* A held flash pad is always let go, whatever changed while it was held (Learn, Set up, the pads turned off). */
+	if (dec->addr.type == MFD_MIDI_NOTE_OFF && dec->addr.channel == 0U &&
+	    dec->addr.number >= MFD_VJ_NOTE_ROW_FLASH && dec->addr.number < MFD_VJ_NOTE_ROW_FLASH + MFD_VJ_STRIPS &&
+	    (eng->vj.flashing & (1U << (unsigned)(dec->addr.number - MFD_VJ_NOTE_ROW_FLASH)))) {
+		struct mfd_vj_action off[MFD_VJ_MAX_ACTIONS];
+		size_t n_off = 0;
+		mfd_vj_pads_feed(&eng->vj, false, 0U, (uint8_t)dec->addr.number, off, MFD_VJ_MAX_ACTIONS, &n_off);
+		for (size_t i = 0; i < n_off; ++i) {
+			vj_run_locked(eng, &off[i]);
+		}
+		return true;
+	}
 	if (!vj_active(eng) || eng->setup_session.active || eng->learning_slot_index >= 0 ||
 	    (dec->addr.type != MFD_MIDI_NOTE_ON && dec->addr.type != MFD_MIDI_NOTE_OFF)) {
 		return false;
@@ -5091,10 +5105,35 @@ static void vj_refresh_locked(struct mfd_engine *eng)
 	}
 }
 
+/* Keeps the pad state true to the strips: a strip raised by hand (or by obs-websocket) after a pad faded it out is
+ * no longer faded out; a flash on a strip that is no longer a Layer Opacity strip, or whose pad is no longer held, ends. */
+static void vj_tidy_locked(struct mfd_engine *eng)
+{
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		struct mfd_fader_slot *slot = vj_slot(eng, i);
+		unsigned b = 1U << (unsigned)i;
+		if (!slot) {
+			continue;
+		}
+		if ((eng->vj.faded & b) && !slot->auto_fade_active && slot->last_applied_val > 0.0005f) {
+			mfd_vj_pads_set_faded(&eng->vj, i, false);
+			eng->vj_state_dirty = true;
+		}
+		if (slot->vj_flash_held && (!(eng->vj.flashing & b) || !vj_fadeable(eng, slot))) {
+			slot->vj_flash_held = false;
+			eng->vj.flashing &= (uint8_t)~b;
+			apply_source_opacity_and_afv(eng, slot->source_a_name, slot->last_applied_val,
+						     slot->audio_follows_video);
+			eng->vj_state_dirty = true;
+		}
+	}
+}
+
 /* Sends the LEDs that changed (a dirty table, so a quiet tick sends nothing). */
 static void vj_flush_leds_locked(struct mfd_engine *eng)
 {
-	if (!vj_active(eng) || !mfd_winmm_has_output(&eng->midi_dev)) {
+	if (!vj_active(eng) || !mfd_winmm_has_output(&eng->midi_dev) ||
+	    os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
 		return;
 	}
 	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
@@ -5145,9 +5184,10 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 	eng->vj_disabled = !enabled;
 	eng->vj_fade_ms = (fade_ms < 50 || fade_ms > 20000) ? MFD_VJ_DEFAULT_FADE_MS : fade_ms;
 	if (was && !vj_active(eng)) {
+		vj_leds_off_locked(eng); /* first: it only turns off what the table says is lit */
 		vj_release_all_locked(eng);
-		vj_leds_off_locked(eng);
 	}
+	eng->vj_was_active = vj_active(eng);
 	eng->vj_refresh_pending = true;
 	if (obs_initialized()) {
 		eng->pending_config_save = true;
@@ -5178,9 +5218,21 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	mfd_engine_lock(eng);
 
 	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+		bool first = !eng->midi_disconnect_handled;
 		abort_open_tbar_slots_on_midi_disconnect_locked(eng);
-		vj_release_all_locked(eng);
+		if (first) {
+			vj_release_all_locked(eng);
+		}
 		mfd_engine_mark_ui_dirty(eng, true);
+	}
+	{
+		/* The pads stopped applying (profile changed, the desk changed): lights off, held pads let go. */
+		bool active = vj_active(eng);
+		if (eng->vj_was_active && !active) {
+			vj_leds_off_locked(eng);
+			vj_release_all_locked(eng);
+		}
+		eng->vj_was_active = active;
 	}
 	if (eng->vj_refresh_pending && vj_active(eng)) {
 		eng->vj_refresh_pending = false;
@@ -5547,6 +5599,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			eng->mix_send_wait = 0.05f;
 		}
 	}
+	vj_tidy_locked(eng);
 	vj_flush_leds_locked(eng);
 	if (eng->vj_state_dirty) {
 		eng->vj_state_dirty = false;

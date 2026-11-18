@@ -86,12 +86,33 @@ void mfd_winmm_init(struct mfd_winmm_device *dev, struct mfd_midi_queue *queue)
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 }
 
-/* Opens the MIDI Out with the input's name (or one containing it, as some drivers prefix "MIDIOUT2 (…)"). */
+/* The device part of a port name: "MIDIIN2 (APC40 mkII)" and "MIDIOUT2 (APC40 mkII)" both give "APC40 mkII";
+ * a name without brackets is itself. */
+static void port_device_part(const char *name, char *out, size_t out_size)
+{
+	const char *open = strchr(name, '(');
+	const char *close = open ? strrchr(name, ')') : NULL;
+	if (open && close && close > open + 1) {
+		size_t len = (size_t)(close - open - 1);
+		if (len >= out_size) {
+			len = out_size - 1U;
+		}
+		memcpy(out, open + 1, len);
+		out[len] = '\0';
+	} else {
+		snprintf(out, out_size, "%s", name);
+	}
+}
+
+/* Opens the MIDI Out with the input's name, else one for the same device ("MIDIOUT2 (…)" beside "MIDIIN2 (…)"). */
 static void open_output(struct mfd_winmm_device *dev)
 {
 	UINT n = midiOutGetNumDevs();
 	int exact = -1, partial = -1;
 	char name[MFD_MIDI_DEV_NAME_MAX];
+	char in_part[MFD_MIDI_DEV_NAME_MAX];
+	char out_part[MFD_MIDI_DEV_NAME_MAX];
+	port_device_part(dev->opened_name, in_part, sizeof(in_part));
 	for (UINT i = 0U; i < n; ++i) {
 		MIDIOUTCAPSW caps;
 		memset(&caps, 0, sizeof(caps));
@@ -99,9 +120,10 @@ static void open_output(struct mfd_winmm_device *dev)
 			continue;
 		}
 		wide_to_utf8(caps.szPname, name, sizeof(name));
+		port_device_part(name, out_part, sizeof(out_part));
 		if (exact < 0 && strcmp(name, dev->opened_name) == 0) {
 			exact = (int)i;
-		} else if (partial < 0 && dev->opened_name[0] != '\0' && strstr(name, dev->opened_name)) {
+		} else if (partial < 0 && in_part[0] != '\0' && strcmp(out_part, in_part) == 0) {
 			partial = (int)i;
 		}
 	}

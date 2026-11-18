@@ -1178,8 +1178,8 @@ private:
 				"Bottom pad row: blend punch, the strip's layer between Normal and its punch mode (Shift + pad: next "
 				"punch mode). Row 2: flash the layer to 100 % while held. Row 3: fade the layer out; press again to "
 				"fade it back. Stop All Clips: Clean, every effect off and every blend Normal (Shift + Stop All "
-				"Clips: fade every layer out). The pads act on strips set to “Show or hide a layer” or "
-				"“Mix two layers”."),
+				"Clips: fade every layer out). Blend punch works on strips set to “Show or hide a layer” or "
+				"“Mix two layers”; flash and fade on “Show or hide a layer” strips."),
 			adv_tab);
 		vj_legend->setObjectName(QStringLiteral("mfdAdvVjLegend"));
 		vj_legend->setWordWrap(true);

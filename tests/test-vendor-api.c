@@ -2330,7 +2330,8 @@ static int test_vj_pads_drive_layers(void)
 	sg.owner_eng = eng;
 	mfd_midi_parser_init(&eng->midi_parser);
 	mfd_midi_queue_init(&eng->midi_queue);
-	eng->learning_slot_index = -1; /* as the engine starts: not learning */
+	eng->learning_slot_index = -1;         /* as the engine starts: not learning */
+	eng->apc40_controller_detected = true; /* an APC40 mkII is connected */
 
 	vj_layer_slot(eng, 1, "Top");  /* strip 1 */
 	vj_layer_slot(eng, 2, "Base"); /* strip 2 */
@@ -2385,6 +2386,27 @@ static int test_vj_pads_drive_layers(void)
 	REQUIRE(fabsf(fake_sg_find_source(&sg, "Top")->last_opacity - 0.8f) < 0.01f);
 	REQUIRE(!(eng->vj.faded & 0x01U));
 
+	/* A strip faded out by a pad, then raised by hand, is no longer faded out. */
+	vj_tap(eng, 16);
+	for (int i = 0; i < 20; ++i) {
+		mfd_engine_tick(eng, 0.016f);
+	}
+	REQUIRE(eng->vj.faded & 0x01U);
+	mfd_engine_apply_slot_output(eng, &eng->fader_slots[1], 0.5f);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(!(eng->vj.faded & 0x01U));
+
+	/* A flash released while MIDI Learn waits is still let go. */
+	push_midi_note(eng, true, 0, 8);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->fader_slots[1].vj_flash_held);
+	eng->learning_slot_index = 6;
+	push_midi_note(eng, false, 0, 8);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(!eng->fader_slots[1].vj_flash_held);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "Top")->last_opacity - 0.5f) < 1e-4f);
+	eng->learning_slot_index = -1;
+
 	/* 4. Stop All Clips: every blend back to Normal. */
 	vj_tap(eng, 0);
 	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_SCREEN && vj_blend_of("Base") == (int)OBS_BLEND_ADDITIVE);
@@ -2416,6 +2438,14 @@ static int test_vj_pads_drive_layers(void)
 	eng->active_profile_name[0] = '\0';
 	vj_tap(eng, 0);
 	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_SCREEN);
+
+	/* Another desk on the default profile (no APC40 mkII connected): its notes are left alone. */
+	eng->apc40_controller_detected = false;
+	writes = g_vj_blend_writes;
+	vj_tap(eng, 0);
+	REQUIRE(g_vj_blend_writes == writes);
+	eng->apc40_controller_detected = true;
+	mfd_engine_tick(eng, 0.016f);
 
 	/* 7. The controller goes away mid-flash: the flash is let go. */
 	push_midi_note(eng, true, 0, 8);
