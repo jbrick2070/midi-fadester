@@ -4984,7 +4984,7 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		struct mfd_fader_slot *slot = vj_slot(eng, s);
 		if (!vj_fadeable(eng, slot)) {
 			vj_say_once(eng, s, "flash needs a Layer Opacity strip");
-			eng->vj.flashing &= (uint8_t)~(1U << (unsigned)s);
+			eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
 			break;
 		}
 		/* An override on top of the strip: its value, smoothing, fade and takeover carry on underneath. */
