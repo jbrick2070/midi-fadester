@@ -235,6 +235,8 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 	void *ui_ud = NULL;
 	struct mfd_pending_fader_emit fader_emits[MFD_MAX_FADER_SLOTS];
 	size_t fader_emit_count = 0U;
+	unsigned speed_actions = 0U;
+	int speed_steps = 0;
 
 	if (eng->lock_depth > 0U) {
 		--eng->lock_depth;
@@ -247,6 +249,18 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 			if (eng->pending_fader_emits[i].pending) {
 				fader_emits[fader_emit_count++] = eng->pending_fader_emits[i];
 				eng->pending_fader_emits[i].pending = false;
+			}
+		}
+
+		/* APC40 video speed: Tap Tempo and Play at once, Tempo steps added up and sent at most every 50 ms. */
+		speed_actions = eng->vj_speed_actions;
+		eng->vj_speed_actions = 0U;
+		if (eng->vj_speed_steps != 0) {
+			uint64_t now = os_gettime_ns();
+			if (now - eng->vj_speed_sent_ns >= MFD_VJ_SPEED_SEND_NS) {
+				speed_steps = eng->vj_speed_steps;
+				eng->vj_speed_steps = 0;
+				eng->vj_speed_sent_ns = now;
 			}
 		}
 
@@ -267,6 +281,15 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 	}
 	if (emit_state) {
 		mfd_vendor_emit_state_changed(eng);
+	}
+	if (speed_actions & MFD_VJ_SPEED_RESET_BIT) {
+		mfd_vendor_emit_vjster_action("vjster.speed.reset", 0);
+	}
+	if (speed_actions & MFD_VJ_SPEED_PLAY_BIT) {
+		mfd_vendor_emit_vjster_action("vjster.playPause", 0);
+	}
+	if (speed_steps != 0) {
+		mfd_vendor_emit_vjster_action("vjster.speed.step", speed_steps);
 	}
 	if (wake_ui && ui_fn) {
 		ui_fn(ui_ud);
@@ -4796,6 +4819,13 @@ static void sync_volume_slots_from_live_locked(struct mfd_engine *eng)
 
 #define MFD_VJ_DEFAULT_FADE_MS 1000
 
+/* The APC40 mkII's endless knobs that send steps, not a position: Tempo (CC 13) and Cue Level (CC 47), channel 1. */
+static bool apc40_relative_knob(const struct mfd_engine *eng, const struct mfd_midi_addr *a)
+{
+	return eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name) && a->type == MFD_MIDI_CC &&
+	       a->channel == 0U && (a->number == MFD_VJ_CC_TEMPO || a->number == 47U);
+}
+
 static int vj_effective_fade_ms(const struct mfd_engine *eng)
 {
 	int ms = eng ? eng->vj_fade_ms : 0;
@@ -5053,6 +5083,20 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		obs_log(LOG_INFO, "APC40 pads: every layer strip fading out");
 		eng->vj_state_dirty = true;
 		break;
+	case MFD_VJ_ACTION_SPEED_STEPS: {
+		long total = (long)eng->vj_speed_steps + (long)a->steps;
+		eng->vj_speed_steps = (int)(total > MFD_VJ_SPEED_MAX_STEPS    ? MFD_VJ_SPEED_MAX_STEPS
+					    : total < -MFD_VJ_SPEED_MAX_STEPS ? -MFD_VJ_SPEED_MAX_STEPS
+									      : total);
+		break;
+	}
+	case MFD_VJ_ACTION_SPEED_RESET:
+		eng->vj_speed_steps = 0; /* steps turned before Tap Tempo are overtaken by it */
+		eng->vj_speed_actions |= MFD_VJ_SPEED_RESET_BIT;
+		break;
+	case MFD_VJ_ACTION_PLAY_PAUSE:
+		eng->vj_speed_actions ^= MFD_VJ_SPEED_PLAY_BIT; /* two presses before they are sent cancel out */
+		break;
 	case MFD_VJ_ACTION_NONE:
 	default:
 		break;
@@ -5080,21 +5124,28 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 		eng->vj.shift = false; /* a held Shift is always let go too */
 		return vj_active(eng);
 	}
-	if (!vj_active(eng) || eng->setup_session.active || eng->learning_slot_index >= 0 ||
-	    (dec->addr.type != MFD_MIDI_NOTE_ON && dec->addr.type != MFD_MIDI_NOTE_OFF)) {
+	bool is_note = dec->addr.type == MFD_MIDI_NOTE_ON || dec->addr.type == MFD_MIDI_NOTE_OFF;
+	bool is_knob = dec->addr.type == MFD_MIDI_CC && !dec->addr.is_14bit &&
+		       mfd_vj_pads_is_knob(dec->addr.channel, (uint8_t)dec->addr.number);
+	if (!vj_active(eng) || eng->setup_session.active || eng->learning_slot_index >= 0 || (!is_note && !is_knob)) {
 		return false;
 	}
-	struct mfd_midi_addr as_on = dec->addr;
-	as_on.type = MFD_MIDI_NOTE_ON; /* a strip learned on this pad's note on owns its note off too */
+	struct mfd_midi_addr owner = dec->addr;
+	if (is_note) {
+		owner.type = MFD_MIDI_NOTE_ON; /* a strip learned on this pad's note on owns its note off too */
+	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-		if (eng->fader_slots[i].enabled && mfd_midi_addr_matches(&eng->fader_slots[i].addr, &as_on)) {
+		if (eng->fader_slots[i].enabled && mfd_midi_addr_matches(&eng->fader_slots[i].addr, &owner)) {
 			return false;
 		}
 	}
 	struct mfd_vj_action acts[MFD_VJ_MAX_ACTIONS];
 	size_t n = 0;
-	if (!mfd_vj_pads_feed(&eng->vj, dec->addr.type == MFD_MIDI_NOTE_ON, dec->addr.channel,
-			      (uint8_t)dec->addr.number, acts, MFD_VJ_MAX_ACTIONS, &n)) {
+	bool fed = is_note ? mfd_vj_pads_feed(&eng->vj, dec->addr.type == MFD_MIDI_NOTE_ON, dec->addr.channel,
+					      (uint8_t)dec->addr.number, acts, MFD_VJ_MAX_ACTIONS, &n)
+			   : mfd_vj_pads_feed_cc(&eng->vj, dec->addr.channel, (uint8_t)dec->addr.number,
+						 (uint8_t)(dec->raw_value & 0x7FU), acts, MFD_VJ_MAX_ACTIONS, &n);
+	if (!fed) {
 		return false;
 	}
 	for (size_t i = 0; i < n; ++i) {
@@ -5287,7 +5338,12 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		mfd_engine_mark_ui_dirty(eng, false);
 
 		struct mfd_midi_addr learned;
-		if (mfd_midi_parser_pop_learned(&eng->midi_parser, &learned)) {
+		bool got_learned = mfd_midi_parser_pop_learned(&eng->midi_parser, &learned);
+		if (got_learned && apc40_relative_knob(eng, &learned)) {
+			/* The APC40's Tempo and Cue Level knobs are endless and send steps, not a position: bound to a
+			 * strip they would throw it between 0 and 100 %. Keep listening for another control. */
+			mfd_midi_parser_start_learn(&eng->midi_parser);
+		} else if (got_learned) {
 			if (eng->setup_session.active && eng->setup_session.learning) {
 				eng->setup_session.candidate_addr = learned;
 				mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &learned,

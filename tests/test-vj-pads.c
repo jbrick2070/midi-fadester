@@ -131,6 +131,28 @@ int main(void)
 	REQUIRE(!mfd_vj_blend_from_id("overlay", &b));
 	REQUIRE(strcmp(mfd_vj_blend_id(MFD_VJ_BLEND_DARKEN), "darken") == 0);
 
+	/* 10. Transport: Tempo detents (relative; 64..127 is negative, 0 no turn), Shift x5, Nudge +-5, Tap Tempo, Play. */
+	struct mfd_vj_pads t;
+	mfd_vj_pads_init(&t);
+	REQUIRE(!mfd_vj_pads_feed_cc(&t, 0, 14, 1, acts, MFD_VJ_MAX_ACTIONS, &n)); /* master fader */
+	REQUIRE(!mfd_vj_pads_feed_cc(&t, 1, 13, 1, acts, MFD_VJ_MAX_ACTIONS, &n)); /* another channel */
+	REQUIRE(mfd_vj_pads_feed_cc(&t, 0, 13, 1, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1);
+	REQUIRE(acts[0].kind == MFD_VJ_ACTION_SPEED_STEPS && acts[0].steps == 1);
+	REQUIRE(mfd_vj_pads_feed_cc(&t, 0, 13, 127, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1 && acts[0].steps == -1);
+	REQUIRE(mfd_vj_pads_feed_cc(&t, 0, 13, 64, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1 && acts[0].steps == -64);
+	REQUIRE(mfd_vj_pads_feed_cc(&t, 0, 13, 63, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1 && acts[0].steps == 63);
+	REQUIRE(mfd_vj_pads_feed_cc(&t, 0, 13, 0, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 0);
+	REQUIRE(feed(&t, true, 0, 98) && n == 0);
+	REQUIRE(mfd_vj_pads_feed_cc(&t, 0, 13, 2, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1 && acts[0].steps == 10);
+	REQUIRE(feed(&t, false, 0, 98) && !t.shift);
+	REQUIRE(feed(&t, true, 0, 101) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SPEED_STEPS && acts[0].steps == 5);
+	REQUIRE(feed(&t, false, 0, 101) && n == 0);
+	REQUIRE(feed(&t, true, 0, 100) && n == 1 && acts[0].steps == -5);
+	REQUIRE(feed(&t, true, 0, 99) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SPEED_RESET);
+	REQUIRE(feed(&t, true, 0, 91) && n == 1 && acts[0].kind == MFD_VJ_ACTION_PLAY_PAUSE);
+	REQUIRE(feed(&t, false, 0, 91) && n == 0);
+	REQUIRE(!feed(&t, true, 1, 91) && !feed(&t, true, 0, 92)); /* Play on another channel; Stop */
+
 	printf("test-vj-pads: all checks passed\n");
 	return 0;
 }

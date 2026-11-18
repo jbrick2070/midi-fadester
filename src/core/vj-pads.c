@@ -59,8 +59,15 @@ void mfd_vj_pads_init(struct mfd_vj_pads *p)
 
 bool mfd_vj_pads_is_button(uint8_t channel, uint8_t note)
 {
-	return channel == 0U && (note < MFD_VJ_NOTE_ROW_FADE + MFD_VJ_STRIPS || note == MFD_VJ_NOTE_STOP_ALL ||
-				 note == MFD_VJ_NOTE_SHIFT);
+	return channel == 0U &&
+	       (note < MFD_VJ_NOTE_ROW_FADE + MFD_VJ_STRIPS || note == MFD_VJ_NOTE_STOP_ALL ||
+		note == MFD_VJ_NOTE_SHIFT || note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO ||
+		note == MFD_VJ_NOTE_NUDGE_DOWN || note == MFD_VJ_NOTE_NUDGE_UP);
+}
+
+bool mfd_vj_pads_is_knob(uint8_t channel, uint8_t cc)
+{
+	return channel == 0U && cc == MFD_VJ_CC_TEMPO;
 }
 
 static void push(struct mfd_vj_action *out, size_t max, size_t *count, enum mfd_vj_action_kind kind, int strip,
@@ -70,6 +77,7 @@ static void push(struct mfd_vj_action *out, size_t max, size_t *count, enum mfd_
 		out[*count].kind = kind;
 		out[*count].strip = strip;
 		out[*count].blend = blend;
+		out[*count].steps = 0;
 		++*count;
 	}
 }
@@ -94,6 +102,19 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 
 	if (note == MFD_VJ_NOTE_SHIFT) {
 		p->shift = note_on;
+	} else if (note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO || note == MFD_VJ_NOTE_NUDGE_DOWN ||
+		   note == MFD_VJ_NOTE_NUDGE_UP) {
+		if (note_on && note == MFD_VJ_NOTE_PLAY) {
+			push(out, max, &count, MFD_VJ_ACTION_PLAY_PAUSE, -1, MFD_VJ_BLEND_NORMAL);
+		} else if (note_on && note == MFD_VJ_NOTE_TAP_TEMPO) {
+			push(out, max, &count, MFD_VJ_ACTION_SPEED_RESET, -1, MFD_VJ_BLEND_NORMAL);
+		} else if (note_on) {
+			push(out, max, &count, MFD_VJ_ACTION_SPEED_STEPS, -1, MFD_VJ_BLEND_NORMAL);
+			if (count > 0) {
+				out[count - 1].steps = note == MFD_VJ_NOTE_NUDGE_UP ? MFD_VJ_COARSE_STEPS
+										    : -MFD_VJ_COARSE_STEPS;
+			}
+		}
 	} else if (note == MFD_VJ_NOTE_STOP_ALL) {
 		if (note_on) {
 			if (p->shift) {
@@ -141,6 +162,30 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 		}
 	}
 
+	if (out_count) {
+		*out_count = count;
+	}
+	return true;
+}
+
+bool mfd_vj_pads_feed_cc(struct mfd_vj_pads *p, uint8_t channel, uint8_t cc, uint8_t value, struct mfd_vj_action *out,
+			 size_t max, size_t *out_count)
+{
+	size_t count = 0;
+	if (out_count) {
+		*out_count = 0;
+	}
+	if (!p || !mfd_vj_pads_is_knob(channel, cc)) {
+		return false;
+	}
+	value &= 0x7FU;
+	int detents = value < 64U ? (int)value : (int)value - 128; /* 0 is no turn */
+	if (detents != 0) {
+		push(out, max, &count, MFD_VJ_ACTION_SPEED_STEPS, -1, MFD_VJ_BLEND_NORMAL);
+		if (count > 0) {
+			out[count - 1].steps = p->shift ? detents * MFD_VJ_COARSE_STEPS : detents;
+		}
+	}
 	if (out_count) {
 		*out_count = count;
 	}

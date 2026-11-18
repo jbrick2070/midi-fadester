@@ -55,6 +55,9 @@ void mfd_vendor_set_event_sink(mfd_vendor_event_sink_fn fn, void *user_data);
 void mfd_vendor_emit_fader_changed(const char *slot_id, float value, const char *origin);
 void mfd_vendor_emit_fader_changed_ex(const char *slot_id, float value, const char *display_value, const char *origin);
 void mfd_vendor_emit_state_changed(struct mfd_engine *eng);
+/* APC40 video speed for Fadester Companion: vendor event "vjster_action" with {"action": id} and, for
+ * "vjster.speed.step", {"steps": n} (n x 0.05x, signed). Never called with the engine lock held. */
+void mfd_vendor_emit_vjster_action(const char *action, int steps);
 
 /*
  * Direct request handlers exposed for unit tests and in-process verification.

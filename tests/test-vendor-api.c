@@ -2303,6 +2303,124 @@ static void vj_layer_slot(struct mfd_engine *eng, int idx, const char *source)
 	snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", source);
 }
 
+struct vj_speed_log {
+	int events;
+	int steps;
+	char actions[256];
+};
+
+static void on_vj_speed_event(const char *event_name, obs_data_t *event_data, void *user_data)
+{
+	struct vj_speed_log *log = (struct vj_speed_log *)user_data;
+	if (!log || !event_name || strcmp(event_name, "vjster_action") != 0) {
+		return;
+	}
+	++log->events;
+	log->steps += (int)obs_data_get_int(event_data, "steps");
+	size_t len = strlen(log->actions);
+	snprintf(log->actions + len, sizeof(log->actions) - len, "%s;", obs_data_get_string(event_data, "action"));
+}
+
+static void push_midi_cc_now(struct mfd_engine *eng, uint8_t cc, uint8_t val)
+{
+	mfd_midi_queue_push(&eng->midi_queue, 0xB0U | ((uint32_t)cc << 8) | ((uint32_t)val << 16), 0U);
+}
+
+/* APC40 transport: Tempo, Nudge, Tap Tempo and Play become vjster_action vendor events for Fadester Companion. */
+static int test_vj_speed_events(void)
+{
+	struct mfd_engine *eng = calloc(1U, sizeof(*eng));
+	REQUIRE(eng != NULL);
+	REQUIRE(mfd_engine_init_mutex(eng));
+	mfd_midi_parser_init(&eng->midi_parser);
+	mfd_midi_queue_init(&eng->midi_queue);
+	eng->learning_slot_index = -1;
+	eng->midi_dev.is_open = true;
+	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "APC40 mkII");
+	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", "apc40mk2");
+	struct vj_speed_log log;
+	memset(&log, 0, sizeof(log));
+	mfd_vendor_set_event_sink(on_vj_speed_event, &log);
+	mfd_engine_tick(eng, 0.016f);
+
+	/* A fast spin within one tick is one event with every step; a turn right after waits for the 50 ms gap. */
+	push_midi_cc_now(eng, 13, 1);
+	push_midi_cc_now(eng, 13, 2);
+	push_midi_cc_now(eng, 13, 1);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 1 && log.steps == 4 && strcmp(log.actions, "vjster.speed.step;") == 0);
+	eng->vj_speed_sent_ns = os_gettime_ns(); /* as if just sent */
+	push_midi_cc_now(eng, 13, 127);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 1 && eng->vj_speed_steps == -1);
+	eng->vj_speed_sent_ns = 0;
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 2 && log.steps == 3);
+
+	/* Tap Tempo overtakes steps not sent yet; Play pressed twice before a send is no change. */
+	eng->vj_speed_sent_ns = os_gettime_ns();
+	push_midi_cc_now(eng, 13, 3);
+	push_midi_note(eng, true, 0, 99);
+	push_midi_note(eng, false, 0, 99);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 3 && strstr(log.actions, "vjster.speed.reset;") && eng->vj_speed_steps == 0);
+	push_midi_note(eng, true, 0, 91);
+	push_midi_note(eng, false, 0, 91);
+	push_midi_note(eng, true, 0, 91);
+	push_midi_note(eng, false, 0, 91);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 3);
+	vj_tap(eng, 91);
+	REQUIRE(log.events == 4 && strstr(log.actions, "vjster.playPause;"));
+
+	/* Nudge +, and with Shift held each Tempo detent is 5 steps. */
+	eng->vj_speed_sent_ns = 0;
+	vj_tap(eng, 101);
+	REQUIRE(log.events == 5 && log.steps == 8);
+	push_midi_note(eng, true, 0, 98);
+	push_midi_cc_now(eng, 13, 127);
+	push_midi_note(eng, false, 0, 98);
+	eng->vj_speed_sent_ns = 0;
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 6 && log.steps == 3);
+
+	/* A strip learned on the Tempo knob keeps it; so do pads turned off. */
+	struct mfd_fader_slot *s = &eng->fader_slots[3];
+	s->enabled = true;
+	s->addr.type = MFD_MIDI_CC;
+	s->addr.channel = 0;
+	s->addr.number = 13;
+	eng->vj_speed_sent_ns = 0;
+	push_midi_cc_now(eng, 13, 1);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 6 && eng->vj_speed_steps == 0);
+	s->enabled = false;
+	s->addr.type = MFD_MIDI_NONE;
+	mfd_engine_set_vj_buttons(eng, false, eng->vj_fade_ms);
+	push_midi_cc_now(eng, 13, 1);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(log.events == 6 && eng->vj_speed_steps == 0);
+	mfd_engine_set_vj_buttons(eng, true, eng->vj_fade_ms);
+
+	/* MIDI Learn skips the endless Tempo and Cue Level knobs and takes the next control. */
+	eng->learning_slot_index = 2;
+	mfd_midi_parser_start_learn(&eng->midi_parser);
+	push_midi_cc_now(eng, 13, 1);
+	push_midi_cc_now(eng, 47, 1);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->learning_slot_index == 2 && mfd_midi_parser_is_learning(&eng->midi_parser));
+	push_midi_cc_now(eng, 14, 90); /* master fader */
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->learning_slot_index == -1 && eng->fader_slots[2].addr.type == MFD_MIDI_CC &&
+		eng->fader_slots[2].addr.number == 14);
+	REQUIRE(log.events == 6);
+
+	mfd_vendor_set_event_sink(NULL, NULL);
+	mfd_engine_destroy_mutex(eng);
+	free(eng);
+	return 0;
+}
+
 static int test_vj_pads_drive_layers(void)
 {
 	struct fake_scene_graph sg;
@@ -2482,6 +2600,7 @@ int main(void)
 	mfd_text_set_lookup(test_locale_text);
 	REQUIRE(strcmp(mfd_text("PluginDisplayName", "missing"), "Midi Fadester") == 0);
 	REQUIRE(test_config_abort_and_movement_errors() == 0);
+	REQUIRE(test_vj_speed_events() == 0);
 	REQUIRE(test_status_read_takes_no_libobs_lock() == 0);
 	REQUIRE(test_source_removal_callbacks_never_wait_for_engine() == 0);
 	REQUIRE(test_cached_status_follows_scene_changes() == 0);

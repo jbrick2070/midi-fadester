@@ -1185,6 +1185,17 @@ private:
 		vj_legend->setWordWrap(true);
 		vj_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
 		root->addWidget(vj_legend);
+		auto *vj_speed_legend = new QLabel(
+			mfdText("Dialog.VjSpeedLegend",
+				"Video speed (with Fadester Companion and VJster running): the Tempo knob makes the video 0.05x "
+				"faster or slower per click (Shift + Tempo: 0.25x), Nudge − / + 0.25x slower or faster, Tap Tempo "
+				"back to 1x, Play plays or pauses it. It goes through VJster because an OBS media source restarts "
+				"when its speed changes."),
+			adv_tab);
+		vj_speed_legend->setObjectName(QStringLiteral("mfdAdvVjSpeedLegend"));
+		vj_speed_legend->setWordWrap(true);
+		vj_speed_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
+		root->addWidget(vj_speed_legend);
 
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
