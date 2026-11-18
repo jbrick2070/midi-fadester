@@ -729,6 +729,27 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	obs_data_set_array(response_data, "slots", arr);
 	obs_data_array_release(arr);
 
+	/* APC40 mkII VJ pads (additive, api_version stays 1): per strip 1..8 its blend, punch mode, flash and fade. */
+	obs_data_t *vj = obs_data_create();
+	obs_data_set_bool(vj, "enabled", mfd_engine_vj_buttons_enabled(eng));
+	obs_data_set_int(vj, "fade_ms", mfd_engine_vj_fade_ms(eng));
+	obs_data_set_bool(vj, "lights", mfd_winmm_has_output(&eng->midi_dev));
+	obs_data_array_t *strips = obs_data_array_create();
+	for (unsigned i = 0; i < MFD_VJ_STRIPS; ++i) {
+		obs_data_t *st = obs_data_create();
+		obs_data_set_bool(st, "has_layer", (eng->vj.has_layer & (1U << i)) != 0);
+		obs_data_set_string(st, "blend", mfd_vj_blend_id(eng->vj.current[i]));
+		obs_data_set_string(st, "punch", mfd_vj_blend_id(eng->vj.punch[i]));
+		obs_data_set_bool(st, "flashing", (eng->vj.flashing & (1U << i)) != 0);
+		obs_data_set_bool(st, "faded", (eng->vj.faded & (1U << i)) != 0);
+		obs_data_array_push_back(strips, st);
+		obs_data_release(st);
+	}
+	obs_data_set_array(vj, "strips", strips);
+	obs_data_array_release(strips);
+	obs_data_set_obj(response_data, "vj_pads", vj);
+	obs_data_release(vj);
+
 	mfd_engine_unlock(eng);
 }
 

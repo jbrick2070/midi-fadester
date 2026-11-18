@@ -22,6 +22,7 @@
 #include "core/filter-math.h"
 #include "core/apc40-profile.h"
 #include "core/slot-messages.h"
+#include "core/vj-pads.h"
 #include "midi/winmm-device.h"
 
 #ifdef __cplusplus
@@ -83,6 +84,8 @@ struct mfd_fader_slot {
 	enum mfd_crossfade_curve curve;
 	bool audio_follows_video;
 	bool invert;
+	/* APC40 mkII VJ buttons: Solo holds this layer at 100 %; fader moves update the value but not OBS meanwhile. */
+	bool vj_flash_held;
 
 	/* Cached filter property metadata (refreshed on signals, never on video tick) */
 	bool filter_prop_valid;
@@ -351,6 +354,10 @@ struct mfd_scene_graph_ops {
 
 	/* Optional: check whether Midi Fadester's internal opacity filter is attached (headless tests). */
 	bool (*source_has_internal_opacity)(const char *source_name, void *user_data);
+
+	/* Optional: read / write a scene item's blend mode (an obs_blending_type value; headless tests). */
+	bool (*get_blend_mode)(const char *scene_name, const char *source_name, int *out_mode, void *user_data);
+	bool (*set_blend_mode)(const char *scene_name, const char *source_name, int mode, void *user_data);
 };
 
 /*
@@ -463,6 +470,16 @@ struct mfd_engine {
 	void *source_exists_user_data;
 	bool studio_mode_override_set;
 	bool studio_mode_override;
+
+	/* APC40 mkII VJ buttons (core/vj-pads.h): blend punch and pick, flash, fades, Clean FX. On unless turned off. */
+	bool vj_disabled;
+	int vj_fade_ms; /* 0 = the default, 1000 ms */
+	struct mfd_vj_pads vj;
+	float vj_fade_restore[MFD_VJ_STRIPS]; /* the level a Clip Stop faded out from */
+	uint8_t vj_led_sent[MFD_VJ_MAX_LEDS]; /* the velocity last sent per mfd_vj_pads_leds index; 255 = unknown */
+	bool vj_refresh_pending;              /* re-read the strips' layers and blend modes on the next tick */
+	bool vj_state_dirty;                  /* a pad changed something: tell obs-websocket clients once */
+	char vj_said[MFD_VJ_STRIPS][96];      /* the last "why not" line per strip, said once */
 
 	bool signals_connected;
 	float health_check_accum_sec;
@@ -607,6 +624,11 @@ bool mfd_engine_lookup_persisted_calibration(const struct mfd_engine *eng, const
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name);
 void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms);
 void mfd_engine_set_tbar_bidirectional_flip(struct mfd_engine *eng, bool flip);
+
+/* APC40 mkII VJ buttons: on/off and the Clip Stop fade time (50..20000 ms). Persisted with the global settings. */
+void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms);
+bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng);
+int mfd_engine_vj_fade_ms(const struct mfd_engine *eng);
 
 void mfd_engine_start_learn(struct mfd_engine *eng, int slot_index);
 void mfd_engine_cancel_learn(struct mfd_engine *eng);

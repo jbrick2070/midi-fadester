@@ -66,6 +66,8 @@ target_sources(
     src/core/apc40-profile.c
     src/core/tbar-logic.h
     src/core/tbar-logic.c
+    src/core/vj-pads.h
+    src/core/vj-pads.c
     src/core/filter-math.h
     src/core/filter-math.c
     src/core/ui-sentences.h

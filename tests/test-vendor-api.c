@@ -2219,6 +2219,218 @@ static int test_graph_drain_after_shutdown_does_nothing(void)
 	return 0;
 }
 
+/* ---- APC40 mkII VJ pads through the engine (core/vj-pads.h, mfd-engine.c) ---------------------------------- */
+
+struct vj_blend_entry {
+	char scene[64];
+	char source[64];
+	int mode;
+};
+static struct vj_blend_entry g_vj_blends[8];
+static int g_vj_blend_count;
+static int g_vj_blend_writes;
+
+static struct vj_blend_entry *vj_blend_find(const char *scene, const char *source, bool create)
+{
+	for (int i = 0; i < g_vj_blend_count; ++i) {
+		if (strcmp(g_vj_blends[i].scene, scene) == 0 && strcmp(g_vj_blends[i].source, source) == 0) {
+			return &g_vj_blends[i];
+		}
+	}
+	if (!create || g_vj_blend_count >= 8) {
+		return NULL;
+	}
+	struct vj_blend_entry *e = &g_vj_blends[g_vj_blend_count++];
+	snprintf(e->scene, sizeof(e->scene), "%s", scene);
+	snprintf(e->source, sizeof(e->source), "%s", source);
+	e->mode = (int)OBS_BLEND_NORMAL;
+	return e;
+}
+
+static bool vj_fake_get_blend(const char *scene_name, const char *source_name, int *out_mode, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (fake_op_scene_item_stack_index(scene_name, source_name, sg) < 0) {
+		return false;
+	}
+	struct vj_blend_entry *e = vj_blend_find(scene_name, source_name, true);
+	*out_mode = e ? e->mode : (int)OBS_BLEND_NORMAL;
+	return true;
+}
+
+static bool vj_fake_set_blend(const char *scene_name, const char *source_name, int mode, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	if (fake_op_scene_item_stack_index(scene_name, source_name, sg) < 0) {
+		return false;
+	}
+	struct vj_blend_entry *e = vj_blend_find(scene_name, source_name, true);
+	if (e) {
+		e->mode = mode;
+		++g_vj_blend_writes;
+	}
+	return true;
+}
+
+static int vj_blend_of(const char *source)
+{
+	struct vj_blend_entry *e = vj_blend_find("Live", source, false);
+	return e ? e->mode : (int)OBS_BLEND_NORMAL;
+}
+
+static void push_midi_note(struct mfd_engine *eng, bool on, uint8_t ch, uint8_t note)
+{
+	uint32_t raw_msg = (uint32_t)((on ? 0x90U : 0x80U) | (ch & 0x0FU)) | ((uint32_t)(note & 0x7FU) << 8) |
+			   ((uint32_t)(on ? 127U : 0U) << 16);
+	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
+}
+
+static void vj_tap(struct mfd_engine *eng, uint8_t note)
+{
+	push_midi_note(eng, true, 0, note);
+	mfd_engine_tick(eng, 0.016f);
+	push_midi_note(eng, false, 0, note);
+	mfd_engine_tick(eng, 0.016f);
+}
+
+static void vj_layer_slot(struct mfd_engine *eng, int idx, const char *source)
+{
+	struct mfd_fader_slot *s = &eng->fader_slots[idx];
+	snprintf(s->id, sizeof(s->id), "fader_%d", idx);
+	s->enabled = true;
+	s->target_type = MFD_TARGET_SINGLE_LAYER;
+	snprintf(s->scene_name, sizeof(s->scene_name), "%s", "Live");
+	snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", source);
+}
+
+static int test_vj_pads_drive_layers(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "Base", false);
+	fake_sg_add_source(&sg, "Top", false);
+	fake_sg_add_scene(&sg, "Live");
+	fake_sg_scene_add_item(&sg, "Live", "Base");
+	fake_sg_scene_add_item(&sg, "Live", "Top");
+	g_vj_blend_count = 0;
+	g_vj_blend_writes = 0;
+
+	struct mfd_scene_graph_ops ops = g_fake_sg_ops;
+	ops.get_blend_mode = vj_fake_get_blend;
+	ops.set_blend_mode = vj_fake_set_blend;
+
+	struct mfd_engine *eng = calloc(1U, sizeof(*eng));
+	REQUIRE(eng != NULL);
+	REQUIRE(mfd_engine_init_mutex(eng));
+	eng->smooth_tau_ms = 0.0f;
+	eng->scene_graph_ops = &ops;
+	eng->scene_graph_user_data = &sg;
+	eng->studio_mode_override_set = true;
+	eng->studio_mode_override = true;
+	sg.owner_eng = eng;
+	mfd_midi_parser_init(&eng->midi_parser);
+	mfd_midi_queue_init(&eng->midi_queue);
+	eng->learning_slot_index = -1; /* as the engine starts: not learning */
+
+	vj_layer_slot(eng, 1, "Top");  /* strip 1 */
+	vj_layer_slot(eng, 2, "Base"); /* strip 2 */
+	mfd_engine_reevaluate_slots(eng, false);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->vj.has_layer == 0x03U);
+
+	/* 1. Bottom pad 1: punch Top to Screen, again back to Normal. A strip without a layer: nothing. */
+	vj_tap(eng, 0);
+	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_SCREEN);
+	vj_tap(eng, 0);
+	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_NORMAL);
+	int writes = g_vj_blend_writes;
+	vj_tap(eng, 5);
+	REQUIRE(g_vj_blend_writes == writes);
+
+	/* Shift + pad: next punch mode; the strip at Normal stays at Normal on air. */
+	push_midi_note(eng, true, 0, 98);
+	mfd_engine_tick(eng, 0.016f);
+	vj_tap(eng, 1);
+	push_midi_note(eng, false, 0, 98);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(vj_blend_of("Base") == (int)OBS_BLEND_NORMAL && eng->vj.punch[1] == MFD_VJ_BLEND_ADDITIVE);
+	vj_tap(eng, 1);
+	REQUIRE(vj_blend_of("Base") == (int)OBS_BLEND_ADDITIVE);
+
+	/* 2. Flash (row 2): 100 % while held; the strip's value moves underneath; release goes back to it. */
+	mfd_engine_apply_slot_output(eng, &eng->fader_slots[1], 0.4f);
+	push_midi_note(eng, true, 0, 8);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(fake_sg_find_source(&sg, "Top")->last_opacity > 0.999f);
+	mfd_engine_apply_slot_output(eng, &eng->fader_slots[1], 0.3f);
+	REQUIRE(fake_sg_find_source(&sg, "Top")->last_opacity > 0.999f);
+	REQUIRE(fabsf(eng->fader_slots[1].last_applied_val - 0.3f) < 1e-4f);
+	push_midi_note(eng, false, 0, 8);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "Top")->last_opacity - 0.3f) < 1e-4f);
+
+	/* 3. Fade (row 3): out over the fade time, then back to the level it had. */
+	mfd_engine_set_vj_buttons(eng, true, 200);
+	mfd_engine_apply_slot_output(eng, &eng->fader_slots[1], 0.8f);
+	vj_tap(eng, 16);
+	for (int i = 0; i < 20; ++i) {
+		mfd_engine_tick(eng, 0.016f);
+	}
+	REQUIRE(fake_sg_find_source(&sg, "Top")->last_opacity < 0.001f);
+	REQUIRE(eng->vj.faded & 0x01U);
+	vj_tap(eng, 16);
+	for (int i = 0; i < 20; ++i) {
+		mfd_engine_tick(eng, 0.016f);
+	}
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "Top")->last_opacity - 0.8f) < 0.01f);
+	REQUIRE(!(eng->vj.faded & 0x01U));
+
+	/* 4. Stop All Clips: every blend back to Normal. */
+	vj_tap(eng, 0);
+	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_SCREEN && vj_blend_of("Base") == (int)OBS_BLEND_ADDITIVE);
+	vj_tap(eng, 81);
+	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_NORMAL && vj_blend_of("Base") == (int)OBS_BLEND_NORMAL);
+
+	/* 5. A strip learned on a pad owns it: the pad drives that strip, not a blend. */
+	struct mfd_fader_slot *learned = &eng->fader_slots[4];
+	snprintf(learned->id, sizeof(learned->id), "%s", "fader_4");
+	learned->enabled = true;
+	learned->target_type = MFD_TARGET_UNASSIGNED;
+	learned->addr.type = MFD_MIDI_NOTE_ON;
+	learned->addr.channel = 0;
+	learned->addr.number = 1;
+	writes = g_vj_blend_writes;
+	vj_tap(eng, 1);
+	REQUIRE(g_vj_blend_writes == writes && vj_blend_of("Base") == (int)OBS_BLEND_NORMAL);
+	learned->enabled = false;
+
+	/* 6. Turned off, or another controller profile: the pads do nothing. */
+	mfd_engine_set_vj_buttons(eng, false, 1000);
+	writes = g_vj_blend_writes;
+	vj_tap(eng, 0);
+	REQUIRE(g_vj_blend_writes == writes);
+	mfd_engine_set_vj_buttons(eng, true, 1000);
+	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", "midimix");
+	vj_tap(eng, 0);
+	REQUIRE(g_vj_blend_writes == writes);
+	eng->active_profile_name[0] = '\0';
+	vj_tap(eng, 0);
+	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_SCREEN);
+
+	/* 7. The controller goes away mid-flash: the flash is let go. */
+	push_midi_note(eng, true, 0, 8);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->fader_slots[1].vj_flash_held);
+	os_atomic_store_bool(&eng->midi_dev.device_closed_unexpectedly, true);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(!eng->fader_slots[1].vj_flash_held);
+	REQUIRE(fake_sg_find_source(&sg, "Top")->last_opacity < 0.999f);
+
+	mfd_engine_destroy_mutex(eng);
+	free(eng);
+	return 0;
+}
+
 int main(void)
 {
 	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
@@ -2243,6 +2455,7 @@ int main(void)
 	REQUIRE(test_waiting_drainer_takes_no_batch() == 0);
 	REQUIRE(test_fold_stops_at_rename_or_removal() == 0);
 	REQUIRE(test_enable_toggle_survives_overflow() == 0);
+	REQUIRE(test_vj_pads_drive_layers() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
 	fake_sg_add_source(&fake_sg, "Cam 1", true);
