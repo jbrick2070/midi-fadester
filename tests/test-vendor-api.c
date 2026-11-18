@@ -2330,8 +2330,9 @@ static int test_vj_pads_drive_layers(void)
 	sg.owner_eng = eng;
 	mfd_midi_parser_init(&eng->midi_parser);
 	mfd_midi_queue_init(&eng->midi_queue);
-	eng->learning_slot_index = -1;         /* as the engine starts: not learning */
-	eng->apc40_controller_detected = true; /* an APC40 mkII is connected */
+	eng->learning_slot_index = -1; /* as the engine starts: not learning */
+	eng->midi_dev.is_open = true;  /* an APC40 mkII is open (no real MIDI handles: nothing is sent) */
+	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "APC40 mkII");
 
 	vj_layer_slot(eng, 1, "Top");  /* strip 1 */
 	vj_layer_slot(eng, 2, "Base"); /* strip 2 */
@@ -2439,13 +2440,22 @@ static int test_vj_pads_drive_layers(void)
 	vj_tap(eng, 0);
 	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_SCREEN);
 
-	/* Another desk on the default profile (no APC40 mkII connected): its notes are left alone. */
-	eng->apc40_controller_detected = false;
+	/* Another desk open on the default profile: its notes are left alone. */
+	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "Launchpad X");
 	writes = g_vj_blend_writes;
 	vj_tap(eng, 0);
 	REQUIRE(g_vj_blend_writes == writes);
-	eng->apc40_controller_detected = true;
+	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "APC40 mkII");
 	mfd_engine_tick(eng, 0.016f);
+
+	/* Shift released while MIDI Learn waits is still let go. */
+	push_midi_note(eng, true, 0, 98);
+	mfd_engine_tick(eng, 0.016f);
+	eng->learning_slot_index = 6;
+	push_midi_note(eng, false, 0, 98);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(!eng->vj.shift);
+	eng->learning_slot_index = -1;
 
 	/* 7. The controller goes away mid-flash: the flash is let go. */
 	push_midi_note(eng, true, 0, 8);

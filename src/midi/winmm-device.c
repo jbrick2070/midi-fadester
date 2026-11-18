@@ -153,7 +153,6 @@ static void close_output(struct mfd_winmm_device *dev)
 	if (dev->out_handle) {
 		HMIDIOUT hmo = (HMIDIOUT)dev->out_handle;
 		dev->out_handle = NULL;
-		midiOutReset(hmo);
 		midiOutClose(hmo);
 		obs_log(LOG_INFO, "Closed MIDI Out device '%s'", dev->out_name);
 	}
@@ -300,7 +299,10 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	dev->error_kind = MFD_WINMM_OK;
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 	obs_log(LOG_INFO, "Opened MIDI In device '%s' (WinMM index %u)", dev->opened_name, (unsigned)winmm_id);
-	open_output(dev);
+	/* Only an APC40 mkII has lights to drive; another desk's MIDI Out stays free for other apps. */
+	if (mfd_is_apc40_mk2_name(dev->opened_name)) {
+		open_output(dev);
+	}
 	return true;
 }
 

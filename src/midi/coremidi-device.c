@@ -360,7 +360,10 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
 	obs_log(LOG_INFO, "Opened MIDI In device '%s' (CoreMIDI source %u)", dev->opened_name,
 		(unsigned)list[selected_idx].index);
-	open_output(dev, source);
+	/* Only an APC40 mkII has lights to drive; another desk's MIDI Out stays free for other apps. */
+	if (mfd_is_apc40_mk2_name(dev->opened_name)) {
+		open_output(dev, source);
+	}
 	return true;
 }
 

@@ -362,9 +362,6 @@ static void refresh_apc40_detected_locked(struct mfd_engine *eng)
 	if (!eng) {
 		return;
 	}
-	/* Called after every MIDI open: the desk's LEDs are unknown, so the pads repaint them all. */
-	memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
-	eng->vj_refresh_pending = true;
 	if (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) {
 		eng->apc40_controller_detected = true;
 		return;
@@ -4797,8 +4794,8 @@ static int vj_effective_fade_ms(const struct mfd_engine *eng)
 /* The pads belong to the APC40 mkII layout; another profile's pads mean other things. */
 static bool vj_active(const struct mfd_engine *eng)
 {
-	/* Only on an APC40 mkII: the default profile is the APC40's, but another desk on it must keep its notes. */
-	return eng && !eng->vj_disabled && eng->apc40_controller_detected &&
+	/* Only with an APC40 mkII open: the default profile is the APC40's, but another desk on it keeps its notes. */
+	return eng && !eng->vj_disabled && eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name) &&
 	       strcmp(effective_profile_name(eng), MFD_DEFAULT_PROFILE_NAME) == 0;
 }
 
@@ -5067,6 +5064,11 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 		}
 		return true;
 	}
+	if (dec->addr.type == MFD_MIDI_NOTE_OFF && dec->addr.channel == 0U && dec->addr.number == MFD_VJ_NOTE_SHIFT &&
+	    eng->vj.shift) {
+		eng->vj.shift = false; /* a held Shift is always let go too */
+		return vj_active(eng);
+	}
 	if (!vj_active(eng) || eng->setup_session.active || eng->learning_slot_index >= 0 ||
 	    (dec->addr.type != MFD_MIDI_NOTE_ON && dec->addr.type != MFD_MIDI_NOTE_OFF)) {
 		return false;
@@ -5139,11 +5141,14 @@ static void vj_flush_leds_locked(struct mfd_engine *eng)
 	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
 	size_t n = mfd_vj_pads_leds(&eng->vj, leds, MFD_VJ_MAX_LEDS);
 	for (size_t i = 0; i < n; ++i) {
-		if (eng->vj_led_sent[i] != leds[i].velocity &&
-		    mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
-					 leds[i].velocity)) {
-			eng->vj_led_sent[i] = leds[i].velocity;
+		if (eng->vj_led_sent[i] == leds[i].velocity) {
+			continue;
 		}
+		if (!mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
+					  leds[i].velocity)) {
+			break; /* the desk is going away: try again next tick, not 24 times now */
+		}
+		eng->vj_led_sent[i] = leds[i].velocity;
 	}
 }
 
@@ -5231,6 +5236,10 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (eng->vj_was_active && !active) {
 			vj_leds_off_locked(eng);
 			vj_release_all_locked(eng);
+		} else if (!eng->vj_was_active && active) {
+			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all. */
+			memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+			eng->vj_refresh_pending = true;
 		}
 		eng->vj_was_active = active;
 	}
