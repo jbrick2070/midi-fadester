@@ -1558,11 +1558,17 @@ private:
 
 		z1_name_label_->setText(mfdFill(mfdText("Dialog.Controller.Name", "Controller: %1"),
 						{QString::fromUtf8(ctrl.display_name)}));
-		z1_dot_label_->setStyleSheet(ctrl.dot_green ? QStringLiteral("color: #22c55e; font-size: 14px;")
-							    : QStringLiteral("color: #ef4444; font-size: 14px;"));
+		const QString dot_css = ctrl.dot_green ? QStringLiteral("color: #22c55e; font-size: 14px;")
+						       : QStringLiteral("color: #ef4444; font-size: 14px;");
+		if (z1_dot_label_->styleSheet() != dot_css) { /* refreshed up to 30 Hz while the desk dock is shown */
+			z1_dot_label_->setStyleSheet(dot_css);
+		}
 		z1_status_label_->setText(QString::fromUtf8(ctrl.status_sentence));
-		z1_status_label_->setStyleSheet(ctrl.dot_green ? QStringLiteral("color: #6ee7b7; font-weight: bold;")
-							       : QStringLiteral("color: #fca5a5; font-weight: bold;"));
+		const QString status_css = ctrl.dot_green ? QStringLiteral("color: #6ee7b7; font-weight: bold;")
+							  : QStringLiteral("color: #fca5a5; font-weight: bold;");
+		if (z1_status_label_->styleSheet() != status_css) {
+			z1_status_label_->setStyleSheet(status_css);
+		}
 		z1_btn_reconnect_->setVisible(ctrl.show_reconnect);
 
 		const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(snap_.active_profile);

@@ -3408,15 +3408,34 @@ static int test_vj_fill_follow_and_desk(void)
 		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_VS_TAP);
 		eng->midi_dev.is_open = true;
 
-		/* 14f. Shown: Visual Sidechain is asked at once, and the frame tick asks the UI to repaint. */
+		/* 14f. Shown: Visual Sidechain is asked at once, and the frame tick asks the UI to repaint (one request per
+		 * 1/30 s of ticks); hidden, the frame tick asks for nothing. */
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
 		eng->vj_vs_poll_pending = false;
 		mfd_engine_set_desk_visible(eng, true);
 		REQUIRE(eng->vj_vs_poll_pending && eng->desk_visible);
-		eng->pending_ui_notify = false;
-		mfd_engine_tick(eng, 0.05f);
-		REQUIRE(eng->pending_ui_notify || eng->telemetry_rev > 0U);
+		eng->desk_frame_sec = 0.0f;
+		uint64_t rev0 = eng->telemetry_rev;
+		mfd_engine_tick(eng, 0.01f);
+		REQUIRE(eng->desk_frame_sec > 0.0f); /* not yet 1/30 s */
+		mfd_engine_tick(eng, 0.03f);
+		REQUIRE(eng->telemetry_rev > rev0 && eng->desk_frame_sec == 0.0f);
 		mfd_engine_set_desk_visible(eng, false);
 		mfd_engine_flush_pending_ui_work(eng);
+		eng->desk_frame_sec = 0.0f;
+		mfd_engine_tick(eng, 0.05f);
+		REQUIRE(eng->desk_frame_sec == 0.0f); /* hidden: no repaint requests counted */
+		/* 14g. A dock blackout (Shift + Flash) holds and lets go like the desk's. */
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, true, true, &ep) == MFD_DESK_HOLD_STARTED);
+		REQUIRE((eng->vj.blackout & 0x02U) && !eng->vj.shift);
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, false, true, &ep) == MFD_DESK_ACCEPTED);
+		REQUIRE(!(eng->vj.blackout & 0x02U));
+		/* 14h. A command dropped on a full queue is a refusal, not a press that worked. */
+		eng->vj_cmd_count = MFD_VJ_CMD_MAX;
+		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_REJECTED);
+		eng->vj_cmd_count = 0;
+		mfd_engine_desk_press(eng, 0, 33, false, false, NULL);
 		free(v);
 	}
 

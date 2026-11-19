@@ -105,7 +105,9 @@ uint32_t onScreen(uint32_t rgb)
 	if (top == 0U || top >= 110U) {
 		return rgb;
 	}
-	auto up = [&](uint32_t c) { return std::min(255U, c * 110U / top); };
+	auto up = [&](uint32_t c) {
+		return std::min(255U, c * 110U / top);
+	};
 	return (up(r) << 16) | (up(g) << 8) | up(b);
 }
 
@@ -127,10 +129,43 @@ uint32_t ledColor(const struct mfd_vj_led &led, double beat_pos, uint32_t lamp_o
 	return onScreen(mix(dim, full, 0.5 - 0.5 * std::cos(cycle * 2.0 * kPi)));
 }
 
+/* Qt re-polishes on every setStyleSheet and sends an event on every setToolTip / setText: only on change (30 Hz). */
+void setCss(QWidget *w, const QString &css)
+{
+	if (w->styleSheet() != css) {
+		w->setStyleSheet(css);
+	}
+}
+
+void setTip(QWidget *w, const QString &tip)
+{
+	if (w->toolTip() != tip) {
+		w->setToolTip(tip);
+	}
+}
+
+void setLabel(QLabel *l, const QString &text)
+{
+	if (l->text() != text) {
+		l->setText(text);
+	}
+}
+
+void setButtonText(QPushButton *b, const QString &text)
+{
+	if (b->text() != text) {
+		b->setText(text);
+	}
+}
+
 class MfdDeskDock final : public QWidget {
 public:
 	explicit MfdDeskDock(struct mfd_engine *eng, QWidget *parent = nullptr);
-	~MfdDeskDock() override { releaseHolds(); }
+	~MfdDeskDock() override
+	{
+		releaseHolds();
+		mfd_engine_set_desk_visible(eng_, false); /* deleted while shown (no hide): the engine stops asking */
+	}
 
 protected:
 	void showEvent(QShowEvent *e) override;
@@ -174,6 +209,8 @@ private:
 	bool holding_[kStrips] = {};
 	uint32_t hold_epoch_[kStrips] = {};
 	double bpm_value_ = 120.0;
+	bool bpm_valid_ = false;
+	bool status_is_reason_ = false;
 	bool vs_loaded_ = false;
 	long long last_beat_index_ = -1;
 };
@@ -206,6 +243,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	root->setSpacing(6);
 
 	title_ = new QLabel(this);
+	title_->setObjectName(QStringLiteral("mfdDeskTitle"));
 	title_->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: bold;"));
 	root->addWidget(title_);
 
@@ -247,6 +285,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 							    {rowName(r), QString::number(i + 1)}),
 						    30, 22);
 			pads_[r][i] = b;
+			b->setObjectName(QStringLiteral("mfdDeskPad_%1_%2").arg(r).arg(i));
 			connect(b, &QPushButton::pressed, this, [this, r, i]() { pressPad(r, i, true); });
 			connect(b, &QPushButton::released, this, [this, r, i]() { pressPad(r, i, false); });
 			grid->addWidget(b, r + 1, i + 1);
@@ -387,6 +426,7 @@ bool MfdDeskDock::event(QEvent *e)
 void MfdDeskDock::sayStatus(const QString &text)
 {
 	status_->setText(text);
+	status_is_reason_ = false;
 	status_age_.start();
 }
 
@@ -471,6 +511,7 @@ void MfdDeskDock::refresh()
 
 	/* Visual Sidechain's signals: its in-process proc, outside the engine lock */
 	vs_loaded_ = false;
+	bpm_valid_ = false;
 	double beat_phase = 0.0;
 	long long beat_index = 0;
 	bool locked = false;
@@ -482,6 +523,7 @@ void MfdDeskDock::refresh()
 			double bpm = calldata_float(&cd, "bpm");
 			if (std::isfinite(bpm) && bpm >= 20.0 && bpm <= 400.0) {
 				bpm_value_ = bpm;
+				bpm_valid_ = true;
 			}
 			beat_phase = calldata_float(&cd, "beat_phase");
 			beat_index = calldata_int(&cd, "beat_index");
@@ -493,10 +535,10 @@ void MfdDeskDock::refresh()
 	double beat_pos = vs_loaded_ && beat_index > 0 ? (double)beat_index + beat_phase
 						       : (double)clock_.elapsed() / 1000.0 * (bpm_value_ / 60.0);
 
-	title_->setText(mfdFill(mfdText("Desk.Title", "Fadester Desk \xE2\x80\x94 Midi Fadester %1 \xC2\xB7 %2"),
-				{QString::fromUtf8(PLUGIN_VERSION),
-				 view_.desk_connected ? mfdText("Desk.DeskOn", "APC40 mkII connected")
-						      : mfdText("Desk.DeskOff", "no APC40 mkII")}));
+	setLabel(title_, mfdFill(mfdText("Desk.Title", "Fadester Desk \xE2\x80\x94 Midi Fadester %1 \xC2\xB7 %2"),
+				 {QString::fromUtf8(PLUGIN_VERSION),
+				  view_.desk_connected ? mfdText("Desk.DeskOn", "APC40 mkII connected")
+						       : mfdText("Desk.DeskOff", "no APC40 mkII")}));
 
 	bool pads_on = view_.finished_loading && view_.pads == MFD_DESK_PADS_ON && !view_.learn_or_setup;
 	bool shift = shift_->isChecked();
@@ -506,19 +548,19 @@ void MfdDeskDock::refresh()
 		const struct mfd_vj_led &led = view_.leds[48 + j];
 		bool exists = j < view_.scene_count;
 		QString name = exists ? QString::fromUtf8(view_.scenes[j]) : QString();
-		scenes_[j]->setText(scenes_[j]->fontMetrics().elidedText(name, Qt::ElideRight,
-									 std::max(40, scenes_[j]->width() - 8)));
+		setButtonText(scenes_[j], scenes_[j]->fontMetrics().elidedText(name, Qt::ElideRight,
+									       std::max(40, scenes_[j]->width() - 8)));
 		QString what =
 			!view_.studio_mode
 				? mfdText("Desk.SceneTip.Program", "Click: put this scene on air.")
 				: mfdText("Desk.SceneTip.Studio",
 					  "Click: to Preview; click again: take it to Program. Ctrl-click: straight on air.");
 		bool can = pads_on && exists && !view_.tbar_busy && !view_.scene_owned[j];
-		scenes_[j]->setToolTip(
-			!exists                ? mfdText("Desk.Tip.NoScene", "No scene here.")
-			: view_.tbar_busy      ? mfdText("Desk.Tip.Throw", "Waits while the crossfader is thrown.")
-			: view_.scene_owned[j] ? mfdText("Desk.Tip.Owned", "A fader learned this button.")
-					       : name + QStringLiteral("\n") + what);
+		setTip(scenes_[j], !exists ? mfdText("Desk.Tip.NoScene", "No scene here.")
+				   : view_.tbar_busy
+					   ? mfdText("Desk.Tip.Throw", "Waits while the crossfader is thrown.")
+				   : view_.scene_owned[j] ? mfdText("Desk.Tip.Owned", "A fader learned this button.")
+							  : name + QStringLiteral("\n") + what);
 		paintButton(scenes_[j], ledColor(led, beat_pos, 0x22C55EU), can, false);
 	}
 
@@ -526,13 +568,13 @@ void MfdDeskDock::refresh()
 	for (int i = 0; i < kStrips; ++i) {
 		const struct mfd_desk_strip &st = view_.strips[i];
 		QString src = QString::fromUtf8(st.source);
-		col_names_[i]->setText(
-			col_names_[i]->fontMetrics().elidedText(src.isEmpty() ? QStringLiteral("\xE2\x80\x94") : src,
-								Qt::ElideRight, std::max(28, col_names_[i]->width())));
-		col_names_[i]->setToolTip(
-			src.isEmpty() ? mfdText("Desk.Tip.Empty", "No source on this column.")
-				      : src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
-							  : mfdText("Desk.Pinned", " (pinned)")));
+		setLabel(col_names_[i],
+			 col_names_[i]->fontMetrics().elidedText(src.isEmpty() ? QStringLiteral("\xE2\x80\x94") : src,
+								 Qt::ElideRight, std::max(28, col_names_[i]->width())));
+		setTip(col_names_[i],
+		       src.isEmpty() ? mfdText("Desk.Tip.Empty", "No source on this column.")
+				     : src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
+							 : mfdText("Desk.Pinned", " (pinned)")));
 		for (int r = 0; r < kRows; ++r) {
 			int cell = kRowCell[r];
 			const struct mfd_vj_led &led = view_.leds[i * MFD_DESK_CELLS + cell];
@@ -550,9 +592,9 @@ void MfdDeskDock::refresh()
 				why = mfdText("Desk.Tip.SingleLayer", "Needs a Layer Opacity fader.");
 			}
 			if (!why.isEmpty()) {
-				pads_[r][i]->setToolTip(why);
+				setTip(pads_[r][i], why);
 			} else {
-				pads_[r][i]->setToolTip(pads_[r][i]->accessibleName());
+				setTip(pads_[r][i], pads_[r][i]->accessibleName());
 			}
 			paintButton(pads_[r][i], ledColor(led, beat_pos, 0x22C55EU), can);
 		}
@@ -560,11 +602,11 @@ void MfdDeskDock::refresh()
 		paintButton(clip_stops_[i], ledColor(stop, beat_pos, 0x22C55EU),
 			    pads_on && st.has_layer && !st.owned[MFD_DESK_CLIP_STOP]);
 		faders_[i]->setValue((int)std::lround(std::clamp(st.level, 0.0f, 1.0f) * 1000.0f));
-		faders_[i]->setToolTip(
-			src.isEmpty() ? mfdFill(mfdText("Desk.FaderEmpty", "Fader %1"), {QString::number(i + 1)})
-				      : mfdFill(mfdText("Desk.FaderTip", "Fader %1: %2, %3 %"),
-						{QString::number(i + 1), src,
-						 QString::number((int)std::lround(st.level * 100.0f))}));
+		setTip(faders_[i], src.isEmpty()
+					   ? mfdFill(mfdText("Desk.FaderEmpty", "Fader %1"), {QString::number(i + 1)})
+					   : mfdFill(mfdText("Desk.FaderTip", "Fader %1: %2, %3 %"),
+						     {QString::number(i + 1), src,
+						      QString::number((int)std::lround(st.level * 100.0f))}));
 	}
 	xfader_->setValue((int)std::lround(std::clamp(view_.crossfader, 0.0f, 1.0f) * 1000.0f));
 	paintButton(stop_all_, 0x475569U, pads_on && !view_.stop_all_owned, true);
@@ -575,36 +617,39 @@ void MfdDeskDock::refresh()
 
 	/* Visual Sidechain */
 	if (!vs_loaded_) {
-		bpm_->setText(QStringLiteral("\xE2\x80\x94 BPM"));
-		lock_->setText(mfdText("Desk.VsMissing", "Visual Sidechain is not loaded."));
+		setLabel(bpm_, QStringLiteral("\xE2\x80\x94 BPM"));
+		setLabel(lock_, mfdText("Desk.VsMissing", "Visual Sidechain is not loaded."));
 	} else {
-		bpm_->setText(QStringLiteral("%1 BPM").arg(bpm_value_, 0, 'f', 1));
-		lock_->setText(locked ? mfdText("Desk.Locked", "tempo locked") : mfdText("Desk.Unlocked", "following"));
+		/* no estimate yet (no audio): no number, rather than the animation's 120 */
+		setLabel(bpm_, bpm_valid_ ? QStringLiteral("%1 BPM").arg(bpm_value_, 0, 'f', 1)
+					  : QStringLiteral("\xE2\x80\x94 BPM"));
+		setLabel(lock_,
+			 locked ? mfdText("Desk.Locked", "tempo locked") : mfdText("Desk.Unlocked", "following"));
 	}
 	int step = vs_loaded_ ? (int)(((beat_index % 4) + 4) % 4) : -1;
 	bool fresh = beat_index != last_beat_index_ && beat_phase < 0.25;
 	last_beat_index_ = beat_index;
 	for (int k = 0; k < 4; ++k) {
 		bool on = k == step;
-		beats_[k]->setStyleSheet(QStringLiteral("background-color: %1; border-radius: 6px;")
-						 .arg(on ? (fresh || beat_phase < 0.25 ? QStringLiteral("#f8fafc")
-										       : QStringLiteral("#64748b"))
-							 : QStringLiteral("#1f2937")));
+		setCss(beats_[k], QStringLiteral("background-color: %1; border-radius: 6px;")
+					  .arg(on ? (fresh || beat_phase < 0.25 ? QStringLiteral("#f8fafc")
+										: QStringLiteral("#64748b"))
+						  : QStringLiteral("#1f2937")));
 	}
 	if (view_.vs_panic_known && view_.vs_panic) {
-		panic_->setText(mfdText("Desk.PanicOn", "PANIC \xE2\x80\x94 Visual Sidechain's effects are held safe. "
-							"Press Panic again to restore."));
-		panic_->setStyleSheet(QStringLiteral("color: #f8fafc; background-color: #b91c1c; padding: 4px;"));
+		setLabel(panic_, mfdText("Desk.PanicOn", "PANIC \xE2\x80\x94 Visual Sidechain's effects are held safe. "
+							 "Press Panic again to restore."));
+		setCss(panic_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; padding: 4px;"));
 	} else if (view_.vs_last_failed) {
-		panic_->setText(mfdText("Desk.VsNoAnswer",
-					"Visual Sidechain did not answer (it needs obs-websocket switched on)."));
-		panic_->setStyleSheet(QStringLiteral("color: #fde68a; padding: 2px;"));
+		setLabel(panic_, mfdText("Desk.VsNoAnswer",
+					 "Visual Sidechain did not answer (it needs obs-websocket switched on)."));
+		setCss(panic_, QStringLiteral("color: #fde68a; padding: 2px;"));
 	} else {
-		panic_->setText(QString());
-		panic_->setStyleSheet(QString());
+		setLabel(panic_, QString());
+		setCss(panic_, QString());
 	}
-	vs_panic_->setText(view_.vs_panic_known && view_.vs_panic ? mfdText("Desk.VsRestoreShort", "Restore")
-								  : mfdText("Desk.VsPanicShort", "Panic"));
+	setButtonText(vs_panic_, view_.vs_panic_known && view_.vs_panic ? mfdText("Desk.VsRestoreShort", "Restore")
+									: mfdText("Desk.VsPanicShort", "Panic"));
 	paintButton(vs_panic_, view_.vs_panic ? 0xEF4444U : 0x475569U, vs_loaded_, true);
 	paintButton(vs_tap_, 0x475569U, vs_loaded_, true);
 	paintButton(vs_lock_, locked ? 0x0EA5E9U : 0x475569U, vs_loaded_, true);
@@ -625,9 +670,11 @@ void MfdDeskDock::refresh()
 		why = mfdText("Desk.WhyLearn", "The pads wait while MIDI Learn or Set up is running.");
 	}
 	if (!why.isEmpty()) {
-		status_->setText(why);
-	} else if (status_age_.isValid() && status_age_.elapsed() > 4000) {
-		status_->setText(QString());
+		setLabel(status_, why);
+		status_is_reason_ = true;
+	} else if (status_is_reason_ || (status_age_.isValid() && status_age_.elapsed() > 4000)) {
+		setLabel(status_, QString()); /* the reason is gone (loaded, desk connected), or the message is old */
+		status_is_reason_ = false;
 		status_age_.invalidate();
 	}
 }

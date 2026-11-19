@@ -2027,6 +2027,14 @@ int main(int argc, char **argv)
 		desk->show();
 		pump_ui();
 		capture_and_verify_png(desk, screenshot_dir, QStringLiteral("13-desk-dock.png"));
+		/* what it shows: the version, and a live pad on a column with a source (column 1, Show / hide) */
+		auto *desk_title = desk->findChild<QLabel *>(QStringLiteral("mfdDeskTitle"));
+		REQUIRE(desk_title && desk_title->text().startsWith(QStringLiteral("Fadester Desk")) &&
+			desk_title->text().contains(QStringLiteral("APC40 mkII")));
+		auto *show_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_0"));
+		REQUIRE(show_pad && show_pad->isEnabled());
+		auto *empty_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_7"));
+		REQUIRE(empty_pad && !empty_pad->isEnabled()); /* no source on column 8 */
 		desk->hide();
 		delete desk;
 		REQUIRE(!eng.desk_visible);

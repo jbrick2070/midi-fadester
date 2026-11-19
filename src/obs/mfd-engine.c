@@ -338,6 +338,7 @@ void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, vo
 static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *cmd);
 static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
+static void vj_hold_epoch_sync_locked(struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
 
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
@@ -409,8 +410,11 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 		bool answered = mfd_vendor_visual_sidechain_panic_state(&panic);
 		mfd_engine_lock(eng);
 		bool changed = answered && panic != eng->vs_panic;
-		if (answered != eng->vs_panic_known) {
+		if (answered != eng->vs_panic_known || (answered && eng->vs_last_failed)) {
 			eng->vs_panic_known = answered; /* a first "not panicked" answer counts too */
+			if (answered) {
+				eng->vs_last_failed = false; /* it answers again */
+			}
 			mfd_engine_notify_state_changed(eng);
 		}
 		mfd_engine_unlock(eng);
@@ -5236,6 +5240,7 @@ static bool vj_queue_strip_cmd_locked(struct mfd_engine *eng, enum mfd_vj_comman
 	int room = kind == MFD_VJ_CMD_VS_PANIC ? MFD_VJ_CMD_MAX : MFD_VJ_CMD_MAX - 2;
 	if (eng->vj_cmd_count >= room) {
 		obs_log(LOG_WARNING, "APC40: too many desk presses at once; one was dropped");
+		++eng->vj_cmd_drops;
 		return false;
 	}
 	struct mfd_vj_command *c = &eng->vj_cmds[eng->vj_cmd_count++];
@@ -5938,6 +5943,7 @@ static void vj_release_all_locked(struct mfd_engine *eng)
 		vj_run_locked(eng, &acts[i]);
 	}
 	memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+	vj_hold_epoch_sync_locked(eng);
 }
 
 void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms)
@@ -6304,6 +6310,7 @@ int mfd_engine_fill_strips_from_scene(struct mfd_engine *eng, const char *scene,
 	bool changed = false;
 	int placed =
 		vj_fill_locked(eng, scene, include_empty, replace_layers, &st, out_scene, out_scene_size, &changed);
+	vj_hold_epoch_sync_locked(eng); /* a strip that moved let go of its hold */
 	if (out_status) {
 		*out_status = st;
 	}
@@ -6627,11 +6634,13 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 			pads.has_layer = (uint8_t)(st->has_layer ? pads.has_layer | (1U << (unsigned)i)
 								 : pads.has_layer & ~(1U << (unsigned)i));
 		}
-		st->single_layer = st->has_layer && sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER;
+		st->single_layer = st->has_layer && sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER &&
+				   mfd_engine_is_slot_writable(eng, sl); /* as vj_fadeable */
 		st->level = sl->last_applied_val;
 		st->follows = sl->auto_follow;
 		/* Shift + top pad: pins a strip on a single layer, unpins a pinned one (even empty) (vj_run_locked). */
-		st->can_pin_toggle = (sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER) ||
+		st->can_pin_toggle = (sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER &&
+				      (!sl->auto_follow || st->has_layer)) ||
 				     (!sl->auto_follow && sl->target_type == MFD_TARGET_UNASSIGNED);
 		for (int c = 0; c < (int)MFD_DESK_CLIP_STOP; ++c) {
 			st->owned[c] = desk_owned_locked(eng, 0U, (uint8_t)(k_rows[c] + (unsigned)i));
@@ -6676,8 +6685,9 @@ enum mfd_desk_press_result mfd_engine_desk_press(struct mfd_engine *eng, uint8_t
 	dec.raw_value = on ? 127U : 0U;
 	dec.normalized = on ? 1.0f : 0.0f;
 	bool desk_shift = eng->vj.shift;
+	uint32_t drops = eng->vj_cmd_drops;
 	eng->vj.shift = shift;
-	bool fed = vj_feed_locked(eng, &dec);
+	bool fed = vj_feed_locked(eng, &dec) && eng->vj_cmd_drops == drops; /* a dropped command did nothing */
 	eng->vj.shift = desk_shift; /* the desk's own Shift, whatever the dock had */
 	vj_hold_epoch_sync_locked(eng);
 	enum mfd_desk_press_result r = fed ? MFD_DESK_ACCEPTED : MFD_DESK_REJECTED;
@@ -6800,6 +6810,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	}
 
 	sync_parser_lsb_independence_locked(eng);
+	vj_hold_epoch_sync_locked(eng); /* holds the UI thread let go of since the last tick, before the desk presses */
 	struct mfd_midi_raw_event raw;
 	while (mfd_midi_queue_pop(&eng->midi_queue, &raw)) {
 		struct mfd_midi_decoded dec;

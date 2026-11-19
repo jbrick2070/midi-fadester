@@ -544,6 +544,7 @@ struct mfd_engine {
 	float vj_vs_poll_sec;                  /* time since Visual Sidechain's panic state was last asked */
 	bool vj_vs_poll_pending;               /* ask it from the UI thread */
 	uint32_t vj_hold_epoch[MFD_VJ_STRIPS]; /* bumps on every change of a strip's flash / blackout hold (desk dock) */
+	uint32_t vj_cmd_drops;                 /* desk commands dropped on a full queue (the dock reports them) */
 	uint8_t vj_hold_seen;                  /* the hold bits vj_hold_epoch last saw */
 	bool desk_visible;                     /* the Fadester Desk dock is on screen: Visual Sidechain is polled */
 	float desk_frame_sec;                  /* time since the dock was last asked to repaint */
