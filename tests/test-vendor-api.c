@@ -2791,10 +2791,9 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_PREVIEW && strcmp(g_vj_cmds[1].scene, "Scene C") == 0);
 	REQUIRE(g_vj_cmds[0].arg == 0 && g_vj_cmds[1].arg == 0);
 	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene B") == 0 &&
-		g_vj_cmds[2].arg == 1); /* Shift: a cut, not the current transition */
+		g_vj_cmds[2].arg == 0); /* Shift: straight to Program, with the current transition */
 	REQUIRE(g_vj_cmds[3].kind == MFD_VJ_CMD_TAKE);
-	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[4].scene, "Scene A") == 0 &&
-		g_vj_cmds[4].arg == 1);
+	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_TAKE); /* Shift + Session is a take too */
 	/* Lights: Program red, Preview pulsing, the third scene idle, no scene off; Session lit (a take is ready). */
 	REQUIRE(eng->vj.scene[0] == MFD_VJ_SCENE_PREVIEW && eng->vj.scene[1] == MFD_VJ_SCENE_PROGRAM &&
 		eng->vj.scene[2] == MFD_VJ_SCENE_IDLE && eng->vj.scene[3] == MFD_VJ_SCENE_NONE && eng->vj.take_ready);

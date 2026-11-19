@@ -207,15 +207,15 @@ int main(void)
 	REQUIRE(led_velocity(&q, 32) == 37U);
 	REQUIRE(led_velocity(&q, 26) == 0U && led_velocity(&q, 34) == 0U); /* no source: dark */
 
-	/* 13. Scenes: Scene Launch picks (Shift cuts); Session takes (Shift cuts). Lights: Program red, Preview green
+	/* 13. Scenes: Scene Launch picks (Shift: straight to Program); Session takes. Lights: Program red, Preview green
 	 * pulsing (channel 11), idle dim blue, no scene off. */
 	REQUIRE(feed(&q, true, 0, 82) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PICK && acts[0].strip == 0);
 	REQUIRE(feed(&q, false, 0, 82) && n == 0);
 	REQUIRE(feed(&q, true, 0, 86) && n == 1 && acts[0].strip == 4);
 	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
 	REQUIRE(feed(&q, true, 0, 98));
-	REQUIRE(feed(&q, true, 0, 83) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_CUT && acts[0].strip == 1);
-	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_CUT);
+	REQUIRE(feed(&q, true, 0, 83) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PROGRAM && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
 	REQUIRE(feed(&q, false, 0, 98));
 	mfd_vj_pads_set_scene(&q, 0, MFD_VJ_SCENE_PROGRAM);
 	mfd_vj_pads_set_scene(&q, 1, MFD_VJ_SCENE_PREVIEW);

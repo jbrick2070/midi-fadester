@@ -28,8 +28,9 @@
  * Scenes (the first five in OBS's Scenes list, top first):
  *
  *   Scene Launch n (notes 82..86)           put scene n in Preview; pressed again (it is in Preview), take it with
- *                                           the transition; with Shift, or outside Studio Mode, cut straight to it
- *   Session (note 102)                      take Preview to Program; with Shift, cut
+ *                                           the transition; with Shift, or outside Studio Mode, straight to Program
+ *                                           (with the transition too)
+ *   Session (note 102)                      take Preview to Program
  *   Cue Level (CC 47, relative)             transition length, 50 ms a detent; with Shift, the pad fade time
  *
  * Visual Sidechain: Record (note 93) panics or restores; Metronome (note 90) taps the tempo, with Shift locks or
@@ -98,33 +99,32 @@ enum mfd_vj_blend {
 
 enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_NONE = 0,
-	MFD_VJ_ACTION_SET_BLEND,    /* strip, blend */
-	MFD_VJ_ACTION_FLASH_ON,     /* strip */
-	MFD_VJ_ACTION_FLASH_OFF,    /* strip */
-	MFD_VJ_ACTION_FADE_TOGGLE,  /* strip: out when it shows, back in when a pad faded it out */
-	MFD_VJ_ACTION_CLEAN,        /* Clean / All FX Off and every strip's blend back to Normal */
-	MFD_VJ_ACTION_FADE_ALL_OUT, /* every layer strip out */
-	MFD_VJ_ACTION_SPEED_STEPS,  /* steps: video speed by steps x 0.05x (through Fadester Companion) */
-	MFD_VJ_ACTION_SPEED_RESET,  /* video back to 1x */
-	MFD_VJ_ACTION_PLAY_PAUSE,   /* play or pause the video */
-	MFD_VJ_ACTION_BLACKOUT_ON,  /* strip: hold the layer at 0 % (Shift + row 2) */
-	MFD_VJ_ACTION_BLACKOUT_OFF, /* strip */
-	MFD_VJ_ACTION_SNAP,         /* strip: straight to 0 % when it shows, else back up (Shift + row 3) */
-	MFD_VJ_ACTION_SHOW_TOGGLE,  /* strip: the source's eye on or off (row 4) */
-	MFD_VJ_ACTION_WAKE,         /* strip: shown, 100 %, blend Normal (Shift + row 4) */
-	MFD_VJ_ACTION_RESTART,      /* strip: restart the source's video (row 5) */
-	MFD_VJ_ACTION_PIN_TOGGLE,   /* strip: pin the column to its source, or let it follow the scene again */
-	MFD_VJ_ACTION_COLUMN_CLEAN, /* strip: blend Normal, flash and blackout let go (Clip Stop) */
-	MFD_VJ_ACTION_SCENE_PICK,   /* strip = scene 0..4: to Preview, or take it when it is in Preview */
-	MFD_VJ_ACTION_SCENE_CUT,    /* strip = scene 0..4: straight to Program */
-	MFD_VJ_ACTION_TAKE,         /* Preview to Program with the transition */
-	MFD_VJ_ACTION_CUT,          /* Preview to Program at once */
-	MFD_VJ_ACTION_VS_PANIC,     /* Visual Sidechain panic, or restore when it is panicked */
-	MFD_VJ_ACTION_VS_TAP,       /* Visual Sidechain tap tempo */
-	MFD_VJ_ACTION_VS_LOCK,      /* Visual Sidechain BPM lock on or off */
-	MFD_VJ_ACTION_VS_RESYNC,    /* Visual Sidechain downbeat resync */
-	MFD_VJ_ACTION_CUE_STEPS,    /* steps: transition length by steps x 50 ms */
-	MFD_VJ_ACTION_FADE_STEPS,   /* steps: pad fade time by steps x 50 ms */
+	MFD_VJ_ACTION_SET_BLEND,     /* strip, blend */
+	MFD_VJ_ACTION_FLASH_ON,      /* strip */
+	MFD_VJ_ACTION_FLASH_OFF,     /* strip */
+	MFD_VJ_ACTION_FADE_TOGGLE,   /* strip: out when it shows, back in when a pad faded it out */
+	MFD_VJ_ACTION_CLEAN,         /* Clean / All FX Off and every strip's blend back to Normal */
+	MFD_VJ_ACTION_FADE_ALL_OUT,  /* every layer strip out */
+	MFD_VJ_ACTION_SPEED_STEPS,   /* steps: video speed by steps x 0.05x (through Fadester Companion) */
+	MFD_VJ_ACTION_SPEED_RESET,   /* video back to 1x */
+	MFD_VJ_ACTION_PLAY_PAUSE,    /* play or pause the video */
+	MFD_VJ_ACTION_BLACKOUT_ON,   /* strip: hold the layer at 0 % (Shift + row 2) */
+	MFD_VJ_ACTION_BLACKOUT_OFF,  /* strip */
+	MFD_VJ_ACTION_SNAP,          /* strip: straight to 0 % when it shows, else back up (Shift + row 3) */
+	MFD_VJ_ACTION_SHOW_TOGGLE,   /* strip: the source's eye on or off (row 4) */
+	MFD_VJ_ACTION_WAKE,          /* strip: shown, 100 %, blend Normal (Shift + row 4) */
+	MFD_VJ_ACTION_RESTART,       /* strip: restart the source's video (row 5) */
+	MFD_VJ_ACTION_PIN_TOGGLE,    /* strip: pin the column to its source, or let it follow the scene again */
+	MFD_VJ_ACTION_COLUMN_CLEAN,  /* strip: blend Normal, flash and blackout let go (Clip Stop) */
+	MFD_VJ_ACTION_SCENE_PICK,    /* strip = scene 0..4: to Preview, or take it when it is in Preview */
+	MFD_VJ_ACTION_SCENE_PROGRAM, /* strip = scene 0..4: straight to Program, skipping Preview */
+	MFD_VJ_ACTION_TAKE,          /* Preview to Program with the transition */
+	MFD_VJ_ACTION_VS_PANIC,      /* Visual Sidechain panic, or restore when it is panicked */
+	MFD_VJ_ACTION_VS_TAP,        /* Visual Sidechain tap tempo */
+	MFD_VJ_ACTION_VS_LOCK,       /* Visual Sidechain BPM lock on or off */
+	MFD_VJ_ACTION_VS_RESYNC,     /* Visual Sidechain downbeat resync */
+	MFD_VJ_ACTION_CUE_STEPS,     /* steps: transition length by steps x 50 ms */
+	MFD_VJ_ACTION_FADE_STEPS,    /* steps: pad fade time by steps x 50 ms */
 };
 
 /* What a Scene Launch button shows. */

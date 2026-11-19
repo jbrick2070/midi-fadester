@@ -172,7 +172,7 @@ static void feed_transport(struct mfd_vj_pads *p, uint8_t note, struct mfd_vj_ac
 	} else if (note == MFD_VJ_NOTE_RECORD) {
 		push(out, max, count, MFD_VJ_ACTION_VS_PANIC, -1, MFD_VJ_BLEND_NORMAL);
 	} else if (note == MFD_VJ_NOTE_SESSION) {
-		push(out, max, count, p->shift ? MFD_VJ_ACTION_CUT : MFD_VJ_ACTION_TAKE, -1, MFD_VJ_BLEND_NORMAL);
+		push(out, max, count, MFD_VJ_ACTION_TAKE, -1, MFD_VJ_BLEND_NORMAL);
 	}
 }
 
@@ -195,7 +195,7 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 		}
 	} else if (note >= MFD_VJ_NOTE_SCENE && note < MFD_VJ_NOTE_SCENE + MFD_VJ_SCENES) {
 		if (note_on) {
-			push(out, max, &count, p->shift ? MFD_VJ_ACTION_SCENE_CUT : MFD_VJ_ACTION_SCENE_PICK,
+			push(out, max, &count, p->shift ? MFD_VJ_ACTION_SCENE_PROGRAM : MFD_VJ_ACTION_SCENE_PICK,
 			     (int)(note - MFD_VJ_NOTE_SCENE), MFD_VJ_BLEND_NORMAL);
 		}
 	} else if (note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO || note == MFD_VJ_NOTE_NUDGE_DOWN ||

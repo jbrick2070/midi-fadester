@@ -1200,7 +1200,8 @@ private:
 		auto *vj_scene_legend = new QLabel(
 			mfdText("Dialog.VjScenesLegend",
 				"Scene Launch 1–5: the first five scenes in the Scenes list. Press once for Preview, again (or "
-				"Session) to take it; Shift + button cuts to it. Program red, Preview green. Cue Level: transition "
+				"Session) to take it; Shift + button sends it straight to Program. Program red, Preview green. Cue "
+				"Level: transition "
 				"length (Shift: pad fade time). Record: Visual Sidechain panic or restore. Metronome: its tap "
 				"tempo (Shift: lock the BPM). Shift + Tap Tempo: back to its downbeat."),
 			adv_tab);
