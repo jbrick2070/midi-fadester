@@ -406,13 +406,16 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	}
 	if (vs_poll && obs_initialized()) {
 		bool panic = false;
-		if (mfd_vendor_visual_sidechain_panic_state(&panic)) {
-			mfd_engine_lock(eng);
-			bool changed = panic != eng->vs_panic;
-			mfd_engine_unlock(eng);
-			if (changed) {
-				mfd_engine_set_vs_panic(eng, panic);
-			}
+		bool answered = mfd_vendor_visual_sidechain_panic_state(&panic);
+		mfd_engine_lock(eng);
+		bool changed = answered && panic != eng->vs_panic;
+		if (answered != eng->vs_panic_known) {
+			eng->vs_panic_known = answered; /* a first "not panicked" answer counts too */
+			mfd_engine_notify_state_changed(eng);
+		}
+		mfd_engine_unlock(eng);
+		if (changed) {
+			mfd_engine_set_vs_panic(eng, panic);
 		}
 	}
 	if (autofill) {
@@ -6116,6 +6119,19 @@ static void vj_leave_source_locked(struct mfd_engine *eng, int s)
 	eng->vj_home_key[s][0] = '\0'; /* the next source's blend is read afresh */
 }
 
+/* A strip's flash / blackout hold changed: its epoch moves on, so a dock release of an earlier hold does nothing. */
+static void vj_hold_epoch_sync_locked(struct mfd_engine *eng)
+{
+	uint8_t now = (uint8_t)(eng->vj.flashing | eng->vj.blackout);
+	uint8_t changed = (uint8_t)(now ^ eng->vj_hold_seen);
+	for (int i = 0; i < (int)MFD_VJ_STRIPS && changed != 0U; ++i) {
+		if (changed & (1U << (unsigned)i)) {
+			++eng->vj_hold_epoch[i];
+		}
+	}
+	eng->vj_hold_seen = now;
+}
+
 void mfd_engine_vj_let_go_locked(struct mfd_engine *eng, int slot_index)
 {
 	int strip = slot_index - 1;
@@ -6132,6 +6148,7 @@ void mfd_engine_vj_let_go_locked(struct mfd_engine *eng, int slot_index)
 	}
 	eng->vj.flashing &= (uint8_t)~b;
 	eng->vj.blackout &= (uint8_t)~b;
+	vj_hold_epoch_sync_locked(eng);
 	eng->vj_state_dirty = true;
 }
 
@@ -6473,9 +6490,20 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 			if (cmd->kind == MFD_VJ_CMD_VS_PANIC) {
 				mfd_engine_set_vs_panic(eng, panic);
 			}
+			mfd_engine_lock(eng);
+			eng->vs_last_failed = false;
+			if (cmd->kind == MFD_VJ_CMD_VS_PANIC) {
+				eng->vs_panic_known = true;
+			}
+			mfd_engine_notify_state_changed(eng);
+			mfd_engine_unlock(eng);
 		} else {
 			obs_log(LOG_INFO,
 				"APC40: Visual Sidechain did not answer (is it installed, with obs-websocket?)");
+			mfd_engine_lock(eng);
+			eng->vs_last_failed = true;
+			mfd_engine_notify_state_changed(eng);
+			mfd_engine_unlock(eng);
 		}
 		break;
 	}
@@ -6522,6 +6550,172 @@ void mfd_engine_set_vs_panic(struct mfd_engine *eng, bool panic)
 	obs_log(LOG_INFO, "APC40: Visual Sidechain %s",
 		panic ? "panicked (Record blinks; press again to restore)" : "restored");
 	mfd_engine_notify_state_changed(eng);
+	mfd_engine_unlock(eng);
+}
+
+/* --- Fadester Desk dock --- */
+
+/* Whether a fader learned this MIDI note address (as vj_feed_locked's ownership check). */
+static bool desk_owned_locked(const struct mfd_engine *eng, uint8_t channel, uint8_t note)
+{
+	struct mfd_midi_addr a = {0};
+	a.type = MFD_MIDI_NOTE_ON;
+	a.channel = channel;
+	a.number = note;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		if (eng->fader_slots[i].enabled && mfd_midi_addr_matches(&eng->fader_slots[i].addr, &a)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mfd_desk_view *out)
+{
+	if (!out) {
+		return;
+	}
+	memset(out, 0, sizeof(*out));
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	out->finished_loading = eng->frontend_finished_loading;
+	out->desk_connected = eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name);
+	out->pads = vj_active(eng)         ? MFD_DESK_PADS_ON
+		    : eng->vj_disabled     ? MFD_DESK_PADS_BUTTONS_OFF
+		    : !out->desk_connected ? MFD_DESK_PADS_NO_APC40
+					   : MFD_DESK_PADS_OTHER_PROFILE;
+	out->learn_or_setup = eng->setup_session.active || eng->learning_slot_index >= 0;
+	out->studio_mode = mfd_engine_is_studio_mode_active(eng);
+	out->take_ready = out->studio_mode && eng->cached_preview_scene[0] != '\0' &&
+			  strcmp(eng->cached_preview_scene, eng->cached_program_scene) != 0;
+	out->tbar_busy = vj_tbar_busy_locked(eng);
+	out->scene_count = eng->cached_scene_count < (int)MFD_VJ_SCENES ? eng->cached_scene_count : (int)MFD_VJ_SCENES;
+	struct mfd_vj_pads pads = eng->vj; /* a copy: the dock's Shift changes only what it is shown */
+	pads.shift = pads.shift || dock_shift;
+	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
+		enum mfd_vj_scene_state st = MFD_VJ_SCENE_NONE;
+		if (j < out->scene_count) {
+			snprintf(out->scenes[j], sizeof(out->scenes[j]), "%s", eng->cached_scenes[j]);
+			st = !strcmp(eng->cached_scenes[j], eng->cached_program_scene) ? MFD_VJ_SCENE_PROGRAM
+			     : out->studio_mode && !strcmp(eng->cached_scenes[j], eng->cached_preview_scene)
+				     ? MFD_VJ_SCENE_PREVIEW
+				     : MFD_VJ_SCENE_IDLE;
+		}
+		pads.scene[j] = st; /* worked out here: the pads' own copy is only kept while they are on */
+		out->scene_owned[j] = desk_owned_locked(eng, 0U, (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)j));
+	}
+	pads.take_ready = out->take_ready;
+	pads.vs_panic = eng->vj.vs_panic;
+	out->stop_all_owned = desk_owned_locked(eng, 0U, MFD_VJ_NOTE_STOP_ALL);
+	out->session_owned = desk_owned_locked(eng, 0U, MFD_VJ_NOTE_SESSION);
+	static const uint8_t k_rows[MFD_DESK_CLIP_STOP] = {MFD_VJ_NOTE_ROW_BLEND, MFD_VJ_NOTE_ROW_FLASH,
+							   MFD_VJ_NOTE_ROW_FADE, MFD_VJ_NOTE_ROW_SHOW,
+							   MFD_VJ_NOTE_ROW_RESTART};
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		const struct mfd_fader_slot *sl = &eng->fader_slots[i + 1];
+		struct mfd_desk_strip *st = &out->strips[i];
+		const char *scene = NULL, *source = NULL;
+		/* from the strip itself: the pads' bits are stale while the pads are off */
+		st->has_layer = vj_strip_layer(eng, i, &scene, &source);
+		if (st->has_layer) {
+			snprintf(st->scene, sizeof(st->scene), "%s", scene);
+			snprintf(st->source, sizeof(st->source), "%s", source);
+		}
+		if (out->pads != MFD_DESK_PADS_ON) {
+			pads.has_layer = (uint8_t)(st->has_layer ? pads.has_layer | (1U << (unsigned)i)
+								 : pads.has_layer & ~(1U << (unsigned)i));
+		}
+		st->single_layer = st->has_layer && sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER;
+		st->level = sl->last_applied_val;
+		st->follows = sl->auto_follow;
+		/* Shift + top pad: pins a strip on a single layer, unpins a pinned one (even empty) (vj_run_locked). */
+		st->can_pin_toggle = (sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER) ||
+				     (!sl->auto_follow && sl->target_type == MFD_TARGET_UNASSIGNED);
+		for (int c = 0; c < (int)MFD_DESK_CLIP_STOP; ++c) {
+			st->owned[c] = desk_owned_locked(eng, 0U, (uint8_t)(k_rows[c] + (unsigned)i));
+		}
+		st->owned[MFD_DESK_CLIP_STOP] = desk_owned_locked(eng, (uint8_t)i, MFD_VJ_NOTE_CLIP_STOP);
+	}
+	out->led_count = mfd_vj_pads_leds(&pads, out->leds, MFD_VJ_MAX_LEDS);
+	out->crossfader = eng->fader_slots[0].last_applied_val;
+	out->vs_panic = eng->vs_panic;
+	out->vs_panic_known = eng->vs_panic_known;
+	out->vs_last_failed = eng->vs_last_failed;
+	mfd_engine_unlock(eng);
+}
+
+enum mfd_desk_press_result mfd_engine_desk_press(struct mfd_engine *eng, uint8_t channel, uint8_t note, bool on,
+						 bool shift, uint32_t *hold_epoch)
+{
+	if (!eng || note == MFD_VJ_NOTE_SHIFT || note > 127U || channel > 15U ||
+	    !mfd_vj_pads_is_button(channel, note)) {
+		return MFD_DESK_REJECTED;
+	}
+	mfd_engine_lock(eng);
+	vj_hold_epoch_sync_locked(eng); /* holds the desk changed since the last tick */
+	int strip = note >= MFD_VJ_NOTE_ROW_FLASH && note < MFD_VJ_NOTE_ROW_FLASH + MFD_VJ_STRIPS && channel == 0U
+			    ? (int)(note - MFD_VJ_NOTE_ROW_FLASH)
+			    : -1;
+	uint8_t held_before = (uint8_t)(eng->vj.flashing | eng->vj.blackout);
+	if (!on && strip >= 0) {
+		/* only the hold this dock press started: not one the desk started since */
+		bool same = hold_epoch && (held_before & (1U << (unsigned)strip)) &&
+			    eng->vj_hold_epoch[strip] == *hold_epoch;
+		if (!same) {
+			mfd_engine_unlock(eng);
+			return MFD_DESK_REJECTED;
+		}
+	}
+	struct mfd_midi_decoded dec;
+	memset(&dec, 0, sizeof(dec));
+	dec.addr.type = on ? MFD_MIDI_NOTE_ON : MFD_MIDI_NOTE_OFF;
+	dec.addr.channel = channel;
+	dec.addr.number = note;
+	dec.raw_value = on ? 127U : 0U;
+	dec.normalized = on ? 1.0f : 0.0f;
+	bool desk_shift = eng->vj.shift;
+	eng->vj.shift = shift;
+	bool fed = vj_feed_locked(eng, &dec);
+	eng->vj.shift = desk_shift; /* the desk's own Shift, whatever the dock had */
+	vj_hold_epoch_sync_locked(eng);
+	enum mfd_desk_press_result r = fed ? MFD_DESK_ACCEPTED : MFD_DESK_REJECTED;
+	if (fed && on && strip >= 0 && !(held_before & (1U << (unsigned)strip)) &&
+	    ((eng->vj.flashing | eng->vj.blackout) & (1U << (unsigned)strip))) {
+		r = MFD_DESK_HOLD_STARTED;
+		if (hold_epoch) {
+			*hold_epoch = eng->vj_hold_epoch[strip];
+		}
+	}
+	mfd_engine_unlock(eng);
+	return r;
+}
+
+bool mfd_engine_desk_vs(struct mfd_engine *eng, enum mfd_vj_command_kind kind)
+{
+	if (!eng || (kind != MFD_VJ_CMD_VS_PANIC && kind != MFD_VJ_CMD_VS_TAP && kind != MFD_VJ_CMD_VS_LOCK &&
+		     kind != MFD_VJ_CMD_VS_RESYNC)) {
+		return false;
+	}
+	mfd_engine_lock(eng);
+	bool ok = vj_queue_cmd_locked(eng, kind, NULL, NULL, 0);
+	mfd_engine_unlock(eng);
+	return ok;
+}
+
+void mfd_engine_set_desk_visible(struct mfd_engine *eng, bool visible)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (visible && !eng->desk_visible) {
+		eng->vj_vs_poll_pending = true; /* the panic state at once, not in up to 2 s */
+		eng->vj_vs_poll_sec = 0.0f;
+		mfd_engine_mark_ui_dirty(eng, false);
+	}
+	eng->desk_visible = visible;
 	mfd_engine_unlock(eng);
 }
 
@@ -6573,7 +6767,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	} else if (vj_active(eng)) {
 		vj_status_locked(eng, false);
 	}
-	if (vj_active(eng)) {
+	if (vj_active(eng) || eng->desk_visible) {
 		eng->vj_vs_poll_sec += seconds;
 		if (eng->vj_vs_poll_sec >= 2.0f) {
 			eng->vj_vs_poll_sec = 0.0f;
@@ -6655,7 +6849,9 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			eng->learning_slot_index = -1;
 		}
 
-		if (vj_feed_locked(eng, &dec)) {
+		bool vj_fed = vj_feed_locked(eng, &dec);
+		vj_hold_epoch_sync_locked(eng);
+		if (vj_fed) {
 			continue;
 		}
 
@@ -6955,7 +7151,17 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		}
 	}
 	vj_tidy_locked(eng);
+	vj_hold_epoch_sync_locked(eng);
 	vj_flush_leds_locked(eng);
+	if (eng->desk_visible) {
+		/* The dock repaints on OBS's frame clock (no timers): about 30 times a second, for its pulsing pads and
+		 * Visual Sidechain's beat. */
+		eng->desk_frame_sec += seconds;
+		if (eng->desk_frame_sec >= 1.0f / 30.0f) {
+			eng->desk_frame_sec = 0.0f;
+			mfd_engine_mark_ui_dirty(eng, false);
+		}
+	}
 	if (eng->vj_state_dirty) {
 		eng->vj_state_dirty = false;
 		mfd_engine_notify_state_changed(eng);

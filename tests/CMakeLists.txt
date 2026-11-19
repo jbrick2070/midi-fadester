@@ -122,6 +122,7 @@ add_executable(
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.c"
   "${_core}/vj-pads.c"
+  "${_core}/apc40-palette.c"
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
@@ -149,6 +150,8 @@ add_executable(
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.cpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.cpp"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
@@ -161,6 +164,7 @@ add_executable(
   "${_core}/apc40-profile.c"
   "${_core}/tbar-logic.c"
   "${_core}/vj-pads.c"
+  "${_core}/apc40-palette.c"
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.c"
   "${_core}/slot-messages.c"
@@ -206,6 +210,7 @@ set(
   "${_core}/tbar-logic.c"
   "${_core}/vj-pads.h"
   "${_core}/vj-pads.c"
+  "${_core}/apc40-palette.c"
   "${_core}/filter-math.h"
   "${_core}/filter-math.c"
   "${_core}/ui-sentences.h"
@@ -231,6 +236,9 @@ set(
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.cpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.hpp"
+  "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.cpp"
+  "${CMAKE_SOURCE_DIR}/src/core/apc40-palette.h"
 )
 
 add_executable(test-shader-syntax test-shader-syntax.c)

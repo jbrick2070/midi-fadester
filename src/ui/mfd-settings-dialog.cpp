@@ -15,6 +15,7 @@
 #endif
 
 #include "ui/mfd-settings-dialog.hpp"
+#include "ui/mfd-desk-dock.hpp"
 #include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-setup-sheet.hpp"
 #include "ui/mfd-text-qt.hpp"
@@ -2689,6 +2690,7 @@ void MfdUiDispatcher::on_drain()
 	if (g_dialog) {
 		g_dialog->refresh_from_engine();
 	}
+	mfd_desk_dock_refresh();
 }
 
 static void ui_notify_bridge_cb(void *unused)
@@ -2786,6 +2788,7 @@ void mfd_ui_init(void)
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), ui_notify_bridge_cb, nullptr);
 
 	obs_frontend_add_tools_menu_item(obs_module_text("ToolsMenuTitle"), on_tools_menu_clicked, nullptr);
+	mfd_desk_dock_init(); /* before OBS restores the dock layout */
 
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
 #ifdef _WIN32
@@ -2802,6 +2805,7 @@ void mfd_ui_init(void)
 
 void mfd_ui_shutdown(void)
 {
+	mfd_desk_dock_shutdown();
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), nullptr, nullptr);
 
 #ifdef _WIN32

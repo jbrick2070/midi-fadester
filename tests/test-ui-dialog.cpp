@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "ui/mfd-desk-dock.hpp"
 #include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-svg-canvas.hpp"
@@ -2015,13 +2016,30 @@ int main(int argc, char **argv)
 		REQUIRE(cut.isEmpty());
 	}
 
+	{
+		/* 0.8.0: the Fadester Desk dock on the same engine */
+		const bool was_setup = eng.setup_session.active;
+		const int was_learning = eng.learning_slot_index;
+		eng.setup_session.active = false; /* the pads lit, as on stage */
+		eng.learning_slot_index = -1;
+		QWidget *desk = mfd_desk_dock_create(&eng);
+		desk->resize(560, 520);
+		desk->show();
+		pump_ui();
+		capture_and_verify_png(desk, screenshot_dir, QStringLiteral("13-desk-dock.png"));
+		desk->hide();
+		delete desk;
+		REQUIRE(!eng.desk_visible);
+		eng.setup_session.active = was_setup;
+		eng.learning_slot_index = was_learning;
+	}
 	mfd_engine_destroy_mutex(&eng);
 	mfd_text_set_lookup(nullptr);
 	text_lookup_destroy(obs_module_lookup);
 	obs_module_lookup = nullptr;
 
 	std::printf(
-		"test-ui-dialog: PASS (all end-to-end flows, FX bank, filter_param, multi-controller profiles & 12 screenshots verified in %s)\n",
+		"test-ui-dialog: PASS (all end-to-end flows, FX bank, filter_param, multi-controller profiles & 13 screenshots verified in %s)\n",
 		screenshot_dir.toUtf8().constData());
 	return 0;
 }

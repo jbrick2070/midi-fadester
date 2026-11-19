@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "core/apc40-palette.h"
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
@@ -3317,6 +3318,107 @@ static int test_vj_fill_follow_and_desk(void)
 	mfd_engine_set_vs_panic(eng, false);
 	mfd_engine_tick(eng, 0.016f);
 	REQUIRE(!eng->vj.vs_panic);
+
+	/* 14. Fadester Desk dock (0.8.0). */
+	{
+		REQUIRE(mfd_apc40_palette_rgb(0) == 0x000000U && mfd_apc40_palette_rgb(5) == 0xFF0000U &&
+			mfd_apc40_palette_rgb(21) == 0x00FF00U && mfd_apc40_palette_rgb(45) == 0x0000FFU &&
+			mfd_apc40_palette_rgb(200) == mfd_apc40_palette_rgb(72));
+		struct mfd_desk_view *v = calloc(1U, sizeof(*v));
+		REQUIRE(v != NULL);
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
+		/* 14a. The view: pads on, names and follow from the strips, Program red on the scene row, 55 LEDs. */
+		mfd_engine_get_desk_view(eng, false, v);
+		REQUIRE(v->pads == MFD_DESK_PADS_ON && v->desk_connected && v->finished_loading && v->led_count == 55U);
+		REQUIRE(v->scene_count == 3 && strcmp(v->scenes[1], "Scene B") == 0 && v->studio_mode);
+		REQUIRE(v->leds[48 + 1].velocity == 5U); /* Scene B on air: red */
+		REQUIRE(strcmp(v->strips[1].source, "B1") == 0 && v->strips[1].single_layer && v->strips[1].follows &&
+			!v->strips[1].owned[MFD_DESK_RESTART]);
+		REQUIRE(v->leds[1 * MFD_DESK_CELLS + MFD_DESK_BLEND].velocity == 1U); /* dim white at its own blend */
+		/* a latched dock Shift shows the armed punch colour, without touching the desk's Shift */
+		mfd_engine_get_desk_view(eng, true, v);
+		REQUIRE(v->leds[1 * MFD_DESK_CELLS + MFD_DESK_BLEND].velocity != 1U && !eng->vj.shift);
+
+		/* 14b. A dock flash hold, then the desk lets go and holds again: the dock's release leaves the desk's hold. */
+		uint32_t ep = 0;
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, true, false, &ep) == MFD_DESK_HOLD_STARTED);
+		REQUIRE(eng->vj.flashing & 0x02U);
+		push_midi_note(eng, false, 0, 9);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(!(eng->vj.flashing & 0x02U));
+		push_midi_note(eng, true, 0, 9);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->vj.flashing & 0x02U);
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, false, false, &ep) == MFD_DESK_REJECTED);
+		REQUIRE(eng->vj.flashing & 0x02U); /* still the desk's */
+		push_midi_note(eng, false, 0, 9);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(!(eng->vj.flashing & 0x02U));
+		/* the dock's own hold, let go by the dock */
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, true, false, &ep) == MFD_DESK_HOLD_STARTED);
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, false, false, &ep) == MFD_DESK_ACCEPTED);
+		REQUIRE(!(eng->vj.flashing & 0x02U));
+		/* pressing a pad the desk already holds is not a new dock hold */
+		push_midi_note(eng, true, 0, 9);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(mfd_engine_desk_press(eng, 0, 9, true, false, &ep) == MFD_DESK_ACCEPTED);
+		push_midi_note(eng, false, 0, 9);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(!(eng->vj.flashing & 0x02U));
+
+		/* 14c. The desk's Shift survives a dock press without Shift; the Shift note itself is refused. */
+		push_midi_note(eng, true, 0, 98);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->vj.shift);
+		g_vj_cmd_count = 0;
+		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_ACCEPTED); /* restart B1 */
+		mfd_engine_desk_press(eng, 0, 33, false, false, NULL);
+		REQUIRE(eng->vj.shift && eng->fader_slots[2].auto_follow); /* not taken as Shift + top pad (pin) */
+		REQUIRE(mfd_engine_desk_press(eng, 0, 98, false, false, NULL) == MFD_DESK_REJECTED && eng->vj.shift);
+		push_midi_note(eng, false, 0, 98);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(!eng->vj.shift);
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_RESTART);
+
+		/* 14d. A button a fader learned is marked and refused. */
+		struct mfd_midi_addr saved_addr = eng->fader_slots[4].addr;
+		bool saved_enabled = eng->fader_slots[4].enabled;
+		eng->fader_slots[4].addr.type = MFD_MIDI_NOTE_ON;
+		eng->fader_slots[4].addr.channel = 0;
+		eng->fader_slots[4].addr.number = 33;
+		eng->fader_slots[4].addr.is_14bit = false;
+		eng->fader_slots[4].enabled = true;
+		mfd_engine_get_desk_view(eng, false, v);
+		REQUIRE(v->strips[1].owned[MFD_DESK_RESTART] && !v->strips[1].owned[MFD_DESK_SHOW]);
+		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_REJECTED);
+		eng->fader_slots[4].addr = saved_addr;
+		eng->fader_slots[4].enabled = saved_enabled;
+
+		/* 14e. Without the APC40 the pads wait (with the reason), but Visual Sidechain's buttons still work. */
+		eng->midi_dev.is_open = false;
+		mfd_engine_get_desk_view(eng, false, v);
+		REQUIRE(v->pads == MFD_DESK_PADS_NO_APC40 && !v->desk_connected);
+		REQUIRE(strcmp(v->strips[1].source, "B1") == 0); /* names still shown */
+		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_REJECTED);
+		g_vj_cmd_count = 0;
+		REQUIRE(mfd_engine_desk_vs(eng, MFD_VJ_CMD_VS_TAP) && !mfd_engine_desk_vs(eng, MFD_VJ_CMD_TAKE));
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_VS_TAP);
+		eng->midi_dev.is_open = true;
+
+		/* 14f. Shown: Visual Sidechain is asked at once, and the frame tick asks the UI to repaint. */
+		eng->vj_vs_poll_pending = false;
+		mfd_engine_set_desk_visible(eng, true);
+		REQUIRE(eng->vj_vs_poll_pending && eng->desk_visible);
+		eng->pending_ui_notify = false;
+		mfd_engine_tick(eng, 0.05f);
+		REQUIRE(eng->pending_ui_notify || eng->telemetry_rev > 0U);
+		mfd_engine_set_desk_visible(eng, false);
+		mfd_engine_flush_pending_ui_work(eng);
+		free(v);
+	}
 
 	/* 12. Saved and loaded: following strips stay following; the first fill is not repeated. */
 	obs_data_t *saved = obs_data_create();

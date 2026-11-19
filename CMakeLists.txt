@@ -68,6 +68,8 @@ target_sources(
     src/core/tbar-logic.c
     src/core/vj-pads.h
     src/core/vj-pads.c
+    src/core/apc40-palette.h
+    src/core/apc40-palette.c
     src/core/filter-math.h
     src/core/filter-math.c
     src/core/ui-sentences.h
@@ -95,6 +97,8 @@ target_sources(
     src/ui/mfd-setup-sheet.cpp
     src/ui/mfd-settings-dialog.hpp
     src/ui/mfd-settings-dialog.cpp
+    src/ui/mfd-desk-dock.hpp
+    src/ui/mfd-desk-dock.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE src)
