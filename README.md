@@ -331,6 +331,15 @@ obs-websocket `get_state` reply lists them under `vj_pads`, with the five scenes
 
 **Fadester Desk dock.** Turn it on in OBS under **Docks → Fadester Desk** (it starts hidden; OBS remembers where you put it). It shows what the desk shows: the five scene buttons (Program red, Preview pulsing green), the 8 × 5 pad grid in the desk's own colours with each column's source name above it, Clip Stop, Stop All, Session (Take), the eight faders and the crossfader, and Visual Sidechain's BPM, tempo lock, beat (four dots for the bar) and a red banner while it is panicked. Click a button and it does what the desk button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Shift** on the dock is for the next pad only; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air. A greyed button says why in its tooltip (no source on the column, a fader learned that button, a crossfader throw under way). Without the desk the dock still shows the scenes, faders and Visual Sidechain, and its Panic, Tap, Lock and Downbeat buttons still work (they need obs-websocket, like the desk's). A dock press never cancels a pad or Shift you are holding on the desk.
 
+Also on the dock: a red Panic banner at the very top while Visual Sidechain is panicked; **On air** and **Preview** scene
+names; the transition length and pad fade time (what the Cue Level knob just changed); a **Reconnect** button when the
+APC40 drops; row names that switch to Pin, Wake, Snap, Blackout and Punch mode while Shift is armed; beat 1 in amber;
+**Escape** lets go of anything held from the dock. The **VJster video** row drives the video speed through
+[Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester): an endless speed dial (0.05x per notch, like the
+Tempo knob; click it first to use the scroll wheel or arrow keys), preset speeds 0.5x, 0.75x, **1x**, 1.25x, 1.5x and 2x
+(the presets other than 1x need Companion 0.1.17 or later), and Play / Pause. It works without the APC40. Midi Fadester
+does not hear back from the video, so the dock shows only the last speed it asked for, marked unconfirmed.
+
 ![The Fadester Desk dock](docs/screenshots/13-desk-dock.png)
 
 ## Not yet

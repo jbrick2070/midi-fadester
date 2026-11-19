@@ -1223,6 +1223,14 @@ private:
 		vj_fill_bar->addWidget(vj_fill_result_, 1);
 		root->addLayout(vj_fill_bar);
 		connect(btn_vj_fill, &QPushButton::clicked, this, [this]() { fill_faders_from_scene(); });
+		/* 0.8.0: the dock that mirrors the desk, one click away (it starts hidden in OBS's Docks menu) */
+		auto *btn_show_desk = new QPushButton(
+			mfdText("Dialog.ShowDesk",
+				"Show the Fadester Desk dock (the APC40 on screen; also in the Docks menu)"),
+			adv_tab);
+		btn_show_desk->setObjectName(QStringLiteral("mfdAdvShowDesk"));
+		root->addWidget(btn_show_desk);
+		connect(btn_show_desk, &QPushButton::clicked, this, []() { mfd_desk_dock_show(); });
 
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -2730,6 +2738,7 @@ static void on_midi_ports_changed()
 		g_dialog->on_hardware_ports_changed();
 		g_dialog->refresh_from_engine();
 	}
+	mfd_desk_dock_refresh();
 }
 
 #ifdef _WIN32

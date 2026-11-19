@@ -563,8 +563,10 @@ struct mfd_engine {
 	 * vendor events by mfd_engine_unlock after the lock is let go (steps at most every 50 ms). */
 #define MFD_VJ_SPEED_RESET_BIT 1U
 #define MFD_VJ_SPEED_PLAY_BIT 2U
+#define MFD_VJ_SPEED_SET_BIT 4U          /* a preset speed from the dock: vj_speed_set_rate */
 #define MFD_VJ_SPEED_MAX_STEPS 80        /* 0.25x..4x is 75 steps of 0.05x */
 #define MFD_VJ_SPEED_SEND_NS 50000000ULL /* 20 sends a second at most */
+	double vj_speed_set_rate;        /* the preset the dock asked for (MFD_VJ_SPEED_SET_BIT) */
 	int vj_speed_steps;
 	unsigned vj_speed_actions; /* MFD_VJ_SPEED_RESET_BIT | MFD_VJ_SPEED_PLAY_BIT */
 	uint64_t vj_speed_sent_ns;
@@ -691,9 +693,11 @@ enum mfd_desk_cell {
 struct mfd_desk_strip {
 	char scene[MFD_SOURCE_NAME_MAX];
 	char source[MFD_SOURCE_NAME_MAX]; /* the strip's layer, "" when it has none */
+	char label[MFD_SOURCE_NAME_MAX];  /* what its fader drives when it is not a layer (audio, a filter), else "" */
 	float level;                      /* the fader's value, 0..1 */
 	bool has_layer;                   /* a Layer Opacity or Two-Source Mix layer the pads act on */
 	bool single_layer;                /* a Layer Opacity strip: flash, blackout, fade and snap work */
+	bool source_missing;              /* a Layer Opacity strip whose source is not available now */
 	bool follows;                     /* follows the scene on air */
 	bool can_pin_toggle;              /* Shift + top pad would pin or unpin it */
 	bool owned[MFD_DESK_CELLS];       /* a fader learned that button's MIDI address */
@@ -707,6 +711,10 @@ struct mfd_desk_view {
 	bool studio_mode;
 	bool take_ready;
 	bool tbar_busy;
+	bool desk_shift; /* Shift held on the desk */
+	int fade_ms;     /* the pads' fade time */
+	char program[MFD_SOURCE_NAME_MAX];
+	char preview[MFD_SOURCE_NAME_MAX];
 	int scene_count;
 	char scenes[MFD_VJ_SCENES][MFD_SOURCE_NAME_MAX];
 	bool scene_owned[MFD_VJ_SCENES];
@@ -737,6 +745,20 @@ enum mfd_desk_press_result mfd_engine_desk_press(struct mfd_engine *eng, uint8_t
 /* A Visual Sidechain button on the dock (MFD_VJ_CMD_VS_PANIC, _TAP, _LOCK or _RESYNC): queued for the UI thread, with
  * or without an APC40. Returns false when the command queue is full or the kind is not one of those. */
 bool mfd_engine_desk_vs(struct mfd_engine *eng, enum mfd_vj_command_kind kind);
+
+/* Visual Sidechain answered a safety poll (from_poll) or a desk command of this kind, or did not: keeps vs_panic,
+ * vs_panic_known and vs_last_failed (what the dock shows). */
+void mfd_engine_vs_result(struct mfd_engine *eng, bool from_poll, enum mfd_vj_command_kind kind, bool answered,
+			  bool panic);
+
+/* The dock's VJster buttons: video speed steps (n x 0.05x, signed), back to 1x, or play / pause, sent to Fadester
+ * Companion as the desk's Tempo, Nudge, Tap Tempo and Play are (vendor event vjster_action, added up and paced the
+ * same way). Works without the APC40; nothing answers back. */
+void mfd_engine_desk_vjster(struct mfd_engine *eng, int steps, bool reset, bool play_pause);
+
+/* A preset speed button on the dock (0.25..4): one vjster_action {"action":"vjster.speed.set","rate":r}, which
+ * overtakes steps and a 1x still waiting (Fadester Companion 0.1.17 or later; older ones ignore it). */
+void mfd_engine_desk_vjster_rate(struct mfd_engine *eng, double rate);
 
 /* The dock is shown or hidden: while shown, Visual Sidechain's panic state is asked every 2 s (at once on show). */
 void mfd_engine_set_desk_visible(struct mfd_engine *eng, bool visible);

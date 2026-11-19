@@ -58,6 +58,8 @@ void mfd_vendor_emit_state_changed(struct mfd_engine *eng);
 /* APC40 video speed for Fadester Companion: vendor event "vjster_action" with {"action": id} and, for
  * "vjster.speed.step", {"steps": n} (n x 0.05x, signed). Never called with the engine lock held. */
 void mfd_vendor_emit_vjster_action(const char *action, int steps);
+/* {"action": "vjster.speed.set", "rate": r} (0.25..4): the dock's preset speeds (Fadester Companion 0.1.17+). */
+void mfd_vendor_emit_vjster_rate(double rate);
 
 /*
  * An APC40 desk button for Visual Sidechain, through obs-websocket: "panic" (panics, or restores when it is panicked),

@@ -17,13 +17,18 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QDial>
+#include <QDockWidget>
 #include <QElapsedTimer>
+#include <QWheelEvent>
 #include <QEvent>
 #include <QFontMetrics>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QPointer>
+#include <QScrollArea>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -32,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 namespace {
 
@@ -65,9 +71,23 @@ QString rowName(int r)
 	}
 }
 
-/* Row r's short name for the grid (its full name is the tooltip). */
-QString rowShortName(int r)
+/* Row r's short name for the grid (its full name is the tooltip); with Shift armed, what Shift makes it do. */
+QString rowShortName(int r, bool shift = false)
 {
+	if (shift) {
+		switch (r) {
+		case 0:
+			return mfdText("Desk.RowPinShort", "Pin");
+		case 1:
+			return mfdText("Desk.RowWakeShort", "Wake");
+		case 2:
+			return mfdText("Desk.RowSnapShort", "Snap");
+		case 3:
+			return mfdText("Desk.RowBlackoutShort", "Blackout");
+		default:
+			return mfdText("Desk.RowPunchModeShort", "Punch mode");
+		}
+	}
 	switch (r) {
 	case 0:
 		return mfdText("Desk.RowRestartShort", "Restart");
@@ -85,6 +105,17 @@ QString rowShortName(int r)
 QString rgbCss(uint32_t rgb)
 {
 	return QStringLiteral("#%1").arg(rgb & 0xFFFFFFU, 6, 16, QLatin1Char('0'));
+}
+
+/* Dark text on a light colour, light text on a dark one (relative luminance, sRGB). */
+bool lightBackground(uint32_t rgb)
+{
+	auto lin = [](uint32_t c) {
+		double x = (double)(c & 0xFFU) / 255.0;
+		return x <= 0.04045 ? x / 12.92 : std::pow((x + 0.055) / 1.055, 2.4);
+	};
+	double y = 0.2126 * lin(rgb >> 16) + 0.7152 * lin(rgb >> 8) + 0.0722 * lin(rgb);
+	return y > 0.22;
 }
 
 uint32_t mix(uint32_t a, uint32_t b, double t)
@@ -158,6 +189,95 @@ void setButtonText(QPushButton *b, const QString &text)
 	}
 }
 
+/* An endless speed encoder: each notch is one 0.05x step, like the APC40's Tempo knob. Clicking never jumps (the press
+ * only anchors); a large jump between two positions is ignored; the scroll wheel and keys act only once it has focus,
+ * so scrolling the dock never changes the video's speed. */
+class MfdSpeedDial final : public QDial {
+public:
+	explicit MfdSpeedDial(std::function<void(int)> on_steps, QWidget *parent = nullptr)
+		: QDial(parent),
+		  on_steps_(std::move(on_steps))
+	{
+		setWrapping(true);
+		setRange(0, kNotches - 1);
+		setNotchesVisible(true);
+		setFocusPolicy(Qt::StrongFocus);
+		connect(this, &QDial::valueChanged, this, [this](int value) { moved(value); });
+	}
+
+protected:
+	void mousePressEvent(QMouseEvent *e) override
+	{
+		anchoring_ = true; /* QDial moves to the pointer on press: that is not a turn */
+		QDial::mousePressEvent(e);
+		anchoring_ = false;
+		last_ = value();
+	}
+	void wheelEvent(QWheelEvent *e) override
+	{
+		if (!hasFocus()) {
+			e->ignore(); /* the dock scrolls */
+			return;
+		}
+		wheel_ += e->angleDelta().y();
+		int steps = wheel_ / 120;
+		wheel_ -= steps * 120;
+		if (steps != 0) {
+			on_steps_(std::clamp(steps, -5, 5));
+		}
+		e->accept();
+	}
+	void keyPressEvent(QKeyEvent *e) override
+	{
+		switch (e->key()) {
+		case Qt::Key_Up:
+		case Qt::Key_Right:
+			on_steps_(1);
+			break;
+		case Qt::Key_Down:
+		case Qt::Key_Left:
+			on_steps_(-1);
+			break;
+		case Qt::Key_PageUp:
+			on_steps_(5);
+			break;
+		case Qt::Key_PageDown:
+			on_steps_(-5);
+			break;
+		case Qt::Key_Home:
+		case Qt::Key_End:
+			break; /* no jumps on an endless dial */
+		default:
+			e->ignore(); /* Escape and the rest go to the dock */
+			return;
+		}
+		e->accept();
+	}
+
+private:
+	static constexpr int kNotches = 24;
+	void moved(int value)
+	{
+		int delta = value - last_;
+		last_ = value;
+		if (anchoring_) {
+			return;
+		}
+		if (delta > kNotches / 2) {
+			delta -= kNotches; /* across the wrap */
+		} else if (delta < -kNotches / 2) {
+			delta += kNotches;
+		}
+		if (delta != 0 && std::abs(delta) <= 3) { /* a bigger jump is not a turn: ignored */
+			on_steps_(delta);
+		}
+	}
+	std::function<void(int)> on_steps_;
+	bool anchoring_ = false;
+	int last_ = 0;
+	int wheel_ = 0;
+};
+
 class MfdDeskDock final : public QWidget {
 public:
 	explicit MfdDeskDock(struct mfd_engine *eng, QWidget *parent = nullptr);
@@ -171,6 +291,7 @@ protected:
 	void showEvent(QShowEvent *e) override;
 	void hideEvent(QHideEvent *e) override;
 	bool event(QEvent *e) override;
+	void keyPressEvent(QKeyEvent *e) override;
 
 public:
 	void refresh();
@@ -181,10 +302,14 @@ private:
 	void pressNote(uint8_t channel, uint8_t note, bool on, bool shift);
 	void releaseHolds();
 	void sayStatus(const QString &text);
-	void paintButton(QPushButton *b, uint32_t rgb, bool enabled, bool bright_text = false);
+	void paintButton(QPushButton *b, uint32_t rgb, bool enabled);
 
 	struct mfd_engine *eng_ = nullptr;
 	QLabel *title_ = nullptr;
+	QLabel *on_air_ = nullptr;
+	QLabel *row_names_[kRows] = {};
+	QLabel *timing_ = nullptr;
+	QPushButton *reconnect_ = nullptr;
 	QLabel *status_ = nullptr;
 	QPushButton *scenes_[MFD_VJ_SCENES] = {};
 	QLabel *col_names_[kStrips] = {};
@@ -203,6 +328,10 @@ private:
 	QPushButton *vs_tap_ = nullptr;
 	QPushButton *vs_lock_ = nullptr;
 	QPushButton *vs_downbeat_ = nullptr;
+	MfdSpeedDial *speed_dial_ = nullptr;
+	QPushButton *vj_play_ = nullptr;
+	QPushButton *vj_presets_[6] = {};
+	void vjSteps(int steps);
 	QElapsedTimer clock_;
 	QElapsedTimer status_age_;
 	struct mfd_desk_view view_ = {};
@@ -229,8 +358,9 @@ QPushButton *MfdDeskDock::makeButton(const QString &accessible, int min_w, int m
 MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(parent), eng_(eng)
 {
 	setObjectName(QStringLiteral("mfdDeskDock"));
-	setMinimumSize(420, 380);
-	setStyleSheet(QStringLiteral("QWidget#mfdDeskDock { background-color: #0b1120; }"
+	setMinimumSize(300, 240);
+	setStyleSheet(QStringLiteral("QWidget#mfdDeskDock, QWidget#mfdDeskBody { background-color: #0b1120; }"
+				     "QScrollArea { border: none; background-color: #0b1120; }"
 				     "QLabel { color: #e2e8f0; font-size: 11px; }"
 				     "QPushButton { border: 1px solid #334155; border-radius: 3px; color: #0b1120;"
 				     " font-size: 10px; padding: 1px; }"
@@ -238,14 +368,33 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 				     "QProgressBar { border: 1px solid #334155; background: #111827; }"
 				     "QProgressBar::chunk { background: #94a3b8; }"));
 
-	auto *root = new QVBoxLayout(this);
+	auto *outer = new QVBoxLayout(this);
+	outer->setContentsMargins(0, 0, 0, 0);
+	auto *scroll = new QScrollArea(this);
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	auto *body = new QWidget(scroll);
+	body->setObjectName(QStringLiteral("mfdDeskBody"));
+	body->setMinimumWidth(380); /* below that it scrolls sideways rather than squeezing the grid */
+	scroll->setWidget(body);
+	outer->addWidget(scroll);
+	auto *root = new QVBoxLayout(body);
 	root->setContentsMargins(8, 8, 8, 8);
 	root->setSpacing(6);
 
 	title_ = new QLabel(this);
 	title_->setObjectName(QStringLiteral("mfdDeskTitle"));
 	title_->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: bold;"));
+	title_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	root->addWidget(title_);
+	/* Panic first: it must be seen however short the dock is */
+	panic_ = new QLabel(this);
+	panic_->setWordWrap(true);
+	root->addWidget(panic_);
+	on_air_ = new QLabel(this);
+	on_air_->setObjectName(QStringLiteral("mfdDeskOnAir"));
+	on_air_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	root->addWidget(on_air_);
 
 	/* Scene Launch 1..5 */
 	auto *scene_row = new QHBoxLayout();
@@ -254,6 +403,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		QPushButton *b = makeButton(
 			mfdFill(mfdText("Desk.SceneButton", "Scene Launch %1"), {QString::number(j + 1)}), 60, 28);
 		scenes_[j] = b;
+		b->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); /* a long name never widens the dock */
 		connect(b, &QPushButton::pressed, this, [this, j]() {
 			/* Ctrl-click (Cmd on a Mac): straight to Program, as Shift + Scene Launch on the desk */
 			bool direct = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
@@ -273,12 +423,14 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		col_names_[i] = new QLabel(this);
 		col_names_[i]->setAlignment(Qt::AlignCenter);
 		col_names_[i]->setMinimumWidth(30);
+		col_names_[i]->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 		grid->addWidget(col_names_[i], 0, i + 1);
 	}
 	for (int r = 0; r < kRows; ++r) {
 		auto *name = new QLabel(rowShortName(r), this);
 		name->setToolTip(rowName(r));
 		name->setMaximumWidth(110);
+		row_names_[r] = name;
 		grid->addWidget(name, r + 1, 0);
 		for (int i = 0; i < kStrips; ++i) {
 			QPushButton *b = makeButton(mfdFill(mfdText("Desk.PadName", "%1, column %2"),
@@ -309,9 +461,17 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 
 	/* Stop All, Shift (latched for the next pad), Session: added after the grid below */
 	auto *transport = new QHBoxLayout();
-	stop_all_ = makeButton(mfdText("Desk.StopAll", "Stop All: every source back to its own blend"), 80, 24);
+	stop_all_ = makeButton(mfdText("Desk.StopAllTip", "Stop All: every effect off and every source back to its own "
+							  "blend. With Shift: fade every source out."),
+			       80, 24);
 	stop_all_->setText(mfdText("Desk.StopAllShort", "Stop All"));
-	connect(stop_all_, &QPushButton::pressed, this, [this]() { pressNote(0U, MFD_VJ_NOTE_STOP_ALL, true, false); });
+	connect(stop_all_, &QPushButton::pressed, this, [this]() {
+		bool shift = shift_->isChecked();
+		pressNote(0U, MFD_VJ_NOTE_STOP_ALL, true, shift);
+		if (shift) {
+			shift_->setChecked(false);
+		}
+	});
 	connect(stop_all_, &QPushButton::released, this,
 		[this]() { pressNote(0U, MFD_VJ_NOTE_STOP_ALL, false, false); });
 	shift_ = makeButton(mfdText("Desk.Shift", "Shift for the next pad"), 60, 24);
@@ -347,6 +507,10 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	xfader_->setAccessibleName(mfdText("Desk.Crossfader", "Crossfader (T-bar)"));
 	xfader_->setToolTip(xfader_->accessibleName());
 	root->addWidget(xfader_);
+	timing_ = new QLabel(this);
+	timing_->setObjectName(QStringLiteral("mfdDeskTiming"));
+	timing_->setStyleSheet(QStringLiteral("color: #94a3b8;"));
+	root->addWidget(timing_);
 
 	/* Visual Sidechain */
 	auto *vs_row = new QHBoxLayout();
@@ -363,9 +527,6 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	}
 	vs_row->addStretch(1);
 	root->addLayout(vs_row);
-	panic_ = new QLabel(this);
-	panic_->setWordWrap(true);
-	root->addWidget(panic_);
 	auto *vs_buttons = new QHBoxLayout();
 	vs_panic_ = makeButton(mfdText("Desk.VsPanic", "Panic / Restore (Record)"), 70, 24);
 	vs_panic_->setText(mfdText("Desk.VsPanicShort", "Panic"));
@@ -381,7 +542,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 									 {vs_downbeat_, MFD_VJ_CMD_VS_RESYNC}};
 	for (const auto &p : vs) {
 		enum mfd_vj_command_kind kind = p.second;
-		connect(p.first, &QPushButton::clicked, this, [this, kind]() {
+		connect(p.first, &QPushButton::pressed, this, [this, kind]() {
 			if (!mfd_engine_desk_vs(eng_, kind)) {
 				sayStatus(mfdText("Desk.Busy", "Too many presses at once; try again."));
 			}
@@ -390,10 +551,70 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	}
 	root->addLayout(vs_buttons);
 
+	/* VJster: the video's speed through Fadester Companion. A dial for fine changes (the desk's Tempo knob), a row of
+	 * preset speeds with 1x (the desk's Tap Tempo), and Play / Pause. */
+	auto *vj_row = new QHBoxLayout();
+	auto *vj_name = new QLabel(mfdText("Desk.VjsterTitle", "VJster video"), this);
+	vj_name->setToolTip(mfdText("Desk.VjsterNote",
+				    "Video speed in VJster (Chrome or the OBS video page), through Fadester "
+				    "Companion with VJster on (the preset speeds need 0.1.17 or later). Midi "
+				    "Fadester does not hear back: watch the video."));
+	vj_row->addWidget(vj_name);
+	speed_dial_ = new MfdSpeedDial([this](int steps) { vjSteps(steps); }, this);
+	speed_dial_->setObjectName(QStringLiteral("mfdDeskSpeedDial"));
+	speed_dial_->setFixedSize(48, 48);
+	speed_dial_->setAccessibleName(mfdText("Desk.VjsterDial",
+					       "Speed dial: 0.05x per notch (click it first to use the "
+					       "scroll wheel or the arrow keys)"));
+	speed_dial_->setToolTip(speed_dial_->accessibleName());
+	vj_row->addWidget(speed_dial_);
+	vj_play_ = makeButton(mfdText("Desk.VjsterPlayTip", "Play or pause the video (Play)"), 70, 24);
+	vj_play_->setText(mfdText("Desk.VjsterPlay", "Play / Pause"));
+	connect(vj_play_, &QPushButton::pressed, this, [this]() { mfd_engine_desk_vjster(eng_, 0, false, true); });
+	vj_row->addWidget(vj_play_);
+	root->addLayout(vj_row);
+	auto *preset_row = new QHBoxLayout();
+	preset_row->setSpacing(3);
+	static const double k_presets[6] = {0.5, 0.75, 1.0, 1.25, 1.5, 2.0};
+	for (int k = 0; k < 6; ++k) {
+		double rate = k_presets[k];
+		QString label = QString::number(rate) + QStringLiteral("x");
+		QPushButton *b = makeButton(
+			rate == 1.0 ? mfdText("Desk.VjsterReset", "Back to 1x (Tap Tempo)")
+				    : mfdFill(mfdText("Desk.VjsterPresetTip",
+						      "Ask VJster for %1 (Fadester Companion 0.1.17 or later)"),
+					      {label}),
+			40, 26);
+		b->setText(label);
+		b->setObjectName(QStringLiteral("mfdDeskSpeedPreset_%1").arg(k));
+		vj_presets_[k] = b;
+		connect(b, &QPushButton::pressed, this, [this, rate, label]() {
+			if (rate == 1.0) {
+				mfd_engine_desk_vjster(eng_, 0, true, false); /* 1x: the reset every Companion knows */
+			} else {
+				mfd_engine_desk_vjster_rate(eng_, rate);
+			}
+			sayStatus(mfdFill(mfdText("Desk.VjsterAsked", "Last request from this dock: %1 (unconfirmed)"),
+					  {label}));
+		});
+		preset_row->addWidget(b);
+	}
+	root->addLayout(preset_row);
+
+	auto *status_row = new QHBoxLayout();
 	status_ = new QLabel(this);
 	status_->setWordWrap(true);
 	status_->setStyleSheet(QStringLiteral("color: #94a3b8;"));
-	root->addWidget(status_);
+	status_row->addWidget(status_, 1);
+	reconnect_ = makeButton(mfdText("Desk.ReconnectTip", "Look for the APC40 mkII again"), 80, 24);
+	reconnect_->setText(mfdText("Desk.Reconnect", "Reconnect"));
+	reconnect_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	connect(reconnect_, &QPushButton::clicked, this, [this]() {
+		mfd_engine_poll_midi_health_on_ui_thread(eng_);
+		refresh();
+	});
+	status_row->addWidget(reconnect_);
+	root->addLayout(status_row);
 	root->addStretch(1);
 
 	clock_.start();
@@ -421,6 +642,26 @@ bool MfdDeskDock::event(QEvent *e)
 		releaseHolds();
 	}
 	return QWidget::event(e);
+}
+
+void MfdDeskDock::vjSteps(int steps)
+{
+	mfd_engine_desk_vjster(eng_, steps, false, false);
+	sayStatus(mfdFill(mfdText("Desk.VjsterAskedStep", "Last request from this dock: %1 (unconfirmed)"),
+			  {QStringLiteral("%1%2x")
+				   .arg(steps > 0 ? QStringLiteral("+") : QStringLiteral("\xE2\x88\x92"))
+				   .arg(std::abs(steps) * 0.05, 0, 'f', 2)}));
+}
+
+void MfdDeskDock::keyPressEvent(QKeyEvent *e)
+{
+	if (e->key() == Qt::Key_Escape) {
+		releaseHolds(); /* and the dock's Shift */
+		refresh();
+		e->accept();
+		return;
+	}
+	QWidget::keyPressEvent(e);
 }
 
 void MfdDeskDock::sayStatus(const QString &text)
@@ -488,11 +729,12 @@ void MfdDeskDock::releaseHolds()
 	}
 }
 
-void MfdDeskDock::paintButton(QPushButton *b, uint32_t rgb, bool enabled, bool bright_text)
+void MfdDeskDock::paintButton(QPushButton *b, uint32_t rgb, bool enabled)
 {
-	QString css = QStringLiteral("QPushButton { background-color: %1; color: %2; }"
-				     "QPushButton:disabled { background-color: #1f2937; color: #4b5563; }")
-			      .arg(rgbCss(rgb), bright_text ? QStringLiteral("#f8fafc") : QStringLiteral("#0b1120"));
+	QString css =
+		QStringLiteral("QPushButton { background-color: %1; color: %2; }"
+			       "QPushButton:disabled { background-color: #1f2937; color: #6b7280; }")
+			.arg(rgbCss(rgb), lightBackground(rgb) ? QStringLiteral("#0b1120") : QStringLiteral("#f8fafc"));
 	if (b->property("mfdCss").toString() != css) {
 		b->setStyleSheet(css);
 		b->setProperty("mfdCss", css);
@@ -541,7 +783,24 @@ void MfdDeskDock::refresh()
 						       : mfdText("Desk.DeskOff", "no APC40 mkII")}));
 
 	bool pads_on = view_.finished_loading && view_.pads == MFD_DESK_PADS_ON && !view_.learn_or_setup;
-	bool shift = shift_->isChecked();
+	bool shift = shift_->isChecked() || view_.desk_shift; /* what a click on a pad does now */
+	for (int r = 0; r < kRows; ++r) {
+		setLabel(row_names_[r], rowShortName(r, shift));
+	}
+	setButtonText(stop_all_, shift ? mfdText("Desk.StopAllFadeShort", "Fade all out")
+				       : mfdText("Desk.StopAllShort", "Stop All"));
+	QString program = QString::fromUtf8(view_.program);
+	QString preview = QString::fromUtf8(view_.preview);
+	setLabel(on_air_,
+		 view_.studio_mode && !preview.isEmpty()
+			 ? mfdFill(mfdText("Desk.OnAirStudio", "On air: %1 \xC2\xB7 Preview: %2"), {program, preview})
+			 : mfdFill(mfdText("Desk.OnAir", "On air: %1"), {program}));
+	timing_->setVisible(obs_initialized());
+	if (obs_initialized()) {
+		setLabel(timing_, mfdFill(mfdText("Desk.Timing", "Transition %1 ms \xC2\xB7 Pad fade %2 s"),
+					  {QString::number(obs_frontend_get_transition_duration()),
+					   QString::number(view_.fade_ms / 1000.0, 'f', 1)}));
+	}
 
 	/* scenes */
 	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
@@ -561,16 +820,18 @@ void MfdDeskDock::refresh()
 					   ? mfdText("Desk.Tip.Throw", "Waits while the crossfader is thrown.")
 				   : view_.scene_owned[j] ? mfdText("Desk.Tip.Owned", "A fader learned this button.")
 							  : name + QStringLiteral("\n") + what);
-		paintButton(scenes_[j], ledColor(led, beat_pos, 0x22C55EU), can, false);
+		paintButton(scenes_[j], ledColor(led, beat_pos, 0x22C55EU), can);
 	}
 
 	/* the grid */
 	for (int i = 0; i < kStrips; ++i) {
 		const struct mfd_desk_strip &st = view_.strips[i];
 		QString src = QString::fromUtf8(st.source);
-		setLabel(col_names_[i],
-			 col_names_[i]->fontMetrics().elidedText(src.isEmpty() ? QStringLiteral("\xE2\x80\x94") : src,
-								 Qt::ElideRight, std::max(28, col_names_[i]->width())));
+		QString label = QString::fromUtf8(st.label); /* a fader on audio or a filter: named, greyed below */
+		QString header = !src.isEmpty() ? src : !label.isEmpty() ? label : QStringLiteral("\xE2\x80\x94");
+		setLabel(col_names_[i], col_names_[i]->fontMetrics().elidedText(header, Qt::ElideRight,
+										std::max(28, col_names_[i]->width())));
+		setCss(col_names_[i], src.isEmpty() ? QStringLiteral("color: #6b7280;") : QString()); /* not a layer */
 		setTip(col_names_[i],
 		       src.isEmpty() ? mfdText("Desk.Tip.Empty", "No source on this column.")
 				     : src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
@@ -589,7 +850,10 @@ void MfdDeskDock::refresh()
 				why = mfdText("Desk.Tip.Empty", "No source on this column.");
 			} else if ((cell == MFD_DESK_FLASH || cell == MFD_DESK_FADE) && !st.single_layer) {
 				can = false;
-				why = mfdText("Desk.Tip.SingleLayer", "Needs a Layer Opacity fader.");
+				why = st.source_missing
+					      ? mfdText("Desk.Tip.SourceMissing",
+							"Its source is not in the scene right now.")
+					      : mfdText("Desk.Tip.SingleLayer", "Needs a Layer Opacity fader.");
 			}
 			if (!why.isEmpty()) {
 				setTip(pads_[r][i], why);
@@ -609,11 +873,11 @@ void MfdDeskDock::refresh()
 						      QString::number((int)std::lround(st.level * 100.0f))}));
 	}
 	xfader_->setValue((int)std::lround(std::clamp(view_.crossfader, 0.0f, 1.0f) * 1000.0f));
-	paintButton(stop_all_, 0x475569U, pads_on && !view_.stop_all_owned, true);
-	paintButton(shift_, shift ? 0xF8FAFCU : 0x475569U, pads_on, !shift);
+	paintButton(stop_all_, 0x475569U, pads_on && !view_.stop_all_owned);
+	paintButton(shift_, shift ? 0xF8FAFCU : 0x475569U, pads_on);
 	session_->setVisible(view_.studio_mode);
 	paintButton(session_, view_.take_ready ? 0x22C55EU : 0x475569U,
-		    pads_on && view_.take_ready && !view_.tbar_busy && !view_.session_owned, !view_.take_ready);
+		    pads_on && view_.take_ready && !view_.tbar_busy && !view_.session_owned);
 
 	/* Visual Sidechain */
 	if (!vs_loaded_) {
@@ -631,10 +895,13 @@ void MfdDeskDock::refresh()
 	last_beat_index_ = beat_index;
 	for (int k = 0; k < 4; ++k) {
 		bool on = k == step;
-		setCss(beats_[k], QStringLiteral("background-color: %1; border-radius: 6px;")
-					  .arg(on ? (fresh || beat_phase < 0.25 ? QStringLiteral("#f8fafc")
-										: QStringLiteral("#64748b"))
-						  : QStringLiteral("#1f2937")));
+		bool flash = fresh || beat_phase < 0.25;
+		QString lit =
+			k == 0 ? (flash ? QStringLiteral("#f59e0b") : QStringLiteral("#92400e")) /* beat 1: amber */
+			       : (flash ? QStringLiteral("#f8fafc") : QStringLiteral("#64748b"));
+		setCss(beats_[k],
+		       QStringLiteral("background-color: %1; border-radius: 6px;")
+			       .arg(on ? lit : (k == 0 ? QStringLiteral("#3b2a12") : QStringLiteral("#1f2937"))));
 	}
 	if (view_.vs_panic_known && view_.vs_panic) {
 		setLabel(panic_, mfdText("Desk.PanicOn", "PANIC \xE2\x80\x94 Visual Sidechain's effects are held safe. "
@@ -648,12 +915,17 @@ void MfdDeskDock::refresh()
 		setLabel(panic_, QString());
 		setCss(panic_, QString());
 	}
+	panic_->setVisible(!panic_->text().isEmpty()); /* no gap when there is nothing to warn about */
 	setButtonText(vs_panic_, view_.vs_panic_known && view_.vs_panic ? mfdText("Desk.VsRestoreShort", "Restore")
 									: mfdText("Desk.VsPanicShort", "Panic"));
-	paintButton(vs_panic_, view_.vs_panic ? 0xEF4444U : 0x475569U, vs_loaded_, true);
-	paintButton(vs_tap_, 0x475569U, vs_loaded_, true);
-	paintButton(vs_lock_, locked ? 0x0EA5E9U : 0x475569U, vs_loaded_, true);
-	paintButton(vs_downbeat_, 0x475569U, vs_loaded_, true);
+	paintButton(vs_panic_, view_.vs_panic_known && view_.vs_panic ? 0xEF4444U : 0x475569U, vs_loaded_);
+	paintButton(vs_tap_, 0x475569U, vs_loaded_);
+	paintButton(vs_lock_, locked ? 0x0EA5E9U : 0x475569U, vs_loaded_);
+	paintButton(vs_downbeat_, 0x475569U, vs_loaded_);
+	paintButton(vj_play_, 0x334155U, true); /* always: VJster does not need the desk */
+	for (int k = 0; k < 6; ++k) {
+		paintButton(vj_presets_[k], k == 2 ? 0x64748BU : 0x334155U, true); /* 1x stands out */
+	}
 
 	/* the status line: why the pads wait, else the last message for a few seconds */
 	QString why;
@@ -668,7 +940,13 @@ void MfdDeskDock::refresh()
 			      "Choose the APC40 mkII profile in Midi Fadester's settings to use the pads.");
 	} else if (view_.learn_or_setup) {
 		why = mfdText("Desk.WhyLearn", "The pads wait while MIDI Learn or Set up is running.");
+	} else if (view_.tbar_busy) {
+		why = mfdText("Desk.TbarBusy", "Crossfader throw under way: the scene buttons wait.");
 	}
+	bool lost = view_.finished_loading && view_.pads == MFD_DESK_PADS_NO_APC40;
+	reconnect_->setVisible(lost);
+	setCss(status_,
+	       lost ? QStringLiteral("color: #fde68a; font-weight: bold;") : QStringLiteral("color: #94a3b8;"));
 	if (!why.isEmpty()) {
 		setLabel(status_, why);
 		status_is_reason_ = true;
@@ -728,6 +1006,21 @@ void mfd_desk_dock_refresh(void)
 	if (g_dock && g_dock->isVisible()) {
 		g_dock->refresh();
 	}
+}
+
+bool mfd_desk_dock_show(void)
+{
+	if (!g_dock) {
+		return false;
+	}
+	for (QWidget *w = g_dock->parentWidget(); w; w = w->parentWidget()) {
+		if (auto *dw = qobject_cast<QDockWidget *>(w)) { /* OBS wraps the widget in its own dock */
+			dw->show();
+			dw->raise();
+			return true;
+		}
+	}
+	return false;
 }
 
 void mfd_desk_dock_shutdown(void)

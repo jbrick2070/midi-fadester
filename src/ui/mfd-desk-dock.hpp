@@ -20,6 +20,9 @@ void mfd_desk_dock_init(void);
  * frame tick asks about 30 times a second while the dock is visible). */
 void mfd_desk_dock_refresh(void);
 
+/* Shows the dock (the settings dialog's button): false when it is not registered (no OBS frontend). */
+bool mfd_desk_dock_show(void);
+
 /* Takes the dock out again (idempotent; OBS_FRONTEND_EVENT_EXIT does it first when OBS quits). */
 void mfd_desk_dock_shutdown(void);
 

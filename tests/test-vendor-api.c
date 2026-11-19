@@ -3367,20 +3367,67 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_tick(eng, 0.016f);
 		REQUIRE(!(eng->vj.flashing & 0x02U));
 
-		/* 14c. The desk's Shift survives a dock press without Shift; the Shift note itself is refused. */
+		/* 14c. The desk's Shift survives a dock press (a desk-held Shift shifts the click, as the dock shows it); the
+		 * Shift note itself is refused. */
 		push_midi_note(eng, true, 0, 98);
 		mfd_engine_tick(eng, 0.016f);
 		REQUIRE(eng->vj.shift);
-		g_vj_cmd_count = 0;
-		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_ACCEPTED); /* restart B1 */
-		mfd_engine_desk_press(eng, 0, 33, false, false, NULL);
-		REQUIRE(eng->vj.shift && eng->fader_slots[2].auto_follow); /* not taken as Shift + top pad (pin) */
+		mfd_engine_get_desk_view(eng, false, v);
+		REQUIRE(v->desk_shift);
+		REQUIRE(mfd_engine_desk_press(eng, 1, 52, true, false, NULL) ==
+			MFD_DESK_ACCEPTED); /* Clip Stop, column 2 */
+		mfd_engine_desk_press(eng, 1, 52, false, false, NULL);
+		REQUIRE(eng->vj.shift);
 		REQUIRE(mfd_engine_desk_press(eng, 0, 98, false, false, NULL) == MFD_DESK_REJECTED && eng->vj.shift);
 		push_midi_note(eng, false, 0, 98);
 		mfd_engine_tick(eng, 0.016f);
 		REQUIRE(!eng->vj.shift);
+		g_vj_cmd_count = 0;
+		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_ACCEPTED); /* restart B1 */
+		mfd_engine_desk_press(eng, 0, 33, false, false, NULL);
 		mfd_engine_flush_pending_ui_work(eng);
-		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_RESTART);
+		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_RESTART &&
+			eng->fader_slots[2].auto_follow);
+
+		/* 14j. Program / Preview names and the pad fade time are in the view; a renamed scene keeps its button. */
+		mfd_engine_get_desk_view(eng, false, v);
+		REQUIRE(strcmp(v->program, "Scene B") == 0 && v->fade_ms == mfd_engine_vj_fade_ms(eng));
+		mfd_engine_handle_source_rename(eng, "Scene C", "Scene C2");
+		REQUIRE(strcmp(eng->cached_scenes[2], "Scene C2") == 0);
+		mfd_engine_handle_source_rename(eng, "Scene B", "Scene B2");
+		REQUIRE(strcmp(eng->cached_program_scene, "Scene B2") == 0 &&
+			strcmp(eng->cached_scenes[1], "Scene B2") == 0);
+		mfd_engine_handle_source_rename(eng, "Scene B2", "Scene B");
+		mfd_engine_handle_source_rename(eng, "Scene C2", "Scene C");
+		REQUIRE(strcmp(eng->cached_scenes[1], "Scene B") == 0 && strcmp(eng->cached_scenes[2], "Scene C") == 0);
+
+		/* 14l. VJster buttons work without the APC40: steps add up, 1x drops the steps before it. */
+		eng->midi_dev.is_open = false;
+		eng->vj_speed_sent_ns = os_gettime_ns(); /* inside the 50 ms pacing: the steps wait */
+		mfd_engine_desk_vjster(eng, 1, false, false);
+		mfd_engine_desk_vjster(eng, 5, false, false);
+		REQUIRE(eng->vj_speed_steps == 6);
+		mfd_engine_desk_vjster(eng, 0, true, false);
+		REQUIRE(eng->vj_speed_steps == 0 && eng->vj_speed_actions == 0U); /* the reset went out at the unlock */
+		mfd_engine_desk_vjster(eng, 1000, false, false);
+		REQUIRE(eng->vj_speed_steps == 0); /* nonsense steps refused */
+		for (int k = 0; k < 10; ++k) {
+			mfd_engine_desk_vjster(eng, 50, false, false);
+		}
+		REQUIRE(eng->vj_speed_steps == MFD_VJ_SPEED_MAX_STEPS); /* bounded like the Tempo knob */
+		/* a preset overtakes the steps waiting before it, and is sent at once */
+		mfd_engine_desk_vjster_rate(eng, 1.5);
+		REQUIRE(eng->vj_speed_steps == 0 && eng->vj_speed_actions == 0U && eng->vj_speed_set_rate == 1.5);
+		mfd_engine_desk_vjster_rate(eng, 9.0); /* outside 0.25..4: refused */
+		REQUIRE(eng->vj_speed_set_rate == 1.5);
+		eng->midi_dev.is_open = true;
+
+		/* 14k. Two Panic presses before the first has run: one Panic, not Panic then Restore. */
+		g_vj_cmd_count = 0;
+		REQUIRE(mfd_engine_desk_vs(eng, MFD_VJ_CMD_VS_PANIC) && mfd_engine_desk_vs(eng, MFD_VJ_CMD_VS_PANIC));
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_VS_PANIC);
+		g_vj_cmd_count = 0;
 
 		/* 14d. A button a fader learned is marked and refused. */
 		struct mfd_midi_addr saved_addr = eng->fader_slots[4].addr;
@@ -3426,6 +3473,26 @@ static int test_vj_fill_follow_and_desk(void)
 		eng->desk_frame_sec = 0.0f;
 		mfd_engine_tick(eng, 0.05f);
 		REQUIRE(eng->desk_frame_sec == 0.0f); /* hidden: no repaint requests counted */
+		/* 14i. What Visual Sidechain's answers do to the dock's panic state. */
+		eng->vs_panic_known = false;
+		eng->vs_last_failed = false;
+		mfd_engine_vs_result(eng, true, MFD_VJ_CMD_VS_PANIC, false, false);
+		REQUIRE(!eng->vs_panic_known &&
+			!eng->vs_last_failed); /* a silent poll: unknown, not "did not answer" */
+		mfd_engine_vs_result(eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+		REQUIRE(eng->vs_panic_known && !eng->vs_panic); /* a first "not panicked" answer counts */
+		mfd_engine_vs_result(eng, false, MFD_VJ_CMD_VS_TAP, false, false);
+		REQUIRE(eng->vs_last_failed);
+		mfd_engine_vs_result(eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+		REQUIRE(!eng->vs_last_failed); /* answering again clears it */
+		mfd_engine_vs_result(eng, false, MFD_VJ_CMD_VS_PANIC, true, true);
+		REQUIRE(eng->vs_panic && eng->vs_panic_known && !eng->vs_last_failed);
+		mfd_engine_vs_result(eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+		REQUIRE(!eng->vs_panic); /* restored elsewhere (a hotkey): the poll says so */
+		mfd_engine_vs_result(eng, true, MFD_VJ_CMD_VS_PANIC, false, false);
+		REQUIRE(!eng->vs_panic_known);
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
 		/* 14g. A dock blackout (Shift + Flash) holds and lets go like the desk's. */
 		REQUIRE(mfd_engine_desk_press(eng, 0, 9, true, true, &ep) == MFD_DESK_HOLD_STARTED);
 		REQUIRE((eng->vj.blackout & 0x02U) && !eng->vj.shift);

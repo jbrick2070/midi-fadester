@@ -237,6 +237,7 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 	size_t fader_emit_count = 0U;
 	unsigned speed_actions = 0U;
 	int speed_steps = 0;
+	double speed_rate = 0.0;
 
 	if (eng->lock_depth > 0U) {
 		--eng->lock_depth;
@@ -255,6 +256,7 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 		/* APC40 video speed: Tap Tempo and Play at once, Tempo steps added up and sent at most every 50 ms. */
 		speed_actions = eng->vj_speed_actions;
 		eng->vj_speed_actions = 0U;
+		speed_rate = eng->vj_speed_set_rate;
 		if (eng->vj_speed_steps != 0) {
 			uint64_t now = os_gettime_ns();
 			if (now - eng->vj_speed_sent_ns >= MFD_VJ_SPEED_SEND_NS) {
@@ -284,6 +286,9 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 	}
 	if (speed_actions & MFD_VJ_SPEED_RESET_BIT) {
 		mfd_vendor_emit_vjster_action("vjster.speed.reset", 0);
+	}
+	if (speed_actions & MFD_VJ_SPEED_SET_BIT) {
+		mfd_vendor_emit_vjster_rate(speed_rate);
 	}
 	if (speed_actions & MFD_VJ_SPEED_PLAY_BIT) {
 		mfd_vendor_emit_vjster_action("vjster.playPause", 0);
@@ -408,19 +413,7 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	if (vs_poll && obs_initialized()) {
 		bool panic = false;
 		bool answered = mfd_vendor_visual_sidechain_panic_state(&panic);
-		mfd_engine_lock(eng);
-		bool changed = answered && panic != eng->vs_panic;
-		if (answered != eng->vs_panic_known || (answered && eng->vs_last_failed)) {
-			eng->vs_panic_known = answered; /* a first "not panicked" answer counts too */
-			if (answered) {
-				eng->vs_last_failed = false; /* it answers again */
-			}
-			mfd_engine_notify_state_changed(eng);
-		}
-		mfd_engine_unlock(eng);
-		if (changed) {
-			mfd_engine_set_vs_panic(eng, panic);
-		}
+		mfd_engine_vs_result(eng, true, MFD_VJ_CMD_VS_PANIC, answered, panic);
 	}
 	if (autofill) {
 		vj_try_autofill(eng);
@@ -2626,6 +2619,20 @@ static bool rename_source_refs_locked(struct mfd_engine *eng, const char *prev_n
 		snprintf(eng->vj_home_key[i], sizeof(eng->vj_home_key[i]), "%s\n%s", sc, src);
 	}
 	bool touched = false;
+	/* A renamed scene: its Scene Launch button, Program / Preview and an asked Preview keep pointing at it. */
+	for (int j = 0; j < eng->cached_scene_count && j < (int)MFD_VJ_SCENES; ++j) {
+		if (strcmp(eng->cached_scenes[j], prev_name) == 0) {
+			snprintf(eng->cached_scenes[j], sizeof(eng->cached_scenes[j]), "%s", new_name);
+			touched = true;
+		}
+	}
+	char *const scene_names[] = {eng->cached_program_scene, eng->cached_preview_scene, eng->vj_preview_asked};
+	for (size_t k = 0U; k < sizeof(scene_names) / sizeof(scene_names[0]); ++k) {
+		if (strcmp(scene_names[k], prev_name) == 0) {
+			snprintf(scene_names[k], MFD_SOURCE_NAME_MAX, "%s", new_name);
+			touched = true;
+		}
+	}
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_filter_bypass_lease *l = &eng->filter_leases[i];
 		if (l->in_use && strcmp(l->source_name, prev_name) == 0) {
@@ -5236,6 +5243,15 @@ static void vj_set_blend_locked(struct mfd_engine *eng, int s, enum mfd_vj_blend
 static bool vj_queue_strip_cmd_locked(struct mfd_engine *eng, enum mfd_vj_command_kind kind, const char *scene,
 				      const char *source, int arg, int strip)
 {
+	/* Panic toggles at run time: a second press while one waits would undo it, so it is not queued twice (pressing
+	 * again after it ran restores, as on the desk). */
+	if (kind == MFD_VJ_CMD_VS_PANIC) {
+		for (int i = 0; i < eng->vj_cmd_count; ++i) {
+			if (eng->vj_cmds[i].kind == MFD_VJ_CMD_VS_PANIC) {
+				return true;
+			}
+		}
+	}
 	/* The last two places are kept for Panic (Record), so a burst of other presses never drops it. */
 	int room = kind == MFD_VJ_CMD_VS_PANIC ? MFD_VJ_CMD_MAX : MFD_VJ_CMD_MAX - 2;
 	if (eng->vj_cmd_count >= room) {
@@ -5551,6 +5567,7 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 	}
 	case MFD_VJ_ACTION_SPEED_RESET:
 		eng->vj_speed_steps = 0; /* steps turned before Tap Tempo are overtaken by it */
+		eng->vj_speed_actions &= ~MFD_VJ_SPEED_SET_BIT;
 		eng->vj_speed_actions |= MFD_VJ_SPEED_RESET_BIT;
 		break;
 	case MFD_VJ_ACTION_PLAY_PAUSE:
@@ -6489,29 +6506,13 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 	case MFD_VJ_CMD_VS_LOCK:
 	case MFD_VJ_CMD_VS_RESYNC: {
 		bool panic = false;
-		if (mfd_vendor_call_visual_sidechain_desk(cmd->kind == MFD_VJ_CMD_VS_PANIC  ? "panic"
-							  : cmd->kind == MFD_VJ_CMD_VS_TAP  ? "tap_tempo"
-							  : cmd->kind == MFD_VJ_CMD_VS_LOCK ? "lock_bpm"
-											    : "resync_downbeat",
-							  &panic)) {
-			if (cmd->kind == MFD_VJ_CMD_VS_PANIC) {
-				mfd_engine_set_vs_panic(eng, panic);
-			}
-			mfd_engine_lock(eng);
-			eng->vs_last_failed = false;
-			if (cmd->kind == MFD_VJ_CMD_VS_PANIC) {
-				eng->vs_panic_known = true;
-			}
-			mfd_engine_notify_state_changed(eng);
-			mfd_engine_unlock(eng);
-		} else {
-			obs_log(LOG_INFO,
-				"APC40: Visual Sidechain did not answer (is it installed, with obs-websocket?)");
-			mfd_engine_lock(eng);
-			eng->vs_last_failed = true;
-			mfd_engine_notify_state_changed(eng);
-			mfd_engine_unlock(eng);
-		}
+		bool answered = mfd_vendor_call_visual_sidechain_desk(cmd->kind == MFD_VJ_CMD_VS_PANIC ? "panic"
+								      : cmd->kind == MFD_VJ_CMD_VS_TAP ? "tap_tempo"
+								      : cmd->kind == MFD_VJ_CMD_VS_LOCK
+									      ? "lock_bpm"
+									      : "resync_downbeat",
+								      &panic);
+		mfd_engine_vs_result(eng, false, cmd->kind, answered, panic);
 		break;
 	}
 	default:
@@ -6543,6 +6544,44 @@ bool mfd_engine_slot_follows_scene(struct mfd_engine *eng, int slot_index)
 	bool f = eng->fader_slots[slot_index].auto_follow;
 	mfd_engine_unlock(eng);
 	return f;
+}
+
+void mfd_engine_vs_result(struct mfd_engine *eng, bool from_poll, enum mfd_vj_command_kind kind, bool answered,
+			  bool panic)
+{
+	if (!eng) {
+		return;
+	}
+	if (!answered && !from_poll) {
+		obs_log(LOG_INFO, "APC40: Visual Sidechain did not answer (is it installed, with obs-websocket?)");
+	}
+	mfd_engine_lock(eng);
+	bool notify = false;
+	if (from_poll) {
+		if (answered != eng->vs_panic_known) {
+			eng->vs_panic_known = answered; /* a first "not panicked" answer counts too */
+			notify = true;
+		}
+		if (answered && eng->vs_last_failed) {
+			eng->vs_last_failed = false; /* it answers again */
+			notify = true;
+		}
+	} else {
+		notify = eng->vs_last_failed != !answered;
+		eng->vs_last_failed = !answered;
+		if (answered && kind == MFD_VJ_CMD_VS_PANIC && !eng->vs_panic_known) {
+			eng->vs_panic_known = true;
+			notify = true;
+		}
+	}
+	bool set = answered && kind == MFD_VJ_CMD_VS_PANIC && (!from_poll || panic != eng->vs_panic);
+	if (notify) {
+		mfd_engine_notify_state_changed(eng);
+	}
+	mfd_engine_unlock(eng);
+	if (set) {
+		mfd_engine_set_vs_panic(eng, panic);
+	}
 }
 
 void mfd_engine_set_vs_panic(struct mfd_engine *eng, bool panic)
@@ -6598,6 +6637,10 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 	out->take_ready = out->studio_mode && eng->cached_preview_scene[0] != '\0' &&
 			  strcmp(eng->cached_preview_scene, eng->cached_program_scene) != 0;
 	out->tbar_busy = vj_tbar_busy_locked(eng);
+	out->desk_shift = eng->vj.shift;
+	out->fade_ms = mfd_engine_vj_fade_ms(eng);
+	snprintf(out->program, sizeof(out->program), "%s", eng->cached_program_scene);
+	snprintf(out->preview, sizeof(out->preview), "%s", out->studio_mode ? eng->cached_preview_scene : "");
 	out->scene_count = eng->cached_scene_count < (int)MFD_VJ_SCENES ? eng->cached_scene_count : (int)MFD_VJ_SCENES;
 	struct mfd_vj_pads pads = eng->vj; /* a copy: the dock's Shift changes only what it is shown */
 	pads.shift = pads.shift || dock_shift;
@@ -6629,13 +6672,17 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 		if (st->has_layer) {
 			snprintf(st->scene, sizeof(st->scene), "%s", scene);
 			snprintf(st->source, sizeof(st->source), "%s", source);
+		} else if (sl->enabled && sl->target_type != MFD_TARGET_UNASSIGNED) {
+			snprintf(st->label, sizeof(st->label), "%s",
+				 sl->source_a_name); /* audio or a filter's source */
 		}
 		if (out->pads != MFD_DESK_PADS_ON) {
 			pads.has_layer = (uint8_t)(st->has_layer ? pads.has_layer | (1U << (unsigned)i)
 								 : pads.has_layer & ~(1U << (unsigned)i));
 		}
-		st->single_layer = st->has_layer && sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER &&
-				   mfd_engine_is_slot_writable(eng, sl); /* as vj_fadeable */
+		bool layer_fader = st->has_layer && sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER;
+		st->single_layer = layer_fader && mfd_engine_is_slot_writable(eng, sl); /* as vj_fadeable */
+		st->source_missing = layer_fader && !st->single_layer;
 		st->level = sl->last_applied_val;
 		st->follows = sl->auto_follow;
 		/* Shift + top pad: pins a strip on a single layer, unpins a pinned one (even empty) (vj_run_locked). */
@@ -6686,7 +6733,7 @@ enum mfd_desk_press_result mfd_engine_desk_press(struct mfd_engine *eng, uint8_t
 	dec.normalized = on ? 1.0f : 0.0f;
 	bool desk_shift = eng->vj.shift;
 	uint32_t drops = eng->vj_cmd_drops;
-	eng->vj.shift = shift;
+	eng->vj.shift = shift || desk_shift; /* Shift held on the desk shifts a dock click too, as the view shows */
 	bool fed = vj_feed_locked(eng, &dec) && eng->vj_cmd_drops == drops; /* a dropped command did nothing */
 	eng->vj.shift = desk_shift; /* the desk's own Shift, whatever the dock had */
 	vj_hold_epoch_sync_locked(eng);
@@ -6712,6 +6759,40 @@ bool mfd_engine_desk_vs(struct mfd_engine *eng, enum mfd_vj_command_kind kind)
 	bool ok = vj_queue_cmd_locked(eng, kind, NULL, NULL, 0);
 	mfd_engine_unlock(eng);
 	return ok;
+}
+
+void mfd_engine_desk_vjster(struct mfd_engine *eng, int steps, bool reset, bool play_pause)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (reset) {
+		eng->vj_speed_steps = 0; /* as Tap Tempo: steps and a preset waiting before it are dropped */
+		eng->vj_speed_actions = (eng->vj_speed_actions & ~MFD_VJ_SPEED_SET_BIT) | MFD_VJ_SPEED_RESET_BIT;
+	}
+	if (play_pause) {
+		eng->vj_speed_actions |= MFD_VJ_SPEED_PLAY_BIT;
+	}
+	if (steps != 0 && steps >= -200 && steps <= 200) {
+		int sum = eng->vj_speed_steps + steps; /* bounded like the APC40's Tempo knob */
+		eng->vj_speed_steps = sum < -MFD_VJ_SPEED_MAX_STEPS  ? -MFD_VJ_SPEED_MAX_STEPS
+				      : sum > MFD_VJ_SPEED_MAX_STEPS ? MFD_VJ_SPEED_MAX_STEPS
+								     : sum;
+	}
+	mfd_engine_unlock(eng); /* the unlock sends them (mfd_engine_unlock), never with the lock held */
+}
+
+void mfd_engine_desk_vjster_rate(struct mfd_engine *eng, double rate)
+{
+	if (!eng || !(rate >= 0.25 && rate <= 4.0)) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	eng->vj_speed_steps = 0; /* the preset is where the video should be: steps and a 1x before it are overtaken */
+	eng->vj_speed_actions = (eng->vj_speed_actions & ~MFD_VJ_SPEED_RESET_BIT) | MFD_VJ_SPEED_SET_BIT;
+	eng->vj_speed_set_rate = rate;
+	mfd_engine_unlock(eng); /* sent at the unlock, with no lock held */
 }
 
 void mfd_engine_set_desk_visible(struct mfd_engine *eng, bool visible)

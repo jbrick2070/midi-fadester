@@ -441,6 +441,19 @@ void mfd_vendor_emit_vjster_action(const char *action, int steps)
 	obs_data_release(ev);
 }
 
+void mfd_vendor_emit_vjster_rate(double rate)
+{
+	if (!(rate >= 0.25 && rate <= 4.0) || os_atomic_load_bool(&g_vendor_shutting_down)) {
+		return;
+	}
+	obs_data_t *ev = obs_data_create();
+	obs_data_set_string(ev, "action", "vjster.speed.set");
+	obs_data_set_double(ev, "rate", rate);
+	obs_data_set_string(ev, "origin", "desk");
+	emit_vendor_event("vjster_action", ev);
+	obs_data_release(ev);
+}
+
 void mfd_vendor_emit_state_changed(struct mfd_engine *eng)
 {
 	if (!eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
