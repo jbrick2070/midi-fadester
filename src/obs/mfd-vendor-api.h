@@ -65,6 +65,8 @@ void mfd_vendor_emit_vjster_action(const char *action, int steps);
  * *out_panic: whether it is panicked afterwards (panic only). UI thread, no lock held.
  */
 bool mfd_vendor_call_visual_sidechain_desk(const char *request, bool *out_panic);
+/* Visual Sidechain's panic state as it answers get_safety. False when it did not answer. UI thread, no lock held. */
+bool mfd_vendor_visual_sidechain_panic_state(bool *out_panic);
 
 /*
  * Direct request handlers exposed for unit tests and in-process verification.
