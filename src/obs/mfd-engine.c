@@ -5633,6 +5633,9 @@ static void vj_status_locked(struct mfd_engine *eng, bool read_eyes)
 /* Whether a strip other than `except` shows the source a home key names. */
 static bool vj_key_shared_locked(const struct mfd_engine *eng, int except, const char *key)
 {
+	if (!key || key[0] == ' ') {
+		return false; /* no source: nothing to share */
+	}
 	for (int j = 0; j < (int)MFD_VJ_STRIPS; ++j) {
 		if (j != except && strcmp(eng->vj_home_key[j], key) == 0) {
 			return true;
