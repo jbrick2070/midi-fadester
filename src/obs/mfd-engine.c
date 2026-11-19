@@ -340,19 +340,6 @@ static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
 
-/* A scene transition (a fade, a swipe) is part-way: strips that follow the scene wait for it to end, so the outgoing
- * scene is not changed while it is still on screen. UI thread. */
-static bool vj_transition_running(const struct mfd_engine *eng)
-{
-	if (eng->scene_graph_ops || !obs_initialized()) {
-		return false;
-	}
-	obs_source_t *t = obs_frontend_get_current_transition();
-	float at = t ? obs_transition_get_time(t) : 1.0f;
-	obs_source_release(t);
-	return at > 0.0f && at < 1.0f;
-}
-
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -380,7 +367,7 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	eng->vj_cmd_count = 0;
 	autofill = eng->vj_autofill_pending;
 	eng->vj_autofill_pending = false;
-	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng) && !vj_transition_running(eng)) {
+	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
 		eng->vj_follow_pending = false;
 		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
 	}
@@ -5668,6 +5655,17 @@ static void vj_restore_key_locked(struct mfd_engine *eng, const char *key, enum 
 	vj_blend_io(eng, buf, nl + 1, true, &b); /* the source may be gone: nothing to put back then */
 }
 
+/* Every punched source back to its own blend (pads off, the desk gone, a scene collection change, OBS closing). */
+static void vj_restore_all_punches_locked(struct mfd_engine *eng)
+{
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		if (eng->vj_home_key[i][0] != '\0' && eng->vj.current[i] != eng->vj.home[i]) {
+			vj_restore_key_locked(eng, eng->vj_home_key[i], eng->vj.home[i]);
+			mfd_vj_pads_set_current(&eng->vj, i, eng->vj.home[i]);
+		}
+	}
+}
+
 /* Each strip's layer and its blend mode as OBS has them now (scene change, graph change, a strip edited). */
 static void vj_refresh_locked(struct mfd_engine *eng)
 {
@@ -5699,9 +5697,17 @@ static void vj_refresh_locked(struct mfd_engine *eng)
 			continue; /* not readable now (loading, briefly missing): keep what is known, read it next time */
 		}
 		if (strcmp(key, eng->vj_home_key[i]) != 0) {
-			/* A new source on this strip: its blend in the scene now is the one Clean goes back to. */
+			/* A new source on this strip: its blend in the scene now is the one Clean goes back to, unless another
+			 * strip shows it already (it may have punched it): then that strip knows its own blend. */
+			enum mfd_vj_blend home = b;
+			for (int j = 0; j < (int)MFD_VJ_STRIPS; ++j) {
+				if (j != i && strcmp(eng->vj_home_key[j], key) == 0) {
+					home = eng->vj.home[j];
+					break;
+				}
+			}
 			snprintf(eng->vj_home_key[i], sizeof(eng->vj_home_key[i]), "%s", key);
-			mfd_vj_pads_set_home(&eng->vj, i, b);
+			mfd_vj_pads_set_home(&eng->vj, i, home);
 		} else if (b != before && !vj_key_shared_locked(eng, i, key)) {
 			/* Changed outside Midi Fadester (the mouse, a script): that is the source's blend now. Another strip
 			 * on the same source may have punched it: then this strip only shows it. */
@@ -5808,6 +5814,7 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 	if (was && !vj_active(eng)) {
 		vj_leds_off_locked(eng); /* first: it only turns off what the table says is lit */
 		vj_release_all_locked(eng);
+		vj_restore_all_punches_locked(eng);
 	} else if (!was && vj_active(eng)) {
 		memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
 		if (eng->frontend_finished_loading && !eng->vj_autofill_done) {
@@ -5964,7 +5971,8 @@ static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_sl
 static void vj_leave_source_locked(struct mfd_engine *eng, int s)
 {
 	const char *scene = NULL, *source = NULL;
-	if (eng->vj.current[s] != eng->vj.home[s] && vj_strip_layer(eng, s, &scene, &source)) {
+	if (eng->vj.current[s] != eng->vj.home[s] && !vj_key_shared_locked(eng, s, eng->vj_home_key[s]) &&
+	    vj_strip_layer(eng, s, &scene, &source)) {
 		enum mfd_vj_blend b = eng->vj.home[s];
 		if (vj_blend_io(eng, scene, source, true, &b)) {
 			mfd_vj_pads_set_current(&eng->vj, s, b);
@@ -6191,7 +6199,7 @@ static void vj_follow_program(struct mfd_engine *eng)
 	for (int k = 1; k <= (int)MFD_VJ_STRIPS && vj_active(eng); ++k) {
 		any = any || eng->fader_slots[k].auto_follow;
 	}
-	bool later = any && (vj_tbar_busy_locked(eng) || vj_transition_running(eng));
+	bool later = any && vj_tbar_busy_locked(eng);
 	if (later) {
 		eng->vj_follow_pending = true;
 	}
@@ -6362,6 +6370,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (eng->vj_was_active && !active) {
 			vj_leds_off_locked(eng);
 			vj_release_all_locked(eng);
+			vj_restore_all_punches_locked(eng); /* nothing can put them back while the pads are off */
 			eng->vj_follow_pending = false;
 		} else if (!eng->vj_was_active && active) {
 			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all.
@@ -7635,14 +7644,17 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
 		sync_slots_on_scene_change(eng, true);
 		break;
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+		mfd_engine_lock(eng);
+		vj_restore_all_punches_locked(eng); /* while the collection's sources still exist */
+		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+			eng->vj_home_key[i][0] = '\0';
+		}
+		mfd_engine_unlock(eng);
+		break;
 	case OBS_FRONTEND_EVENT_EXIT:
 		mfd_engine_lock(eng);
-		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
-			/* Punched blends are the desk's, not the scene's: the saved scene keeps each source's own. */
-			if (eng->vj_home_key[i][0] != '\0' && eng->vj.current[i] != eng->vj.home[i]) {
-				vj_restore_key_locked(eng, eng->vj_home_key[i], eng->vj.home[i]);
-			}
-		}
+		vj_restore_all_punches_locked(eng); /* punched blends are the desk's: the saved scenes keep their own */
 		mfd_engine_restore_all_bypass_leases(eng);
 		disconnect_obs_signals(eng);
 		mfd_engine_unlock(eng);

@@ -2573,6 +2573,8 @@ static int test_vj_pads_drive_layers(void)
 
 	/* Another desk open on the default profile: its notes are left alone. */
 	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "Launchpad X");
+	mfd_engine_tick(eng, 0.016f); /* the pads stop applying: the punched Top goes back to its own blend */
+	REQUIRE(vj_blend_of("Top") == (int)OBS_BLEND_NORMAL);
 	writes = g_vj_blend_writes;
 	vj_tap(eng, 0);
 	REQUIRE(g_vj_blend_writes == writes);
@@ -3078,6 +3080,23 @@ static int test_vj_fill_follow_and_desk(void)
 		obs_data_release(rq);
 		obs_data_release(rs);
 		eng->fader_slots[8].auto_follow = true;
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
+	}
+
+	/* 12j. Quitting OBS puts a punched source back to its own blend, so the saved scene keeps it. */
+	{
+		int c1 = -1;
+		for (int k = 1; k <= 8; ++k) {
+			if (vj_strip_is(eng, k, "Scene B", "B1")) {
+				c1 = k - 1;
+			}
+		}
+		REQUIRE(c1 >= 0);
+		vj_tap(eng, (uint8_t)c1);
+		REQUIRE(vj_blend_in("Scene B", "B1") != (int)OBS_BLEND_NORMAL);
+		mfd_engine_frontend_event_for_test(eng, OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING);
+		REQUIRE(vj_blend_in("Scene B", "B1") == (int)OBS_BLEND_NORMAL && eng->vj_home_key[c1][0] == '\0');
 		mfd_engine_tick(eng, 0.016f);
 		mfd_engine_flush_pending_ui_work(eng);
 	}

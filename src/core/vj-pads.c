@@ -412,8 +412,8 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 		uint8_t b = bit(i);
 		bool layer = (p->has_layer & b) != 0;
-		/* Bottom row: dim white at the home blend, the punched blend's colour; with Shift held, the punch mode the
-		 * pad would switch to. */
+		/* Bottom row: dim white at the home blend, the punched blend's colour; with Shift held, the armed punch mode
+		 * (the one on air when punched). */
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_BLEND + (unsigned)i),
 		    !layer     ? COLOR_OFF
 		    : p->shift ? k_blend_color[p->current[i] != p->home[i] ? p->current[i] : punch_target(p, i)]
