@@ -1,0 +1,53 @@
+/*
+ * Visual Sidechain - obs-websocket 5 Vendor API & In-Process Signal Bridge
+ * Copyright (C) 2026 Jeffrey A. Brick
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ */
+
+#pragma once
+
+#include "core/fader-bridge.h"
+
+#include <obs-data.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define VS_VENDOR_NAME "visual-sidechain"
+
+typedef void (*vs_safety_walk_schedule_fn)(bool panic);
+
+void vs_vendor_api_set_safety_walk_scheduler(vs_safety_walk_schedule_fn fn);
+bool vs_vendor_api_register(void);
+bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t *global_sh);
+void vs_vendor_api_reset(void);
+void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
+			   bool is_primary_track);
+void vs_vendor_api_emit_safety_changed(void);
+void vs_vendor_api_emit_signals_changed(void);
+void vs_vendor_api_emit_decks_changed(void);
+
+void vs_vendor_tap_tempo_at(double now_sec, obs_data_t *response_data);
+
+void vs_vendor_handle_get_signals(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_deck_command(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_get_safety(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_panic(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_restore(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_tap_tempo(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_set_bpm(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_lock_bpm(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void vs_vendor_handle_resync_downbeat(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+
+#ifdef __cplusplus
+}
+#endif
