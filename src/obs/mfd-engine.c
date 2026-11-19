@@ -5609,7 +5609,11 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 	}
 	struct mfd_vj_action acts[MFD_VJ_MAX_ACTIONS];
 	size_t n = 0;
-	if (is_note && dec->addr.type == MFD_MIDI_NOTE_ON) {
+	/* Only a press that works with blends (a bottom-row pad, Clip Stop, Clean) reads them from OBS first: each read
+	 * looks the scene up, so Shift, the scene buttons and the other rows skip it. */
+	uint8_t note = (uint8_t)dec->addr.number;
+	if (is_note && dec->addr.type == MFD_MIDI_NOTE_ON &&
+	    (note < MFD_VJ_NOTE_ROW_FLASH || note == MFD_VJ_NOTE_CLIP_STOP || note == MFD_VJ_NOTE_STOP_ALL)) {
 		eng->vj_punched = 0U;
 		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 			vj_sync_blend_locked(eng, i);
