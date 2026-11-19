@@ -244,6 +244,9 @@ struct mfd_slot_config_edit {
 	bool enabled;
 	enum mfd_target_type target_type;
 	bool preserve_scene;
+	/* Built from the dialog's last snapshot with the layer untouched (a curve, invert or on/off change): a strip that
+	 * follows the scene on air keeps its current source and keeps following. */
+	bool keep_layer;
 	char scene_name[MFD_SOURCE_NAME_MAX];
 	char source_a_name[MFD_SOURCE_NAME_MAX];
 	char source_b_name[MFD_SOURCE_NAME_MAX];
@@ -327,7 +330,7 @@ typedef void (*mfd_numeric_prop_cb)(const struct mfd_filter_prop_info *info, voi
  * pads and carried out by mfd_engine_flush_pending_ui_work. */
 enum mfd_vj_command_kind {
 	MFD_VJ_CMD_PREVIEW = 0, /* scene to Preview */
-	MFD_VJ_CMD_PROGRAM,     /* scene straight to Program */
+	MFD_VJ_CMD_PROGRAM,     /* scene to Program; arg 1: with a cut, not the current transition */
 	MFD_VJ_CMD_TAKE,        /* Preview to Program with the transition */
 	MFD_VJ_CMD_SET_VISIBLE, /* scene, source, arg 1 shown / 0 hidden */
 	MFD_VJ_CMD_RESTART,     /* source: restart its video */
@@ -343,6 +346,7 @@ enum mfd_vj_command_kind {
 struct mfd_vj_command {
 	enum mfd_vj_command_kind kind;
 	int arg;
+	int strip; /* the pad column it came from (show / hide), -1 otherwise */
 	char scene[MFD_SOURCE_NAME_MAX];
 	char source[MFD_SOURCE_NAME_MAX];
 };
@@ -527,7 +531,7 @@ struct mfd_engine {
 	bool vj_was_active;                    /* the pads applied last tick (to turn the lights off when they stop) */
 	bool vj_state_dirty;                   /* a pad changed something: tell obs-websocket clients once */
 	char vj_said[MFD_VJ_STRIPS][96];       /* the last "why not" line per strip, said once */
-	unsigned vj_status_ticks;              /* counts ticks between re-reads of each source's eye */
+	float vj_blink_sec;                    /* Record blinks in software: the desk's Record lamp is on or off only */
 	uint8_t vj_eye_hold;                   /* strips whose eye change is queued: not re-read until it is done */
 	bool vj_autofill_done;                 /* the eight empty strips were filled from the scene once (saved) */
 	bool vj_autofill_pending;              /* try that fill from the UI thread (the desk opened, pads turned on) */

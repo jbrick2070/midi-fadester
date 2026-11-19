@@ -1905,6 +1905,7 @@ private:
 		edit.enabled = s.enabled;
 		edit.target_type = s.target_type;
 		edit.preserve_scene = preserve_scene;
+		edit.keep_layer = true; /* cleared by the job and source pickers, which change the layer */
 		std::snprintf(edit.scene_name, sizeof(edit.scene_name), "%s", s.scene_name);
 		std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s", s.source_a_name);
 		std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s", s.source_b_name);
@@ -2227,6 +2228,7 @@ private:
 						return;
 					}
 					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
+					edit.keep_layer = false;
 					const auto new_target =
 						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
 					edit.target_type = new_target;
@@ -2249,6 +2251,7 @@ private:
 						}
 						struct mfd_slot_config_edit edit =
 							make_edit_from_snapshot_row(row, true);
+						edit.keep_layer = false;
 						const QByteArray utf8 = src_a_combo->currentData().toString().toUtf8();
 						const bool host_changed =
 							(std::strcmp(edit.source_a_name, utf8.constData()) != 0);
@@ -2275,6 +2278,7 @@ private:
 						}
 						struct mfd_slot_config_edit edit =
 							make_edit_from_snapshot_row(row, true);
+						edit.keep_layer = false;
 						const QByteArray utf8 = src_b_combo->currentData().toString().toUtf8();
 						std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s",
 							      utf8.constData());

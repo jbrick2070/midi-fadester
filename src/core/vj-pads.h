@@ -162,7 +162,7 @@ struct mfd_vj_pads {
 	enum mfd_vj_blend current[MFD_VJ_STRIPS];
 	enum mfd_vj_blend punch[MFD_VJ_STRIPS];
 	enum mfd_vj_scene_state scene[MFD_VJ_SCENES];
-	bool vs_panic;   /* Visual Sidechain is panicked (Record blinks) */
+	bool vs_panic;   /* Record lamp on (the engine blinks it while Visual Sidechain is panicked) */
 	bool take_ready; /* Studio Mode with another scene in Preview (Session lights) */
 };
 

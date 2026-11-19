@@ -2788,9 +2788,12 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(g_vj_cmd_count == 5);
 	REQUIRE(g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE);
 	REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_PREVIEW && strcmp(g_vj_cmds[1].scene, "Scene C") == 0);
-	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene B") == 0);
+	REQUIRE(g_vj_cmds[0].arg == 0 && g_vj_cmds[1].arg == 0);
+	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene B") == 0 &&
+		g_vj_cmds[2].arg == 1); /* Shift: a cut, not the current transition */
 	REQUIRE(g_vj_cmds[3].kind == MFD_VJ_CMD_TAKE);
-	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[4].scene, "Scene A") == 0);
+	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[4].scene, "Scene A") == 0 &&
+		g_vj_cmds[4].arg == 1);
 	/* Lights: Program red, Preview pulsing, the third scene idle, no scene off; Session lit (a take is ready). */
 	REQUIRE(eng->vj.scene[0] == MFD_VJ_SCENE_PREVIEW && eng->vj.scene[1] == MFD_VJ_SCENE_PROGRAM &&
 		eng->vj.scene[2] == MFD_VJ_SCENE_IDLE && eng->vj.scene[3] == MFD_VJ_SCENE_NONE && eng->vj.take_ready);
@@ -2798,9 +2801,26 @@ static int test_vj_fill_follow_and_desk(void)
 	mfd_engine_set_test_frontend_state(eng, true, false, "", "Scene B", true);
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 84);
+	vj_tap(eng, 102); /* Session outside Studio Mode: nothing to take */
 	mfd_engine_flush_pending_ui_work(eng);
-	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PROGRAM);
+	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PROGRAM && g_vj_cmds[0].arg == 0);
 	mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", true);
+	/* While the crossfader is mid-throw, the scene buttons and Session do nothing. */
+	eng->fader_slots[0].tbar_state = MFD_TBAR_THROWING;
+	g_vj_cmd_count = 0;
+	vj_tap(eng, 82);
+	vj_tap(eng, 84);
+	vj_tap(eng, 102);
+	vj_shift_tap(eng, 102);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 0);
+	/* A T-bar resting at its end after a throw (parked) does not hold them back. */
+	eng->fader_slots[0].tbar_state = MFD_TBAR_PARKED;
+	vj_tap(eng, 84);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW);
+	g_vj_cmd_count = 0;
+	eng->fader_slots[0].tbar_state = MFD_TBAR_IDLE;
 
 	/* 7. Row 4 hides and shows the source; the eye read back from OBS drives the light; Shift + row 4 wakes it. */
 	g_vj_cmd_count = 0;
@@ -2880,6 +2900,53 @@ static int test_vj_fill_follow_and_desk(void)
 	mfd_engine_set_vs_panic(eng, true);
 	REQUIRE(eng->vj.vs_panic);
 
+	/* 12a. A source in both scenes keeps its pad state when the scene changes (here a fade under way). */
+	fake_sg_add_scene(&sg, "Scene D");
+	fake_sg_scene_add_item(&sg, "Scene D", "B1");
+	fake_sg_scene_add_item(&sg, "Scene D", "B2");
+	mfd_engine_set_vj_buttons(eng, true, 1000);
+	struct mfd_fader_slot *b1 = &eng->fader_slots[1];
+	mfd_engine_apply_slot_output(eng, b1, 0.9f);
+	vj_tap(eng, 16); /* B1 starts fading out over a second */
+	REQUIRE(b1->auto_fade_active && (eng->vj.faded & 0x01U));
+	vj_program(eng, "Scene B", "Scene D");
+	REQUIRE(vj_strip_is(eng, 1, "Scene D", "B1") && b1->auto_fade_active && (eng->vj.faded & 0x01U));
+	vj_program(eng, "Scene A", "Scene B");
+	for (int i = 0; i < 80; ++i) {
+		mfd_engine_tick(eng, 0.016f);
+	}
+	vj_tap(eng, 16); /* and back in */
+	for (int i = 0; i < 80; ++i) {
+		mfd_engine_tick(eng, 0.016f);
+	}
+
+	/* 12b. With the pads turned off, strips stop following until they are on again. */
+	mfd_engine_set_vj_buttons(eng, false, 1000);
+	vj_program(eng, "Scene B", "Scene C");
+	REQUIRE(vj_strip_is(eng, 1, "Scene B", "B1"));
+	mfd_engine_set_vj_buttons(eng, true, 1000);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->vj_follow_pending);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(vj_strip_is(eng, 1, "Scene C", "Mine"));
+	vj_program(eng, "Scene A", "Scene B");
+
+	/* 12c. A dialog edit built from an old snapshot (curve only) keeps a following strip on its current source. */
+	struct mfd_slot_config_edit ed;
+	memset(&ed, 0, sizeof(ed));
+	ed.enabled = true;
+	ed.target_type = MFD_TARGET_SINGLE_LAYER;
+	ed.keep_layer = true;
+	snprintf(ed.scene_name, sizeof(ed.scene_name), "%s", "Scene A");
+	snprintf(ed.source_a_name, sizeof(ed.source_a_name), "%s", "A1");
+	ed.curve = MFD_CURVE_CUT;
+	REQUIRE(mfd_engine_update_slot_config(eng, 1, &ed));
+	REQUIRE(eng->fader_slots[1].auto_follow && vj_strip_is(eng, 1, "Scene B", "B1") &&
+		eng->fader_slots[1].curve == MFD_CURVE_CUT);
+	ed.keep_layer = false; /* the source picker: a job of the user's own */
+	REQUIRE(mfd_engine_update_slot_config(eng, 1, &ed));
+	REQUIRE(!eng->fader_slots[1].auto_follow && vj_strip_is(eng, 1, "Scene A", "A1"));
+
 	/* 12. Saved and loaded: following strips stay following; the first fill is not repeated. */
 	obs_data_t *saved = obs_data_create();
 	mfd_engine_serialize_slots_for_test(eng, saved);
@@ -2889,11 +2956,31 @@ static int test_vj_fill_follow_and_desk(void)
 	eng2->scene_graph_ops = &ops;
 	eng2->scene_graph_user_data = &sg;
 	mfd_engine_deserialize_slots_for_test(eng2, saved);
-	REQUIRE(eng2->fader_slots[1].auto_follow && !eng2->fader_slots[0].auto_follow &&
-		vj_strip_is(eng2, 1, "Scene B", "B1"));
+	REQUIRE(eng2->fader_slots[2].auto_follow && !eng2->fader_slots[1].auto_follow &&
+		!eng2->fader_slots[0].auto_follow && vj_strip_is(eng2, 2, "Scene B", "B2"));
 	obs_data_release(saved);
 	mfd_engine_destroy_mutex(eng2);
 	free(eng2);
+
+	/* 13. A user who already set strips up: the one-time fill is marked done and never happens later. */
+	struct mfd_engine *eng3 = calloc(1U, sizeof(*eng3));
+	REQUIRE(eng3 != NULL);
+	REQUIRE(mfd_engine_init_mutex(eng3));
+	eng3->scene_graph_ops = &ops;
+	eng3->scene_graph_user_data = &sg;
+	mfd_midi_parser_init(&eng3->midi_parser);
+	mfd_midi_queue_init(&eng3->midi_queue);
+	mfd_engine_load_apc40_defaults(eng3);
+	eng3->learning_slot_index = -1;
+	eng3->midi_dev.is_open = true;
+	snprintf(eng3->midi_dev.opened_name, sizeof(eng3->midi_dev.opened_name), "%s", "APC40 mkII");
+	vj_layer_slot(eng3, 3, "Mine");
+	mfd_engine_set_test_frontend_state(eng3, true, true, "Scene B", "Scene A", true);
+	mfd_engine_tick(eng3, 0.016f);
+	mfd_engine_flush_pending_ui_work(eng3);
+	REQUIRE(eng3->vj_autofill_done && vj_strip_is(eng3, 1, NULL, NULL) && !eng3->fader_slots[1].auto_follow);
+	mfd_engine_destroy_mutex(eng3);
+	free(eng3);
 
 	mfd_engine_destroy_mutex(eng);
 	free(eng);

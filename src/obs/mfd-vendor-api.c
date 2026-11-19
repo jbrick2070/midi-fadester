@@ -1193,11 +1193,14 @@ bool mfd_vendor_call_visual_sidechain_desk(const char *request, bool *out_panic)
 	if (!resp) {
 		return false;
 	}
-	if (out_panic) {
-		*out_panic = strcmp(req, "panic") == 0;
+	bool ok = !obs_data_has_user_value(resp, "error");
+	if (ok && out_panic) {
+		/* panic and restore answer with the safety state; trust it over the request's name. */
+		*out_panic = obs_data_has_user_value(resp, "panic") ? obs_data_get_bool(resp, "panic")
+								    : strcmp(req, "panic") == 0;
 	}
 	obs_data_release(resp);
-	return true;
+	return ok;
 }
 
 void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -1239,9 +1242,8 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	bool has_bypass = obs_data_has_user_value(request_data, "bypass_at_zero");
 	bool has_cal_min = obs_data_has_user_value(request_data, "cal_min");
 	bool has_cal_max = obs_data_has_user_value(request_data, "cal_max");
-	if (has_target || has_scene || has_sa || has_sb) {
-		s->auto_follow = false; /* a job of the caller's own: it no longer follows the scene on air */
-	}
+	/* A job of the caller's own: it no longer follows the scene on air (set once the request is accepted). */
+	const bool stops_following = has_target || has_scene || has_sa || has_sb;
 	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
 	int new_cal_max = has_cal_max ? (int)obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
 
@@ -1452,6 +1454,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		s->resolved_scene_name[0] = '\0';
 	}
 
+	if (stops_following) {
+		s->auto_follow = false;
+	}
 	mfd_engine_bump_slot_rev(eng, idx);
 	mfd_engine_reevaluate_slots(eng, false);
 	if (!was_enabled && new_enabled) {

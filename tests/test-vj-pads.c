@@ -225,7 +225,7 @@ int main(void)
 	REQUIRE(led_velocity(&q, 84) == 46U && led_velocity(&q, 85) == 0U);
 	q.take_ready = true;
 	q.vs_panic = true;
-	REQUIRE(led_at(&q, 102, 0, NULL) == 1U && led_at(&q, 93, 0, NULL) == 2U);
+	REQUIRE(led_at(&q, 102, 0, NULL) == 1U && led_at(&q, 93, 0, NULL) == 1U); /* Record: on or off only */
 	struct mfd_vj_led ql[MFD_VJ_MAX_LEDS];
 	size_t qc = mfd_vj_pads_leds(&q, ql, MFD_VJ_MAX_LEDS);
 	for (size_t i = 0; i < qc; ++i) {

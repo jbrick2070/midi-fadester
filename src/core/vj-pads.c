@@ -23,10 +23,9 @@
 #define CH_PULSE 10U /* channel 11: pulsing, 1/2 */
 #define CH_BLINK 15U /* channel 16: blinking, 1/2 */
 
-/* A single-colour button (Clip Stop, Record, Session): 0 off, 1 on, 2 blinking. */
+/* A single-colour button: 0 off, 1 on (Clip Stop could also blink with 2; Record and Session cannot). */
 #define LAMP_OFF 0U
 #define LAMP_ON 1U
-#define LAMP_BLINK 2U
 
 static const uint8_t k_blend_color[MFD_VJ_BLEND_COUNT] = {
 	COLOR_WHITE_DIM, /* Normal: dim white, an idle source */
@@ -431,7 +430,7 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 			break;
 		}
 	}
-	led(out, max, &count, 0U, MFD_VJ_NOTE_RECORD, p->vs_panic ? LAMP_BLINK : LAMP_OFF, false);
+	led(out, max, &count, 0U, MFD_VJ_NOTE_RECORD, p->vs_panic ? LAMP_ON : LAMP_OFF, false);
 	led(out, max, &count, 0U, MFD_VJ_NOTE_SESSION, p->take_ready ? LAMP_ON : LAMP_OFF, false);
 	return count;
 }
