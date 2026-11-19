@@ -1179,8 +1179,9 @@ private:
 				"themselves and follow the scene; a fader you set yourself stays. Bottom pad row: blend punch "
 				"(Shift + pad: next punch mode). Row 2: flash while held (Shift: blackout). Row 3: fade out and "
 				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: restart its video "
-				"(Shift: pin the column to its source). Clip Stop: that column's blend back to Normal. Stop All "
-				"Clips: Clean, every effect off and every blend Normal (Shift: fade every layer out)."),
+				"(Shift: pin the column to its source). Clip Stop: that column back to its own blend. Stop All "
+				"Clips: Clean, every effect off and every source back to its own blend (Shift: fade every layer "
+				"out)."),
 			adv_tab);
 		vj_legend->setObjectName(QStringLiteral("mfdAdvVjLegend"));
 		vj_legend->setWordWrap(true);

@@ -2973,6 +2973,55 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(eng->vj.current[2] == MFD_VJ_BLEND_NORMAL && !(eng->vj.has_layer & 0x04U));
 	vj_program(eng, "Scene A", "Scene B");
 
+	/* 12f. A source whose blend in the scene is Screen keeps it as its home: the pad punches away and back to Screen,
+	 * Clip Stop and Clean return to Screen, never Normal. */
+	{
+		struct vj_blend_entry *home = vj_blend_find("Scene B", "B2", true);
+		home->mode = (int)OBS_BLEND_SCREEN;
+		vj_program(eng, "Scene B", "Scene A");
+		vj_program(eng, "Scene A", "Scene B"); /* B2 taken afresh: its home is read now */
+		int col = -1;
+		for (int k = 1; k <= 8; ++k) {
+			if (vj_strip_is(eng, k, "Scene B", "B2")) {
+				col = k - 1;
+			}
+		}
+		REQUIRE(col >= 0 && eng->vj.home[col] == MFD_VJ_BLEND_SCREEN);
+		vj_tap(eng, (uint8_t)col);
+		REQUIRE(vj_blend_in("Scene B", "B2") != (int)OBS_BLEND_SCREEN &&
+			vj_blend_in("Scene B", "B2") != (int)OBS_BLEND_NORMAL);
+		push_midi_note(eng, true, (uint8_t)col, 52);
+		mfd_engine_tick(eng, 0.016f);
+		push_midi_note(eng, false, (uint8_t)col, 52);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(vj_blend_in("Scene B", "B2") == (int)OBS_BLEND_SCREEN);
+		vj_tap(eng, (uint8_t)col);
+		vj_tap(eng, 81);
+		REQUIRE(vj_blend_in("Scene B", "B2") == (int)OBS_BLEND_SCREEN);
+		home->mode = (int)OBS_BLEND_NORMAL;
+	}
+
+	/* 12g. A layer added to the scene on air reaches the following strips; pinning an empty column does nothing. */
+	fake_sg_add_source(&sg, "B3", false);
+	fake_sg_scene_add_item(&sg, "Scene B", "B3");
+	mfd_engine_reevaluate_slots(eng, false); /* as the item_add signal does through the scene-graph queue */
+	mfd_engine_tick(eng, 0.016f);
+	mfd_engine_flush_pending_ui_work(eng);
+	{
+		bool b3 = false;
+		for (int k = 1; k <= 8; ++k) {
+			b3 = b3 || vj_strip_is(eng, k, "Scene B", "B3");
+		}
+		REQUIRE(b3);
+	}
+	REQUIRE(eng->fader_slots[8].auto_follow && !(eng->vj.has_layer & 0x80U));
+	vj_shift_tap(eng, 39);
+	REQUIRE(eng->fader_slots[8].auto_follow); /* nothing to pin */
+	fake_sg_scene_remove_item(&sg, "Scene B", "B3");
+	mfd_engine_reevaluate_slots(eng, false);
+	mfd_engine_tick(eng, 0.016f);
+	mfd_engine_flush_pending_ui_work(eng);
+
 	/* 12e. Record blinks in software while Visual Sidechain is panicked (the lamp is on or off only). */
 	mfd_engine_set_vs_panic(eng, true);
 	bool seen_on = false, seen_off = false;

@@ -532,12 +532,13 @@ struct mfd_engine {
 	bool vj_state_dirty;                   /* a pad changed something: tell obs-websocket clients once */
 	char vj_said[MFD_VJ_STRIPS][96];       /* the last "why not" line per strip, said once */
 	float vj_blink_sec;                    /* Record blinks in software: the desk's Record lamp is on or off only */
-	uint8_t vj_eye_hold;                   /* strips whose eye change is queued: not re-read until it is done */
-	bool vj_autofill_done;                 /* the eight empty strips were filled from the scene once (saved) */
-	bool vj_autofill_pending;              /* try that fill from the UI thread (the desk opened, pads turned on) */
-	bool vj_follow_pending;                /* refill following strips from Program when the T-bar is at rest */
-	bool vs_panic;                         /* Visual Sidechain said it is panicked */
-	int vj_cue_ms;                         /* Cue Level turns not sent yet, in ms of transition length */
+	char vj_home_key[MFD_VJ_STRIPS][2 * MFD_SOURCE_NAME_MAX + 2]; /* scene + source the home blend was read for */
+	uint8_t vj_eye_hold;      /* strips whose eye change is queued: not re-read until it is done */
+	bool vj_autofill_done;    /* the eight empty strips were filled from the scene once (saved) */
+	bool vj_autofill_pending; /* try that fill from the UI thread (the desk opened, pads turned on) */
+	bool vj_follow_pending;   /* refill following strips from Program when the T-bar is at rest */
+	bool vs_panic;            /* Visual Sidechain said it is panicked */
+	int vj_cue_ms;            /* Cue Level turns not sent yet, in ms of transition length */
 	struct mfd_vj_command vj_cmds[MFD_VJ_CMD_MAX];
 	int vj_cmd_count;
 	/* APC40 video speed for Fadester Companion: Tempo / Nudge steps added up, and Tap Tempo / Play pressed, sent as

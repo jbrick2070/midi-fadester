@@ -13,8 +13,10 @@
 #define COLOR_WHITE_DIM 1U
 #define COLOR_WHITE 3U
 #define COLOR_RED 5U
+#define COLOR_RED_DIM 6U
 #define COLOR_AMBER 9U
 #define COLOR_GREEN 21U
+#define COLOR_GREEN_DIM 22U
 #define COLOR_AZURE 37U
 #define COLOR_BLUE_DIM 46U
 
@@ -65,6 +67,7 @@ void mfd_vj_pads_init(struct mfd_vj_pads *p)
 	memset(p, 0, sizeof(*p));
 	for (unsigned i = 0; i < MFD_VJ_STRIPS; ++i) {
 		p->current[i] = MFD_VJ_BLEND_NORMAL;
+		p->home[i] = MFD_VJ_BLEND_NORMAL;
 		p->punch[i] = MFD_VJ_BLEND_SCREEN;
 	}
 }
@@ -114,7 +117,14 @@ static enum mfd_vj_blend next_punch(enum mfd_vj_blend b)
 	return n >= (int)MFD_VJ_BLEND_DARKEN ? MFD_VJ_BLEND_LIGHTEN : (enum mfd_vj_blend)n;
 }
 
-/* A bottom-row pad. A strip without a layer has nothing to blend, so nothing changes. */
+/* The blend a punch switches the strip to: its punch mode, or the next one when that is the home blend already. */
+static enum mfd_vj_blend punch_target(const struct mfd_vj_pads *p, int s)
+{
+	return p->punch[s] == p->home[s] ? next_punch(p->punch[s]) : p->punch[s];
+}
+
+/* A bottom-row pad: the source between its home blend and its punch mode. A strip without a layer has nothing to blend,
+ * so nothing changes. */
 static void feed_blend(struct mfd_vj_pads *p, int s, struct mfd_vj_action *out, size_t max, size_t *count)
 {
 	if (!(p->has_layer & bit(s))) {
@@ -122,13 +132,16 @@ static void feed_blend(struct mfd_vj_pads *p, int s, struct mfd_vj_action *out, 
 	}
 	if (p->shift) {
 		p->punch[s] = next_punch(p->punch[s]);
-		/* Only a strip already blending changes on air: from one blend mode to the next. */
-		if (p->current[s] != MFD_VJ_BLEND_NORMAL) {
+		if (p->punch[s] == p->home[s]) {
+			p->punch[s] = next_punch(p->punch[s]); /* the home blend is not a punch for this source */
+		}
+		/* Only a strip already punched changes on air: from one blend mode to the next. */
+		if (p->current[s] != p->home[s]) {
 			p->current[s] = p->punch[s];
 			push(out, max, count, MFD_VJ_ACTION_SET_BLEND, s, p->punch[s]);
 		}
 	} else {
-		enum mfd_vj_blend b = p->current[s] != MFD_VJ_BLEND_NORMAL ? MFD_VJ_BLEND_NORMAL : p->punch[s];
+		enum mfd_vj_blend b = p->current[s] != p->home[s] ? p->home[s] : punch_target(p, s);
 		p->current[s] = b;
 		push(out, max, count, MFD_VJ_ACTION_SET_BLEND, s, b);
 	}
@@ -211,7 +224,7 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 			} else {
 				for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 					if (p->has_layer & bit(i)) {
-						p->current[i] = MFD_VJ_BLEND_NORMAL;
+						p->current[i] = p->home[i];
 					}
 				}
 				push(out, max, &count, MFD_VJ_ACTION_CLEAN, -1, MFD_VJ_BLEND_NORMAL);
@@ -294,6 +307,13 @@ size_t mfd_vj_pads_release_all(struct mfd_vj_pads *p, struct mfd_vj_action *out,
 	return count;
 }
 
+void mfd_vj_pads_set_home(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend blend)
+{
+	if (p && valid_strip(strip) && (int)blend >= 0 && blend < MFD_VJ_BLEND_COUNT) {
+		p->home[strip] = blend;
+	}
+}
+
 void mfd_vj_pads_set_current(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend blend)
 {
 	if (p && valid_strip(strip) && (int)blend >= 0 && blend < MFD_VJ_BLEND_COUNT) {
@@ -367,6 +387,7 @@ static void led(struct mfd_vj_led *out, size_t max, size_t *count, uint8_t chann
 		out[*count].note = note;
 		out[*count].velocity = velocity;
 		out[*count].rgb = rgb;
+		out[*count].primary = 0U;
 		++*count;
 	}
 }
@@ -385,9 +406,13 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 		uint8_t b = bit(i);
 		bool layer = (p->has_layer & b) != 0;
-		/* Bottom row: the blend on air; with Shift held, the punch mode the pad would switch to. */
+		/* Bottom row: dim white at the home blend, the punched blend's colour; with Shift held, the punch mode the
+		 * pad would switch to. */
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_BLEND + (unsigned)i),
-		    !layer ? COLOR_OFF : k_blend_color[p->shift ? p->punch[i] : p->current[i]]);
+		    !layer                        ? COLOR_OFF
+		    : p->shift                    ? k_blend_color[punch_target(p, i)]
+		    : p->current[i] == p->home[i] ? COLOR_WHITE_DIM
+						  : k_blend_color[p->current[i]]);
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_FLASH + (unsigned)i),
 		    !layer              ? COLOR_OFF
 		    : (p->flashing & b) ? COLOR_WHITE
@@ -400,6 +425,7 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		uint8_t show = (uint8_t)(MFD_VJ_NOTE_ROW_SHOW + (unsigned)i);
 		if (layer && (p->hidden & b)) {
 			led(out, max, &count, CH_BLINK, show, COLOR_RED, true);
+			out[count - 1U].primary = COLOR_RED_DIM; /* lit even if the desk does not blink */
 		} else {
 			pad(out, max, &count, show, !layer ? COLOR_OFF : (p->zero & b) ? COLOR_AMBER : COLOR_WHITE_DIM);
 		}
@@ -408,8 +434,7 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		    : (p->pinned & b) ? COLOR_AZURE
 				      : COLOR_WHITE_DIM);
 		led(out, max, &count, (uint8_t)i, MFD_VJ_NOTE_CLIP_STOP,
-		    layer && (p->current[i] != MFD_VJ_BLEND_NORMAL || ((p->flashing | p->blackout) & b)) ? LAMP_ON
-													 : LAMP_OFF,
+		    layer && (p->current[i] != p->home[i] || ((p->flashing | p->blackout) & b)) ? LAMP_ON : LAMP_OFF,
 		    false);
 	}
 	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
@@ -420,6 +445,8 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 			break;
 		case MFD_VJ_SCENE_PREVIEW:
 			led(out, max, &count, CH_PULSE, note, COLOR_GREEN, true);
+			out[count - 1U].primary =
+				COLOR_GREEN_DIM; /* dim to bright, so it stays lit if the desk does not pulse */
 			break;
 		case MFD_VJ_SCENE_IDLE:
 			pad(out, max, &count, note, COLOR_BLUE_DIM);
