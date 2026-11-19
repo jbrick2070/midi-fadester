@@ -2052,7 +2052,7 @@ int main(int argc, char **argv)
 			ld->show();
 			pump_ui();
 			for (QPushButton *b : ld->findChildren<QPushButton *>()) {
-				if (!b->isVisible() || b->objectName().isEmpty() && b->text().isEmpty()) {
+				if (!b->isVisible() || (b->objectName().isEmpty() && b->text().isEmpty())) {
 					continue;
 				}
 				if (b->fontMetrics().horizontalAdvance(b->text()) > b->width() - 4) {
