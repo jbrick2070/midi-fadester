@@ -123,6 +123,15 @@ static enum mfd_vj_blend punch_target(const struct mfd_vj_pads *p, int s)
 	return p->punch[s] == p->home[s] ? next_punch(p->punch[s]) : p->punch[s];
 }
 
+/* What Shift + the pad sets the punch mode to: the next mode after the one on air (or the saved one at home), never
+ * the home blend itself. */
+static enum mfd_vj_blend shift_target(const struct mfd_vj_pads *p, int s)
+{
+	enum mfd_vj_blend from = p->current[s] != p->home[s] ? p->current[s] : p->punch[s];
+	enum mfd_vj_blend nb = next_punch(from);
+	return nb == p->home[s] ? next_punch(nb) : nb;
+}
+
 /* A bottom-row pad: the source between its home blend and its punch mode. A strip without a layer has nothing to blend,
  * so nothing changes. */
 static void feed_blend(struct mfd_vj_pads *p, int s, struct mfd_vj_action *out, size_t max, size_t *count)
@@ -131,13 +140,7 @@ static void feed_blend(struct mfd_vj_pads *p, int s, struct mfd_vj_action *out, 
 		return;
 	}
 	if (p->shift) {
-		/* The next punch mode after the one on air (or the saved one at home); never the home blend itself. */
-		enum mfd_vj_blend from = p->current[s] != p->home[s] ? p->current[s] : p->punch[s];
-		enum mfd_vj_blend nb = next_punch(from);
-		if (nb == p->home[s]) {
-			nb = next_punch(nb);
-		}
-		p->punch[s] = nb;
+		p->punch[s] = shift_target(p, s);
 		/* Only a strip already punched changes on air: from one blend mode to the next. */
 		if (p->current[s] != p->home[s]) {
 			p->current[s] = p->punch[s];
@@ -412,8 +415,8 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		/* Bottom row: dim white at the home blend, the punched blend's colour; with Shift held, the punch mode the
 		 * pad would switch to. */
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_BLEND + (unsigned)i),
-		    !layer                        ? COLOR_OFF
-		    : p->shift                    ? k_blend_color[punch_target(p, i)]
+		    !layer     ? COLOR_OFF
+		    : p->shift ? k_blend_color[p->current[i] != p->home[i] ? p->current[i] : punch_target(p, i)]
 		    : p->current[i] == p->home[i] ? COLOR_WHITE_DIM
 						  : k_blend_color[p->current[i]]);
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_FLASH + (unsigned)i),

@@ -3020,6 +3020,68 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_flush_pending_ui_work(eng);
 	}
 
+	/* 12h. A punched strip edited in the dialog to another source: the source it leaves goes back to its own blend. */
+	{
+		int c2 = -1;
+		for (int k = 1; k <= 8; ++k) {
+			if (vj_strip_is(eng, k, "Scene B", "B2")) {
+				c2 = k - 1;
+			}
+		}
+		REQUIRE(c2 >= 0);
+		vj_tap(eng, (uint8_t)c2);
+		REQUIRE(vj_blend_in("Scene B", "B2") != (int)OBS_BLEND_NORMAL);
+		struct mfd_slot_config_edit e2;
+		memset(&e2, 0, sizeof(e2));
+		e2.enabled = true;
+		e2.target_type = MFD_TARGET_SINGLE_LAYER;
+		snprintf(e2.scene_name, sizeof(e2.scene_name), "%s", "Scene C");
+		snprintf(e2.source_a_name, sizeof(e2.source_a_name), "%s", "Mine");
+		REQUIRE(mfd_engine_update_slot_config(eng, c2 + 1, &e2));
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(vj_blend_in("Scene B", "B2") == (int)OBS_BLEND_NORMAL);
+		eng->fader_slots[c2 + 1].auto_follow = true; /* back to following for the steps below */
+		vj_program(eng, "Scene B", "Scene A");
+		vj_program(eng, "Scene A", "Scene B");
+		mfd_engine_flush_pending_ui_work(eng);
+	}
+
+	/* 12i. Two strips on one source: a punch from one is not taken as the other's own blend. */
+	{
+		int c1 = -1;
+		for (int k = 1; k <= 8; ++k) {
+			if (vj_strip_is(eng, k, "Scene B", "B1")) {
+				c1 = k - 1;
+			}
+		}
+		REQUIRE(c1 >= 0);
+		obs_data_t *rq = obs_data_create();
+		obs_data_t *rs = obs_data_create();
+		obs_data_set_string(rq, "slot", "fader_8");
+		obs_data_set_string(rq, "target_mode", "layer_opacity");
+		obs_data_set_string(rq, "scene", "Scene B");
+		obs_data_set_string(rq, "source_a", "B1");
+		mfd_vendor_handle_set_slot(rq, rs, eng);
+		obs_data_release(rq);
+		obs_data_release(rs);
+		mfd_engine_tick(eng, 0.016f);
+		vj_tap(eng, (uint8_t)c1);
+		mfd_engine_reevaluate_slots(eng, false);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->vj.home[7] == MFD_VJ_BLEND_NORMAL && eng->vj.home[c1] == MFD_VJ_BLEND_NORMAL);
+		vj_tap(eng, (uint8_t)c1); /* back to Normal */
+		rq = obs_data_create();
+		rs = obs_data_create();
+		obs_data_set_string(rq, "slot", "fader_8");
+		obs_data_set_string(rq, "target_mode", "unassigned");
+		mfd_vendor_handle_set_slot(rq, rs, eng);
+		obs_data_release(rq);
+		obs_data_release(rs);
+		eng->fader_slots[8].auto_follow = true;
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
+	}
+
 	/* 12g. A layer added to the scene on air reaches the following strips; pinning an empty column does nothing. */
 	fake_sg_add_source(&sg, "B3", false);
 	fake_sg_scene_add_item(&sg, "Scene B", "B3");
