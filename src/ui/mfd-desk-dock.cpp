@@ -189,6 +189,14 @@ void setButtonText(QPushButton *b, const QString &text)
 	}
 }
 
+/* Takes the dock's "real press" mark (MfdDeskDock::eventFilter): false for a pressed that a sliding pointer re-sent. */
+bool physical(QObject *b)
+{
+	bool p = b->property("mfdPhysical").toBool();
+	b->setProperty("mfdPhysical", false);
+	return p;
+}
+
 /* An endless speed encoder: each notch is one 0.05x step, like the APC40's Tempo knob. Clicking never jumps (the press
  * only anchors); a large jump between two positions is ignored; the scroll wheel and keys act only once it has focus,
  * so scrolling the dock never changes the video's speed. */
@@ -268,8 +276,8 @@ private:
 		} else if (delta < -kNotches / 2) {
 			delta += kNotches;
 		}
-		if (delta != 0 && std::abs(delta) <= 3) { /* a bigger jump is not a turn: ignored */
-			on_steps_(delta);
+		if (delta != 0) { /* a fast spin counts, up to 6 notches (a quarter turn) in one move */
+			on_steps_(std::clamp(delta, -6, 6));
 		}
 	}
 	std::function<void(int)> on_steps_;
@@ -292,6 +300,7 @@ protected:
 	void hideEvent(QHideEvent *e) override;
 	bool event(QEvent *e) override;
 	void keyPressEvent(QKeyEvent *e) override;
+	bool eventFilter(QObject *obj, QEvent *e) override;
 
 public:
 	void refresh();
@@ -347,6 +356,7 @@ private:
 QPushButton *MfdDeskDock::makeButton(const QString &accessible, int min_w, int min_h)
 {
 	auto *b = new QPushButton(this);
+	b->installEventFilter(this); /* marks real presses: see physical() */
 	b->setAccessibleName(accessible);
 	b->setToolTip(accessible);
 	b->setMinimumSize(min_w, min_h);
@@ -404,7 +414,10 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 			mfdFill(mfdText("Desk.SceneButton", "Scene Launch %1"), {QString::number(j + 1)}), 60, 28);
 		scenes_[j] = b;
 		b->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); /* a long name never widens the dock */
-		connect(b, &QPushButton::pressed, this, [this, j]() {
+		connect(b, &QPushButton::pressed, this, [this, j, b]() {
+			if (!physical(b)) {
+				return;
+			}
 			/* Ctrl-click (Cmd on a Mac): straight to Program, as Shift + Scene Launch on the desk */
 			bool direct = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
 			pressNote(0U, (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)j), true, direct);
@@ -438,7 +451,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 						    30, 22);
 			pads_[r][i] = b;
 			b->setObjectName(QStringLiteral("mfdDeskPad_%1_%2").arg(r).arg(i));
-			connect(b, &QPushButton::pressed, this, [this, r, i]() { pressPad(r, i, true); });
+			connect(b, &QPushButton::pressed, this, [this, r, i, b]() {
+				if (physical(b)) {
+					pressPad(r, i, true);
+				}
+			});
 			connect(b, &QPushButton::released, this, [this, r, i]() { pressPad(r, i, false); });
 			grid->addWidget(b, r + 1, i + 1);
 		}
@@ -452,8 +469,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 						    {QString::number(i + 1)}),
 					    30, 14);
 		clip_stops_[i] = b;
-		connect(b, &QPushButton::pressed, this,
-			[this, i]() { pressNote((uint8_t)i, MFD_VJ_NOTE_CLIP_STOP, true, false); });
+		connect(b, &QPushButton::pressed, this, [this, i, b]() {
+			if (physical(b)) {
+				pressNote((uint8_t)i, MFD_VJ_NOTE_CLIP_STOP, true, false);
+			}
+		});
 		connect(b, &QPushButton::released, this,
 			[this, i]() { pressNote((uint8_t)i, MFD_VJ_NOTE_CLIP_STOP, false, false); });
 		grid->addWidget(b, kRows + 1, i + 1);
@@ -466,6 +486,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 			       80, 24);
 	stop_all_->setText(mfdText("Desk.StopAllShort", "Stop All"));
 	connect(stop_all_, &QPushButton::pressed, this, [this]() {
+		if (!physical(stop_all_)) {
+			return;
+		}
 		bool shift = shift_->isChecked();
 		pressNote(0U, MFD_VJ_NOTE_STOP_ALL, true, shift);
 		if (shift) {
@@ -479,7 +502,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	shift_->setCheckable(true);
 	session_ = makeButton(mfdText("Desk.Session", "Session: take Preview to Program"), 70, 24);
 	session_->setText(mfdText("Desk.SessionShort", "Take"));
-	connect(session_, &QPushButton::pressed, this, [this]() { pressNote(0U, MFD_VJ_NOTE_SESSION, true, false); });
+	connect(session_, &QPushButton::pressed, this, [this]() {
+		if (physical(session_)) {
+			pressNote(0U, MFD_VJ_NOTE_SESSION, true, false);
+		}
+	});
 	connect(session_, &QPushButton::released, this, [this]() { pressNote(0U, MFD_VJ_NOTE_SESSION, false, false); });
 	transport->addWidget(stop_all_);
 	transport->addWidget(shift_);
@@ -542,7 +569,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 									 {vs_downbeat_, MFD_VJ_CMD_VS_RESYNC}};
 	for (const auto &p : vs) {
 		enum mfd_vj_command_kind kind = p.second;
-		connect(p.first, &QPushButton::pressed, this, [this, kind]() {
+		QPushButton *vb = p.first;
+		connect(vb, &QPushButton::pressed, this, [this, kind, vb]() {
+			if (!physical(vb)) {
+				return;
+			}
 			if (!mfd_engine_desk_vs(eng_, kind)) {
 				sayStatus(mfdText("Desk.Busy", "Too many presses at once; try again."));
 			}
@@ -570,7 +601,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	vj_row->addWidget(speed_dial_);
 	vj_play_ = makeButton(mfdText("Desk.VjsterPlayTip", "Play or pause the video (Play)"), 70, 24);
 	vj_play_->setText(mfdText("Desk.VjsterPlay", "Play / Pause"));
-	connect(vj_play_, &QPushButton::pressed, this, [this]() { mfd_engine_desk_vjster(eng_, 0, false, true); });
+	connect(vj_play_, &QPushButton::pressed, this, [this]() {
+		if (physical(vj_play_)) {
+			mfd_engine_desk_vjster(eng_, 0, false, true);
+		}
+	});
 	vj_row->addWidget(vj_play_);
 	root->addLayout(vj_row);
 	auto *preset_row = new QHBoxLayout();
@@ -588,7 +623,10 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		b->setText(label);
 		b->setObjectName(QStringLiteral("mfdDeskSpeedPreset_%1").arg(k));
 		vj_presets_[k] = b;
-		connect(b, &QPushButton::pressed, this, [this, rate, label]() {
+		connect(b, &QPushButton::pressed, this, [this, rate, label, b]() {
+			if (!physical(b)) {
+				return;
+			}
 			if (rate == 1.0) {
 				mfd_engine_desk_vjster(eng_, 0, true, false); /* 1x: the reset every Companion knows */
 			} else {
@@ -651,6 +689,18 @@ void MfdDeskDock::vjSteps(int steps)
 			  {QStringLiteral("%1%2x")
 				   .arg(steps > 0 ? QStringLiteral("+") : QStringLiteral("\xE2\x88\x92"))
 				   .arg(std::abs(steps) * 0.05, 0, 'f', 2)}));
+}
+
+/* A real press: the mouse button or Space went down on it. QPushButton also emits pressed when a held pointer slides
+ * back onto it, which must not press a desk button a second time (Lock would toggle twice, a scene would be taken). */
+bool MfdDeskDock::eventFilter(QObject *obj, QEvent *e)
+{
+	if (e->type() == QEvent::MouseButtonPress || e->type() == QEvent::MouseButtonDblClick ||
+	    (e->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(e)->key() == Qt::Key_Space &&
+	     !static_cast<QKeyEvent *>(e)->isAutoRepeat())) {
+		obj->setProperty("mfdPhysical", true);
+	}
+	return QWidget::eventFilter(obj, e);
 }
 
 void MfdDeskDock::keyPressEvent(QKeyEvent *e)
@@ -833,9 +883,11 @@ void MfdDeskDock::refresh()
 										std::max(28, col_names_[i]->width())));
 		setCss(col_names_[i], src.isEmpty() ? QStringLiteral("color: #6b7280;") : QString()); /* not a layer */
 		setTip(col_names_[i],
-		       src.isEmpty() ? mfdText("Desk.Tip.Empty", "No source on this column.")
-				     : src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
-							 : mfdText("Desk.Pinned", " (pinned)")));
+		       !src.isEmpty() ? src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
+							  : mfdText("Desk.Pinned", " (pinned)"))
+		       : !label.isEmpty()
+			       ? mfdFill(mfdText("Desk.Tip.NotLayer", "Not a layer: its fader drives %1."), {label})
+			       : mfdText("Desk.Tip.Empty", "No source on this column."));
 		for (int r = 0; r < kRows; ++r) {
 			int cell = kRowCell[r];
 			const struct mfd_vj_led &led = view_.leds[i * MFD_DESK_CELLS + cell];
@@ -947,10 +999,11 @@ void MfdDeskDock::refresh()
 	reconnect_->setVisible(lost);
 	setCss(status_,
 	       lost ? QStringLiteral("color: #fde68a; font-weight: bold;") : QStringLiteral("color: #94a3b8;"));
-	if (!why.isEmpty()) {
+	bool fresh_message = !status_is_reason_ && status_age_.isValid() && status_age_.elapsed() <= 4000;
+	if (!why.isEmpty() && !fresh_message) { /* a message just said (a speed asked for) stays its 4 s */
 		setLabel(status_, why);
 		status_is_reason_ = true;
-	} else if (status_is_reason_ || (status_age_.isValid() && status_age_.elapsed() > 4000)) {
+	} else if (why.isEmpty() && (status_is_reason_ || (status_age_.isValid() && status_age_.elapsed() > 4000))) {
 		setLabel(status_, QString()); /* the reason is gone (loaded, desk connected), or the message is old */
 		status_is_reason_ = false;
 		status_age_.invalidate();

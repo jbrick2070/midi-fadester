@@ -3403,8 +3403,10 @@ static int test_vj_fill_follow_and_desk(void)
 
 		/* 14l. VJster buttons work without the APC40: steps add up, 1x drops the steps before it. */
 		eng->midi_dev.is_open = false;
-		eng->vj_speed_sent_ns = os_gettime_ns(); /* inside the 50 ms pacing: the steps wait */
+		/* "just sent" right before each call: the steps wait inside the 50 ms pacing, however slow the machine */
+		eng->vj_speed_sent_ns = os_gettime_ns();
 		mfd_engine_desk_vjster(eng, 1, false, false);
+		eng->vj_speed_sent_ns = os_gettime_ns();
 		mfd_engine_desk_vjster(eng, 5, false, false);
 		REQUIRE(eng->vj_speed_steps == 6);
 		mfd_engine_desk_vjster(eng, 0, true, false);
@@ -3412,6 +3414,7 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_desk_vjster(eng, 1000, false, false);
 		REQUIRE(eng->vj_speed_steps == 0); /* nonsense steps refused */
 		for (int k = 0; k < 10; ++k) {
+			eng->vj_speed_sent_ns = os_gettime_ns();
 			mfd_engine_desk_vjster(eng, 50, false, false);
 		}
 		REQUIRE(eng->vj_speed_steps == MFD_VJ_SPEED_MAX_STEPS); /* bounded like the Tempo knob */
@@ -3420,6 +3423,7 @@ static int test_vj_fill_follow_and_desk(void)
 		REQUIRE(eng->vj_speed_steps == 0 && eng->vj_speed_actions == 0U && eng->vj_speed_set_rate == 1.5);
 		mfd_engine_desk_vjster_rate(eng, 9.0); /* outside 0.25..4: refused */
 		REQUIRE(eng->vj_speed_set_rate == 1.5);
+		eng->vj_speed_sent_ns = 0U;
 		eng->midi_dev.is_open = true;
 
 		/* 14k. Two Panic presses before the first has run: one Panic, not Panic then Restore. */

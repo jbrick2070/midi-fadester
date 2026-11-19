@@ -223,6 +223,11 @@ bool mfd_engine_held_by_current_thread(const struct mfd_engine *eng)
 	return eng && os_atomic_load_long((volatile long *)&eng->lock_owner) == current_thread_key();
 }
 
+/* Speed events (vjster_action) are sent after the engine lock is let go, from the thread that let it go: this keeps
+ * their order across threads (a dock preset from the UI thread, desk steps from the video tick). Taken while the engine
+ * lock is still held, released once they are sent. */
+static pthread_mutex_t g_speed_emit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void mfd_engine_unlock(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -273,6 +278,11 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 		os_atomic_store_long(&eng->lock_owner, 0);
 	}
 
+	bool speed_work = speed_actions != 0U || speed_steps != 0;
+	if (speed_work) {
+		pthread_mutex_lock(
+			&g_speed_emit_mutex); /* before the engine lock goes: no later event can overtake these */
+	}
 	if (eng->state_mutex_initialized) {
 		pthread_mutex_unlock(&eng->state_mutex);
 	}
@@ -295,6 +305,9 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 	}
 	if (speed_steps != 0) {
 		mfd_vendor_emit_vjster_action("vjster.speed.step", speed_steps);
+	}
+	if (speed_work) {
+		pthread_mutex_unlock(&g_speed_emit_mutex);
 	}
 	if (wake_ui && ui_fn) {
 		ui_fn(ui_ud);
