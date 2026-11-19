@@ -24,16 +24,27 @@ static bool feed(struct mfd_vj_pads *p, bool on, uint8_t ch, uint8_t note)
 	return mfd_vj_pads_feed(p, on, ch, note, acts, MFD_VJ_MAX_ACTIONS, &n);
 }
 
-static uint8_t led_velocity(const struct mfd_vj_pads *p, uint8_t note)
+/* The LED for a note (and, for Clip Stop, its track channel): its velocity, and its channel in *ch. */
+static uint8_t led_at(const struct mfd_vj_pads *p, uint8_t note, int track, uint8_t *ch)
 {
 	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
 	size_t c = mfd_vj_pads_leds(p, leds, MFD_VJ_MAX_LEDS);
 	for (size_t i = 0; i < c; ++i) {
-		if (leds[i].channel == 0U && leds[i].note == note) {
+		if (leds[i].note == note && (track < 0 || leds[i].channel == (uint8_t)track)) {
+			if (ch) {
+				*ch = leds[i].channel;
+			}
 			return leds[i].velocity;
 		}
 	}
 	return 255U;
+}
+
+static uint8_t led_velocity(const struct mfd_vj_pads *p, uint8_t note)
+{
+	uint8_t ch = 0;
+	uint8_t v = led_at(p, note, -1, &ch);
+	return ch == 0U ? v : 254U; /* an animated pad is not a plain colour */
 }
 
 int main(void)
@@ -44,13 +55,17 @@ int main(void)
 		mfd_vj_pads_set_has_layer(&p, i, i < 3);
 	}
 
-	/* Not a VJ pad: Solo, Track Select, upper rows and other channels are left alone. */
-	REQUIRE(!feed(&p, true, 0, 32)); /* top clip row */
-	REQUIRE(!feed(&p, true, 0, 24)); /* fourth row */
+	/* Not a VJ pad: Solo, Track Select, Activator, A|B, a ninth Clip Stop and other channels are left alone. */
 	REQUIRE(!feed(&p, true, 1, 3));  /* bottom-row note on another channel */
 	REQUIRE(!feed(&p, true, 0, 49)); /* Solo */
 	REQUIRE(!feed(&p, true, 1, 51)); /* Track Select */
+	REQUIRE(!feed(&p, true, 0, 50)); /* Activator */
+	REQUIRE(!feed(&p, true, 0, 66)); /* Crossfade A|B */
+	REQUIRE(!feed(&p, true, 8, 52)); /* Clip Stop on a ninth channel */
+	REQUIRE(!feed(&p, true, 0, 87)); /* Pan */
 	REQUIRE(mfd_vj_pads_is_button(0, 23) && mfd_vj_pads_is_button(0, 98) && mfd_vj_pads_is_button(0, 81));
+	REQUIRE(mfd_vj_pads_is_button(0, 39) && mfd_vj_pads_is_button(7, 52) && mfd_vj_pads_is_button(0, 86));
+	REQUIRE(!mfd_vj_pads_is_button(0, 40) && !mfd_vj_pads_is_button(0, 87) && !mfd_vj_pads_is_button(1, 82));
 
 	/* 1. Blend punch: Normal -> Screen (the first punch mode) -> Normal. Release does nothing. */
 	REQUIRE(feed(&p, true, 0, 1) && n == 1);
@@ -91,9 +106,9 @@ int main(void)
 	/* 4. Fade (row 3): a toggle on press only; the engine reports the faded state for the LED. */
 	REQUIRE(feed(&p, true, 0, 16) && n == 1 && acts[0].kind == MFD_VJ_ACTION_FADE_TOGGLE && acts[0].strip == 0);
 	REQUIRE(feed(&p, false, 0, 16) && n == 0);
-	REQUIRE(led_velocity(&p, 16) == 23U);
+	REQUIRE(led_velocity(&p, 16) == 1U); /* dim white: a source at rest */
 	mfd_vj_pads_set_faded(&p, 0, true);
-	REQUIRE(led_velocity(&p, 16) == 5U);
+	REQUIRE(led_velocity(&p, 16) == 9U); /* amber: faded out */
 
 	/* 5. Stop All Clips: Clean (FX off, every blend Normal); with Shift held, fade every layer out. */
 	REQUIRE(feed(&p, true, 0, 0) && acts[0].blend == MFD_VJ_BLEND_SCREEN);
@@ -115,7 +130,8 @@ int main(void)
 	mfd_vj_pads_set_current(&p, 2, MFD_VJ_BLEND_DARKEN);
 	REQUIRE(led_velocity(&p, 2) == mfd_vj_blend_color(MFD_VJ_BLEND_DARKEN));
 	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
-	REQUIRE(mfd_vj_pads_leds(&p, leds, MFD_VJ_MAX_LEDS) == 24U);
+	REQUIRE(mfd_vj_pads_leds(&p, leds, MFD_VJ_MAX_LEDS) ==
+		55U); /* 40 pads, 8 Clip Stops, 5 scenes, Record, Session */
 
 	/* 8. Saved punch modes: Normal and Darken are refused. */
 	mfd_vj_pads_set_punch(&p, 4, MFD_VJ_BLEND_MULTIPLY);
@@ -152,6 +168,84 @@ int main(void)
 	REQUIRE(feed(&t, true, 0, 91) && n == 1 && acts[0].kind == MFD_VJ_ACTION_PLAY_PAUSE);
 	REQUIRE(feed(&t, false, 0, 91) && n == 0);
 	REQUIRE(!feed(&t, true, 1, 91) && !feed(&t, true, 0, 92)); /* Play on another channel; Stop */
+
+	/* 11. Rows 4 and 5, Clip Stop, blackout and snap. */
+	struct mfd_vj_pads q;
+	mfd_vj_pads_init(&q);
+	mfd_vj_pads_set_has_layer(&q, 0, true);
+	mfd_vj_pads_set_has_layer(&q, 1, true);
+	REQUIRE(feed(&q, true, 0, 24) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SHOW_TOGGLE && acts[0].strip == 0);
+	REQUIRE(feed(&q, false, 0, 24) && n == 0);
+	REQUIRE(feed(&q, true, 0, 26) && n == 0); /* no source on strip 3: nothing to show or hide */
+	REQUIRE(feed(&q, true, 0, 33) && n == 1 && acts[0].kind == MFD_VJ_ACTION_RESTART && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 3, 52) && n == 0); /* Clip Stop on a strip without a source */
+	REQUIRE(feed(&q, true, 1, 52) && n == 1 && acts[0].kind == MFD_VJ_ACTION_COLUMN_CLEAN && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 98));
+	REQUIRE(feed(&q, true, 0, 25) && n == 1 && acts[0].kind == MFD_VJ_ACTION_WAKE && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 37) && n == 1 && acts[0].kind == MFD_VJ_ACTION_PIN_TOGGLE && acts[0].strip == 5);
+	REQUIRE(feed(&q, true, 0, 17) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SNAP && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 9) && n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_ON && acts[0].strip == 1);
+	REQUIRE(led_velocity(&q, 9) == 9U);     /* amber while blacked out */
+	REQUIRE(led_at(&q, 52, 1, NULL) == 1U); /* Clip Stop lit while the column holds a blackout */
+	REQUIRE(feed(&q, false, 0, 98));
+	REQUIRE(feed(&q, true, 0, 9) && n == 0); /* already held: no flash on top of the blackout */
+	REQUIRE(feed(&q, false, 0, 9) && n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_OFF);
+	REQUIRE(led_at(&q, 52, 1, NULL) == 0U && led_velocity(&q, 9) == 1U);
+	REQUIRE(feed(&q, true, 0, 98) && feed(&q, true, 0, 8) && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_ON);
+	n = mfd_vj_pads_release_all(&q, acts, MFD_VJ_MAX_ACTIONS);
+	REQUIRE(n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_OFF && q.blackout == 0 && !q.shift);
+
+	/* 12. Row 4 and row 5 lights: hidden blinks red (channel 16), 0 % is amber, a pinned column is azure. */
+	uint8_t ch = 0;
+	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 1U);
+	mfd_vj_pads_set_hidden(&q, 0, true);
+	REQUIRE(led_at(&q, 24, -1, &ch) == 5U && ch == 15U);
+	mfd_vj_pads_set_hidden(&q, 0, false);
+	mfd_vj_pads_set_zero(&q, 0, true);
+	REQUIRE(led_velocity(&q, 24) == 9U);
+	mfd_vj_pads_set_pinned(&q, 0, true);
+	REQUIRE(led_velocity(&q, 32) == 37U);
+	REQUIRE(led_velocity(&q, 26) == 0U && led_velocity(&q, 34) == 0U); /* no source: dark */
+
+	/* 13. Scenes: Scene Launch picks (Shift: straight to Program); Session takes. Lights: Program red, Preview green
+	 * pulsing (channel 11), idle dim blue, no scene off. */
+	REQUIRE(feed(&q, true, 0, 82) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PICK && acts[0].strip == 0);
+	REQUIRE(feed(&q, false, 0, 82) && n == 0);
+	REQUIRE(feed(&q, true, 0, 86) && n == 1 && acts[0].strip == 4);
+	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
+	REQUIRE(feed(&q, true, 0, 98));
+	REQUIRE(feed(&q, true, 0, 83) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PROGRAM && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
+	REQUIRE(feed(&q, false, 0, 98));
+	mfd_vj_pads_set_scene(&q, 0, MFD_VJ_SCENE_PROGRAM);
+	mfd_vj_pads_set_scene(&q, 1, MFD_VJ_SCENE_PREVIEW);
+	mfd_vj_pads_set_scene(&q, 2, MFD_VJ_SCENE_IDLE);
+	REQUIRE(led_velocity(&q, 82) == 5U);
+	REQUIRE(led_at(&q, 83, -1, &ch) == 21U && ch == 10U);
+	REQUIRE(led_velocity(&q, 84) == 46U && led_velocity(&q, 85) == 0U);
+	q.take_ready = true;
+	q.vs_panic = true;
+	REQUIRE(led_at(&q, 102, 0, NULL) == 1U && led_at(&q, 93, 0, NULL) == 1U); /* Record: on or off only */
+	struct mfd_vj_led ql[MFD_VJ_MAX_LEDS];
+	size_t qc = mfd_vj_pads_leds(&q, ql, MFD_VJ_MAX_LEDS);
+	for (size_t i = 0; i < qc; ++i) {
+		bool rgb = ql[i].note < 40U || (ql[i].note >= 82U && ql[i].note <= 86U);
+		REQUIRE(ql[i].rgb == rgb);
+	}
+
+	/* 14. Visual Sidechain: Record panics, Metronome taps (Shift: lock), Shift + Tap Tempo resyncs. Cue Level: the
+	 * transition length, with Shift the pad fade time. */
+	REQUIRE(feed(&q, true, 0, 93) && n == 1 && acts[0].kind == MFD_VJ_ACTION_VS_PANIC);
+	REQUIRE(feed(&q, true, 0, 90) && n == 1 && acts[0].kind == MFD_VJ_ACTION_VS_TAP);
+	REQUIRE(feed(&q, true, 0, 98));
+	REQUIRE(feed(&q, true, 0, 90) && n == 1 && acts[0].kind == MFD_VJ_ACTION_VS_LOCK);
+	REQUIRE(feed(&q, true, 0, 99) && n == 1 && acts[0].kind == MFD_VJ_ACTION_VS_RESYNC);
+	REQUIRE(mfd_vj_pads_feed_cc(&q, 0, 47, 3, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1);
+	REQUIRE(acts[0].kind == MFD_VJ_ACTION_FADE_STEPS && acts[0].steps == 3);
+	REQUIRE(feed(&q, false, 0, 98));
+	REQUIRE(mfd_vj_pads_feed_cc(&q, 0, 47, 126, acts, MFD_VJ_MAX_ACTIONS, &n) && n == 1);
+	REQUIRE(acts[0].kind == MFD_VJ_ACTION_CUE_STEPS && acts[0].steps == -2);
+	REQUIRE(!mfd_vj_pads_feed_cc(&q, 1, 47, 1, acts, MFD_VJ_MAX_ACTIONS, &n));
 
 	printf("test-vj-pads: all checks passed\n");
 	return 0;

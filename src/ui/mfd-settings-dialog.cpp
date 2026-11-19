@@ -1175,11 +1175,12 @@ private:
 		root->addLayout(vj_bar);
 		auto *vj_legend = new QLabel(
 			mfdText("Dialog.VjPadsLegend",
-				"Bottom pad row: blend punch, the strip's layer between Normal and its punch mode (Shift + pad: next "
-				"punch mode). Row 2: flash the layer to 100 % while held. Row 3: fade the layer out; press again to "
-				"fade it back. Stop All Clips: Clean, every effect off and every blend Normal (Shift + Stop All "
-				"Clips: fade every layer out). Blend punch works on strips set to “Show or hide a layer” or "
-				"“Mix two layers”; flash and fade on “Show or hide a layer” strips."),
+				"Columns 1–8 are the sources of the scene on air, bottom layer first: empty faders fill "
+				"themselves and follow the scene; a fader you set yourself stays. Bottom pad row: blend punch "
+				"(Shift + pad: next punch mode). Row 2: flash while held (Shift: blackout). Row 3: fade out and "
+				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: restart its video "
+				"(Shift: pin the column to its source). Clip Stop: that column's blend back to Normal. Stop All "
+				"Clips: Clean, every effect off and every blend Normal (Shift: fade every layer out)."),
 			adv_tab);
 		vj_legend->setObjectName(QStringLiteral("mfdAdvVjLegend"));
 		vj_legend->setWordWrap(true);
@@ -1196,6 +1197,30 @@ private:
 		vj_speed_legend->setWordWrap(true);
 		vj_speed_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
 		root->addWidget(vj_speed_legend);
+		auto *vj_scene_legend = new QLabel(
+			mfdText("Dialog.VjScenesLegend",
+				"Scene Launch 1–5: the first five scenes in the Scenes list. Press once for Preview, again (or "
+				"Session) to take it; Shift + button sends it straight to Program. Program red, Preview green. Cue "
+				"Level: transition "
+				"length (Shift: pad fade time). Record: Visual Sidechain panic or restore. Metronome: its tap "
+				"tempo (Shift: lock the BPM). Shift + Tap Tempo: back to its downbeat."),
+			adv_tab);
+		vj_scene_legend->setObjectName(QStringLiteral("mfdAdvVjScenesLegend"));
+		vj_scene_legend->setWordWrap(true);
+		vj_scene_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
+		root->addWidget(vj_scene_legend);
+		auto *vj_fill_bar = new QHBoxLayout();
+		auto *btn_vj_fill =
+			new QPushButton(mfdText("Dialog.VjFill", "Fill empty faders from the scene on air"), adv_tab);
+		btn_vj_fill->setObjectName(QStringLiteral("mfdAdvVjFill"));
+		vj_fill_bar->addWidget(btn_vj_fill);
+		vj_fill_result_ = new QLabel(adv_tab);
+		vj_fill_result_->setObjectName(QStringLiteral("mfdAdvVjFillResult"));
+		vj_fill_result_->setWordWrap(true);
+		vj_fill_result_->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
+		vj_fill_bar->addWidget(vj_fill_result_, 1);
+		root->addLayout(vj_fill_bar);
+		connect(btn_vj_fill, &QPushButton::clicked, this, [this]() { fill_faders_from_scene(); });
 
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -1881,6 +1906,7 @@ private:
 		edit.enabled = s.enabled;
 		edit.target_type = s.target_type;
 		edit.preserve_scene = preserve_scene;
+		edit.keep_layer = true; /* cleared by the job and source pickers, which change the layer */
 		std::snprintf(edit.scene_name, sizeof(edit.scene_name), "%s", s.scene_name);
 		std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s", s.source_a_name);
 		std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s", s.source_b_name);
@@ -2203,6 +2229,7 @@ private:
 						return;
 					}
 					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
+					edit.keep_layer = false;
 					const auto new_target =
 						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
 					edit.target_type = new_target;
@@ -2225,6 +2252,7 @@ private:
 						}
 						struct mfd_slot_config_edit edit =
 							make_edit_from_snapshot_row(row, true);
+						edit.keep_layer = false;
 						const QByteArray utf8 = src_a_combo->currentData().toString().toUtf8();
 						const bool host_changed =
 							(std::strcmp(edit.source_a_name, utf8.constData()) != 0);
@@ -2251,6 +2279,7 @@ private:
 						}
 						struct mfd_slot_config_edit edit =
 							make_edit_from_snapshot_row(row, true);
+						edit.keep_layer = false;
 						const QByteArray utf8 = src_b_combo->currentData().toString().toUtf8();
 						std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s",
 							      utf8.constData());
@@ -2591,6 +2620,45 @@ private:
 	QCheckBox *flip_check_ = nullptr;
 	QCheckBox *vj_check_ = nullptr;
 	QSpinBox *vj_fade_spin_ = nullptr;
+	QLabel *vj_fill_result_ = nullptr;
+
+	/* "Fill empty faders from the scene on air": the engine fills them, the line beside the button says how it went. */
+	void fill_faders_from_scene()
+	{
+		enum mfd_fill_status st = MFD_FILL_NO_SCENE;
+		char scene[MFD_SOURCE_NAME_MAX] = {0};
+		const int n = mfd_engine_fill_strips_from_scene(eng_, nullptr, true, false, &st, scene, sizeof(scene));
+		const QString sc = QString::fromUtf8(scene);
+		QString msg;
+		switch (st) {
+		case MFD_FILL_OK:
+			msg = n == 1 ? mfdFill(mfdText("Dialog.VjFill.One",
+						       "Filled 1 fader from %1. It follows the scene on air."),
+					       {sc})
+				     : mfdFill(mfdText("Dialog.VjFill.Many",
+						       "Filled %1 faders from %2. They follow the scene on air."),
+					       {QString::number(n), sc});
+			break;
+		case MFD_FILL_NO_EMPTY_STRIPS:
+			msg = mfdText("Dialog.VjFill.NoEmpty",
+				      "Every fader has a job of its own. Unassign one to fill it.");
+			break;
+		case MFD_FILL_NO_VIDEO_LAYERS:
+			msg = mfdFill(mfdText("Dialog.VjFill.NoVideo", "%1 has no video source left for the faders."),
+				      {sc});
+			break;
+		case MFD_FILL_NO_SCENE:
+		default:
+			msg = mfdText("Dialog.VjFill.NoScene", "No scene is on air.");
+			break;
+		}
+		if (vj_fill_result_) {
+			vj_fill_result_->setText(msg);
+		}
+		mfd_engine_flush_pending_ui_work(eng_);
+		last_adv_topology_rev_ = ~0ULL;
+		refresh_from_engine();
+	}
 	QTableWidget *table_ = nullptr;
 	QPointer<QLabel> addr_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> learn_buttons_[MFD_MAX_FADER_SLOTS];

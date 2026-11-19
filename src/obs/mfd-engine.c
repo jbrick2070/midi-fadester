@@ -335,6 +335,11 @@ void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, vo
 	mfd_engine_unlock(eng);
 }
 
+static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *cmd);
+static void vj_try_autofill(struct mfd_engine *eng);
+static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
+static bool vj_active(const struct mfd_engine *eng);
+
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -342,6 +347,60 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	}
 	bool do_save = false;
 	bool check_health = false;
+	struct mfd_vj_command cmds[MFD_VJ_CMD_MAX + 1];
+	int ncmd = 0;
+	bool autofill = false;
+	bool follow = false;
+	mfd_engine_lock(eng);
+	if (eng->vj_cue_ms != 0) {
+		/* First: a take pressed right after turning Cue Level uses the new length. */
+		memset(&cmds[ncmd], 0, sizeof(cmds[ncmd]));
+		cmds[ncmd].strip = -1;
+		cmds[ncmd].kind = MFD_VJ_CMD_TRANSITION;
+		cmds[ncmd].arg = eng->vj_cue_ms;
+		++ncmd;
+		eng->vj_cue_ms = 0;
+	}
+	for (int i = 0; i < eng->vj_cmd_count && i < MFD_VJ_CMD_MAX; ++i) {
+		cmds[ncmd++] = eng->vj_cmds[i];
+	}
+	eng->vj_cmd_count = 0;
+	autofill = eng->vj_autofill_pending;
+	eng->vj_autofill_pending = false;
+	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
+		eng->vj_follow_pending = false;
+		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
+	}
+	mfd_engine_unlock(eng);
+
+	uint8_t eyes_done = 0U;
+	for (int i = 0; i < ncmd; ++i) {
+		vj_run_command(eng, &cmds[i]);
+		if (cmds[i].kind == MFD_VJ_CMD_SET_VISIBLE && cmds[i].strip >= 0 &&
+		    cmds[i].strip < (int)MFD_VJ_STRIPS) {
+			eyes_done |= (uint8_t)(1U << (unsigned)cmds[i].strip);
+		}
+	}
+	if (eyes_done != 0U) {
+		mfd_engine_lock(eng);
+		for (int i = 0; i < eng->vj_cmd_count; ++i) {
+			/* A later press on the same strip is still queued: its eye is not settled yet. */
+			if (eng->vj_cmds[i].kind == MFD_VJ_CMD_SET_VISIBLE && eng->vj_cmds[i].strip >= 0 &&
+			    eng->vj_cmds[i].strip < (int)MFD_VJ_STRIPS) {
+				eyes_done &= (uint8_t) ~(1U << (unsigned)eng->vj_cmds[i].strip);
+			}
+		}
+		eng->vj_eye_hold &= (uint8_t)~eyes_done; /* those eyes are set: read them from OBS again */
+		eng->vj_refresh_pending = true;
+		mfd_engine_unlock(eng);
+	}
+	if (autofill) {
+		vj_try_autofill(eng);
+	}
+	if (follow) {
+		mfd_engine_fill_strips_from_scene(eng, NULL, false, false, NULL, NULL, 0U);
+	}
+
 	mfd_engine_lock(eng);
 	if (eng->pending_config_save) {
 		eng->pending_config_save = false;
@@ -406,10 +465,27 @@ static void refresh_apc40_detected_locked(struct mfd_engine *eng)
 	}
 }
 
+static void clear_slot_filter_fields(struct mfd_fader_slot *s);
+
 static void refresh_frontend_cache_on_ui_thread_locked(struct mfd_engine *eng)
 {
 	if (!eng || !obs_initialized()) {
 		return;
+	}
+	if (!eng->scene_list_override_set) {
+		/* The APC40's Scene Launch buttons: the first scenes in the Scenes list, top first. */
+		eng->cached_scene_count = 0;
+		struct obs_frontend_source_list list = {0};
+		obs_frontend_get_scenes(&list);
+		for (size_t i = 0U; i < list.sources.num && eng->cached_scene_count < (int)MFD_VJ_SCENES; ++i) {
+			const char *nm = obs_source_get_name(list.sources.array[i]);
+			if (nm && nm[0] != '\0') {
+				snprintf(eng->cached_scenes[eng->cached_scene_count],
+					 sizeof(eng->cached_scenes[eng->cached_scene_count]), "%s", nm);
+				++eng->cached_scene_count;
+			}
+		}
+		obs_frontend_source_list_free(&list);
 	}
 	eng->cached_studio_mode = obs_frontend_preview_program_mode_active();
 	eng->cached_program_scene[0] = '\0';
@@ -975,17 +1051,20 @@ static bool slots_differ_from_apc40_defaults(const struct mfd_engine *eng)
 	size_t count = mfd_apc40_get_default_slots(defs, MFD_APC40_DEFAULT_SLOT_COUNT);
 	for (size_t i = 0U; i < MFD_MAX_FADER_SLOTS && i < count; ++i) {
 		const struct mfd_fader_slot *s = &eng->fader_slots[i];
+		/* A strip filled from the scene on air by Midi Fadester: its job and source are not the user's. */
+		bool follows = s->auto_follow;
 		if (!s->enabled) {
 			return true;
 		}
-		if (s->target_type != defs[i].default_target) {
+		if (!follows && s->target_type != defs[i].default_target) {
 			return true;
 		}
 		if (!midi_addr_exact_equal(&s->addr, &defs[i].addr)) {
 			return true;
 		}
-		if (s->scene_name[0] != '\0' || s->source_a_name[0] != '\0' || s->source_b_name[0] != '\0' ||
-		    s->filter_name[0] != '\0' || s->filter_prop[0] != '\0' || s->filter_bypass_at_zero) {
+		if (!follows &&
+		    (s->scene_name[0] != '\0' || s->source_a_name[0] != '\0' || s->source_b_name[0] != '\0' ||
+		     s->filter_name[0] != '\0' || s->filter_prop[0] != '\0' || s->filter_bypass_at_zero)) {
 			return true;
 		}
 		if (s->curve != defs[i].default_curve || s->audio_follows_video || s->invert) {
@@ -2929,6 +3008,7 @@ static bool enum_catalog_scene_items_cb(obs_scene_t *scene, obs_sceneitem_t *ite
 	size_t idx = se->layer_count++;
 	snprintf(se->layers[idx], sizeof(se->layers[idx]), "%s", nm);
 	se->layer_has_audio[idx] = ((obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) != 0U);
+	se->layer_has_video[idx] = ((obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0U);
 	return true;
 }
 
@@ -3647,6 +3727,7 @@ bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_ind
 	s->filter_prop_valid = false;
 	s->restore_persisted_pre_bypass = false;
 	s->audio_follows_video = false;
+	s->auto_follow = false;
 	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 	mfd_engine_bump_slot_rev(eng, slot_index);
 	mfd_engine_reevaluate_slots(eng, false);
@@ -3839,6 +3920,7 @@ bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mf
 	}
 	s->curve = cand->curve;
 	s->audio_follows_video = cand->audio_follows_video;
+	s->auto_follow = false;
 	if (had_cand_input) {
 		s->last_raw_norm = cand_raw;
 		s->takeover.has_last_fader = true;
@@ -3940,6 +4022,9 @@ void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 	}
 
 	eng->first_run_offer_dismissed = true;
+	/* The usual layout empties the eight strips: they fill from the scene on air again. */
+	eng->vj_autofill_done = false;
+	eng->vj_autofill_pending = true;
 	mfd_engine_bump_slot_rev(eng, -1);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
@@ -3971,6 +4056,8 @@ void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng)
 		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 	}
 	eng->first_run_offer_dismissed = true;
+	eng->vj_autofill_done = true; /* the user will set the strips up: never fill them from the scene */
+	eng->vj_autofill_pending = false;
 	mfd_engine_bump_slot_rev(eng, -1);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
@@ -4013,6 +4100,22 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 	}
 	mfd_engine_lock(eng);
 	struct mfd_fader_slot *s = &eng->fader_slots[slot_index];
+	struct mfd_slot_config_edit kept;
+	if (edit->keep_layer && s->auto_follow && edit->target_type == s->target_type) {
+		/* The dialog's snapshot may predate the last scene change: keep the source the strip follows now. */
+		kept = *edit;
+		snprintf(kept.scene_name, sizeof(kept.scene_name), "%s", s->scene_name);
+		snprintf(kept.source_a_name, sizeof(kept.source_a_name), "%s", s->source_a_name);
+		snprintf(kept.source_b_name, sizeof(kept.source_b_name), "%s", s->source_b_name);
+		kept.preserve_scene = false;
+		edit = &kept;
+	}
+	/* A strip the user gives another job, source or scene stops following the scene on air (once the edit is
+	 * accepted). */
+	const bool stops_following = s->auto_follow &&
+				     (edit->target_type != s->target_type ||
+				      strcmp(edit->source_a_name, s->source_a_name) != 0 ||
+				      (!edit->preserve_scene && strcmp(edit->scene_name, s->scene_name) != 0));
 
 	bool same_filter_binding =
 		(s->target_type == MFD_TARGET_FILTER_PARAM && edit->target_type == MFD_TARGET_FILTER_PARAM &&
@@ -4126,6 +4229,9 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 	}
 	s->curve = edit->curve;
 	s->audio_follows_video = edit->audio_follows_video;
+	if (stops_following) {
+		s->auto_follow = false;
+	}
 	if (edit->target_type == MFD_TARGET_FILTER_PARAM && filter_range_changed) {
 		s->target_type = MFD_TARGET_UNASSIGNED;
 	}
@@ -4960,12 +5066,12 @@ static void vj_say_once(struct mfd_engine *eng, int strip, const char *msg)
 }
 
 /* The same start as the obs-websocket auto_fade request, for a Layer Opacity strip. */
-static void vj_start_fade_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot, float to_val)
+static void vj_start_fade_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot, float to_val, float seconds)
 {
 	bool was_parked = slot->takeover.state == MFD_TAKEOVER_PARKED;
 	slot->auto_fade_from = slot->last_applied_val;
 	slot->auto_fade_to = clamp01(to_val);
-	slot->auto_fade_duration_sec = (float)vj_effective_fade_ms(eng) / 1000.0f;
+	slot->auto_fade_duration_sec = seconds >= 0.0f ? seconds : (float)vj_effective_fade_ms(eng) / 1000.0f;
 	slot->auto_fade_elapsed_sec = 0.0f;
 	slot->auto_fade_active = true;
 	slot->auto_fade_is_reset_fx = false;
@@ -4990,7 +5096,7 @@ static void vj_fade_out_locked(struct mfd_engine *eng, int strip)
 		return;
 	}
 	eng->vj_fade_restore[strip] = slot->last_applied_val;
-	vj_start_fade_locked(eng, slot, 0.0f);
+	vj_start_fade_locked(eng, slot, 0.0f, -1.0f);
 	mfd_vj_pads_set_faded(&eng->vj, strip, true);
 }
 
@@ -5014,6 +5120,101 @@ static void vj_set_blend_locked(struct mfd_engine *eng, int s, enum mfd_vj_blend
 	eng->vj_state_dirty = true;
 }
 
+/* Queues a desk command for OBS's UI thread (mfd_engine_flush_pending_ui_work). */
+static bool vj_queue_strip_cmd_locked(struct mfd_engine *eng, enum mfd_vj_command_kind kind, const char *scene,
+				      const char *source, int arg, int strip)
+{
+	if (eng->vj_cmd_count >= MFD_VJ_CMD_MAX) {
+		obs_log(LOG_WARNING, "APC40: too many desk presses at once; one was dropped");
+		return false;
+	}
+	struct mfd_vj_command *c = &eng->vj_cmds[eng->vj_cmd_count++];
+	memset(c, 0, sizeof(*c));
+	c->kind = kind;
+	c->arg = arg;
+	c->strip = strip;
+	snprintf(c->scene, sizeof(c->scene), "%s", scene ? scene : "");
+	snprintf(c->source, sizeof(c->source), "%s", source ? source : "");
+	mfd_engine_mark_ui_dirty(eng, false);
+	return true;
+}
+
+static bool vj_queue_cmd_locked(struct mfd_engine *eng, enum mfd_vj_command_kind kind, const char *scene,
+				const char *source, int arg)
+{
+	return vj_queue_strip_cmd_locked(eng, kind, scene, source, arg, -1);
+}
+
+/* A crossfader (T-bar) throw is under way. A T-bar at rest after a throw is parked at its end and does not count. */
+static bool vj_tbar_busy_locked(const struct mfd_engine *eng)
+{
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (s->enabled && s->target_type == MFD_TARGET_TBAR && s->tbar_state == MFD_TBAR_THROWING) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Holds strip s's layer at a level (flash 1, blackout 0) over its fader, which carries on underneath. */
+static bool vj_hold_on_locked(struct mfd_engine *eng, int s, float level, const char *why)
+{
+	struct mfd_fader_slot *slot = vj_slot(eng, s);
+	if (!vj_fadeable(eng, slot)) {
+		vj_say_once(eng, s, why);
+		return false;
+	}
+	slot->vj_flash_held = true;
+	apply_source_opacity_and_afv(eng, slot->source_a_name, level, slot->audio_follows_video);
+	eng->vj_state_dirty = true;
+	return true;
+}
+
+/* Lets go of a held flash or blackout: the layer goes back to its fader's level. */
+static void vj_hold_off_locked(struct mfd_engine *eng, int s)
+{
+	struct mfd_fader_slot *slot = vj_slot(eng, s);
+	if (slot && slot->vj_flash_held) {
+		slot->vj_flash_held = false;
+		apply_source_opacity_and_afv(eng, slot->source_a_name, slot->last_applied_val,
+					     slot->audio_follows_video);
+		eng->vj_state_dirty = true;
+	}
+}
+
+/* Preview to Program with the current transition. Studio Mode only. */
+static void vj_take_locked(struct mfd_engine *eng)
+{
+	if (!mfd_engine_is_studio_mode_active(eng) || eng->cached_preview_scene[0] == '\0') {
+		return;
+	}
+	if (vj_tbar_busy_locked(eng)) {
+		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene buttons wait for it");
+	} else {
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_TAKE, NULL, NULL, 0);
+	}
+}
+
+/* Scene Launch j: into Preview; pressed again while in Preview, taken. With Shift, or outside Studio Mode, straight
+ * to Program. Both use the current transition: Midi Fadester never changes the user's transition. */
+static void vj_scene_locked(struct mfd_engine *eng, int j, bool direct)
+{
+	if (j < 0 || j >= eng->cached_scene_count || j >= (int)MFD_VJ_SCENES) {
+		return;
+	}
+	const char *name = eng->cached_scenes[j];
+	if (vj_tbar_busy_locked(eng)) {
+		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene buttons wait for it");
+	} else if (direct || !mfd_engine_is_studio_mode_active(eng)) {
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_PROGRAM, name, NULL, 0);
+	} else if (strcmp(name, eng->cached_preview_scene) == 0 && strcmp(name, eng->cached_program_scene) != 0) {
+		vj_take_locked(eng);
+	} else {
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_PREVIEW, name, NULL, 0);
+	}
+}
+
 static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 {
 	int s = a->strip;
@@ -5021,27 +5222,149 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 	case MFD_VJ_ACTION_SET_BLEND:
 		vj_set_blend_locked(eng, s, a->blend);
 		break;
-	case MFD_VJ_ACTION_FLASH_ON: {
+	case MFD_VJ_ACTION_FLASH_ON:
+		/* An override on top of the strip: its value, smoothing, fade and takeover carry on underneath. */
+		if (!vj_hold_on_locked(eng, s, 1.0f, "flash needs a Layer Opacity strip")) {
+			eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
+		}
+		break;
+	case MFD_VJ_ACTION_BLACKOUT_ON:
+		if (!vj_hold_on_locked(eng, s, 0.0f, "blackout needs a Layer Opacity strip")) {
+			eng->vj.blackout &= (uint8_t) ~(1U << (unsigned)s);
+		}
+		break;
+	case MFD_VJ_ACTION_FLASH_OFF:
+	case MFD_VJ_ACTION_BLACKOUT_OFF:
+		vj_hold_off_locked(eng, s);
+		break;
+	case MFD_VJ_ACTION_SNAP: {
 		struct mfd_fader_slot *slot = vj_slot(eng, s);
 		if (!vj_fadeable(eng, slot)) {
-			vj_say_once(eng, s, "flash needs a Layer Opacity strip");
-			eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
+			vj_say_once(eng, s, "snap needs a Layer Opacity strip");
 			break;
 		}
-		/* An override on top of the strip: its value, smoothing, fade and takeover carry on underneath. */
-		slot->vj_flash_held = true;
-		apply_source_opacity_and_afv(eng, slot->source_a_name, 1.0f, slot->audio_follows_video);
+		if (slot->last_applied_val > 0.0005f) {
+			eng->vj_fade_restore[s] = slot->last_applied_val;
+			vj_start_fade_locked(eng, slot, 0.0f, 0.0f);
+			mfd_vj_pads_set_faded(&eng->vj, s, true);
+		} else {
+			float back = eng->vj_fade_restore[s] > 0.001f ? eng->vj_fade_restore[s] : 1.0f;
+			vj_start_fade_locked(eng, slot, back, 0.0f);
+			mfd_vj_pads_set_faded(&eng->vj, s, false);
+		}
 		eng->vj_state_dirty = true;
 		break;
 	}
-	case MFD_VJ_ACTION_FLASH_OFF: {
-		struct mfd_fader_slot *slot = vj_slot(eng, s);
-		if (slot && slot->vj_flash_held) {
-			slot->vj_flash_held = false;
-			apply_source_opacity_and_afv(eng, slot->source_a_name, slot->last_applied_val,
-						     slot->audio_follows_video);
-			eng->vj_state_dirty = true;
+	case MFD_VJ_ACTION_SHOW_TOGGLE: {
+		const char *scene = NULL, *source = NULL;
+		if (vj_strip_layer(eng, s, &scene, &source)) {
+			bool hidden = (eng->vj.hidden & (1U << (unsigned)s)) != 0;
+			if (vj_queue_strip_cmd_locked(eng, MFD_VJ_CMD_SET_VISIBLE, scene, source, hidden ? 1 : 0, s)) {
+				mfd_vj_pads_set_hidden(&eng->vj, s, !hidden);
+				eng->vj_eye_hold |= (uint8_t)(1U << (unsigned)s);
+				obs_log(LOG_INFO, "APC40 pads: %s %s", source, hidden ? "shown" : "hidden");
+				eng->vj_state_dirty = true;
+			}
 		}
+		break;
+	}
+	case MFD_VJ_ACTION_WAKE: {
+		const char *scene = NULL, *source = NULL;
+		if (!vj_strip_layer(eng, s, &scene, &source)) {
+			break;
+		}
+		if (vj_queue_strip_cmd_locked(eng, MFD_VJ_CMD_SET_VISIBLE, scene, source, 1, s)) {
+			mfd_vj_pads_set_hidden(&eng->vj, s, false);
+			eng->vj_eye_hold |= (uint8_t)(1U << (unsigned)s);
+		}
+		eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
+		eng->vj.blackout &= (uint8_t) ~(1U << (unsigned)s);
+		vj_hold_off_locked(eng, s);
+		vj_set_blend_locked(eng, s, MFD_VJ_BLEND_NORMAL);
+		struct mfd_fader_slot *slot = vj_slot(eng, s);
+		if (vj_fadeable(eng, slot)) {
+			vj_start_fade_locked(eng, slot, 1.0f, 0.0f);
+			mfd_vj_pads_set_faded(&eng->vj, s, false);
+		}
+		obs_log(LOG_INFO, "APC40 pads: %s woken: shown, 100 %%, blend Normal", source);
+		eng->vj_state_dirty = true;
+		break;
+	}
+	case MFD_VJ_ACTION_RESTART: {
+		const char *scene = NULL, *source = NULL;
+		if (vj_strip_layer(eng, s, &scene, &source)) {
+			vj_queue_cmd_locked(eng, MFD_VJ_CMD_RESTART, scene, source, 0);
+		}
+		break;
+	}
+	case MFD_VJ_ACTION_PIN_TOGGLE: {
+		struct mfd_fader_slot *slot = vj_slot(eng, s);
+		if (!slot) {
+			break;
+		}
+		if (slot->auto_follow) {
+			slot->auto_follow = false;
+			obs_log(LOG_INFO, "APC40 pads: column %d pinned to %s", s + 1,
+				slot->source_a_name[0] != '\0' ? slot->source_a_name : "no source");
+		} else if (slot->target_type == MFD_TARGET_UNASSIGNED || slot->target_type == MFD_TARGET_SINGLE_LAYER) {
+			slot->auto_follow = true;
+			eng->vj_follow_pending = true;
+			obs_log(LOG_INFO, "APC40 pads: column %d follows the scene on air again", s + 1);
+		} else {
+			vj_say_once(eng, s, "this strip has a job of its own, so it does not follow the scene");
+			break;
+		}
+		mfd_vj_pads_set_pinned(&eng->vj, s,
+				       !slot->auto_follow && (eng->vj.has_layer & (1U << (unsigned)s)) != 0);
+		if (obs_initialized()) {
+			eng->pending_config_save = true;
+		}
+		mfd_engine_bump_slot_rev(eng, s + 1);
+		eng->vj_state_dirty = true;
+		break;
+	}
+	case MFD_VJ_ACTION_COLUMN_CLEAN:
+		eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
+		eng->vj.blackout &= (uint8_t) ~(1U << (unsigned)s);
+		vj_hold_off_locked(eng, s);
+		vj_set_blend_locked(eng, s, MFD_VJ_BLEND_NORMAL);
+		eng->vj_state_dirty = true;
+		break;
+	case MFD_VJ_ACTION_SCENE_PICK:
+		vj_scene_locked(eng, s, false);
+		break;
+	case MFD_VJ_ACTION_SCENE_PROGRAM:
+		vj_scene_locked(eng, s, true);
+		break;
+	case MFD_VJ_ACTION_TAKE:
+		vj_take_locked(eng);
+		break;
+	case MFD_VJ_ACTION_VS_PANIC:
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_VS_PANIC, NULL, NULL, 0);
+		break;
+	case MFD_VJ_ACTION_VS_TAP:
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_VS_TAP, NULL, NULL, 0);
+		break;
+	case MFD_VJ_ACTION_VS_LOCK:
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_VS_LOCK, NULL, NULL, 0);
+		break;
+	case MFD_VJ_ACTION_VS_RESYNC:
+		vj_queue_cmd_locked(eng, MFD_VJ_CMD_VS_RESYNC, NULL, NULL, 0);
+		break;
+	case MFD_VJ_ACTION_CUE_STEPS: {
+		long ms = (long)eng->vj_cue_ms + (long)a->steps * 50L;
+		eng->vj_cue_ms = (int)(ms > 20000L ? 20000L : ms < -20000L ? -20000L : ms);
+		mfd_engine_mark_ui_dirty(eng, false);
+		break;
+	}
+	case MFD_VJ_ACTION_FADE_STEPS: {
+		int ms = vj_effective_fade_ms(eng) + a->steps * 50;
+		eng->vj_fade_ms = ms < 50 ? 50 : ms > 20000 ? 20000 : ms;
+		if (obs_initialized()) {
+			eng->pending_config_save = true;
+		}
+		mfd_engine_mark_ui_dirty(eng, true);
+		mfd_engine_notify_state_changed(eng);
 		break;
 	}
 	case MFD_VJ_ACTION_FADE_TOGGLE: {
@@ -5052,12 +5375,12 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		}
 		if (eng->vj.faded & (1U << (unsigned)s)) {
 			float back = eng->vj_fade_restore[s] > 0.001f ? eng->vj_fade_restore[s] : 1.0f;
-			vj_start_fade_locked(eng, slot, back);
+			vj_start_fade_locked(eng, slot, back, -1.0f);
 			mfd_vj_pads_set_faded(&eng->vj, s, false);
 		} else if (slot->last_applied_val > 0.0005f) {
 			vj_fade_out_locked(eng, s);
 		} else {
-			vj_start_fade_locked(eng, slot, 1.0f);
+			vj_start_fade_locked(eng, slot, 1.0f, -1.0f);
 		}
 		eng->vj_state_dirty = true;
 		break;
@@ -5103,6 +5426,20 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 	}
 }
 
+/* Sends a pressed button's light again on the next tick, in case the desk changed it by itself on the press or the
+ * release. */
+static void vj_repaint_note_locked(struct mfd_engine *eng, uint8_t channel, uint8_t note)
+{
+	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
+	size_t n = mfd_vj_pads_leds(&eng->vj, leds, MFD_VJ_MAX_LEDS);
+	for (size_t i = 0; i < n; ++i) {
+		if (leds[i].note == note &&
+		    (leds[i].rgb || leds[i].note != MFD_VJ_NOTE_CLIP_STOP || leds[i].channel == channel)) {
+			eng->vj_led_sent[i] = 0xFFFFU;
+		}
+	}
+}
+
 /* A note on / note off for the VJ pads, unless a learned strip owns that address. True when it was one. Runs after
  * MIDI Learn, and never while learning or while Set up edits a strip. */
 static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded *dec)
@@ -5110,13 +5447,14 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 	/* A held flash pad is always let go, whatever changed while it was held (Learn, Set up, the pads turned off). */
 	if (dec->addr.type == MFD_MIDI_NOTE_OFF && dec->addr.channel == 0U &&
 	    dec->addr.number >= MFD_VJ_NOTE_ROW_FLASH && dec->addr.number < MFD_VJ_NOTE_ROW_FLASH + MFD_VJ_STRIPS &&
-	    (eng->vj.flashing & (1U << (unsigned)(dec->addr.number - MFD_VJ_NOTE_ROW_FLASH)))) {
+	    ((eng->vj.flashing | eng->vj.blackout) & (1U << (unsigned)(dec->addr.number - MFD_VJ_NOTE_ROW_FLASH)))) {
 		struct mfd_vj_action off[MFD_VJ_MAX_ACTIONS];
 		size_t n_off = 0;
 		mfd_vj_pads_feed(&eng->vj, false, 0U, (uint8_t)dec->addr.number, off, MFD_VJ_MAX_ACTIONS, &n_off);
 		for (size_t i = 0; i < n_off; ++i) {
 			vj_run_locked(eng, &off[i]);
 		}
+		vj_repaint_note_locked(eng, dec->addr.channel, (uint8_t)dec->addr.number);
 		return true;
 	}
 	if (dec->addr.type == MFD_MIDI_NOTE_OFF && dec->addr.channel == 0U && dec->addr.number == MFD_VJ_NOTE_SHIFT &&
@@ -5151,8 +5489,94 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 	for (size_t i = 0; i < n; ++i) {
 		vj_run_locked(eng, &acts[i]);
 	}
+	if (is_note) {
+		vj_repaint_note_locked(eng, dec->addr.channel, (uint8_t)dec->addr.number);
+	}
 	mfd_engine_mark_ui_dirty(eng, false);
 	return true;
+}
+
+struct vj_visible_find {
+	const char *source;
+	bool found;
+	bool visible;
+};
+
+static bool vj_visible_enum_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct vj_visible_find *f = param;
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	const char *name = src ? obs_source_get_name(src) : NULL;
+	if (name && strcmp(name, f->source) == 0) {
+		f->found = true;
+		f->visible = obs_sceneitem_visible(item); /* the topmost copy, as for the blend mode */
+	}
+	return true;
+}
+
+/* Whether a source's eye is on in a scene. False when the item is not found. */
+static bool vj_item_visible(struct mfd_engine *eng, const char *scene, const char *source, bool *out_visible)
+{
+	if (eng->scene_graph_ops) {
+		return eng->scene_graph_ops->get_item_visible &&
+		       eng->scene_graph_ops->get_item_visible(scene, source, out_visible, eng->scene_graph_user_data);
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *scene_src = obs_get_source_by_name(scene);
+	if (!scene_src) {
+		return false;
+	}
+	struct vj_visible_find f = {source, false, true};
+	obs_scene_t *sc = obs_scene_from_source(scene_src);
+	if (sc) {
+		obs_scene_enum_items(sc, vj_visible_enum_cb, &f);
+	}
+	obs_source_release(scene_src);
+	if (f.found) {
+		*out_visible = f.visible;
+	}
+	return f.found;
+}
+
+/* What the lights show besides the blends: hidden, at 0 %, pinned, the scenes, Session and Record. read_eyes re-reads
+ * each source's eye from OBS (on a refresh: a scene change, an item_visible signal, a show / hide that has run). */
+static void vj_status_locked(struct mfd_engine *eng, bool read_eyes)
+{
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		struct mfd_fader_slot *slot = vj_slot(eng, i);
+		bool has = slot && (eng->vj.has_layer & (1U << (unsigned)i)) != 0;
+		mfd_vj_pads_set_pinned(&eng->vj, i, has && !slot->auto_follow);
+		mfd_vj_pads_set_zero(&eng->vj, i,
+				     has && slot->target_type == MFD_TARGET_SINGLE_LAYER && !slot->vj_flash_held &&
+					     slot->last_applied_val <= 0.0005f);
+		if (!has) {
+			mfd_vj_pads_set_hidden(&eng->vj, i, false);
+		} else if (read_eyes && !(eng->vj_eye_hold & (1U << (unsigned)i))) {
+			const char *scene = NULL, *source = NULL;
+			bool visible = true;
+			if (vj_strip_layer(eng, i, &scene, &source) && vj_item_visible(eng, scene, source, &visible)) {
+				mfd_vj_pads_set_hidden(&eng->vj, i, !visible);
+			}
+		}
+	}
+	bool studio = mfd_engine_is_studio_mode_active(eng);
+	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
+		enum mfd_vj_scene_state st = MFD_VJ_SCENE_NONE;
+		if (j < eng->cached_scene_count) {
+			const char *nm = eng->cached_scenes[j];
+			st = strcmp(nm, eng->cached_program_scene) == 0             ? MFD_VJ_SCENE_PROGRAM
+			     : studio && strcmp(nm, eng->cached_preview_scene) == 0 ? MFD_VJ_SCENE_PREVIEW
+										    : MFD_VJ_SCENE_IDLE;
+		}
+		mfd_vj_pads_set_scene(&eng->vj, j, st);
+	}
+	eng->vj.take_ready = studio && eng->cached_preview_scene[0] != '\0' &&
+			     strcmp(eng->cached_preview_scene, eng->cached_program_scene) != 0;
+	/* The Record lamp is on or off only: half a second on, half off while Visual Sidechain is panicked. */
+	eng->vj.vs_panic = eng->vs_panic && fmodf(eng->vj_blink_sec, 1.0f) < 0.5f;
 }
 
 /* Each strip's layer and its blend mode as OBS has them now (scene change, graph change, a strip edited). */
@@ -5163,10 +5587,13 @@ static void vj_refresh_locked(struct mfd_engine *eng)
 		bool has = vj_strip_layer(eng, i, &scene, &source);
 		mfd_vj_pads_set_has_layer(&eng->vj, i, has);
 		enum mfd_vj_blend b = MFD_VJ_BLEND_NORMAL;
-		if (has && vj_blend_io(eng, scene, source, false, &b)) {
+		if (!has) {
+			mfd_vj_pads_set_current(&eng->vj, i, MFD_VJ_BLEND_NORMAL);
+		} else if (vj_blend_io(eng, scene, source, false, &b)) {
 			mfd_vj_pads_set_current(&eng->vj, i, b);
 		}
 	}
+	vj_status_locked(eng, true);
 }
 
 /* Keeps the pad state true to the strips: a strip raised by hand (or by obs-websocket) after a pad faded it out is
@@ -5183,9 +5610,10 @@ static void vj_tidy_locked(struct mfd_engine *eng)
 			mfd_vj_pads_set_faded(&eng->vj, i, false);
 			eng->vj_state_dirty = true;
 		}
-		if (slot->vj_flash_held && (!(eng->vj.flashing & b) || !vj_fadeable(eng, slot))) {
+		if (slot->vj_flash_held && (!((eng->vj.flashing | eng->vj.blackout) & b) || !vj_fadeable(eng, slot))) {
 			slot->vj_flash_held = false;
 			eng->vj.flashing &= (uint8_t)~b;
+			eng->vj.blackout &= (uint8_t)~b;
 			apply_source_opacity_and_afv(eng, slot->source_a_name, slot->last_applied_val,
 						     slot->audio_follows_video);
 			eng->vj_state_dirty = true;
@@ -5202,15 +5630,23 @@ static void vj_flush_leds_locked(struct mfd_engine *eng)
 	}
 	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
 	size_t n = mfd_vj_pads_leds(&eng->vj, leds, MFD_VJ_MAX_LEDS);
-	for (size_t i = 0; i < n; ++i) {
-		if (eng->vj_led_sent[i] == leds[i].velocity) {
+	unsigned sent = 0U;
+	for (size_t i = 0; i < n && sent < 48U; ++i) {
+		uint16_t key = (uint16_t)(((unsigned)leds[i].channel << 8) | leds[i].velocity);
+		if (eng->vj_led_sent[i] == key) {
 			continue;
+		}
+		/* A pulse or blink runs between the pad's primary colour (channel 1) and this one: make the primary off. */
+		bool animated = leds[i].rgb && leds[i].channel != 0U;
+		if (animated && !mfd_winmm_send_short(&eng->midi_dev, 0x90U, leds[i].note, 0U)) {
+			break;
 		}
 		if (!mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
 					  leds[i].velocity)) {
-			break; /* the desk is going away: try again next tick, not 24 times now */
+			break; /* the desk is going away: try again next tick, not 55 times now */
 		}
-		eng->vj_led_sent[i] = leds[i].velocity;
+		eng->vj_led_sent[i] = key;
+		sent += animated ? 2U : 1U;
 	}
 }
 
@@ -5221,9 +5657,11 @@ static void vj_leds_off_locked(struct mfd_engine *eng)
 		struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
 		size_t n = mfd_vj_pads_leds(&eng->vj, leds, MFD_VJ_MAX_LEDS);
 		for (size_t i = 0; i < n; ++i) {
-			if (eng->vj_led_sent[i] != 0U && eng->vj_led_sent[i] != 255U) {
-				mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
-						     0U);
+			uint16_t was = eng->vj_led_sent[i];
+			if (was != 0xFFFFU && (was & 0xFFU) != 0U) {
+				/* An RGB pad goes off (and stops animating) on channel 1; a lamp on its own channel. */
+				uint8_t ch = leds[i].rgb ? 0U : (uint8_t)(was >> 8);
+				mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | ch), leds[i].note, 0U);
 			}
 		}
 	}
@@ -5253,6 +5691,13 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 	if (was && !vj_active(eng)) {
 		vj_leds_off_locked(eng); /* first: it only turns off what the table says is lit */
 		vj_release_all_locked(eng);
+	} else if (!was && vj_active(eng)) {
+		memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
+		if (eng->frontend_finished_loading && !eng->vj_autofill_done) {
+			eng->vj_autofill_pending = true;
+		}
+		eng->vj_follow_pending = true; /* Program may have changed while the pads were off */
+		mfd_engine_mark_ui_dirty(eng, false);
 	}
 	eng->vj_was_active = vj_active(eng);
 	eng->vj_refresh_pending = true;
@@ -5271,6 +5716,492 @@ bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng)
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
 {
 	return vj_effective_fade_ms(eng);
+}
+
+/* --- Strips that fill themselves from the scene on air --- */
+
+#define MFD_VJ_LAYER_MAX 32
+
+struct vj_layer_list {
+	int count;
+	char names[MFD_VJ_LAYER_MAX][MFD_SOURCE_NAME_MAX];
+};
+
+static void vj_layer_add(struct vj_layer_list *l, const char *name)
+{
+	if (!name || name[0] == '\0' || strncmp(name, "__mfd_", 6) == 0 || strncmp(name, "__midi_fadester_", 16) == 0 ||
+	    l->count >= MFD_VJ_LAYER_MAX) {
+		return;
+	}
+	for (int i = 0; i < l->count; ++i) {
+		if (strcmp(l->names[i], name) == 0) {
+			return;
+		}
+	}
+	snprintf(l->names[l->count], sizeof(l->names[l->count]), "%s", name);
+	++l->count;
+}
+
+static bool vj_collect_enum_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (src && !obs_source_removed(src) && (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0U) {
+		vj_layer_add(param, obs_source_get_name(src));
+	}
+	return true;
+}
+
+/* A scene's video sources, bottom first (hidden ones too: row 4 shows them and can bring them in). False when the
+ * scene is not there. */
+static bool vj_collect_layers(struct mfd_engine *eng, const char *scene, struct vj_layer_list *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (eng->scene_graph_ops) {
+		if (!eng->scene_graph_ops->fill_catalog) {
+			return false;
+		}
+		struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
+		if (!cat) {
+			return false;
+		}
+		eng->scene_graph_ops->fill_catalog(cat, eng->scene_graph_user_data);
+		bool found = false;
+		for (size_t i = 0U; i < cat->scene_count && !found; ++i) {
+			if (strcmp(cat->scenes[i].name, scene) == 0) {
+				found = true;
+				for (size_t k = 0U; k < cat->scenes[i].layer_count; ++k) {
+					if (cat->scenes[i].layer_has_video[k]) {
+						vj_layer_add(out, cat->scenes[i].layers[k]);
+					}
+				}
+			}
+		}
+		mfd_ui_catalog_destroy(cat);
+		return found;
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *scene_src = obs_get_source_by_name(scene);
+	if (!scene_src) {
+		return false;
+	}
+	obs_scene_t *sc = obs_scene_from_source(scene_src);
+	if (sc) {
+		obs_scene_enum_items(sc, vj_collect_enum_cb, out);
+	}
+	obs_source_release(scene_src);
+	return sc != NULL;
+}
+
+/* The level Midi Fadester's own opacity filter has on a source now, if it has one. */
+static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *out)
+{
+	if (eng->scene_graph_ops || !obs_initialized()) {
+		return false;
+	}
+	obs_source_t *src = obs_get_source_by_name(source);
+	if (!src) {
+		return false;
+	}
+	bool ok = false;
+	obs_source_t *flt = obs_source_get_filter_by_name(src, MFD_INTERNAL_OPACITY_FILTER_NAME);
+	if (flt) {
+		float v = mfd_layer_filter_get_opacity(flt);
+		if (v >= 0.0f && v <= 1.0f) {
+			*out = v;
+			ok = true;
+		}
+		obs_source_release(flt);
+	}
+	obs_source_release(src);
+	return ok;
+}
+
+/* A strip taking a layer that is at some level already starts there, with pick-up from where its fader is. */
+static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_slot *s, float v)
+{
+	bool had_raw = s->takeover.has_last_fader;
+	float raw = s->last_raw_norm;
+	mfd_smoother_reset(&s->smoother, v);
+	mfd_takeover_init(&s->takeover, v, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	configure_slot_takeover_mode(eng, s);
+	s->last_applied_val = v;
+	s->last_alpha_a = v;
+	if (had_raw) {
+		s->takeover.has_last_fader = true;
+		s->takeover.last_raw_fader = raw;
+		s->takeover.last_fader = raw;
+		float diff = raw - v;
+		s->takeover.hint = fabsf(diff) <= s->takeover.pickup_threshold ? MFD_HINT_NONE
+				   : diff < 0.0f                               ? MFD_HINT_MOVE_UP
+									       : MFD_HINT_MOVE_DOWN;
+	}
+}
+
+/* Points strip k (1..8) at a source in a scene, or at nothing, as a strip that follows the scene. What the pads held
+ * on the old source is let go first, so it is not left at 100 % or 0 %. Returns whether anything changed. */
+static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *scene, const char *source)
+{
+	struct mfd_fader_slot *s = &eng->fader_slots[k];
+	bool was_auto = s->auto_follow;
+	s->auto_follow = true;
+	if (source && s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
+	    strcmp(s->source_a_name, source) == 0 && strcmp(s->scene_name, scene) == 0) {
+		return !was_auto;
+	}
+	if (!source && s->target_type == MFD_TARGET_UNASSIGNED) {
+		return !was_auto;
+	}
+	if (source && s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
+	    strcmp(s->source_a_name, source) == 0) {
+		/* The same source in the scene now on air: its level, fade, flash and pick-up carry on. */
+		snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
+		s->resolved_scene_name[0] = '\0';
+		return true;
+	}
+	int strip = k - 1;
+	uint8_t b = (uint8_t)(1U << (unsigned)strip);
+	if (s->vj_flash_held) {
+		s->vj_flash_held = false;
+		apply_source_opacity_and_afv(eng, s->source_a_name, s->last_applied_val, s->audio_follows_video);
+	}
+	eng->vj.flashing &= (uint8_t)~b;
+	eng->vj.blackout &= (uint8_t)~b;
+	mfd_vj_pads_set_faded(&eng->vj, strip, false);
+	mfd_vj_pads_set_hidden(&eng->vj, strip, false);
+	eng->vj_eye_hold &= (uint8_t)~b;
+	eng->vj_fade_restore[strip] = 0.0f;
+	eng->vj_said[strip][0] = '\0';
+	s->auto_fade_active = false;
+	s->auto_fade_is_reset_fx = false;
+	mfd_engine_detach_filter_binding_locked(eng, k);
+	s->enabled = true;
+	s->source_b_name[0] = '\0';
+	s->resolved_scene_name[0] = '\0';
+	clear_slot_filter_fields(s);
+	s->audio_follows_video = false;
+	if (!source) {
+		s->scene_name[0] = '\0';
+		s->source_a_name[0] = '\0';
+		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
+		return true;
+	}
+	snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
+	snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", source);
+	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
+	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_SINGLE_LAYER);
+	float live = 1.0f;
+	if (vj_live_opacity(eng, source, &live)) {
+		vj_start_strip_at_locked(eng, s, live);
+	}
+	return true;
+}
+
+/* Whether a strip that does not follow the scene already drives this source as a layer. */
+static bool vj_source_kept_locked(const struct mfd_engine *eng, const bool *following, const char *name)
+{
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if ((i >= 1 && i <= (int)MFD_VJ_STRIPS && following[i]) || !s->enabled ||
+		    (s->target_type != MFD_TARGET_SINGLE_LAYER && s->target_type != MFD_TARGET_TWO_SOURCE_MIX)) {
+			continue;
+		}
+		if (strcmp(s->source_a_name, name) == 0 || strcmp(s->source_b_name, name) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static int vj_fill_locked(struct mfd_engine *eng, const char *scene_arg, bool include_empty, bool replace_layers,
+			  enum mfd_fill_status *status, char *out_scene, size_t out_scene_size, bool *changed)
+{
+	char scene[MFD_SOURCE_NAME_MAX];
+	snprintf(scene, sizeof(scene), "%s", scene_arg && scene_arg[0] != '\0' ? scene_arg : eng->cached_program_scene);
+	if (out_scene && out_scene_size > 0U) {
+		snprintf(out_scene, out_scene_size, "%s", scene);
+	}
+	struct vj_layer_list *layers = calloc(1, sizeof(*layers));
+	if (!layers) {
+		*status = MFD_FILL_NO_SCENE;
+		return 0;
+	}
+	if (scene[0] == '\0' || !vj_collect_layers(eng, scene, layers)) {
+		*status = MFD_FILL_NO_SCENE;
+		free(layers);
+		return 0;
+	}
+	enum mfd_controller_profile prof = mfd_engine_get_active_profile(eng);
+	bool following[MFD_VJ_STRIPS + 1] = {false};
+	int eligible = 0;
+	for (int k = 1; k <= (int)MFD_VJ_STRIPS; ++k) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[k];
+		if (!mfd_profile_has_physical_slot(prof, k) ||
+		    (eng->setup_session.active && eng->setup_session.slot_index == k)) {
+			continue;
+		}
+		if (!s->enabled) {
+			continue; /* switched off by the user: left alone */
+		}
+		if (s->auto_follow || (include_empty && s->target_type == MFD_TARGET_UNASSIGNED) ||
+		    (replace_layers && s->target_type == MFD_TARGET_SINGLE_LAYER)) {
+			following[k] = true;
+			++eligible;
+		}
+	}
+	if (eligible == 0) {
+		*status = MFD_FILL_NO_EMPTY_STRIPS;
+		free(layers);
+		return 0;
+	}
+	int next = 0, placed = 0;
+	for (int k = 1; k <= (int)MFD_VJ_STRIPS; ++k) {
+		if (!following[k]) {
+			continue;
+		}
+		while (next < layers->count && vj_source_kept_locked(eng, following, layers->names[next])) {
+			++next;
+		}
+		const char *pick = next < layers->count ? layers->names[next++] : NULL;
+		if (vj_point_strip_locked(eng, k, scene, pick)) {
+			*changed = true;
+		}
+		if (pick) {
+			++placed;
+		}
+	}
+	free(layers);
+	*status = placed > 0 ? MFD_FILL_OK : MFD_FILL_NO_VIDEO_LAYERS;
+	return placed;
+}
+
+int mfd_engine_fill_strips_from_scene(struct mfd_engine *eng, const char *scene, bool include_empty,
+				      bool replace_layers, enum mfd_fill_status *out_status, char *out_scene,
+				      size_t out_scene_size)
+{
+	enum mfd_fill_status st = MFD_FILL_NO_SCENE;
+	if (!eng) {
+		if (out_status) {
+			*out_status = st;
+		}
+		return 0;
+	}
+	mfd_engine_lock(eng);
+	bool changed = false;
+	int placed =
+		vj_fill_locked(eng, scene, include_empty, replace_layers, &st, out_scene, out_scene_size, &changed);
+	if (out_status) {
+		*out_status = st;
+	}
+	if (!changed) {
+		mfd_engine_unlock(eng);
+		return placed;
+	}
+	mfd_engine_bump_slot_rev(eng, -1);
+	mfd_engine_reevaluate_slots(eng, false);
+	vj_refresh_locked(eng);
+	mfd_engine_notify_state_changed(eng);
+	if (obs_initialized()) {
+		eng->pending_config_save = true; /* saved by the UI thread, never from obs-websocket's */
+	}
+	mfd_engine_unlock(eng);
+	return placed;
+}
+
+/* The first start with an APC40: eight empty strips fill from the scene on air, once. */
+static void vj_try_autofill(struct mfd_engine *eng)
+{
+	mfd_engine_lock(eng);
+	bool go = eng->frontend_finished_loading && vj_active(eng) && !eng->vj_autofill_done;
+	bool set_up = false;
+	for (int k = 1; go && k <= (int)MFD_VJ_STRIPS; ++k) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[k];
+		if (s->target_type != MFD_TARGET_UNASSIGNED || s->auto_follow) {
+			set_up = true; /* someone has set the strips up already */
+		}
+	}
+	if (go && set_up) {
+		/* Never fill them later, even if every strip is emptied by hand one day. */
+		eng->vj_autofill_done = true;
+		if (obs_initialized()) {
+			eng->pending_config_save = true;
+		}
+		go = false;
+	}
+	mfd_engine_unlock(eng);
+	if (!go) {
+		return;
+	}
+	enum mfd_fill_status st = MFD_FILL_NO_SCENE;
+	char scene[MFD_SOURCE_NAME_MAX] = {0};
+	int n = mfd_engine_fill_strips_from_scene(eng, NULL, true, false, &st, scene, sizeof(scene));
+	if (n > 0) {
+		mfd_engine_lock(eng);
+		eng->vj_autofill_done = true;
+		obs_log(LOG_INFO, "APC40: faders 1-8 filled from %s (%d sources); they follow the scene on air", scene,
+			n);
+		if (obs_initialized()) {
+			eng->pending_config_save = true;
+		}
+		mfd_engine_mark_ui_dirty(eng, true);
+		mfd_engine_unlock(eng);
+	}
+}
+
+/* Program changed: strips that follow the scene move to its sources, after any crossfader throw. */
+static void vj_follow_program(struct mfd_engine *eng)
+{
+	mfd_engine_lock(eng);
+	bool any = false;
+	for (int k = 1; k <= (int)MFD_VJ_STRIPS && vj_active(eng); ++k) {
+		any = any || eng->fader_slots[k].auto_follow;
+	}
+	bool later = any && vj_tbar_busy_locked(eng);
+	if (later) {
+		eng->vj_follow_pending = true;
+	}
+	mfd_engine_unlock(eng);
+	if (any && !later) {
+		mfd_engine_fill_strips_from_scene(eng, NULL, false, false, NULL, NULL, 0U);
+	}
+}
+
+struct vj_set_visible {
+	const char *source;
+	bool visible;
+};
+
+/* Every copy of the source in the scene, as the eye is read from the topmost copy. */
+static bool vj_set_visible_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct vj_set_visible *v = param;
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	const char *name = src ? obs_source_get_name(src) : NULL;
+	if (name && strcmp(name, v->source) == 0) {
+		obs_sceneitem_set_visible(item, v->visible);
+	}
+	return true;
+}
+
+/* Carries out a desk command in the UI thread, with no lock held. */
+static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *cmd)
+{
+	if (eng->scene_graph_ops) {
+		if (eng->scene_graph_ops->run_vj_command) {
+			eng->scene_graph_ops->run_vj_command(cmd, eng->scene_graph_user_data);
+		}
+		return;
+	}
+	if (!obs_initialized()) {
+		return;
+	}
+	switch (cmd->kind) {
+	case MFD_VJ_CMD_PREVIEW:
+	case MFD_VJ_CMD_PROGRAM: {
+		obs_source_t *src = obs_get_source_by_name(cmd->scene);
+		if (src) {
+			if (cmd->kind == MFD_VJ_CMD_PREVIEW) {
+				obs_frontend_set_current_preview_scene(src);
+			} else {
+				obs_frontend_set_current_scene(src); /* with the current transition */
+			}
+			obs_source_release(src);
+		}
+		break;
+	}
+	case MFD_VJ_CMD_TAKE:
+		obs_frontend_preview_program_trigger_transition();
+		break;
+	case MFD_VJ_CMD_SET_VISIBLE: {
+		obs_source_t *scene_src = obs_get_source_by_name(cmd->scene);
+		obs_scene_t *sc = scene_src ? obs_scene_from_source(scene_src) : NULL;
+		if (sc) {
+			struct vj_set_visible set = {cmd->source, cmd->arg != 0};
+			obs_scene_enum_items(sc, vj_set_visible_cb, &set);
+		}
+		obs_source_release(scene_src);
+		break;
+	}
+	case MFD_VJ_CMD_RESTART: {
+		obs_source_t *src = obs_get_source_by_name(cmd->source);
+		if (src) {
+			obs_source_media_restart(src);
+			obs_source_release(src);
+		}
+		break;
+	}
+	case MFD_VJ_CMD_TRANSITION: {
+		int ms = obs_frontend_get_transition_duration() + cmd->arg;
+		ms = ms < 50 ? 50 : ms > 20000 ? 20000 : ms;
+		obs_frontend_set_transition_duration(ms);
+		break;
+	}
+	case MFD_VJ_CMD_VS_PANIC:
+	case MFD_VJ_CMD_VS_TAP:
+	case MFD_VJ_CMD_VS_LOCK:
+	case MFD_VJ_CMD_VS_RESYNC: {
+		bool panic = false;
+		if (mfd_vendor_call_visual_sidechain_desk(cmd->kind == MFD_VJ_CMD_VS_PANIC  ? "panic"
+							  : cmd->kind == MFD_VJ_CMD_VS_TAP  ? "tap_tempo"
+							  : cmd->kind == MFD_VJ_CMD_VS_LOCK ? "lock_bpm"
+											    : "resync_downbeat",
+							  &panic)) {
+			if (cmd->kind == MFD_VJ_CMD_VS_PANIC) {
+				mfd_engine_set_vs_panic(eng, panic);
+			}
+		} else {
+			obs_log(LOG_INFO,
+				"APC40: Visual Sidechain did not answer (is it installed, with obs-websocket?)");
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void mfd_engine_set_test_scene_list(struct mfd_engine *eng, const char *const *names, int count)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	eng->scene_list_override_set = true;
+	eng->cached_scene_count = 0;
+	for (int i = 0; names && i < count && i < (int)MFD_VJ_SCENES; ++i) {
+		snprintf(eng->cached_scenes[i], sizeof(eng->cached_scenes[i]), "%s", names[i] ? names[i] : "");
+		eng->cached_scene_count = i + 1;
+	}
+	mfd_engine_unlock(eng);
+}
+
+bool mfd_engine_slot_follows_scene(struct mfd_engine *eng, int slot_index)
+{
+	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
+		return false;
+	}
+	mfd_engine_lock(eng);
+	bool f = eng->fader_slots[slot_index].auto_follow;
+	mfd_engine_unlock(eng);
+	return f;
+}
+
+void mfd_engine_set_vs_panic(struct mfd_engine *eng, bool panic)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	eng->vs_panic = panic;
+	eng->vj.vs_panic = panic;
+	eng->vj_blink_sec = 0.0f;
+	obs_log(LOG_INFO, "APC40: Visual Sidechain %s",
+		panic ? "panicked (Record blinks; press again to restore)" : "restored");
+	mfd_engine_notify_state_changed(eng);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_engine_tick(struct mfd_engine *eng, float seconds)
@@ -5298,16 +6229,32 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (eng->vj_was_active && !active) {
 			vj_leds_off_locked(eng);
 			vj_release_all_locked(eng);
+			eng->vj_follow_pending = false;
 		} else if (!eng->vj_was_active && active) {
-			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all. */
+			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all.
+			 * Empty strips may fill from the scene on air now (in the UI thread). */
 			memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
 			eng->vj_refresh_pending = true;
+			if (eng->frontend_finished_loading && !eng->vj_autofill_done) {
+				eng->vj_autofill_pending = true;
+			}
+			eng->vj_follow_pending = true; /* Program may have changed while the pads were off */
+			mfd_engine_mark_ui_dirty(eng, false);
 		}
 		eng->vj_was_active = active;
 	}
 	if (eng->vj_refresh_pending && vj_active(eng)) {
 		eng->vj_refresh_pending = false;
 		vj_refresh_locked(eng);
+	} else if (vj_active(eng)) {
+		vj_status_locked(eng, false);
+	}
+	eng->vj_blink_sec += seconds;
+	if (eng->vj_blink_sec >= 3600.0f) {
+		eng->vj_blink_sec -= 3600.0f; /* a whole number of blinks: no jump in the phase */
+	}
+	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
+		mfd_engine_mark_ui_dirty(eng, false); /* the throw is over: let the UI thread move the strips */
 	}
 	sync_volume_slots_from_live_locked(eng);
 
@@ -5746,6 +6693,7 @@ static void disconnect_tracked_entry_signals(struct mfd_tracked_signal_entry *en
 			signal_handler_disconnect(sh, "item_add", on_obs_scene_signal, eng);
 			signal_handler_disconnect(sh, "item_remove", on_obs_scene_signal, eng);
 			signal_handler_disconnect(sh, "reorder", on_obs_scene_signal, eng);
+			signal_handler_disconnect(sh, "item_visible", on_obs_scene_signal, eng);
 		}
 	}
 }
@@ -5893,6 +6841,7 @@ static void connect_host_source_signals_locked(struct mfd_engine *eng, obs_sourc
 					signal_handler_connect(sh, "item_add", on_obs_scene_signal, eng);
 					signal_handler_connect(sh, "item_remove", on_obs_scene_signal, eng);
 					signal_handler_connect(sh, "reorder", on_obs_scene_signal, eng);
+					signal_handler_connect(sh, "item_visible", on_obs_scene_signal, eng);
 				}
 			}
 		}
@@ -6399,6 +7348,7 @@ void mfd_engine_connect_signal_callbacks_for_test(struct mfd_engine *eng, signal
 	signal_handler_connect(sh, "item_add", on_obs_scene_signal, eng);
 	signal_handler_connect(sh, "item_remove", on_obs_scene_signal, eng);
 	signal_handler_connect(sh, "reorder", on_obs_scene_signal, eng);
+	signal_handler_connect(sh, "item_visible", on_obs_scene_signal, eng);
 	signal_handler_connect(sh, "filter_add", on_obs_host_filter_add, eng);
 	signal_handler_connect(sh, "filter_remove", on_obs_host_filter_remove, eng);
 	signal_handler_connect(sh, "rename", on_obs_filter_rename, eng);
@@ -6452,6 +7402,7 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 	}
 	mfd_engine_lock(eng);
 	refresh_frontend_cache_on_ui_thread_locked(eng);
+	vj_status_locked(eng, false); /* the scene lights and get_state's scenes, at once */
 	if (reset_tbar) {
 		mfd_engine_unlatch_tbar(eng);
 	}
@@ -6522,6 +7473,8 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
 		mfd_engine_unlock(eng);
+		vj_try_autofill(eng);
+		vj_follow_program(eng);
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
 		mfd_engine_lock(eng);
@@ -6530,6 +7483,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
 		mfd_engine_unlock(eng);
+		vj_follow_program(eng);
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED:
 		mfd_engine_lock(eng);
@@ -6538,6 +7492,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		mfd_engine_unlock(eng);
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
+		sync_slots_on_scene_change(eng, false);
+		vj_follow_program(eng); /* strips that follow the scene on air move to its sources */
+		break;
 	case OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED:
 		sync_slots_on_scene_change(eng, false);
 		break;
@@ -6559,6 +7516,23 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event)
 {
 	on_frontend_event((enum obs_frontend_event)event, eng);
+}
+
+static void serialize_slots(struct mfd_engine *eng, obs_data_t *root);
+static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root);
+
+void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root)
+{
+	mfd_engine_lock(eng);
+	serialize_slots(eng, root);
+	mfd_engine_unlock(eng);
+}
+
+void mfd_engine_deserialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root)
+{
+	mfd_engine_lock(eng);
+	deserialize_slots(eng, root);
+	mfd_engine_unlock(eng);
 }
 
 static void serialize_calibrations(const struct mfd_engine *eng, obs_data_t *root)
@@ -6648,6 +7622,7 @@ static void serialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		obs_data_set_int(item, "curve", (int)s->curve);
 		obs_data_set_bool(item, "afv", s->audio_follows_video);
 		obs_data_set_bool(item, "invert", s->invert);
+		obs_data_set_bool(item, "auto_follow", s->auto_follow);
 		obs_data_array_push_back(arr, item);
 		obs_data_release(item);
 	}
@@ -6827,6 +7802,10 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 		}
 		s->audio_follows_video = obs_data_get_bool(item, "afv");
 		s->invert = obs_data_get_bool(item, "invert");
+		/* Only strips 1..8 follow the scene on air, and only as Show or hide a layer (or empty) strips. */
+		s->auto_follow = obs_data_get_bool(item, "auto_follow") && slot_idx >= 1 &&
+				 slot_idx <= (int)MFD_VJ_STRIPS &&
+				 (s->target_type == MFD_TARGET_UNASSIGNED || s->target_type == MFD_TARGET_SINGLE_LAYER);
 		obs_data_release(item);
 	}
 	obs_data_array_release(arr);
@@ -6912,6 +7891,7 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
 	obs_data_set_bool(data, "vj_buttons_enabled", !eng->vj_disabled);
 	obs_data_set_int(data, "vj_fade_ms", vj_effective_fade_ms(eng));
+	obs_data_set_bool(data, "vj_autofill_done", eng->vj_autofill_done);
 	obs_data_array_t *punch = obs_data_array_create();
 	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 		obs_data_t *item = obs_data_create();
@@ -6991,6 +7971,12 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	if (obs_data_has_user_value(data, "vj_fade_ms")) {
 		long long ms = obs_data_get_int(data, "vj_fade_ms");
 		eng->vj_fade_ms = (ms < 50 || ms > 20000) ? 0 : (int)ms;
+	}
+	if (user_file) {
+		/* A layout imported by hand keeps its empty strips empty. */
+		eng->vj_autofill_done = true;
+	} else if (obs_data_has_user_value(data, "vj_autofill_done")) {
+		eng->vj_autofill_done = obs_data_get_bool(data, "vj_autofill_done");
 	}
 	obs_data_array_t *punch = obs_data_get_array(data, "vj_punch");
 	if (punch) {

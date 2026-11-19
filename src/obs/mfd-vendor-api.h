@@ -60,6 +60,13 @@ void mfd_vendor_emit_state_changed(struct mfd_engine *eng);
 void mfd_vendor_emit_vjster_action(const char *action, int steps);
 
 /*
+ * An APC40 desk button for Visual Sidechain, through obs-websocket: "panic" (panics, or restores when it is panicked),
+ * "tap_tempo", "lock_bpm" (toggles the lock) or "resync_downbeat". False when Visual Sidechain did not answer.
+ * *out_panic: whether it is panicked afterwards (panic only). UI thread, no lock held.
+ */
+bool mfd_vendor_call_visual_sidechain_desk(const char *request, bool *out_panic);
+
+/*
  * Direct request handlers exposed for unit tests and in-process verification.
  * Conform to C:\streamdeck-fadester\API-CONTRACT.md:
  *   - get_state
@@ -76,6 +83,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
+void mfd_vendor_handle_fill_from_scene(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
