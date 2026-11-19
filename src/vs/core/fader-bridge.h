@@ -59,6 +59,10 @@ void vs_fader_bridge_detach(void);
 
 bool vs_fader_bridge_is_midi_fadester_loaded(void);
 bool vs_fader_bridge_poll_once(void);
+/* Between begin and end (per thread, nestable) a frame tick's poll of Midi Fadester waits; the last end runs it, after
+ * the caller has released its own lock. end returns true when it polled. */
+void vs_fader_bridge_defer_poll_begin(void);
+bool vs_fader_bridge_defer_poll_end(void);
 
 bool vs_fader_bridge_set_slot(int slot_idx, float value);
 bool vs_fader_bridge_set_slot_by_name(const char *name, float value);

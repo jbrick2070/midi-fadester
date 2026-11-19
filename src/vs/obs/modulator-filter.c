@@ -942,7 +942,10 @@ static void modulator_video_tick(void *data, float seconds)
 		vs_audio_tap_resolve_named_lookup(&named);
 	}
 
+	/* The tap's frame tick polls Midi Fadester; that waits until f->mutex is released (see fader-bridge.c). */
+	vs_fader_bridge_defer_poll_begin();
 	modulator_tick_with_lookup(f, seconds, &named);
+	vs_fader_bridge_defer_poll_end();
 	vs_audio_tap_release_named_lookup(&named);
 }
 

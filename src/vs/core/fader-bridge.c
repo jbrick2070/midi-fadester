@@ -583,6 +583,40 @@ void vs_fader_bridge_apply_tempo_snapshot(const struct vs_tempo_snapshot *snap)
 		emit_visual_sidechain_signal(sh, &emit_snap);
 }
 
+/*
+ * A caller holding its own lock (the Audio Modulator's tick holds its filter mutex) defers the frame tick's poll until
+ * it lets go: the poll calls into Midi Fadester, which takes its engine lock, and a scene-collection save holds the OBS
+ * sources lock while it waits for the filter mutex, while Midi Fadester may hold its engine lock while it looks up an
+ * OBS source. Polling only with no lock of ours held breaks that three-way wait. Per thread, nestable.
+ */
+static _Thread_local int g_poll_defer_depth;
+static _Thread_local bool g_poll_deferred;
+
+static void poll_or_defer(void)
+{
+	if (g_poll_defer_depth > 0) {
+		g_poll_deferred = true;
+		return;
+	}
+	vs_fader_bridge_poll_once();
+}
+
+void vs_fader_bridge_defer_poll_begin(void)
+{
+	g_poll_defer_depth++;
+}
+
+bool vs_fader_bridge_defer_poll_end(void)
+{
+	if (g_poll_defer_depth > 0)
+		g_poll_defer_depth--;
+	if (g_poll_defer_depth > 0 || !g_poll_deferred)
+		return false;
+	g_poll_deferred = false;
+	vs_fader_bridge_poll_once();
+	return true;
+}
+
 bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
 				   bool is_primary_track)
 {
@@ -598,7 +632,7 @@ bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const 
 					     frame->bar_index);
 
 		if (has_ph)
-			vs_fader_bridge_poll_once();
+			poll_or_defer();
 
 		pthread_mutex_lock(&g_bridge_mutex);
 		const bool emit = should_emit_signals_locked(dt_sec, frame);
@@ -654,7 +688,7 @@ bool vs_fader_bridge_on_frame_tick(uint64_t video_frame_ts, float dt_sec, const 
 					     frame->bar_index);
 	}
 	if (do_poll)
-		vs_fader_bridge_poll_once();
+		poll_or_defer();
 	if (did_emit && sh)
 		emit_visual_sidechain_signal(sh, &emit_snap);
 

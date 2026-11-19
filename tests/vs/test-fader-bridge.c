@@ -962,6 +962,47 @@ static void test_shader_and_modulator_fader_parameter_controls(void)
 	assert(fabs(res.float_val - 40.0) < 1e-6); /* 160.0 * 1.0 * 0.25 = 40.0 */
 }
 
+/* The Audio Modulator ticks with its filter mutex held: a frame tick inside the defer window must not call Midi
+ * Fadester (which takes its engine lock) until the window ends, or a collection save can wait on all three locks. */
+static void test_frame_tick_poll_waits_for_defer_end(void)
+{
+	proc_handler_t *ph = proc_handler_create();
+	signal_handler_t *sh = signal_handler_create();
+	assert(ph != NULL && sh != NULL);
+	struct fake_fadester_ctx fake;
+	memset(&fake, 0, sizeof(fake));
+	fake.slots[VS_FADER_1] = 0.5f;
+	proc_handler_add(
+		ph,
+		"void midi_fadester_get_slot_value(in string slot, out float value, out bool ok, out string reason)",
+		fake_midi_fadester_get_slot_value, &fake);
+	signal_handler_add(sh, "void midi_fadester_fader_changed(string slot, float value, string origin)");
+	vs_fader_bridge_attach(ph, sh);
+	const int after_attach = fake.poll_calls;
+
+	struct vs_audio_frame frame;
+	memset(&frame, 0, sizeof(frame));
+	vs_fader_bridge_defer_poll_begin();
+	vs_fader_bridge_defer_poll_begin(); /* nested: only the outer end polls */
+	vs_fader_bridge_on_frame_tick(200000000ULL, 0.01667f, &frame, true);
+	assert(fake.poll_calls == after_attach);
+	assert(!vs_fader_bridge_defer_poll_end());
+	assert(fake.poll_calls == after_attach);
+	assert(vs_fader_bridge_defer_poll_end());
+	assert(fake.poll_calls == after_attach + 1);
+	/* nothing deferred: an end does not poll, and an unmatched end is harmless */
+	vs_fader_bridge_defer_poll_begin();
+	assert(!vs_fader_bridge_defer_poll_end());
+	assert(!vs_fader_bridge_defer_poll_end());
+	/* outside a window the tick polls at once */
+	vs_fader_bridge_on_frame_tick(300000000ULL, 0.01667f, &frame, true);
+	assert(fake.poll_calls == after_attach + 2);
+
+	vs_fader_bridge_detach();
+	signal_handler_destroy(sh);
+	proc_handler_destroy(ph);
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -983,6 +1024,7 @@ int main(void)
 	test_shader_switch_during_panic_keeps_saved_values();
 	test_multi_instance_frame_deduplication_and_track1_priority();
 	test_shader_and_modulator_fader_parameter_controls();
+	test_frame_tick_poll_waits_for_defer_end();
 	printf("test-fader-bridge: all assertions passed\n");
 	return 0;
 }
