@@ -59,11 +59,30 @@ begin
     Log('Old Visual Sidechain path could not be removed: ' + Path);
 end;
 
+{ The old uninstaller starts a copy of itself from the temp folder and the first process exits at once, so the folders
+  may still be in use for a few seconds after Exec returns: try for up to ten seconds before giving up. }
+function RemoveOldPaths: Boolean;
+var
+  Attempt: Integer;
+begin
+  for Attempt := 1 to 20 do
+  begin
+    Result := RemoveOldPath(ExpandConstant('{commonappdata}\obs-studio\plugins\visual-sidechain'), True);
+    if IsWin64 then
+    begin
+      Result := RemoveOldPath(ExpandConstant('{commonpf64}\obs-studio\obs-plugins\64bit\visual-sidechain.dll'), False) and Result;
+      Result := RemoveOldPath(ExpandConstant('{commonpf64}\obs-studio\data\obs-plugins\visual-sidechain'), True) and Result;
+    end;
+    if Result then
+      Exit;
+    Sleep(500);
+  end;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  Cmd, Dir: String;
+  Cmd: String;
   Code: Integer;
-  Ok: Boolean;
 begin
   Result := '';
   if OldVsUninstaller(Cmd) then
@@ -74,14 +93,7 @@ begin
     else
       Log('Old Visual Sidechain uninstaller did not start: ' + SysErrorMessage(Code));
   end;
-  Dir := ExpandConstant('{commonappdata}\obs-studio\plugins\visual-sidechain');
-  Ok := RemoveOldPath(Dir, True);
-  if IsWin64 then
-  begin
-    Ok := RemoveOldPath(ExpandConstant('{commonpf64}\obs-studio\obs-plugins\64bit\visual-sidechain.dll'), False) and Ok;
-    Ok := RemoveOldPath(ExpandConstant('{commonpf64}\obs-studio\data\obs-plugins\visual-sidechain'), True) and Ok;
-  end;
-  if not Ok then
+  if not RemoveOldPaths then
     Result := 'The old Visual Sidechain plugin could not be removed (it is part of Midi Fadester now). ' +
               'Close OBS and run this installer again.';
 end;

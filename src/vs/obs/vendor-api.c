@@ -560,13 +560,24 @@ void vs_vendor_api_shutdown(void)
 	static const char *const k_requests[] = {"get_signals", "get_decks",      "deck_command", "get_safety",
 						 "panic",       "restore",        "tap_tempo",    "set_bpm",
 						 "lock_bpm",    "resync_downbeat"};
-	if (g_ws_ph && g_vendor) {
+	/* Ask obs-websocket for its proc handler again, as Midi Fadester's own vendor shutdown does, instead of trusting the
+	 * one cached at registration: unregister only while that same handler is still the one obs-websocket hands out. */
+	proc_handler_t *ws_ph = NULL;
+	proc_handler_t *global_ph = g_vendor ? obs_get_proc_handler() : NULL;
+	if (global_ph) {
+		struct calldata cd;
+		calldata_init(&cd);
+		if (proc_handler_call(global_ph, "obs_websocket_api_get_ph", &cd))
+			ws_ph = (proc_handler_t *)calldata_ptr(&cd, "ph");
+		calldata_free(&cd);
+	}
+	if (ws_ph && ws_ph == g_ws_ph && g_vendor) {
 		for (size_t i = 0; i < sizeof(k_requests) / sizeof(k_requests[0]); ++i) {
 			struct calldata cd;
 			calldata_init(&cd);
 			calldata_set_ptr(&cd, "vendor", g_vendor);
 			calldata_set_string(&cd, "type", k_requests[i]);
-			proc_handler_call(g_ws_ph, "vendor_request_unregister", &cd);
+			proc_handler_call(ws_ph, "vendor_request_unregister", &cd);
 			calldata_free(&cd);
 		}
 	}
