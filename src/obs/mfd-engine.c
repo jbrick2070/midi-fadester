@@ -2485,6 +2485,14 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 	}
 	mfd_engine_lock(eng);
 	eng->vj_refresh_pending = true;
+	/* The scene graph or a strip changed: strips that follow the scene on air look again (a layer added, removed or
+	 * reordered in the scene on air). The refill changes nothing when the layers are the same. */
+	for (int k = 1; k <= (int)MFD_VJ_STRIPS && eng->frontend_finished_loading; ++k) {
+		if (eng->fader_slots[k].auto_follow) {
+			eng->vj_follow_pending = true;
+			break;
+		}
+	}
 	bool any_changed = false;
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
@@ -5315,13 +5323,13 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
 		eng->vj.blackout &= (uint8_t) ~(1U << (unsigned)s);
 		vj_hold_off_locked(eng, s);
-		vj_set_blend_locked(eng, s, MFD_VJ_BLEND_NORMAL);
+		vj_set_blend_locked(eng, s, eng->vj.home[s]); /* its own blend in the scene */
 		struct mfd_fader_slot *slot = vj_slot(eng, s);
 		if (vj_fadeable(eng, slot)) {
 			vj_start_fade_locked(eng, slot, 1.0f, 0.0f);
 			mfd_vj_pads_set_faded(&eng->vj, s, false);
 		}
-		obs_log(LOG_INFO, "APC40 pads: %s woken: shown, 100 %%, blend Normal", source);
+		obs_log(LOG_INFO, "APC40 pads: %s woken: shown, 100 %%, its own blend", source);
 		eng->vj_state_dirty = true;
 		break;
 	}
@@ -5335,6 +5343,10 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 	case MFD_VJ_ACTION_PIN_TOGGLE: {
 		struct mfd_fader_slot *slot = vj_slot(eng, s);
 		if (!slot) {
+			break;
+		}
+		if (slot->auto_follow && !(eng->vj.has_layer & (1U << (unsigned)s))) {
+			vj_say_once(eng, s, "no source on this column, so there is nothing to pin");
 			break;
 		}
 		if (slot->auto_follow) {
@@ -5362,7 +5374,7 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		eng->vj.flashing &= (uint8_t) ~(1U << (unsigned)s);
 		eng->vj.blackout &= (uint8_t) ~(1U << (unsigned)s);
 		vj_hold_off_locked(eng, s);
-		vj_set_blend_locked(eng, s, MFD_VJ_BLEND_NORMAL);
+		vj_set_blend_locked(eng, s, eng->vj.home[s]); /* its own blend in the scene */
 		eng->vj_state_dirty = true;
 		break;
 	case MFD_VJ_ACTION_SCENE_PICK:
@@ -5424,12 +5436,16 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		mfd_engine_reset_fx(eng, 0, NULL, NULL, NULL, NULL, 0);
 		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 			const char *scene = NULL, *source = NULL;
-			enum mfd_vj_blend b = MFD_VJ_BLEND_NORMAL;
-			if (vj_strip_layer(eng, i, &scene, &source) && vj_blend_io(eng, scene, source, true, &b)) {
-				mfd_vj_pads_set_current(&eng->vj, i, b);
+			enum mfd_vj_blend b = eng->vj.home[i];
+			if (!vj_strip_layer(eng, i, &scene, &source)) {
+				continue;
+			}
+			if (vj_blend_io(eng, scene, source, true, &b) || vj_blend_io(eng, scene, source, false, &b)) {
+				mfd_vj_pads_set_current(&eng->vj, i, b); /* written, or what OBS still has */
 			}
 		}
-		obs_log(LOG_INFO, "APC40 pads: Clean / All FX Off, every blend back to Normal");
+		obs_log(LOG_INFO, "APC40 pads: Clean / All FX Off, every source back to its own blend");
+		eng->vj_refresh_pending = true; /* a source not found keeps its blend: show what OBS has */
 		eng->vj_state_dirty = true;
 		break;
 	case MFD_VJ_ACTION_FADE_ALL_OUT:
@@ -5614,19 +5630,93 @@ static void vj_status_locked(struct mfd_engine *eng, bool read_eyes)
 	eng->vj.vs_panic = eng->vs_panic && fmodf(eng->vj_blink_sec, 1.0f) < 0.5f;
 }
 
+/* Whether a strip other than `except` shows the source a home key names. */
+static bool vj_key_shared_locked(const struct mfd_engine *eng, int except, const char *key)
+{
+	if (!key || key[0] == '\0') {
+		return false; /* no source: nothing to share */
+	}
+	for (int j = 0; j < (int)MFD_VJ_STRIPS; ++j) {
+		if (j != except && strcmp(eng->vj_home_key[j], key) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Puts the source a home key names ("scene\nsource") back to a blend. */
+static void vj_restore_key_locked(struct mfd_engine *eng, const char *key, enum mfd_vj_blend home)
+{
+	char buf[sizeof(eng->vj_home_key[0])];
+	snprintf(buf, sizeof(buf), "%s", key);
+	char *nl = strchr(buf, '\n');
+	if (!nl) {
+		return;
+	}
+	*nl = '\0';
+	enum mfd_vj_blend b = home;
+	vj_blend_io(eng, buf, nl + 1, true, &b); /* the source may be gone: nothing to put back then */
+}
+
+/* Every punched source back to its own blend (pads off, the desk gone, a scene collection change, OBS closing). */
+static void vj_restore_all_punches_locked(struct mfd_engine *eng)
+{
+	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+		if (eng->vj_home_key[i][0] != '\0' && eng->vj.current[i] != eng->vj.home[i]) {
+			vj_restore_key_locked(eng, eng->vj_home_key[i], eng->vj.home[i]);
+			mfd_vj_pads_set_current(&eng->vj, i, eng->vj.home[i]);
+		}
+	}
+}
+
 /* Each strip's layer and its blend mode as OBS has them now (scene change, graph change, a strip edited). */
 static void vj_refresh_locked(struct mfd_engine *eng)
 {
 	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
 		const char *scene = NULL, *source = NULL;
 		bool has = vj_strip_layer(eng, i, &scene, &source);
+		char key[sizeof(eng->vj_home_key[0])];
+		key[0] = '\0';
+		if (has) {
+			snprintf(key, sizeof(key), "%s\n%s", scene, source);
+		}
+		/* The strip no longer shows the source it had (edited, cleared, switched off, re-pointed, by any path): a
+		 * punch it left there goes back to the source's own blend, unless another strip still shows that source. */
+		if (eng->vj_home_key[i][0] != '\0' && strcmp(key, eng->vj_home_key[i]) != 0 &&
+		    eng->vj.current[i] != eng->vj.home[i] && !vj_key_shared_locked(eng, i, eng->vj_home_key[i])) {
+			vj_restore_key_locked(eng, eng->vj_home_key[i], eng->vj.home[i]);
+		}
 		mfd_vj_pads_set_has_layer(&eng->vj, i, has);
 		enum mfd_vj_blend b = MFD_VJ_BLEND_NORMAL;
 		if (!has) {
 			mfd_vj_pads_set_current(&eng->vj, i, MFD_VJ_BLEND_NORMAL);
-		} else if (vj_blend_io(eng, scene, source, false, &b)) {
-			mfd_vj_pads_set_current(&eng->vj, i, b);
+			mfd_vj_pads_set_home(&eng->vj, i, MFD_VJ_BLEND_NORMAL);
+			eng->vj_home_key[i][0] = '\0';
+			continue;
 		}
+		const enum mfd_vj_blend before = eng->vj.current[i];
+		bool read = vj_blend_io(eng, scene, source, false, &b);
+		if (!read) {
+			continue; /* not readable now (loading, briefly missing): keep what is known, read it next time */
+		}
+		if (strcmp(key, eng->vj_home_key[i]) != 0) {
+			/* A new source on this strip: its blend in the scene now is the one Clean goes back to, unless another
+			 * strip shows it already (it may have punched it): then that strip knows its own blend. */
+			enum mfd_vj_blend home = b;
+			for (int j = 0; j < (int)MFD_VJ_STRIPS; ++j) {
+				if (j != i && strcmp(eng->vj_home_key[j], key) == 0) {
+					home = eng->vj.home[j];
+					break;
+				}
+			}
+			snprintf(eng->vj_home_key[i], sizeof(eng->vj_home_key[i]), "%s", key);
+			mfd_vj_pads_set_home(&eng->vj, i, home);
+		} else if (b != before && !vj_key_shared_locked(eng, i, key)) {
+			/* Changed outside Midi Fadester (the mouse, a script): that is the source's blend now. Another strip
+			 * on the same source may have punched it: then this strip only shows it. */
+			mfd_vj_pads_set_home(&eng->vj, i, b);
+		}
+		mfd_vj_pads_set_current(&eng->vj, i, b);
 	}
 	vj_status_locked(eng, true);
 }
@@ -5671,9 +5761,10 @@ static void vj_flush_leds_locked(struct mfd_engine *eng)
 		if (eng->vj_led_sent[i] == key) {
 			continue;
 		}
-		/* A pulse or blink runs between the pad's primary colour (channel 1) and this one: make the primary off. */
+		/* A pulse or blink runs between the pad's primary colour (channel 1) and this one: the dim end goes first,
+		 * so the pad stays lit if the desk does not animate it. */
 		bool animated = leds[i].rgb && leds[i].channel != 0U;
-		if (animated && !mfd_winmm_send_short(&eng->midi_dev, 0x90U, leds[i].note, 0U)) {
+		if (animated && !mfd_winmm_send_short(&eng->midi_dev, 0x90U, leds[i].note, leds[i].primary)) {
 			break;
 		}
 		if (!mfd_winmm_send_short(&eng->midi_dev, (uint8_t)(0x90U | leds[i].channel), leds[i].note,
@@ -5726,6 +5817,7 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 	if (was && !vj_active(eng)) {
 		vj_leds_off_locked(eng); /* first: it only turns off what the table says is lit */
 		vj_release_all_locked(eng);
+		vj_restore_all_punches_locked(eng);
 	} else if (!was && vj_active(eng)) {
 		memset(eng->vj_led_sent, 255, sizeof(eng->vj_led_sent));
 		if (eng->frontend_finished_loading && !eng->vj_autofill_done) {
@@ -5877,6 +5969,21 @@ static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_sl
 
 /* Points strip k (1..8) at a source in a scene, or at nothing, as a strip that follows the scene. What the pads held
  * on the old source is let go first, so it is not left at 100 % or 0 %. Returns whether anything changed. */
+/* Strip s is about to leave its source: a punched blend goes back to the source's own, so the scene it stays in looks
+ * as it was built, and the next strip to take that source reads its true blend. */
+static void vj_leave_source_locked(struct mfd_engine *eng, int s)
+{
+	const char *scene = NULL, *source = NULL;
+	if (eng->vj.current[s] != eng->vj.home[s] && !vj_key_shared_locked(eng, s, eng->vj_home_key[s]) &&
+	    vj_strip_layer(eng, s, &scene, &source)) {
+		enum mfd_vj_blend b = eng->vj.home[s];
+		if (vj_blend_io(eng, scene, source, true, &b)) {
+			mfd_vj_pads_set_current(&eng->vj, s, b);
+		}
+	}
+	eng->vj_home_key[s][0] = '\0'; /* the next source's blend is read afresh */
+}
+
 static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *scene, const char *source)
 {
 	struct mfd_fader_slot *s = &eng->fader_slots[k];
@@ -5892,12 +5999,14 @@ static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *sce
 	if (source && s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
 	    strcmp(s->source_a_name, source) == 0) {
 		/* The same source in the scene now on air: its level, fade, flash and pick-up carry on. */
+		vj_leave_source_locked(eng, k - 1);
 		snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
 		s->resolved_scene_name[0] = '\0';
 		return true;
 	}
 	int strip = k - 1;
 	uint8_t b = (uint8_t)(1U << (unsigned)strip);
+	vj_leave_source_locked(eng, strip);
 	if (s->vj_flash_held) {
 		s->vj_flash_held = false;
 		apply_source_opacity_and_afv(eng, s->source_a_name, s->last_applied_val, s->audio_follows_video);
@@ -6264,6 +6373,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (eng->vj_was_active && !active) {
 			vj_leds_off_locked(eng);
 			vj_release_all_locked(eng);
+			vj_restore_all_punches_locked(eng); /* nothing can put them back while the pads are off */
 			eng->vj_follow_pending = false;
 		} else if (!eng->vj_was_active && active) {
 			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all.
@@ -7537,8 +7647,17 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
 		sync_slots_on_scene_change(eng, true);
 		break;
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+		mfd_engine_lock(eng);
+		vj_restore_all_punches_locked(eng); /* while the collection's sources still exist */
+		for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
+			eng->vj_home_key[i][0] = '\0';
+		}
+		mfd_engine_unlock(eng);
+		break;
 	case OBS_FRONTEND_EVENT_EXIT:
 		mfd_engine_lock(eng);
+		vj_restore_all_punches_locked(eng); /* punched blends are the desk's: the saved scenes keep their own */
 		mfd_engine_restore_all_bypass_leases(eng);
 		disconnect_obs_signals(eng);
 		mfd_engine_unlock(eng);

@@ -48,7 +48,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.6 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.7 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -57,7 +57,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.7.6, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 0.7.7, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -285,14 +285,14 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 
 | Control | What it does |
 | --- | --- |
-| Bottom row, column *k* | **Blend punch:** the source between Normal and its punch mode (Screen at first). |
+| Bottom row, column *k* | **Blend punch:** the source between its own blend in the scene (Normal, or say Screen on an overlay) and its punch mode (Screen at first, or the next mode when Screen is its own). |
 | Shift + bottom row pad | **Next punch mode** for that column: Lighten, Screen, Additive, Multiply, Subtract. A column already blending switches straight to it. |
 | Row 2 | **Flash** the source to 100 % while you hold the pad; the fader keeps its place underneath. With Shift: **blackout**, 0 % while held. |
 | Row 3 | **Fade** the source out over the pad fade time; press again to fade it back. With Shift: **snap** to 0 % and back, at once. |
-| Row 4 | **Show or hide** the source (its eye in OBS). With Shift: **wake** it: shown, 100 %, blend Normal. |
+| Row 4 | **Show or hide** the source (its eye in OBS). With Shift: **wake** it: shown, 100 %, its own blend. |
 | Row 5 (top) | **Restart** the source's video. With Shift: **pin** the column to its source (it stays when the scene changes); again, it follows the scene again. |
-| Clip Stop *k* | **Column clean:** that source's blend back to Normal, a held flash or blackout let go. |
-| Stop All Clips | **Clean:** every effect off (Clean / All FX Off) and every blend back to Normal. With Shift: **fade every source out**. |
+| Clip Stop *k* | **Column clean:** that source back to its own blend, a held flash or blackout let go. |
+| Stop All Clips | **Clean:** every effect off (Clean / All FX Off) and every source back to its own blend. With Shift: **fade every source out**. |
 | Scene Launch 1–5 | The first five scenes in OBS's Scenes list, top first. Press once: the scene goes to **Preview**. Press the scene in Preview again: it is **taken** to Program with the transition. With Shift (or outside Studio Mode): **straight to Program**, skipping Preview. Both use your OBS transition; Midi Fadester never changes it. |
 | Session | **Take** Preview to Program with the transition. |
 | Cue Level knob | **Transition length**, 50 ms per click. With Shift: the **pad fade time**. |
@@ -303,12 +303,15 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 | Record | Visual Sidechain **Panic**; press again to **Restore**. Blinks while panicked. |
 | Metronome | Visual Sidechain **tap tempo**. With Shift: **lock or unlock** its BPM. |
 
-**Lights.** Scenes: Program red, Preview green and pulsing, other scenes dim blue, no scene dark. Sources: dim white at
-rest, the blend colour when punched (Lighten azure, Screen yellow, Additive orange, Multiply violet, Subtract magenta),
-bright white while flashing, amber when faded out, blacked out or at 0 %, row 4 blinking red when the source is hidden
+**Lights.** Scenes: Program red, Preview pulsing from dim to bright green, other scenes dim blue, no scene dark. Sources:
+dim white at their own blend, the blend colour when punched (Lighten azure, Screen yellow, Additive orange, Multiply violet, Subtract magenta),
+bright white while flashing, amber when faded out, blacked out or at 0 %, row 4 blinking dim / bright red when the source is hidden
 (pressing its pads would change nothing you can see), row 5 azure when the column is pinned, all dark when the column
 has no source. Clip Stop lights while its column has a blend punched; Session lights when a take is ready; Record
-blinks while Visual Sidechain is panicked. Pulses and blinks use the desk's slowest rate.
+blinks while Visual Sidechain is panicked. Pulses and blinks use the desk's slowest rate, and start from the dim colour, so a pad stays lit even if the desk does
+not animate it. A source's own blend is the one it had in the scene when its column took it: Clean never turns a shape on
+black into a black wall by forcing Normal. When a column moves to another source (a scene change, a layer added),
+the source it leaves goes back to its own blend, and a blend you change in OBS with the mouse becomes that source's own.
 
 The video speed controls drive VJster (the Chrome extension or the OBS video page) through
 [Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester) 0.1.15 or later with its controls and VJster on:
@@ -342,7 +345,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.7.6** (November 2026) is the current release. It fixes the APC40 mkII faders filling from the scene on air: a Media Source playing a music file (mp3, ogg, wav and the like) no longer takes a fader, since OBS reports every media source as video; `get_state` slots now carry `follows_scene`. Visual Sidechain moves to 0.7.6 with it.
+**0.7.7** (November 2026) is the current release. From a second-opinion review of the APC40 layout: each column remembers its source's own blend in the scene, so Clean, Clip Stop and wake return to it (an overlay on black stays in Screen instead of becoming a black wall) and the bottom pad switches between that blend and the punch mode; Preview pulses and hidden sources blink from a dim colour, so they stay lit if the desk does not animate; following faders refill when layers are added, removed or reordered in the scene on air; pinning needs a source on the column. Visual Sidechain moves to 0.7.7 with it.
+
+**0.7.6** (November 2026). It fixes the APC40 mkII faders filling from the scene on air: a Media Source playing a music file (mp3, ogg, wav and the like) no longer takes a fader, since OBS reports every media source as video; `get_state` slots now carry `follows_scene`. Visual Sidechain moves to 0.7.6 with it.
 
 **0.7.5** (November 2026). The APC40 mkII becomes a whole VJ deck: the channel faders fill themselves from the scene on air and follow it (pin a column to keep its source; **Fill empty faders from the scene on air** on the Advanced tab; obs-websocket `fill_from_scene`); Scene Launch 1–5 pick the first five scenes into Preview and take them, with Session as Take and Shift sending a scene straight to Program, lit Program red and Preview green; pad row 4 shows or hides a source (Shift: wake it) and row 5 restarts its video (Shift: pin); Shift + row 2 holds a blackout and Shift + row 3 snaps; Clip Stop cleans one column; Cue Level sets the transition length (Shift: pad fade time); Record, Metronome and Shift + Tap Tempo drive Visual Sidechain's Panic / Restore, tap tempo, BPM lock and downbeat. Idle sources light dim white and hidden ones blink red. Visual Sidechain moves to 0.7.5 with it.
 

@@ -233,6 +233,61 @@ int main(void)
 		REQUIRE(ql[i].rgb == rgb);
 	}
 
+	/* 13b. Animated lights start from a dim colour, so they stay lit if the desk does not animate. */
+	{
+		struct mfd_vj_led al[MFD_VJ_MAX_LEDS];
+		size_t ac = mfd_vj_pads_leds(&q, al, MFD_VJ_MAX_LEDS);
+		bool seen_preview = false;
+		for (size_t i = 0; i < ac; ++i) {
+			if (al[i].note == 83U) {
+				REQUIRE(al[i].channel == 10U && al[i].velocity == 21U && al[i].primary == 22U);
+				seen_preview = true;
+			} else if (al[i].channel == 0U) {
+				REQUIRE(al[i].primary == 0U);
+			}
+		}
+		REQUIRE(seen_preview);
+		mfd_vj_pads_set_hidden(&q, 1, true);
+		ac = mfd_vj_pads_leds(&q, al, MFD_VJ_MAX_LEDS);
+		for (size_t i = 0; i < ac; ++i) {
+			if (al[i].note == 25U) {
+				REQUIRE(al[i].channel == 15U && al[i].velocity == 5U && al[i].primary == 6U);
+			}
+		}
+		mfd_vj_pads_set_hidden(&q, 1, false);
+	}
+
+	/* 13c. A source whose own blend in the scene is Screen: the pad punches it to another mode and back to Screen
+	 * (never to Normal, which would make a shape on black a black wall); Clean and the lights follow its home. */
+	{
+		struct mfd_vj_pads h;
+		mfd_vj_pads_init(&h);
+		mfd_vj_pads_set_has_layer(&h, 0, true);
+		mfd_vj_pads_set_home(&h, 0, MFD_VJ_BLEND_SCREEN);
+		mfd_vj_pads_set_current(&h, 0, MFD_VJ_BLEND_SCREEN);
+		REQUIRE(led_velocity(&h, 0) == 1U &&
+			led_at(&h, 52, 0, NULL) == 0U); /* at home: dim white, Clip Stop dark */
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 &&
+			acts[0].blend == MFD_VJ_BLEND_ADDITIVE); /* Screen is home: next */
+		REQUIRE(led_velocity(&h, 0) == mfd_vj_blend_color(MFD_VJ_BLEND_ADDITIVE) &&
+			led_at(&h, 52, 0, NULL) == 1U);
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_SCREEN);
+		REQUIRE(feed(&h, true, 0, 98));
+		REQUIRE(feed(&h, true, 0, 0) && n == 0 && h.punch[0] == MFD_VJ_BLEND_ADDITIVE); /* Screen skipped */
+		REQUIRE(feed(&h, true, 0, 0) && n == 0 && h.punch[0] == MFD_VJ_BLEND_MULTIPLY);
+		REQUIRE(feed(&h, false, 0, 98));
+		REQUIRE(feed(&h, true, 0, 0) && acts[0].blend == MFD_VJ_BLEND_MULTIPLY);
+		/* Punched (Multiply) with Shift: straight on to the next mode on air, Subtract. */
+		REQUIRE(feed(&h, true, 0, 98));
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_SUBTRACT);
+		/* From Subtract the cycle wraps to Lighten (Screen, the home, is skipped on the way). */
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_LIGHTEN);
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_ADDITIVE);
+		REQUIRE(feed(&h, false, 0, 98));
+		REQUIRE(feed(&h, true, 0, 81) && n == 1 && acts[0].kind == MFD_VJ_ACTION_CLEAN &&
+			h.current[0] == MFD_VJ_BLEND_SCREEN);
+	}
+
 	/* 14. Visual Sidechain: Record panics, Metronome taps (Shift: lock), Shift + Tap Tempo resyncs. Cue Level: the
 	 * transition length, with Shift the pad fade time. */
 	REQUIRE(feed(&q, true, 0, 93) && n == 1 && acts[0].kind == MFD_VJ_ACTION_VS_PANIC);

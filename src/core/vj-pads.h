@@ -12,7 +12,8 @@
  * momentary in the desk's default mode are used: Solo, Activator, Record Arm and A|B latch, and Track Select re-banks
  * the Device knobs onto other MIDI channels (design reviews 2026-11-18).
  *
- *   Bottom row pad k (note k, ch 1)         blend punch: strip k's layer Normal <-> its punch mode (Screen at first)
+ *   Bottom row pad k (note k, ch 1)         blend punch: the source between its own blend in the scene (its home
+ *                                           blend, Normal or, say, Screen on an overlay) and its punch mode
  *   Shift + bottom row pad k                next punch mode for strip k (Lighten, Screen, Additive, Multiply,
  *                                           Subtract); a strip already blending switches to it at once
  *   Row 2 pad k (note 8 + k)                flash strip k's layer to 100 % while held; with Shift, blackout (0 %)
@@ -21,8 +22,8 @@
  *                                           100 %, blend Normal
  *   Row 5 pad k (note 32 + k)               restart the source's video; with Shift, pin or unpin the column (a
  *                                           pinned column keeps its source when the scene on air changes)
- *   Clip Stop k (note 52, ch k)             column clean: the source's blend back to Normal, flash or blackout let go
- *   Stop All Clips (note 81)                Clean / All FX Off, and every strip's blend back to Normal
+ *   Clip Stop k (note 52, ch k)             column clean: the source back to its home blend, flash or blackout let go
+ *   Stop All Clips (note 81)                Clean / All FX Off, and every source back to its home blend
  *   Shift (note 98) + Stop All Clips        fade every layer strip out
  *
  * Scenes (the first five in OBS's Scenes list, top first):
@@ -47,8 +48,9 @@
  * Darken is left out of the punch modes: fading a Darken layer down turns its rectangle black.
  *
  * It also says what each LED should show. Scenes: Program red, Preview green pulsing, other scenes dim blue, no scene
- * off. Sources: dim white when idle, the blend colour when punched, bright white while flashing, amber when faded
- * out, at 0 % or blacked out, blinking red when hidden, azure on row 5 when the column is pinned, off without a
+ * off (Preview pulses between dim and bright green, so it stays lit if the desk does not animate). Sources: dim white
+ * at their home blend, the blend colour when punched, bright white while flashing, amber when faded
+ * out, at 0 % or blacked out, blinking dim / bright red when hidden, azure on row 5 when the column is pinned, off without a
  * source. Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
  */
 
@@ -147,7 +149,8 @@ struct mfd_vj_led {
 	uint8_t channel; /* an RGB pad's channel is its animation: 0 solid, 10 pulsing, 15 blinking (both at 1/2) */
 	uint8_t note;
 	uint8_t velocity;
-	bool rgb; /* a clip pad or Scene Launch pad: turned off (and its animation stopped) on channel 0 */
+	bool rgb;        /* a clip pad or Scene Launch pad: turned off (and its animation stopped) on channel 0 */
+	uint8_t primary; /* an animated RGB pad: the colour sent first on channel 0, the other end of the animation */
 };
 
 struct mfd_vj_pads {
@@ -160,6 +163,7 @@ struct mfd_vj_pads {
 	uint8_t zero;      /* a bit per strip whose layer is at 0 % */
 	uint8_t pinned;    /* a bit per strip that keeps its source when the scene on air changes */
 	enum mfd_vj_blend current[MFD_VJ_STRIPS];
+	enum mfd_vj_blend home[MFD_VJ_STRIPS]; /* the blend each source has in its scene: Clean goes back to it */
 	enum mfd_vj_blend punch[MFD_VJ_STRIPS];
 	enum mfd_vj_scene_state scene[MFD_VJ_SCENES];
 	bool vs_panic;   /* Record lamp on (the engine blinks it while Visual Sidechain is panicked) */
@@ -195,6 +199,8 @@ bool mfd_vj_pads_is_knob(uint8_t channel, uint8_t cc);
 size_t mfd_vj_pads_release_all(struct mfd_vj_pads *p, struct mfd_vj_action *out, size_t max);
 
 void mfd_vj_pads_set_current(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend blend);
+/* The blend the strip's source has in its scene (read when the strip takes the source). */
+void mfd_vj_pads_set_home(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend blend);
 void mfd_vj_pads_set_has_layer(struct mfd_vj_pads *p, int strip, bool has_layer);
 void mfd_vj_pads_set_faded(struct mfd_vj_pads *p, int strip, bool faded);
 void mfd_vj_pads_set_hidden(struct mfd_vj_pads *p, int strip, bool hidden);
