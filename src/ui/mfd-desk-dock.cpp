@@ -700,6 +700,10 @@ bool MfdDeskDock::eventFilter(QObject *obj, QEvent *e)
 	case QEvent::MouseButtonPress:
 	case QEvent::MouseButtonDblClick:
 	case QEvent::MouseButtonRelease:
+	case QEvent::FocusOut: /* Qt ends a held press these ways too, without a release reaching the button */
+	case QEvent::Hide:
+	case QEvent::EnabledChange:
+	case QEvent::WindowDeactivate:
 		obj->setProperty("mfdSlid", false);
 		break;
 	case QEvent::MouseMove: {
