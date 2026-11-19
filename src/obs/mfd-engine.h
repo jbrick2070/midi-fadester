@@ -489,6 +489,9 @@ struct mfd_engine {
 	bool cached_studio_mode;
 	char cached_preview_scene[MFD_SOURCE_NAME_MAX];
 	char cached_program_scene[MFD_SOURCE_NAME_MAX];
+	/* The scene a Scene Launch press sent to Preview, until that command has run on the UI thread: a second press
+	 * before then compares with it, not with the Preview OBS still shows. */
+	char vj_preview_asked[MFD_SOURCE_NAME_MAX];
 	/* The first scenes in OBS's Scenes list, top first: the APC40's Scene Launch buttons. */
 	char cached_scenes[MFD_VJ_SCENES][MFD_SOURCE_NAME_MAX];
 	int cached_scene_count;
@@ -533,6 +536,14 @@ struct mfd_engine {
 	char vj_said[MFD_VJ_STRIPS][96];       /* the last "why not" line per strip, said once */
 	float vj_blink_sec;                    /* Record blinks in software: the desk's Record lamp is on or off only */
 	char vj_home_key[MFD_VJ_STRIPS][2 * MFD_SOURCE_NAME_MAX + 2]; /* scene + source the home blend was read for */
+	/* Punched sources saved with the scene collection (home blend per scene + source), put back once it has loaded:
+	 * OBS saves the scenes before Midi Fadester hears that it is closing, and an autosave or a crash keeps a punch. */
+	char vj_load_restore_key[MFD_VJ_STRIPS][2 * MFD_SOURCE_NAME_MAX + 2];
+	enum mfd_vj_blend vj_load_restore_home[MFD_VJ_STRIPS];
+	int vj_load_restore_count;
+	float vj_vs_poll_sec;     /* time since Visual Sidechain's panic state was last asked */
+	bool vj_vs_poll_pending;  /* ask it from the UI thread */
+	uint8_t vj_punched;       /* strips whose blend was off its own at this press, read before the feed */
 	uint8_t vj_eye_hold;      /* strips whose eye change is queued: not re-read until it is done */
 	bool vj_autofill_done;    /* the eight empty strips were filled from the scene once (saved) */
 	bool vj_autofill_pending; /* try that fill from the UI thread (the desk opened, pads turned on) */
@@ -582,6 +593,8 @@ void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event);
 /* Tests: write and read the strips as global.json and the scene collection keep them. */
 void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root);
 void mfd_engine_deserialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root);
+/* Tests: the scene-collection save callback (saving true: write; false: read). */
+void mfd_engine_collection_save_callback_for_test(struct mfd_engine *eng, obs_data_t *save_data, bool saving);
 void mfd_engine_bump_slot_rev(struct mfd_engine *eng, int slot_index);
 
 void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, void *user_data);
@@ -638,6 +651,9 @@ bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine
 							 struct mfd_filter_prop_info *out_prop_info,
 							 struct mfd_msg *out_msg);
 void mfd_engine_detach_filter_binding_locked(struct mfd_engine *eng, int slot_index);
+/* Fader slot 1..8 (an APC40 strip) is about to change its binding: a punched blend and a held flash or blackout
+ * are let go on the source it has now. */
+void mfd_engine_vj_let_go_locked(struct mfd_engine *eng, int slot_index);
 void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng);
 void mfd_engine_handle_filter_rename(struct mfd_engine *eng, const char *parent_source_name, const char *prev_name,
 				     const char *new_name);

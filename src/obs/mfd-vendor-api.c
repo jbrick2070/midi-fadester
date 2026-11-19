@@ -1167,6 +1167,20 @@ static obs_data_t *call_visual_sidechain(const char *request_type, obs_data_t *r
 	return parsed;
 }
 
+bool mfd_vendor_visual_sidechain_panic_state(bool *out_panic)
+{
+	obs_data_t *now = call_visual_sidechain("get_safety", NULL);
+	if (!now) {
+		return false;
+	}
+	bool ok = !obs_data_has_user_value(now, "error") && obs_data_has_user_value(now, "panic");
+	if (ok && out_panic) {
+		*out_panic = obs_data_get_bool(now, "panic");
+	}
+	obs_data_release(now);
+	return ok;
+}
+
 bool mfd_vendor_call_visual_sidechain_desk(const char *request, bool *out_panic)
 {
 	if (!request) {
@@ -1390,6 +1404,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 
 	if (has_target || (has_enabled && !new_enabled)) {
 		mfd_engine_abort_tbar_for_config_change_locked(eng, s);
+	}
+	if (stops_following || (has_enabled && !new_enabled)) {
+		mfd_engine_vj_let_go_locked(eng, idx); /* a held blackout lets go of the old source, not the new one */
 	}
 	mfd_engine_detach_filter_binding_locked(eng, idx);
 	s->enabled = new_enabled;

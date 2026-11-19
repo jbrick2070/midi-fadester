@@ -48,7 +48,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.7 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.8 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -57,7 +57,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.7.7, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 0.7.8, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -345,7 +345,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.7.7** (November 2026) is the current release. From a second-opinion review of the APC40 layout: each column remembers its source's own blend in the scene, so Clean, Clip Stop and wake return to it (an overlay on black stays in Screen instead of becoming a black wall) and the bottom pad switches between that blend and the punch mode; Preview pulses and hidden sources blink from a dim colour, so they stay lit if the desk does not animate; following faders refill when layers are added, removed or reordered in the scene on air; pinning needs a source on the column. Visual Sidechain moves to 0.7.7 with it.
+**0.7.8** (November 2026) is the current release. From two second-opinion code reviews of the APC40 desk: with Studio Mode's Duplicate Scene option, blend and show / hide now reach the copy of the scene on air, not only the scene in Preview; two Scene Launch presses faster than OBS answers no longer put the wrong scene on air (a take goes ahead only for the scene it meant); a punched blend survives quitting OBS (saved with the scene collection and put back at the next start); a blend changed with the mouse is read at the next press, so Clip Stop and Clean keep it; Clean writes only columns you punched; renaming a punched source keeps its own blend; changing a fader's source while its blackout is held lets go of the old source; a fill from a named scene is not put straight back to the scene on air; Record lights from Visual Sidechain's panic state (also when a hotkey set it) and always gets through a burst of presses. Visual Sidechain 0.7.8 fixes a possible freeze when a scene collection is saved with an Audio Modulator running.
+
+**0.7.7** (November 2026). From a second-opinion review of the APC40 layout: each column remembers its source's own blend in the scene, so Clean, Clip Stop and wake return to it (an overlay on black stays in Screen instead of becoming a black wall) and the bottom pad switches between that blend and the punch mode; Preview pulses and hidden sources blink from a dim colour, so they stay lit if the desk does not animate; following faders refill when layers are added, removed or reordered in the scene on air; pinning needs a source on the column. Visual Sidechain moves to 0.7.7 with it.
 
 **0.7.6** (November 2026). It fixes the APC40 mkII faders filling from the scene on air: a Media Source playing a music file (mp3, ogg, wav and the like) no longer takes a fader, since OBS reports every media source as video; `get_state` slots now carry `follows_scene`. Visual Sidechain moves to 0.7.6 with it.
 
