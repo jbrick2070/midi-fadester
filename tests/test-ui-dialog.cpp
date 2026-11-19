@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "ui/mfd-desk-dock.hpp"
 #include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-svg-canvas.hpp"
@@ -2015,13 +2016,90 @@ int main(int argc, char **argv)
 		REQUIRE(cut.isEmpty());
 	}
 
+	{
+		/* 0.8.0: the Fadester Desk dock on the same engine */
+		const bool was_setup = eng.setup_session.active;
+		const int was_learning = eng.learning_slot_index;
+		eng.setup_session.active = false; /* the pads lit, as on stage */
+		eng.learning_slot_index = -1;
+		QWidget *desk = mfd_desk_dock_create(&eng);
+		desk->resize(560, 520);
+		desk->show();
+		pump_ui();
+		capture_and_verify_png(desk, screenshot_dir, QStringLiteral("13-desk-dock.png"));
+		/* what it shows: the version, and a live pad on a column with a source (column 1, Show / hide) */
+		auto *desk_title = desk->findChild<QLabel *>(QStringLiteral("mfdDeskTitle"));
+		REQUIRE(desk_title && desk_title->text().startsWith(QStringLiteral("Fadester Desk")) &&
+			desk_title->text().contains(QStringLiteral("APC40 mkII")));
+		auto *show_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_0"));
+		REQUIRE(show_pad && show_pad->isEnabled());
+		auto *empty_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_7"));
+		REQUIRE(empty_pad && !empty_pad->isEnabled()); /* no source on column 8 */
+		desk->hide();
+		delete desk;
+		desk = nullptr;
+		/* every language: no button or row name is cut off at a normal dock size (scene and column names elide on
+		 * purpose); German and Russian are saved for a look */
+		const QDir desk_locale_dir = QFileInfo(QString::fromUtf8(MFD_TEST_LOCALE_FILE)).dir();
+		QStringList desk_cut;
+		for (const QString &file :
+		     desk_locale_dir.entryList({QStringLiteral("*.ini")}, QDir::Files, QDir::Name)) {
+			g_lang_lookup = text_lookup_create(desk_locale_dir.filePath(file).toUtf8().constData());
+			REQUIRE(g_lang_lookup != nullptr);
+			mfd_text_set_lookup(lang_locale_text);
+			QWidget *ld = mfd_desk_dock_create(&eng);
+			ld->resize(560, 760);
+			ld->show();
+			pump_ui();
+			for (QPushButton *b : ld->findChildren<QPushButton *>()) {
+				if (!b->isVisible() || (b->objectName().isEmpty() && b->text().isEmpty())) {
+					continue;
+				}
+				if (b->fontMetrics().horizontalAdvance(b->text()) > b->width() - 4) {
+					desk_cut << QStringLiteral("%1: button \"%2\" (%3 px)")
+							    .arg(file, b->text())
+							    .arg(b->width());
+				}
+			}
+			for (QLabel *l : ld->findChildren<QLabel *>()) {
+				if (!l->isVisible() || l->wordWrap() ||
+				    l->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored || l->text().isEmpty()) {
+					continue;
+				}
+				if (l->fontMetrics().horizontalAdvance(l->text()) > l->width()) {
+					desk_cut << QStringLiteral("%1: label \"%2\" (%3 px)")
+							    .arg(file, l->text())
+							    .arg(l->width());
+				}
+			}
+			if (file == QStringLiteral("de-DE.ini") || file == QStringLiteral("ru-RU.ini")) {
+				QPixmap pm = ld->grab();
+				REQUIRE(pm.save(QDir(screenshot_dir)
+							.filePath(QStringLiteral("desk-") + file.left(5) +
+								  QStringLiteral(".png")),
+						"PNG"));
+			}
+			ld->hide();
+			delete ld;
+			mfd_text_set_lookup(test_locale_text);
+			text_lookup_destroy(g_lang_lookup);
+			g_lang_lookup = nullptr;
+		}
+		for (const QString &c : desk_cut) {
+			std::fprintf(stderr, "desk text cut off: %s\n", c.toUtf8().constData());
+		}
+		REQUIRE(desk_cut.isEmpty());
+		REQUIRE(!eng.desk_visible);
+		eng.setup_session.active = was_setup;
+		eng.learning_slot_index = was_learning;
+	}
 	mfd_engine_destroy_mutex(&eng);
 	mfd_text_set_lookup(nullptr);
 	text_lookup_destroy(obs_module_lookup);
 	obs_module_lookup = nullptr;
 
 	std::printf(
-		"test-ui-dialog: PASS (all end-to-end flows, FX bank, filter_param, multi-controller profiles & 12 screenshots verified in %s)\n",
+		"test-ui-dialog: PASS (all end-to-end flows, FX bank, filter_param, multi-controller profiles & 13 screenshots verified in %s)\n",
 		screenshot_dir.toUtf8().constData());
 	return 0;
 }

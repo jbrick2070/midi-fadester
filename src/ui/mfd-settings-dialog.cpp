@@ -15,6 +15,7 @@
 #endif
 
 #include "ui/mfd-settings-dialog.hpp"
+#include "ui/mfd-desk-dock.hpp"
 #include "ui/mfd-controller-svg.hpp"
 #include "ui/mfd-setup-sheet.hpp"
 #include "ui/mfd-text-qt.hpp"
@@ -1222,6 +1223,14 @@ private:
 		vj_fill_bar->addWidget(vj_fill_result_, 1);
 		root->addLayout(vj_fill_bar);
 		connect(btn_vj_fill, &QPushButton::clicked, this, [this]() { fill_faders_from_scene(); });
+		/* 0.8.0: the dock that mirrors the desk, one click away (it starts hidden in OBS's Docks menu) */
+		auto *btn_show_desk = new QPushButton(
+			mfdText("Dialog.ShowDesk",
+				"Show the Fadester Desk dock (the APC40 on screen; also in the Docks menu)"),
+			adv_tab);
+		btn_show_desk->setObjectName(QStringLiteral("mfdAdvShowDesk"));
+		root->addWidget(btn_show_desk);
+		connect(btn_show_desk, &QPushButton::clicked, this, []() { mfd_desk_dock_show(); });
 
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -1557,11 +1566,17 @@ private:
 
 		z1_name_label_->setText(mfdFill(mfdText("Dialog.Controller.Name", "Controller: %1"),
 						{QString::fromUtf8(ctrl.display_name)}));
-		z1_dot_label_->setStyleSheet(ctrl.dot_green ? QStringLiteral("color: #22c55e; font-size: 14px;")
-							    : QStringLiteral("color: #ef4444; font-size: 14px;"));
+		const QString dot_css = ctrl.dot_green ? QStringLiteral("color: #22c55e; font-size: 14px;")
+						       : QStringLiteral("color: #ef4444; font-size: 14px;");
+		if (z1_dot_label_->styleSheet() != dot_css) { /* refreshed up to 30 Hz while the desk dock is shown */
+			z1_dot_label_->setStyleSheet(dot_css);
+		}
 		z1_status_label_->setText(QString::fromUtf8(ctrl.status_sentence));
-		z1_status_label_->setStyleSheet(ctrl.dot_green ? QStringLiteral("color: #6ee7b7; font-weight: bold;")
-							       : QStringLiteral("color: #fca5a5; font-weight: bold;"));
+		const QString status_css = ctrl.dot_green ? QStringLiteral("color: #6ee7b7; font-weight: bold;")
+							  : QStringLiteral("color: #fca5a5; font-weight: bold;");
+		if (z1_status_label_->styleSheet() != status_css) {
+			z1_status_label_->setStyleSheet(status_css);
+		}
 		z1_btn_reconnect_->setVisible(ctrl.show_reconnect);
 
 		const struct mfd_controller_profile_def *pdef = mfd_profile_get_def(snap_.active_profile);
@@ -2689,6 +2704,7 @@ void MfdUiDispatcher::on_drain()
 	if (g_dialog) {
 		g_dialog->refresh_from_engine();
 	}
+	mfd_desk_dock_refresh();
 }
 
 static void ui_notify_bridge_cb(void *unused)
@@ -2722,6 +2738,7 @@ static void on_midi_ports_changed()
 		g_dialog->on_hardware_ports_changed();
 		g_dialog->refresh_from_engine();
 	}
+	mfd_desk_dock_refresh();
 }
 
 #ifdef _WIN32
@@ -2786,6 +2803,7 @@ void mfd_ui_init(void)
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), ui_notify_bridge_cb, nullptr);
 
 	obs_frontend_add_tools_menu_item(obs_module_text("ToolsMenuTitle"), on_tools_menu_clicked, nullptr);
+	mfd_desk_dock_init(); /* before OBS restores the dock layout */
 
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
 #ifdef _WIN32
@@ -2802,6 +2820,7 @@ void mfd_ui_init(void)
 
 void mfd_ui_shutdown(void)
 {
+	mfd_desk_dock_shutdown();
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), nullptr, nullptr);
 
 #ifdef _WIN32

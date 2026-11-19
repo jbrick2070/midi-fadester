@@ -1,4 +1,4 @@
-# Midi Fadester — Verification & UI State Gallery (`0.7.8`)
+# Midi Fadester — Verification & UI State Gallery (`0.8.0`)
 
 Midi Fadester verifies every engine invariant, T-bar state transition, Soft Takeover rail/pickup rule, filter parameter modulation & shared-filter `bypass_at_zero` lease contract, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 
@@ -39,7 +39,7 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 
 ## 2. Dialog State Screenshot Gallery (`0.4.0` UI)
 
-All 12 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
+All 13 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
 
 ```powershell
 ctest --preset windows-x64 -C RelWithDebInfo -R test-ui-dialog --output-on-failure
@@ -123,6 +123,10 @@ Switching the segmented bank bar on `Strips` to **`FX & Knobs (8)`** displays th
 Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's source/scene, filter, and numeric setting pickers (including nested `OBS_PROPERTY_GROUP` settings such as Visual Sidechain reactivity), editable `At 0% (From)` / `At 100% (To)` sub-ranges with `[Use current]` capture buttons, `[x] Turn filter off at 0% (saves GPU)` shared-lease bypass, and immediate single-writer conflict refusal if another slot already drives the same `(source, filter, setting)`.
 
 ![State 12: Set up Filter or Effect Setting](docs/screenshots/12-setup-filter-step2.png)
+
+### State 13: Fadester Desk dock (0.8.0)
+
+![State 13: Fadester Desk dock](docs/screenshots/13-desk-dock.png)
 
 ---
 
