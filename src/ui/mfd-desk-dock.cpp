@@ -442,7 +442,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	for (int r = 0; r < kRows; ++r) {
 		auto *name = new QLabel(rowShortName(r), this);
 		name->setToolTip(rowName(r));
-		name->setMaximumWidth(110);
+		name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
 		row_names_[r] = name;
 		grid->addWidget(name, r + 1, 0);
 		for (int i = 0; i < kStrips; ++i) {
@@ -462,7 +462,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	}
 	auto *clip_name = new QLabel(mfdText("Desk.RowClipStopShort", "Clip Stop"), this);
 	clip_name->setToolTip(mfdText("Desk.RowClipStop", "Clip Stop (own blend)"));
-	clip_name->setMaximumWidth(110);
+	clip_name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
 	grid->addWidget(clip_name, kRows + 1, 0);
 	for (int i = 0; i < kStrips; ++i) {
 		QPushButton *b = makeButton(mfdFill(mfdText("Desk.ClipStopName", "Clip Stop, column %1"),
