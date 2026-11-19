@@ -48,7 +48,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.5 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.7.6 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -57,7 +57,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.7.5, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 0.7.6, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -276,7 +276,7 @@ language.
 ## APC40 mkII pads
 
 With an APC40 mkII connected, the desk is a VJ deck. **Columns 1 to 8 are the sources of the scene on air**, bottom
-layer first: column 1 is the lowest video source in Program, column 2 the next, and so on (audio-only sources are
+layer first: column 1 is the lowest video source in Program, column 2 the next, and so on (audio-only sources, music files included, are
 skipped). The first time OBS starts with the desk and all eight channel faders empty, they fill themselves from Program
 as *Show or hide a layer* strips and **follow the scene on air**: switch scenes and they move to the new scene's
 sources. A fader you set yourself never moves, and neither does a column you pin. **Advanced → Fill empty faders from
@@ -342,7 +342,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.7.5** (November 2026) is the current release. The APC40 mkII becomes a whole VJ deck: the channel faders fill themselves from the scene on air and follow it (pin a column to keep its source; **Fill empty faders from the scene on air** on the Advanced tab; obs-websocket `fill_from_scene`); Scene Launch 1–5 pick the first five scenes into Preview and take them, with Session as Take and Shift sending a scene straight to Program, lit Program red and Preview green; pad row 4 shows or hides a source (Shift: wake it) and row 5 restarts its video (Shift: pin); Shift + row 2 holds a blackout and Shift + row 3 snaps; Clip Stop cleans one column; Cue Level sets the transition length (Shift: pad fade time); Record, Metronome and Shift + Tap Tempo drive Visual Sidechain's Panic / Restore, tap tempo, BPM lock and downbeat. Idle sources light dim white and hidden ones blink red. Visual Sidechain moves to 0.7.5 with it.
+**0.7.6** (November 2026) is the current release. It fixes the APC40 mkII faders filling from the scene on air: a Media Source playing a music file (mp3, ogg, wav and the like) no longer takes a fader, since OBS reports every media source as video; `get_state` slots now carry `follows_scene`. Visual Sidechain moves to 0.7.6 with it.
+
+**0.7.5** (November 2026). The APC40 mkII becomes a whole VJ deck: the channel faders fill themselves from the scene on air and follow it (pin a column to keep its source; **Fill empty faders from the scene on air** on the Advanced tab; obs-websocket `fill_from_scene`); Scene Launch 1–5 pick the first five scenes into Preview and take them, with Session as Take and Shift sending a scene straight to Program, lit Program red and Preview green; pad row 4 shows or hides a source (Shift: wake it) and row 5 restarts its video (Shift: pin); Shift + row 2 holds a blackout and Shift + row 3 snaps; Clip Stop cleans one column; Cue Level sets the transition length (Shift: pad fade time); Record, Metronome and Shift + Tap Tempo drive Visual Sidechain's Panic / Restore, tap tempo, BPM lock and downbeat. Idle sources light dim white and hidden ones blink red. Visual Sidechain moves to 0.7.5 with it.
 
 **0.7.4** (November 2026). It adds video speed on the APC40 mkII's transport controls (Tempo knob, Nudge − / +, Tap Tempo, Play) through Fadester Companion 0.1.15 and VJster, as the vendor event `vjster_action`, and MIDI Learn now skips the APC40's endless Tempo and Cue Level knobs. Visual Sidechain moves to 0.7.4 with it.
 
