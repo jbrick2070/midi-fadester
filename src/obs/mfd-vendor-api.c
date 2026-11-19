@@ -345,6 +345,7 @@ static void populate_slot_data(const struct mfd_engine *eng, const struct mfd_fa
 	obs_data_set_string(out, "target_mode", mfd_target_mode_to_string(s->target_type));
 	obs_data_set_string(out, "scene", (s->scene_name[0] != '\0') ? s->scene_name : s->resolved_scene_name);
 	obs_data_set_string(out, "source_a", s->source_a_name);
+	obs_data_set_bool(out, "follows_scene", s->auto_follow);
 	obs_data_set_string(out, "source_b", s->source_b_name);
 	obs_data_set_string(out, "filter_name", s->filter_name);
 	obs_data_set_string(out, "filter_prop", s->filter_prop);

@@ -2984,6 +2984,41 @@ static void sg_enum_filter_hosts(const struct mfd_engine *eng, mfd_filter_host_c
 	obs_enum_sources(live_enum_hosts_cb, &ictx);
 }
 
+/* Whether a scene item shows a picture. OBS reports every media source as video, even one playing a music file, so a
+ * Media Source whose local file is an audio file counts as audio only. */
+static bool source_shows_video(obs_source_t *src)
+{
+	uint32_t flags = obs_source_get_output_flags(src);
+	if ((flags & OBS_SOURCE_VIDEO) == 0U) {
+		return false;
+	}
+	const char *id = obs_source_get_unversioned_id(src);
+	if ((flags & OBS_SOURCE_AUDIO) == 0U || !id || strcmp(id, "ffmpeg_source") != 0) {
+		return true;
+	}
+	obs_data_t *settings = obs_source_get_settings(src);
+	const char *file = settings ? obs_data_get_string(settings, "local_file") : NULL;
+	const char *dot = file ? strrchr(file, '.') : NULL;
+	bool audio_file = false;
+	if (dot && settings && obs_data_get_bool(settings, "is_local_file")) {
+		static const char *const k_audio_ext[] = {".mp3", ".mp2", ".ogg", ".oga", ".opus", ".wav", ".flac",
+							  ".m4a", ".aac", ".wma", ".aif", ".aiff", ".mka", ".weba"};
+		for (size_t i = 0U; i < sizeof(k_audio_ext) / sizeof(k_audio_ext[0]) && !audio_file; ++i) {
+			const char *e = k_audio_ext[i];
+			size_t n = strlen(e);
+			if (strlen(dot) == n) {
+				bool same = true;
+				for (size_t c = 0U; c < n && same; ++c) {
+					same = tolower((unsigned char)dot[c]) == (unsigned char)e[c];
+				}
+				audio_file = same;
+			}
+		}
+	}
+	obs_data_release(settings);
+	return !audio_file;
+}
+
 static bool enum_catalog_scene_items_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 {
 	UNUSED_PARAMETER(scene);
@@ -3008,7 +3043,7 @@ static bool enum_catalog_scene_items_cb(obs_scene_t *scene, obs_sceneitem_t *ite
 	size_t idx = se->layer_count++;
 	snprintf(se->layers[idx], sizeof(se->layers[idx]), "%s", nm);
 	se->layer_has_audio[idx] = ((obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) != 0U);
-	se->layer_has_video[idx] = ((obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0U);
+	se->layer_has_video[idx] = source_shows_video(src);
 	return true;
 }
 
@@ -5746,7 +5781,7 @@ static bool vj_collect_enum_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *
 {
 	UNUSED_PARAMETER(scene);
 	obs_source_t *src = obs_sceneitem_get_source(item);
-	if (src && !obs_source_removed(src) && (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0U) {
+	if (src && !obs_source_removed(src) && source_shows_video(src)) {
 		vj_layer_add(param, obs_source_get_name(src));
 	}
 	return true;
