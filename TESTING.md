@@ -2,12 +2,12 @@
 
 Midi Fadester verifies every engine invariant, T-bar state transition, Soft Takeover rail/pickup rule, filter parameter modulation & shared-filter `bypass_at_zero` lease contract, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 
-1. **Automated `ctest` Suite (15 headless targets, ~2.6 s total)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
+1. **Automated `ctest` Suite (75 headless tests, about 20 s: 33 for Midi Fadester and 42 for Visual Sidechain, which is part of Midi Fadester since 0.9.0)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
 2. **Live Portable OBS 33 + `loopMIDI` Hardware-Loopback Suite (`MFD_SELF_TEST=1`)** — boots real `obs64.exe` in Studio Mode, renders HLSL `mfd_layer_mixer.effect` composites and live `color_filter_v2` `filter_param` sweeps on the GPU, checks `GetSourceScreenshot` pixel samples, verifies live scene-item reorder stack-order inversion, live filter/host rename + remove/re-add + external OBS `"update"` Soft Takeover + `reset_fx`, drives 8 physical-timing `loopMIDI` cases through WinMM `midiInOpen`, and asserts `Number of memory leaks: 0` on clean exit.
 
 ---
 
-## 1. Automated `ctest` Suite (`15/15` Targets)
+## 1. Automated `ctest` Suite (`75/75` tests)
 
 Run locally from a configured preset:
 
@@ -34,6 +34,8 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 | 13 | `test-shader-syntax` | HLSL `data/effects/mfd_layer_mixer.effect` uniform/pass validation, repository-wide UTF-8 no-BOM guard across 35 source/config files, and zero-timer / zero-sleep static source audit (`QTimer`, `startTimer`, `SetTimer`, `QThread::msleep`, `os_sleep_ms`). |
 | 14 | `check-locale-keys` | Verifies every `obs_module_text(...)` key in `src/` exists in `data/locale/en-US.ini` with non-empty text and no `"OBS"` prefix violation. |
 | 15 | `check-locale-keys-fails-on-missing-key` | Negative mutation check proving `check-locale-keys` fails immediately when a locale key is missing. |
+
+The table lists Midi Fadester's core targets; the rest of its 33 tests are the locale-file checks and their negative cases. **Visual Sidechain's 42 tests** (`tests/vs`, all named `vs-*`) came with it in 0.9.0 unchanged: audio analysis (FFT, onsets, spectrum, envelope, tempo), the modulator and its baseline protection, the fader bridge, the shader parser and the photosensitivity flash limit, the Tape Deck (core, HTTP, listener, link), its vendor API, its own locale and product-naming checks and, on macOS, `vs-test-shader-gpu`, which compiles every built-in shader with OBS's GLSL and Metal translators. Their history is in [Visual Sidechain's TESTING.md](https://github.com/jbrick2070/visual-sidechain/blob/main/TESTING.md).
 
 ---
 
