@@ -2777,7 +2777,8 @@ static int test_vj_fill_follow_and_desk(void)
 	obs_data_release(resp);
 	mfd_engine_tick(eng, 0.016f);
 
-	/* 6. Scene Launch: the scene in Preview takes; another goes to Preview; Shift cuts. Session takes, Shift cuts. */
+	/* 6. Scene Launch: the scene in Preview takes; another goes to Preview; Shift sends a scene straight to Program.
+	 * Session takes; Shift + Session is a take too. */
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 82); /* Scene A is in Preview: take */
 	vj_tap(eng, 84); /* Scene C: to Preview */
