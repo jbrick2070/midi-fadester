@@ -660,11 +660,11 @@ static void test_vendor_deck_commands_and_events(void)
 	obs_data_set_string(req, "deck", "");
 	assert_deck_cmd_error(req, "Field 'deck' must name an active Tape Deck source.");
 	obs_data_set_string(req, "deck", "Reel A");
-	assert_deck_cmd_error(req,
-			      "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+	assert_deck_cmd_error(
+		req, "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
 	obs_data_set_string(req, "op", "rewind");
-	assert_deck_cmd_error(req,
-			      "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+	assert_deck_cmd_error(
+		req, "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
 
 	obs_data_set_string(req, "deck", "Missing Deck");
 	obs_data_set_string(req, "op", "play_pause");
