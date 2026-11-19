@@ -532,12 +532,17 @@ struct mfd_engine {
 	bool vj_state_dirty;                   /* a pad changed something: tell obs-websocket clients once */
 	char vj_said[MFD_VJ_STRIPS][96];       /* the last "why not" line per strip, said once */
 	float vj_blink_sec;                    /* Record blinks in software: the desk's Record lamp is on or off only */
-	uint8_t vj_eye_hold;                   /* strips whose eye change is queued: not re-read until it is done */
-	bool vj_autofill_done;                 /* the eight empty strips were filled from the scene once (saved) */
-	bool vj_autofill_pending;              /* try that fill from the UI thread (the desk opened, pads turned on) */
-	bool vj_follow_pending;                /* refill following strips from Program when the T-bar is at rest */
-	bool vs_panic;                         /* Visual Sidechain said it is panicked */
-	int vj_cue_ms;                         /* Cue Level turns not sent yet, in ms of transition length */
+	/* A Shift cut swapped in OBS's Cut transition: the one to put back (a reference, UI thread only) once the cut
+	 * has stopped, or after a second at most. */
+	struct obs_source *vj_restore_transition;
+	uint64_t vj_restore_ns;
+	bool vj_restore_due;      /* read by the tick to wake the UI thread */
+	uint8_t vj_eye_hold;      /* strips whose eye change is queued: not re-read until it is done */
+	bool vj_autofill_done;    /* the eight empty strips were filled from the scene once (saved) */
+	bool vj_autofill_pending; /* try that fill from the UI thread (the desk opened, pads turned on) */
+	bool vj_follow_pending;   /* refill following strips from Program when the T-bar is at rest */
+	bool vs_panic;            /* Visual Sidechain said it is panicked */
+	int vj_cue_ms;            /* Cue Level turns not sent yet, in ms of transition length */
 	struct mfd_vj_command vj_cmds[MFD_VJ_CMD_MAX];
 	int vj_cmd_count;
 	/* APC40 video speed for Fadester Companion: Tempo / Nudge steps added up, and Tap Tempo / Play pressed, sent as

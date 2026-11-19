@@ -337,7 +337,9 @@ void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, vo
 
 static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *cmd);
 static void vj_try_autofill(struct mfd_engine *eng);
-static bool vj_tbar_busy_locked(const struct mfd_engine *eng, bool throwing_only);
+static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
+static bool vj_active(const struct mfd_engine *eng);
+static void vj_restore_transition_if_due(struct mfd_engine *eng, bool stopped);
 
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 {
@@ -351,11 +353,8 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	bool autofill = false;
 	bool follow = false;
 	mfd_engine_lock(eng);
-	for (int i = 0; i < eng->vj_cmd_count && i < MFD_VJ_CMD_MAX; ++i) {
-		cmds[ncmd++] = eng->vj_cmds[i];
-	}
-	eng->vj_cmd_count = 0;
 	if (eng->vj_cue_ms != 0) {
+		/* First: a take pressed right after turning Cue Level uses the new length. */
 		memset(&cmds[ncmd], 0, sizeof(cmds[ncmd]));
 		cmds[ncmd].strip = -1;
 		cmds[ncmd].kind = MFD_VJ_CMD_TRANSITION;
@@ -363,13 +362,18 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 		++ncmd;
 		eng->vj_cue_ms = 0;
 	}
+	for (int i = 0; i < eng->vj_cmd_count && i < MFD_VJ_CMD_MAX; ++i) {
+		cmds[ncmd++] = eng->vj_cmds[i];
+	}
+	eng->vj_cmd_count = 0;
 	autofill = eng->vj_autofill_pending;
 	eng->vj_autofill_pending = false;
-	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng, true)) {
+	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
 		eng->vj_follow_pending = false;
-		follow = true;
+		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
 	}
 	mfd_engine_unlock(eng);
+	vj_restore_transition_if_due(eng, false);
 
 	uint8_t eyes_done = 0U;
 	for (int i = 0; i < ncmd; ++i) {
@@ -381,6 +385,13 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	}
 	if (eyes_done != 0U) {
 		mfd_engine_lock(eng);
+		for (int i = 0; i < eng->vj_cmd_count; ++i) {
+			/* A later press on the same strip is still queued: its eye is not settled yet. */
+			if (eng->vj_cmds[i].kind == MFD_VJ_CMD_SET_VISIBLE && eng->vj_cmds[i].strip >= 0 &&
+			    eng->vj_cmds[i].strip < (int)MFD_VJ_STRIPS) {
+				eyes_done &= (uint8_t) ~(1U << (unsigned)eng->vj_cmds[i].strip);
+			}
+		}
 		eng->vj_eye_hold &= (uint8_t)~eyes_done; /* those eyes are set: read them from OBS again */
 		eng->vj_refresh_pending = true;
 		mfd_engine_unlock(eng);
@@ -5136,11 +5147,9 @@ static bool vj_queue_cmd_locked(struct mfd_engine *eng, enum mfd_vj_command_kind
 	return vj_queue_strip_cmd_locked(eng, kind, scene, source, arg, -1);
 }
 
-/* A crossfader (T-bar) throw is under way. */
-static bool vj_tbar_busy_locked(const struct mfd_engine *eng, bool throwing_only)
+/* A crossfader (T-bar) throw is under way. A T-bar at rest after a throw is parked at its end and does not count. */
+static bool vj_tbar_busy_locked(const struct mfd_engine *eng)
 {
-	/* A T-bar at rest after a throw is parked at its end; only a throw under way counts. */
-	UNUSED_PARAMETER(throwing_only);
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		const struct mfd_fader_slot *s = &eng->fader_slots[i];
 		if (s->enabled && s->target_type == MFD_TARGET_TBAR && s->tbar_state == MFD_TBAR_THROWING) {
@@ -5182,8 +5191,8 @@ static void vj_take_locked(struct mfd_engine *eng, bool cut)
 	if (!mfd_engine_is_studio_mode_active(eng) || eng->cached_preview_scene[0] == '\0') {
 		return;
 	}
-	if (vj_tbar_busy_locked(eng, false)) {
-		obs_log(LOG_INFO, "APC40: the crossfader is mid-way, so the scene buttons wait for it");
+	if (vj_tbar_busy_locked(eng)) {
+		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene buttons wait for it");
 	} else if (cut) {
 		vj_queue_cmd_locked(eng, MFD_VJ_CMD_PROGRAM, eng->cached_preview_scene, NULL, 1);
 	} else {
@@ -5198,8 +5207,8 @@ static void vj_scene_locked(struct mfd_engine *eng, int j, bool cut)
 		return;
 	}
 	const char *name = eng->cached_scenes[j];
-	if (vj_tbar_busy_locked(eng, false)) {
-		obs_log(LOG_INFO, "APC40: the crossfader is mid-way, so the scene buttons wait for it");
+	if (vj_tbar_busy_locked(eng)) {
+		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene buttons wait for it");
 	} else if (cut || !mfd_engine_is_studio_mode_active(eng)) {
 		vj_queue_cmd_locked(eng, MFD_VJ_CMD_PROGRAM, name, NULL, cut ? 1 : 0);
 	} else if (strcmp(name, eng->cached_preview_scene) == 0 && strcmp(name, eng->cached_program_scene) != 0) {
@@ -5486,7 +5495,9 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 	for (size_t i = 0; i < n; ++i) {
 		vj_run_locked(eng, &acts[i]);
 	}
-	vj_repaint_note_locked(eng, dec->addr.channel, (uint8_t)dec->addr.number);
+	if (is_note) {
+		vj_repaint_note_locked(eng, dec->addr.channel, (uint8_t)dec->addr.number);
+	}
 	mfd_engine_mark_ui_dirty(eng, false);
 	return true;
 }
@@ -5937,6 +5948,9 @@ static int vj_fill_locked(struct mfd_engine *eng, const char *scene_arg, bool in
 		    (eng->setup_session.active && eng->setup_session.slot_index == k)) {
 			continue;
 		}
+		if (!s->enabled) {
+			continue; /* switched off by the user: left alone */
+		}
 		if (s->auto_follow || (include_empty && s->target_type == MFD_TARGET_UNASSIGNED) ||
 		    (replace_layers && s->target_type == MFD_TARGET_SINGLE_LAYER)) {
 			following[k] = true;
@@ -6050,7 +6064,7 @@ static void vj_follow_program(struct mfd_engine *eng)
 	for (int k = 1; k <= (int)MFD_VJ_STRIPS && vj_active(eng); ++k) {
 		any = any || eng->fader_slots[k].auto_follow;
 	}
-	bool later = any && vj_tbar_busy_locked(eng, true);
+	bool later = any && vj_tbar_busy_locked(eng);
 	if (later) {
 		eng->vj_follow_pending = true;
 	}
@@ -6080,26 +6094,65 @@ static bool vj_set_visible_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *p
 
 /* Switches Program to a scene with OBS's Cut transition, then puts the transition back. In Studio Mode (and out of
  * it) obs_frontend_set_current_scene uses the current transition, so a plain call would fade. */
-static void vj_cut_to_scene(obs_source_t *scene)
+static bool vj_is_cut_transition(obs_source_t *t)
 {
+	const char *id = t ? obs_source_get_unversioned_id(t) : NULL;
+	return id && strcmp(id, "cut_transition") == 0;
+}
+
+/* Puts back the transition a Shift cut swapped out: when OBS says the cut stopped, or a second after it at most. UI
+ * thread. */
+static void vj_restore_transition_if_due(struct mfd_engine *eng, bool stopped)
+{
+	mfd_engine_lock(eng);
+	obs_source_t *back = NULL;
+	if (eng->vj_restore_transition && (stopped || os_gettime_ns() - eng->vj_restore_ns > 1000000000ULL)) {
+		back = eng->vj_restore_transition;
+		eng->vj_restore_transition = NULL;
+		eng->vj_restore_due = false;
+	}
+	mfd_engine_unlock(eng);
+	if (back) {
+		obs_source_t *now = obs_frontend_get_current_transition();
+		if (vj_is_cut_transition(now)) {
+			obs_frontend_set_current_transition(
+				back); /* only if the user has not picked another meanwhile */
+		}
+		obs_source_release(now);
+		obs_source_release(back);
+	}
+}
+
+static void vj_cut_to_scene(struct mfd_engine *eng, obs_source_t *scene)
+{
+	vj_restore_transition_if_due(eng, true); /* an earlier cut's swap first */
+	obs_source_t *was = obs_frontend_get_current_transition();
+	if (!was || vj_is_cut_transition(was)) {
+		obs_frontend_set_current_scene(scene); /* already a Cut */
+		obs_source_release(was);
+		return;
+	}
 	struct obs_frontend_source_list list = {0};
 	obs_frontend_get_transitions(&list);
 	obs_source_t *cut = NULL;
 	for (size_t i = 0U; i < list.sources.num && !cut; ++i) {
-		const char *id = obs_source_get_unversioned_id(list.sources.array[i]);
-		if (id && strcmp(id, "cut_transition") == 0) {
+		if (vj_is_cut_transition(list.sources.array[i])) {
 			cut = list.sources.array[i];
 		}
 	}
-	obs_source_t *was = obs_frontend_get_current_transition();
-	if (cut && was && was != cut) {
-		obs_frontend_set_current_transition(cut);
-		obs_frontend_set_current_scene(scene);
-		obs_frontend_set_current_transition(was);
-	} else {
+	if (!cut) {
 		obs_frontend_set_current_scene(scene); /* no Cut transition in this OBS: the current one it is */
+		obs_source_release(was);
+		obs_frontend_source_list_free(&list);
+		return;
 	}
-	obs_source_release(was);
+	obs_frontend_set_current_transition(cut);
+	obs_frontend_set_current_scene(scene);
+	mfd_engine_lock(eng);
+	eng->vj_restore_transition = was; /* keeps the reference until it is put back */
+	eng->vj_restore_ns = os_gettime_ns();
+	eng->vj_restore_due = true;
+	mfd_engine_unlock(eng);
 	obs_frontend_source_list_free(&list);
 }
 
@@ -6123,7 +6176,7 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 			if (cmd->kind == MFD_VJ_CMD_PREVIEW) {
 				obs_frontend_set_current_preview_scene(src);
 			} else if (cmd->arg != 0) {
-				vj_cut_to_scene(src);
+				vj_cut_to_scene(eng, src);
 			} else {
 				obs_frontend_set_current_scene(src);
 			}
@@ -6248,6 +6301,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		if (eng->vj_was_active && !active) {
 			vj_leds_off_locked(eng);
 			vj_release_all_locked(eng);
+			eng->vj_follow_pending = false;
 		} else if (!eng->vj_was_active && active) {
 			/* The pads start applying (the desk opened, the pads turned on): its LEDs are unknown, repaint all.
 			 * Empty strips may fill from the scene on air now (in the UI thread). */
@@ -6265,13 +6319,16 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 		eng->vj_refresh_pending = false;
 		vj_refresh_locked(eng);
 	} else if (vj_active(eng)) {
-		eng->vj_blink_sec += seconds;
-		if (eng->vj_blink_sec > 3600.0f) {
-			eng->vj_blink_sec = 0.0f;
-		}
 		vj_status_locked(eng, false);
 	}
-	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng, true)) {
+	eng->vj_blink_sec += seconds;
+	if (eng->vj_blink_sec >= 3600.0f) {
+		eng->vj_blink_sec -= 3600.0f; /* a whole number of blinks: no jump in the phase */
+	}
+	if (eng->vj_restore_due && os_gettime_ns() - eng->vj_restore_ns > 1000000000ULL) {
+		mfd_engine_mark_ui_dirty(eng, false); /* the cut's transition swap is overdue: put it back */
+	}
+	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
 		mfd_engine_mark_ui_dirty(eng, false); /* the throw is over: let the UI thread move the strips */
 	}
 	sync_volume_slots_from_live_locked(eng);
@@ -7479,6 +7536,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	    event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		/* Changes queued for the scene collection that is going away name sources that no longer matter. */
 		mfd_engine_discard_scene_graph_changes(eng);
+		vj_restore_transition_if_due(eng, true); /* a Shift cut's swap goes back before transitions go away */
 	} else {
 		mfd_engine_process_scene_graph_changes(eng);
 	}
@@ -7515,6 +7573,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		break;
 	case OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED:
 		sync_slots_on_scene_change(eng, false);
+		break;
+	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED:
+		vj_restore_transition_if_due(eng, true); /* a Shift cut has finished: its transition goes back */
 		break;
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:

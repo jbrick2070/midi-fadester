@@ -2754,7 +2754,8 @@ static int test_vj_fill_follow_and_desk(void)
 	obs_data_set_string(req, "slot", "fader_8");
 	obs_data_set_string(req, "target_mode", "unassigned");
 	mfd_vendor_handle_set_slot(req, resp, eng);
-	REQUIRE(!eng->fader_slots[8].auto_follow);
+	REQUIRE(eng->fader_slots[8].auto_follow); /* the same job it had: an echo, it keeps following */
+	eng->fader_slots[8].auto_follow = false;  /* as if the user had emptied it by hand */
 	obs_data_release(req);
 	obs_data_release(resp);
 	req = obs_data_create();
@@ -2894,9 +2895,9 @@ static int test_vj_fill_follow_and_desk(void)
 	vj_shift_tap(eng, 99);
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 5);
-	REQUIRE(g_vj_cmds[0].kind == MFD_VJ_CMD_VS_PANIC && g_vj_cmds[1].kind == MFD_VJ_CMD_VS_TAP &&
-		g_vj_cmds[2].kind == MFD_VJ_CMD_VS_LOCK && g_vj_cmds[3].kind == MFD_VJ_CMD_VS_RESYNC);
-	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_TRANSITION && g_vj_cmds[4].arg == 250);
+	REQUIRE(g_vj_cmds[0].kind == MFD_VJ_CMD_TRANSITION && g_vj_cmds[0].arg == 250); /* first: a take uses it */
+	REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_VS_PANIC && g_vj_cmds[2].kind == MFD_VJ_CMD_VS_TAP &&
+		g_vj_cmds[3].kind == MFD_VJ_CMD_VS_LOCK && g_vj_cmds[4].kind == MFD_VJ_CMD_VS_RESYNC);
 	mfd_engine_set_vs_panic(eng, true);
 	REQUIRE(eng->vj.vs_panic);
 
@@ -2915,10 +2916,12 @@ static int test_vj_fill_follow_and_desk(void)
 	for (int i = 0; i < 80; ++i) {
 		mfd_engine_tick(eng, 0.016f);
 	}
+	REQUIRE(fake_sg_find_source(&sg, "B1")->last_opacity < 0.001f && !b1->auto_fade_active);
 	vj_tap(eng, 16); /* and back in */
 	for (int i = 0; i < 80; ++i) {
 		mfd_engine_tick(eng, 0.016f);
 	}
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "B1")->last_opacity - 0.9f) < 0.01f && !(eng->vj.faded & 0x01U));
 
 	/* 12b. With the pads turned off, strips stop following until they are on again. */
 	mfd_engine_set_vj_buttons(eng, false, 1000);
@@ -2947,6 +2950,42 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(mfd_engine_update_slot_config(eng, 1, &ed));
 	REQUIRE(!eng->fader_slots[1].auto_follow && vj_strip_is(eng, 1, "Scene A", "A1"));
 
+	/* 12d. A client echoing a strip's own values back does not stop it following; a switched-off strip is left
+	 * alone by the refill; an empty following strip reports blend Normal. */
+	req = obs_data_create();
+	resp = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_2");
+	obs_data_set_string(req, "target_mode", "layer_opacity");
+	obs_data_set_string(req, "scene", eng->fader_slots[2].scene_name);
+	obs_data_set_string(req, "source_a", eng->fader_slots[2].source_a_name);
+	mfd_vendor_handle_set_slot(req, resp, eng);
+	REQUIRE(eng->fader_slots[2].auto_follow);
+	obs_data_release(req);
+	obs_data_release(resp);
+	eng->fader_slots[2].enabled = false;
+	vj_program(eng, "Scene B", "Scene A");
+	REQUIRE(!eng->fader_slots[2].enabled && strcmp(eng->fader_slots[2].source_a_name, "B2") == 0);
+	eng->fader_slots[2].enabled = true;
+	vj_program(eng, "Scene A", "Scene B");
+	vj_tap(eng, 0); /* strip 1 (B1) punched */
+	vj_program(eng, "Scene B", "Scene C");
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->vj.current[2] == MFD_VJ_BLEND_NORMAL && !(eng->vj.has_layer & 0x04U));
+	vj_program(eng, "Scene A", "Scene B");
+
+	/* 12e. Record blinks in software while Visual Sidechain is panicked (the lamp is on or off only). */
+	mfd_engine_set_vs_panic(eng, true);
+	bool seen_on = false, seen_off = false;
+	for (int i = 0; i < 90; ++i) {
+		mfd_engine_tick(eng, 0.016f);
+		seen_on = seen_on || eng->vj.vs_panic;
+		seen_off = seen_off || !eng->vj.vs_panic;
+	}
+	REQUIRE(seen_on && seen_off);
+	mfd_engine_set_vs_panic(eng, false);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(!eng->vj.vs_panic);
+
 	/* 12. Saved and loaded: following strips stay following; the first fill is not repeated. */
 	obs_data_t *saved = obs_data_create();
 	mfd_engine_serialize_slots_for_test(eng, saved);
@@ -2957,7 +2996,8 @@ static int test_vj_fill_follow_and_desk(void)
 	eng2->scene_graph_user_data = &sg;
 	mfd_engine_deserialize_slots_for_test(eng2, saved);
 	REQUIRE(eng2->fader_slots[2].auto_follow && !eng2->fader_slots[1].auto_follow &&
-		!eng2->fader_slots[0].auto_follow && vj_strip_is(eng2, 2, "Scene B", "B2"));
+		!eng2->fader_slots[0].auto_follow &&
+		vj_strip_is(eng2, 2, "Scene B", eng->fader_slots[2].source_a_name));
 	obs_data_release(saved);
 	mfd_engine_destroy_mutex(eng2);
 	free(eng2);

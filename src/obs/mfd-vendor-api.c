@@ -1243,7 +1243,15 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	bool has_cal_min = obs_data_has_user_value(request_data, "cal_min");
 	bool has_cal_max = obs_data_has_user_value(request_data, "cal_max");
 	/* A job of the caller's own: it no longer follows the scene on air (set once the request is accepted). */
-	const bool stops_following = has_target || has_scene || has_sa || has_sb;
+	enum mfd_target_type asked_target = s->target_type;
+	if (has_target) {
+		mfd_target_mode_from_string(obs_data_get_string(request_data, "target_mode"), &asked_target);
+	}
+	const bool stops_following =
+		(has_target && asked_target != s->target_type) ||
+		(has_scene && strcmp(obs_data_get_string(request_data, "scene"), s->scene_name) != 0) ||
+		(has_sa && strcmp(obs_data_get_string(request_data, "source_a"), s->source_a_name) != 0) ||
+		(has_sb && strcmp(obs_data_get_string(request_data, "source_b"), s->source_b_name) != 0);
 	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
 	int new_cal_max = has_cal_max ? (int)obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
 
