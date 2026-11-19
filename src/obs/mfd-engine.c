@@ -223,10 +223,17 @@ bool mfd_engine_held_by_current_thread(const struct mfd_engine *eng)
 	return eng && os_atomic_load_long((volatile long *)&eng->lock_owner) == current_thread_key();
 }
 
-/* Speed events (vjster_action) are sent after the engine lock is let go, from the thread that let it go: this keeps
- * their order across threads (a dock preset from the UI thread, desk steps from the video tick). Taken while the engine
- * lock is still held, released once they are sent. */
-static pthread_mutex_t g_speed_emit_mutex = PTHREAD_MUTEX_INITIALIZER;
+/*
+ * Speed events (vjster_action) are sent after the engine lock is let go, from the thread that let it go (a dock preset
+ * from the UI thread, desk steps from the video tick). To keep their order across threads, each batch takes a ticket
+ * while the engine lock is still held, and batches are sent in ticket order. A thread waits for its turn with no engine
+ * lock held, and sends its speed events first, before anything that takes the engine lock again (the state event reads
+ * get_state), so no turn ever waits on the engine lock: the batch ahead of it is only sending events.
+ */
+static pthread_mutex_t g_speed_turn_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_speed_turn_cond = PTHREAD_COND_INITIALIZER;
+static uint64_t g_speed_ticket_next;
+static uint64_t g_speed_ticket_serving;
 
 void mfd_engine_unlock(struct mfd_engine *eng)
 {
@@ -279,20 +286,23 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 	}
 
 	bool speed_work = speed_actions != 0U || speed_steps != 0;
+	uint64_t ticket = 0U;
 	if (speed_work) {
 		pthread_mutex_lock(
-			&g_speed_emit_mutex); /* before the engine lock goes: no later event can overtake these */
+			&g_speed_turn_mutex); /* the ticket is taken while the engine lock still holds the order */
+		ticket = g_speed_ticket_next++;
+		pthread_mutex_unlock(&g_speed_turn_mutex);
 	}
 	if (eng->state_mutex_initialized) {
 		pthread_mutex_unlock(&eng->state_mutex);
 	}
 
-	for (size_t k = 0U; k < fader_emit_count; ++k) {
-		mfd_vendor_emit_fader_changed_ex(fader_emits[k].slot_id, fader_emits[k].value,
-						 fader_emits[k].display_value, fader_emits[k].origin);
-	}
-	if (emit_state) {
-		mfd_vendor_emit_state_changed(eng);
+	if (speed_work) {
+		pthread_mutex_lock(&g_speed_turn_mutex);
+		while (g_speed_ticket_serving != ticket) {
+			pthread_cond_wait(&g_speed_turn_cond, &g_speed_turn_mutex);
+		}
+		pthread_mutex_unlock(&g_speed_turn_mutex);
 	}
 	if (speed_actions & MFD_VJ_SPEED_RESET_BIT) {
 		mfd_vendor_emit_vjster_action("vjster.speed.reset", 0);
@@ -307,7 +317,19 @@ void mfd_engine_unlock(struct mfd_engine *eng)
 		mfd_vendor_emit_vjster_action("vjster.speed.step", speed_steps);
 	}
 	if (speed_work) {
-		pthread_mutex_unlock(&g_speed_emit_mutex);
+		pthread_mutex_lock(&g_speed_turn_mutex);
+		++g_speed_ticket_serving; /* the next batch's turn */
+		pthread_cond_broadcast(&g_speed_turn_cond);
+		pthread_mutex_unlock(&g_speed_turn_mutex);
+	}
+
+	/* after the speed events: these may take the engine lock again (get_state) */
+	for (size_t k = 0U; k < fader_emit_count; ++k) {
+		mfd_vendor_emit_fader_changed_ex(fader_emits[k].slot_id, fader_emits[k].value,
+						 fader_emits[k].display_value, fader_emits[k].origin);
+	}
+	if (emit_state) {
+		mfd_vendor_emit_state_changed(eng);
 	}
 	if (wake_ui && ui_fn) {
 		ui_fn(ui_ud);

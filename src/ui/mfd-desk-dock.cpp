@@ -27,6 +27,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPointer>
 #include <QScrollArea>
 #include <QProgressBar>
@@ -189,12 +190,10 @@ void setButtonText(QPushButton *b, const QString &text)
 	}
 }
 
-/* Takes the dock's "real press" mark (MfdDeskDock::eventFilter): false for a pressed that a sliding pointer re-sent. */
+/* False for a pressed that a held pointer re-sent by sliding back onto the button (MfdDeskDock::eventFilter). */
 bool physical(QObject *b)
 {
-	bool p = b->property("mfdPhysical").toBool();
-	b->setProperty("mfdPhysical", false);
-	return p;
+	return !b->property("mfdSlid").toBool();
 }
 
 /* An endless speed encoder: each notch is one 0.05x step, like the APC40's Tempo knob. Clicking never jumps (the press
@@ -310,7 +309,7 @@ private:
 	void pressPad(int row, int strip, bool on);
 	void pressNote(uint8_t channel, uint8_t note, bool on, bool shift);
 	void releaseHolds();
-	void sayStatus(const QString &text);
+	void sayStatus(const QString &text, bool over_reason = true);
 	void paintButton(QPushButton *b, uint32_t rgb, bool enabled);
 
 	struct mfd_engine *eng_ = nullptr;
@@ -349,6 +348,7 @@ private:
 	double bpm_value_ = 120.0;
 	bool bpm_valid_ = false;
 	bool status_is_reason_ = false;
+	bool status_over_reason_ = true; /* the last message may stand over a reason (a speed asked for) */
 	bool vs_loaded_ = false;
 	long long last_beat_index_ = -1;
 };
@@ -356,7 +356,7 @@ private:
 QPushButton *MfdDeskDock::makeButton(const QString &accessible, int min_w, int min_h)
 {
 	auto *b = new QPushButton(this);
-	b->installEventFilter(this); /* marks real presses: see physical() */
+	b->installEventFilter(this); /* notices a held pointer sliding off: see physical() */
 	b->setAccessibleName(accessible);
 	b->setToolTip(accessible);
 	b->setMinimumSize(min_w, min_h);
@@ -691,14 +691,27 @@ void MfdDeskDock::vjSteps(int steps)
 				   .arg(std::abs(steps) * 0.05, 0, 'f', 2)}));
 }
 
-/* A real press: the mouse button or Space went down on it. QPushButton also emits pressed when a held pointer slides
- * back onto it, which must not press a desk button a second time (Lock would toggle twice, a scene would be taken). */
+/* QPushButton emits pressed again when a held pointer slides off it and back on: that must not press a desk button a
+ * second time (Lock would toggle twice, a scene would be taken). The filter marks a held pointer that left the button;
+ * a new press or the release clears it. Keyboard, click() and accessibility presses are untouched. */
 bool MfdDeskDock::eventFilter(QObject *obj, QEvent *e)
 {
-	if (e->type() == QEvent::MouseButtonPress || e->type() == QEvent::MouseButtonDblClick ||
-	    (e->type() == QEvent::KeyPress && static_cast<QKeyEvent *>(e)->key() == Qt::Key_Space &&
-	     !static_cast<QKeyEvent *>(e)->isAutoRepeat())) {
-		obj->setProperty("mfdPhysical", true);
+	switch (e->type()) {
+	case QEvent::MouseButtonPress:
+	case QEvent::MouseButtonDblClick:
+	case QEvent::MouseButtonRelease:
+		obj->setProperty("mfdSlid", false);
+		break;
+	case QEvent::MouseMove: {
+		auto *me = static_cast<QMouseEvent *>(e);
+		auto *w = qobject_cast<QWidget *>(obj);
+		if (w && (me->buttons() & Qt::LeftButton) && !w->rect().contains(me->position().toPoint())) {
+			obj->setProperty("mfdSlid", true);
+		}
+		break;
+	}
+	default:
+		break;
 	}
 	return QWidget::eventFilter(obj, e);
 }
@@ -714,10 +727,11 @@ void MfdDeskDock::keyPressEvent(QKeyEvent *e)
 	QWidget::keyPressEvent(e);
 }
 
-void MfdDeskDock::sayStatus(const QString &text)
+void MfdDeskDock::sayStatus(const QString &text, bool over_reason)
 {
 	status_->setText(text);
 	status_is_reason_ = false;
+	status_over_reason_ = over_reason;
 	status_age_.start();
 }
 
@@ -725,7 +739,7 @@ void MfdDeskDock::pressNote(uint8_t channel, uint8_t note, bool on, bool shift)
 {
 	enum mfd_desk_press_result r = mfd_engine_desk_press(eng_, channel, note, on, shift, nullptr);
 	if (on && r == MFD_DESK_REJECTED) {
-		sayStatus(mfdText("Desk.Ignored", "That button cannot act now (see its tooltip)."));
+		sayStatus(mfdText("Desk.Ignored", "That button cannot act now (see its tooltip)."), false);
 	}
 	refresh();
 }
@@ -757,7 +771,7 @@ void MfdDeskDock::pressPad(int row, int strip, bool on)
 		holding_[strip] = true;
 		hold_epoch_[strip] = epoch;
 	} else if (r == MFD_DESK_REJECTED) {
-		sayStatus(mfdText("Desk.Ignored", "That button cannot act now (see its tooltip)."));
+		sayStatus(mfdText("Desk.Ignored", "That button cannot act now (see its tooltip)."), false);
 	}
 	if (shift && !hold_row) {
 		shift_->setChecked(false); /* Shift is for the next pad only; a blackout keeps it until let go */
@@ -999,7 +1013,9 @@ void MfdDeskDock::refresh()
 	reconnect_->setVisible(lost);
 	setCss(status_,
 	       lost ? QStringLiteral("color: #fde68a; font-weight: bold;") : QStringLiteral("color: #94a3b8;"));
-	bool fresh_message = !status_is_reason_ && status_age_.isValid() && status_age_.elapsed() <= 4000;
+	bool fresh_message = !status_is_reason_ && status_over_reason_ && status_age_.isValid() &&
+			     status_age_.elapsed() <=
+				     4000;      /* "cannot act now" gives way to the reason that explains it */
 	if (!why.isEmpty() && !fresh_message) { /* a message just said (a speed asked for) stays its 4 s */
 		setLabel(status_, why);
 		status_is_reason_ = true;
