@@ -1,0 +1,15 @@
+#!/bin/sh
+# Midi Fadester package preinstall (0.9.0 and later). Visual Sidechain is part of Midi Fadester since 0.9.0: the old
+# standalone visual-sidechain.plugin would load next to it and register the same effects, so it is removed first.
+# The package installs into the current user's home (distribution: enable_currentUserHome), so $2 is that home; fall
+# back to $HOME. Never fails the install: a copy that cannot be removed is reported by Midi Fadester in OBS instead.
+target="${2:-$HOME}"
+[ -n "$target" ] || exit 0
+for plugins in "$target/Library/Application Support/obs-studio/plugins" "/Library/Application Support/obs-studio/plugins"; do
+  for name in visual-sidechain.plugin visual-sidechain.plugin.dSYM visual-sidechain; do
+    if [ -e "$plugins/$name" ]; then
+      rm -rf "$plugins/$name" 2>/dev/null && echo "Removed the old $plugins/$name" || echo "Could not remove $plugins/$name"
+    fi
+  done
+done
+exit 0

@@ -29,6 +29,8 @@ void vs_vendor_api_set_safety_walk_scheduler(vs_safety_walk_schedule_fn fn);
 bool vs_vendor_api_register(void);
 bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t *global_sh);
 void vs_vendor_api_reset(void);
+/* Unregisters the vendor's requests (module unload), then resets. */
+void vs_vendor_api_shutdown(void);
 void vs_vendor_api_on_tick(uint64_t video_frame_ts, float dt_sec, const struct vs_audio_frame *frame,
 			   bool is_primary_track);
 void vs_vendor_api_emit_safety_changed(void);

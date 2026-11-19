@@ -18,6 +18,7 @@ execute_process(
     --identifier '@MACOS_BUNDLEID@'
     --version '@CMAKE_PROJECT_VERSION@'
     --root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/package"
+    --scripts "@CMAKE_CURRENT_SOURCE_DIR@/cmake/macos/resources/scripts"
     "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/temp/@CMAKE_PROJECT_NAME@.pkg"
     COMMAND_ERROR_IS_FATAL ANY
   )

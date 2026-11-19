@@ -13,6 +13,7 @@
 #include "obs/mfd-tbar.h"
 #include "obs/mfd-vendor-api.h"
 #include "ui/mfd-settings-dialog.hpp"
+#include "vs/vs-module.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -47,6 +48,7 @@ bool obs_module_load(void)
 	}
 	mfd_tbar_init();
 	mfd_ui_init();
+	vs_module_load(); /* Visual Sidechain's effects, hotkeys and Tape Deck */
 
 	obs_log(LOG_INFO, "plugin loaded successfully: Midi Fadester %s (commit %s, built %s)", PLUGIN_VERSION,
 		PLUGIN_GIT_COMMIT, PLUGIN_BUILT_AT);
@@ -55,11 +57,13 @@ bool obs_module_load(void)
 
 void obs_module_post_load(void)
 {
+	vs_module_post_load(); /* the "visual-sidechain" vendor and procs */
 	mfd_vendor_api_register(mfd_engine_get());
 }
 
 void obs_module_unload(void)
 {
+	vs_module_unload(); /* first: its vendor, hotkeys, Tape Deck listener */
 	mfd_vendor_api_shutdown(mfd_engine_get());
 	mfd_ui_shutdown();
 	mfd_tbar_shutdown();

@@ -104,6 +104,20 @@ function(_setup_obs_studio)
   )
   message(STATUS "Build ${label} (Release - ${arch}) - done")
 
+  # macOS: OBS's two renderer modules as well, so Visual Sidechain's tests/vs/test-shader-gpu.c can build every built-in
+  # shader with the same GLSL and Metal translators OBS uses on a Mac. Neither is installed or shipped.
+  if(OS_MACOS)
+    message(STATUS "Build ${label} renderers (Release - ${arch})")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" --build build_${arch} --target libobs-opengl libobs-metal --config Release --parallel
+      WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
+      RESULT_VARIABLE _process_result
+      COMMAND_ERROR_IS_FATAL ANY
+      OUTPUT_QUIET
+    )
+    message(STATUS "Build ${label} renderers (Release - ${arch}) - done")
+  endif()
+
   message(STATUS "Install ${label} (${arch})")
   execute_process(
     COMMAND

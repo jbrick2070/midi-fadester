@@ -10,6 +10,7 @@
 #include "core/vj-pads.h"
 #include "obs/mfd-engine.h"
 #include "ui/mfd-text-qt.hpp"
+#include "vs/vs-module.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -973,7 +974,14 @@ void MfdDeskDock::refresh()
 		       QStringLiteral("background-color: %1; border-radius: 6px;")
 			       .arg(on ? lit : (k == 0 ? QStringLiteral("#3b2a12") : QStringLiteral("#1f2937"))));
 	}
-	if (view_.vs_panic_known && view_.vs_panic) {
+	if (const char *old_vs = vs_module_conflict_path()) {
+		/* the old standalone plugin is loaded: Visual Sidechain runs from that copy until it is removed */
+		setLabel(panic_, mfdFill(mfdText("Desk.VsConflict",
+						 "Remove the old Visual Sidechain plugin (%1) and restart OBS: "
+						 "Visual Sidechain is part of Midi Fadester now."),
+					 {QString::fromUtf8(old_vs)}));
+		setCss(panic_, QStringLiteral("color: #0b1120; background-color: #fbbf24; padding: 4px;"));
+	} else if (view_.vs_panic_known && view_.vs_panic) {
 		setLabel(panic_, mfdText("Desk.PanicOn", "PANIC \xE2\x80\x94 Visual Sidechain's effects are held safe. "
 							 "Press Panic again to restore."));
 		setCss(panic_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; padding: 4px;"));

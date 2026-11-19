@@ -17,6 +17,9 @@ if(NOT LOCALE_DIR)
   message(FATAL_ERROR "LOCALE_DIR is required")
 endif()
 
+# Visual Sidechain's key families (part of Midi Fadester since 0.9.0), checked by its own rules in tests/vs
+set(_vs_keys "^(AudioTap|Hotkey|Modulator|Panic|Shader|ShaderParam|Signal|Tubester|VisualSidechain)([.]|$)")
+
 # characters CMake lists treat specially stand in for themselves while lines are split; nothing here looks at them
 string(ASCII 1 _semicolon)
 string(ASCII 2 _open)
@@ -73,6 +76,12 @@ endfunction()
 # %1..%9 are taken out for the rest. The space flag is not refused ("50 % visible" is French and German typography);
 # a percent glued to a word, as in German "10%-ige", is refused: write "10 %-ige" or reword.
 function(check_printf name key text)
+  # Visual Sidechain's keys (part of Midi Fadester since 0.9.0) are printf formats on purpose (vs_text_format): its own
+  # checker (tests/vs/check-locale-files.cmake, test vs-check-locale-files) holds each translation to the English
+  # conversions instead
+  if(key MATCHES ${_vs_keys})
+    return()
+  endif()
   set(_length "(hh|h|ll|l|z|j|t|L|I64|I32|I)?")
   set(_conversion "[sdiufFeEgGxXocpnaASC]")
   string(REPLACE "%%" "" _raw "${text}")
@@ -151,7 +160,12 @@ foreach(_file IN LISTS _files)
     endif()
     placeholders("${EN_${_key}}" _english)
     placeholders("${TR_${_key}}" _translated)
-    if(NOT _english STREQUAL _translated)
+    # Visual Sidechain's keys: "%1" can be a Turkish "%100"; its own checker holds their conversions to the English
+    set(_vs_key FALSE)
+    if(_key MATCHES ${_vs_keys})
+      set(_vs_key TRUE)
+    endif()
+    if(NOT _english STREQUAL _translated AND NOT _vs_key)
       message(SEND_ERROR "${_name}: ${_key} has placeholders \"${_translated}\", English has \"${_english}\"")
     endif()
     check_printf("${_name}" "${_key}" "${TR_${_key}}")

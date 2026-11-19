@@ -368,8 +368,9 @@ void vs_vendor_handle_deck_command(obs_data_t *request_data, obs_data_t *respons
 	if (!op_item || obs_data_item_gettype(op_item) != OBS_DATA_STRING) {
 		if (op_item)
 			obs_data_item_release(&op_item);
-		fill_vendor_error(response_data,
-				  "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+		fill_vendor_error(
+			response_data,
+			"Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
 		return;
 	}
 	const char *op_raw = obs_data_item_get_string(op_item);
@@ -438,8 +439,9 @@ void vs_vendor_handle_deck_command(obs_data_t *request_data, obs_data_t *respons
 			raw_steps = -64;
 		arg = (int)raw_steps;
 	} else {
-		fill_vendor_error(response_data,
-				  "Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
+		fill_vendor_error(
+			response_data,
+			"Field 'op' must be one of: play_pause, cue_to_start, speed_set, speed_step, normal_speed.");
 		return;
 	}
 
@@ -536,8 +538,7 @@ bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t 
 
 	const bool r1 = register_one_vendor_request(ws_ph, vendor, "get_signals", vs_vendor_handle_get_signals, NULL);
 	const bool r2 = register_one_vendor_request(ws_ph, vendor, "get_decks", vs_vendor_handle_get_decks, NULL);
-	const bool r3 =
-		register_one_vendor_request(ws_ph, vendor, "deck_command", vs_vendor_handle_deck_command, NULL);
+	const bool r3 = register_one_vendor_request(ws_ph, vendor, "deck_command", vs_vendor_handle_deck_command, NULL);
 	const bool r4 = register_one_vendor_request(ws_ph, vendor, "get_safety", vs_vendor_handle_get_safety, NULL);
 	const bool r5 = register_one_vendor_request(ws_ph, vendor, "panic", vs_vendor_handle_panic, NULL);
 	const bool r6 = register_one_vendor_request(ws_ph, vendor, "restore", vs_vendor_handle_restore, NULL);
@@ -552,6 +553,24 @@ bool vs_vendor_api_register_with_ph(proc_handler_t *global_ph, signal_handler_t 
 		VS_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8, (int)r9,
 		(int)r10);
 	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && r10;
+}
+
+void vs_vendor_api_shutdown(void)
+{
+	static const char *const k_requests[] = {"get_signals", "get_decks",      "deck_command", "get_safety",
+						 "panic",       "restore",        "tap_tempo",    "set_bpm",
+						 "lock_bpm",    "resync_downbeat"};
+	if (g_ws_ph && g_vendor) {
+		for (size_t i = 0; i < sizeof(k_requests) / sizeof(k_requests[0]); ++i) {
+			struct calldata cd;
+			calldata_init(&cd);
+			calldata_set_ptr(&cd, "vendor", g_vendor);
+			calldata_set_string(&cd, "type", k_requests[i]);
+			proc_handler_call(g_ws_ph, "vendor_request_unregister", &cd);
+			calldata_free(&cd);
+		}
+	}
+	vs_vendor_api_reset();
 }
 
 bool vs_vendor_api_register(void)

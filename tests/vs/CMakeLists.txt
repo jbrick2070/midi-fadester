@@ -1,4 +1,4 @@
-# visual-sidechain CTest suite. Tests link OBS::libobs (util layer only) and run headless.
+# Visual Sidechain's CTest suite (part of Midi Fadester since 0.9.0; tests and targets are named vs-*). Tests link OBS::libobs (util layer only) and run headless.
 # Copyright (C) 2026 Jeffrey A. Brick
 # SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -34,12 +34,13 @@ foreach(_dir IN LISTS _test_dll_dirs)
   cmake_path(NATIVE_PATH _dir _native_dir)
   list(APPEND _test_environment "PATH=path_list_prepend:${_native_dir}")
 endforeach()
-message(STATUS "visual-sidechain tests: DLL search dirs: ${_test_dll_dirs}")
+message(STATUS "Visual Sidechain tests: DLL search dirs: ${_test_dll_dirs}")
 
 # One executable per suite: links only OBS::libobs and runs with the DLL directories above on its PATH
-function(visual_sidechain_add_test name)
+function(visual_sidechain_add_test short_name)
+  set(name "vs-${short_name}")
   add_executable(${name} ${ARGN})
-  target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src")
+  target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/src/vs" "${CMAKE_SOURCE_DIR}/src")
   target_compile_definitions(
     ${name}
     PRIVATE
@@ -51,7 +52,7 @@ function(visual_sidechain_add_test name)
   set_tests_properties(${name} PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 endfunction()
 
-set(_core "${CMAKE_SOURCE_DIR}/src/core")
+set(_core "${CMAKE_SOURCE_DIR}/src/vs/core")
 set(
   _analyzer_srcs
   "${_core}/analyzer.c"
@@ -77,7 +78,7 @@ visual_sidechain_add_test(
   test-text-format
   test-text-format.c
   "${_core}/text-format.c"
-  "${CMAKE_SOURCE_DIR}/src/obs/text.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/text.c"
 )
 visual_sidechain_add_test(
   test-fader-bridge
@@ -88,27 +89,27 @@ visual_sidechain_add_test(
 visual_sidechain_add_test(
   test-vendor-api
   test-vendor-api.c
-  "${CMAKE_SOURCE_DIR}/src/obs/vendor-api.c"
-  "${CMAKE_SOURCE_DIR}/src/tubester/speed.c"
-  "${CMAKE_SOURCE_DIR}/src/tubester/command.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/vendor-api.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/tubester/speed.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/tubester/command.c"
   ${_analyzer_srcs}
 )
-target_link_libraries(test-vendor-api PRIVATE plugin-support)
+target_link_libraries(vs-test-vendor-api PRIVATE plugin-support)
 visual_sidechain_add_test(
   test-modulator-properties
   test-modulator-properties.c
-  "${CMAKE_SOURCE_DIR}/src/obs/modulator-filter.c"
-  "${CMAKE_SOURCE_DIR}/src/obs/audio-tap.c"
-  "${CMAKE_SOURCE_DIR}/src/obs/text.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/modulator-filter.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/audio-tap.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/text.c"
   "${_core}/modulation.c"
   "${_core}/baseline.c"
   "${_core}/text-format.c"
   ${_analyzer_srcs}
 )
-target_link_libraries(test-modulator-properties PRIVATE plugin-support)
+target_link_libraries(vs-test-modulator-properties PRIVATE plugin-support)
 
 # Tubester's core (docs/tubester/REQUIREMENTS.md): pure C, no OBS running
-set(_tubester "${CMAKE_SOURCE_DIR}/src/tubester")
+set(_tubester "${CMAKE_SOURCE_DIR}/src/vs/tubester")
 visual_sidechain_add_test(test-tubester-core test-tubester-core.c "${_tubester}/tape-url.c" "${_tubester}/speed.c")
 visual_sidechain_add_test(
   test-tubester-link
@@ -121,7 +122,7 @@ visual_sidechain_add_test(
 # socket. Winsock and BCrypt on Windows, POSIX sockets and arc4random_buf on macOS (R-PLAT-9).
 visual_sidechain_add_test(test-tubester-http test-tubester-http.c "${_tubester}/http-parse.c" "${_tubester}/random.c")
 if(OS_WINDOWS)
-  target_link_libraries(test-tubester-http PRIVATE bcrypt)
+  target_link_libraries(vs-test-tubester-http PRIVATE bcrypt)
 endif()
 visual_sidechain_add_test(
   test-tubester-listener
@@ -131,7 +132,7 @@ visual_sidechain_add_test(
   "${_tubester}/deck-link.c"
 )
 if(OS_WINDOWS)
-  target_link_libraries(test-tubester-listener PRIVATE ws2_32)
+  target_link_libraries(vs-test-tubester-listener PRIVATE ws2_32)
 endif()
 
 # Every built-in shader built by OBS's own renderers (R-PLAT-9): on macOS, libobs-opengl (HLSL to GLSL) and
@@ -154,50 +155,50 @@ if(OS_MACOS)
     if(_found)
       list(APPEND _gpu_modules "${_found}")
     else()
-      message(WARNING "visual-sidechain tests: ${_module}.dylib not found; test-shader-gpu will not use it")
+      message(WARNING "Visual Sidechain tests: ${_module}.dylib not found; test-shader-gpu will not use it")
     endif()
   endforeach()
-  message(STATUS "visual-sidechain tests: renderer modules: ${_gpu_modules}")
+  message(STATUS "Visual Sidechain tests: renderer modules: ${_gpu_modules}")
   if(_gpu_modules)
     list(JOIN _gpu_modules "|" _gpu_modules_define)
     visual_sidechain_add_test(test-shader-gpu test-shader-gpu.c "${_core}/shader-parse.c")
-    target_compile_definitions(test-shader-gpu PRIVATE "VS_GPU_MODULES=\"${_gpu_modules_define}\"")
-    set_tests_properties(test-shader-gpu PROPERTIES SKIP_RETURN_CODE 77)
+    target_compile_definitions(vs-test-shader-gpu PRIVATE "VS_GPU_MODULES=\"${_gpu_modules_define}\"")
+    set_tests_properties(vs-test-shader-gpu PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()
 
 # Every locale key used in src/ is in en-US.ini (R-TST-4); the second test proves the check fails on a missing key
 add_test(
-  NAME check-locale-keys
+  NAME vs-check-locale-keys
   COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-keys.cmake"
 )
 add_test(
-  NAME check-locale-keys-fails-on-missing-key
+  NAME vs-check-locale-keys-fails-on-missing-key
   COMMAND
     "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
     "-DEXTRA_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/locale-missing-key.c" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-keys.cmake"
 )
 set_tests_properties(
-  check-locale-keys-fails-on-missing-key
+  vs-check-locale-keys-fails-on-missing-key
   PROPERTIES PASS_REGULAR_EXPRESSION "LocaleKeyThatIsNotInTheLocaleFile \\(.*locale-missing-key\\.c\\)"
 )
 add_test(
-  NAME check-locale-keys-fails-on-changed-english
+  NAME vs-check-locale-keys-fails-on-changed-english
   COMMAND
     "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
     "-DEXTRA_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/locale-format-mismatch.c" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-keys.cmake"
 )
 set_tests_properties(
-  check-locale-keys-fails-on-changed-english
+  vs-check-locale-keys-fails-on-changed-english
   PROPERTIES PASS_REGULAR_EXPRESSION "Shader\.Error\.FileNotFound: the English in .*locale-format-mismatch\.c"
 )
 
 # Every translation matches en-US.ini (R-I18N-4): the real files with the eleven required languages, a file full of
 # awkward characters must pass, and each kind of fault must be caught (check-locale-files-bad.cmake)
 add_test(
-  NAME check-locale-files
+  NAME vs-check-locale-files
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
     # the eleven languages of R-I18N-3: a missing file fails
@@ -205,7 +206,7 @@ add_test(
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
 )
 add_test(
-  NAME check-locale-files-passes-a-good-file
+  NAME vs-check-locale-files-passes-a-good-file
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/locale-good" "-DFORMAT_KEYS=Greeting" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
@@ -231,69 +232,69 @@ foreach(
   list(GET _parts 0 _name)
   list(GET _parts 1 _expected)
   add_test(
-    NAME check-locale-files-catches-${_name}
+    NAME vs-check-locale-files-catches-${_name}
     COMMAND
       "${CMAKE_COMMAND}" "-DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/locale-bad"
       "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/locale-bad-${_name}" -P
       "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files-bad.cmake"
   )
-  set_tests_properties(check-locale-files-catches-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
+  set_tests_properties(vs-check-locale-files-catches-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
 endforeach()
 
 # The built-in shaders' parameter texts are in en-US.ini word for word (R-I18N-1), so the translations follow them; the
 # second test proves a missing, a changed and an extra text are each caught
 add_test(
-  NAME check-shader-locale
+  NAME vs-check-shader-locale
   COMMAND
     "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_SOURCE_DIR}/data/shaders"
     "-DLOCALE_FILE=${CMAKE_SOURCE_DIR}/data/locale/en-US.ini" -P "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-locale.cmake"
 )
 add_test(
-  NAME check-shader-locale-catches-faults
+  NAME vs-check-shader-locale-catches-faults
   COMMAND
     "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-locale-bad"
     "-DLOCALE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-locale-bad/en-US.ini" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-locale.cmake"
 )
 set_tests_properties(
-  check-shader-locale-catches-faults
+  vs-check-shader-locale-catches-faults
   PROPERTIES PASS_REGULAR_EXPRESSION "shader locale: 1 missing, 1 different, 1 extra"
 )
 
 # Built-in shaders may only use raw transient uniforms for allow-listed spatial geometry, never colour/luminance (P0-1)
 add_test(
-  NAME check-shader-flash-safety
+  NAME vs-check-shader-flash-safety
   COMMAND
     "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_SOURCE_DIR}/data/shaders" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-flash-safety.cmake"
 )
 add_test(
-  NAME check-shader-flash-safety-catches-faults
+  NAME vs-check-shader-flash-safety-catches-faults
   COMMAND
     "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-flash-bad" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-flash-safety.cmake"
 )
 set_tests_properties(
-  check-shader-flash-safety-catches-faults
+  vs-check-shader-flash-safety-catches-faults
   PROPERTIES PASS_REGULAR_EXPRESSION "shader flash safety: .*ungated-flash\\.shader.*unguarded raw transient"
 )
 
 # Built-in shaders use no HLSL-only form that the Mac's GLSL and Metal compilers refuse (R-PLAT-9), checked on every
 # platform; the second test proves a cast and an attribute are each caught
 add_test(
-  NAME check-shader-portability
+  NAME vs-check-shader-portability
   COMMAND
     "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_SOURCE_DIR}/data/shaders" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-portability.cmake"
 )
 add_test(
-  NAME check-shader-portability-catches-faults
+  NAME vs-check-shader-portability-catches-faults
   COMMAND
     "${CMAKE_COMMAND}" "-DSHADER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shader-portability-bad" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-shader-portability.cmake"
 )
 set_tests_properties(
-  check-shader-portability-catches-faults
+  vs-check-shader-portability-catches-faults
   PROPERTIES
     PASS_REGULAR_EXPRESSION
       "hlsl-only\\.shader: C-style cast '\\(float\\)i'.*hlsl-only\\.shader: HLSL attribute '\\[unroll\\]'"
@@ -301,19 +302,19 @@ set_tests_properties(
 
 # Suite naming pass invariants across all locale files (P1-7)
 add_test(
-  NAME check-product-naming
+  NAME vs-check-product-naming
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-product-naming.cmake"
 )
 add_test(
-  NAME check-product-naming-catches-faults
+  NAME vs-check-product-naming-catches-faults
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/product-naming-bad" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-product-naming.cmake"
 )
 set_tests_properties(
-  check-product-naming-catches-faults
+  vs-check-product-naming-catches-faults
   PROPERTIES
     PASS_REGULAR_EXPRESSION
       "product naming check failed:.*contains legacy product name 'Stream Deck Fadester'.*Hotkey\\.Restore must say 'Restore visuals'"
