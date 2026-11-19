@@ -8,27 +8,47 @@
 
 /*
  * APC40 mkII VJ pads: the clip grid beside the faders, as a pure state machine (no OBS calls), so every press can be
- * tested. Only the clip pads, Shift and Stop All Clips are used: in the desk's default mode they are momentary, while
- * Solo latches and Track Select re-banks the Device knobs onto other MIDI channels (design review 2026-11-18).
+ * tested. Column k is strip k's source (in the scene on air when the strip follows it). Only controls that are
+ * momentary in the desk's default mode are used: Solo, Activator, Record Arm and A|B latch, and Track Select re-banks
+ * the Device knobs onto other MIDI channels (design reviews 2026-11-18).
  *
  *   Bottom row pad k (note k, ch 1)         blend punch: strip k's layer Normal <-> its punch mode (Screen at first)
  *   Shift + bottom row pad k                next punch mode for strip k (Lighten, Screen, Additive, Multiply,
  *                                           Subtract); a strip already blending switches to it at once
- *   Row 2 pad k (note 8 + k)                flash strip k's layer to 100 % while held
- *   Row 3 pad k (note 16 + k)               fade strip k out; again, fade it back in
+ *   Row 2 pad k (note 8 + k)                flash strip k's layer to 100 % while held; with Shift, blackout (0 %)
+ *   Row 3 pad k (note 16 + k)               fade strip k out; again, fade it back in; with Shift, snap 0 % / 100 %
+ *   Row 4 pad k (note 24 + k)               show or hide the source (its eye in OBS); with Shift, wake it: shown,
+ *                                           100 %, blend Normal
+ *   Row 5 pad k (note 32 + k)               restart the source's video; with Shift, pin or unpin the column (a
+ *                                           pinned column keeps its source when the scene on air changes)
+ *   Clip Stop k (note 52, ch k)             column clean: the source's blend back to Normal, flash or blackout let go
  *   Stop All Clips (note 81)                Clean / All FX Off, and every strip's blend back to Normal
  *   Shift (note 98) + Stop All Clips        fade every layer strip out
+ *
+ * Scenes (the first five in OBS's Scenes list, top first):
+ *
+ *   Scene Launch n (notes 82..86)           put scene n in Preview; pressed again (it is in Preview), take it with
+ *                                           the transition; with Shift, or outside Studio Mode, cut straight to it
+ *   Session (note 102)                      take Preview to Program; with Shift, cut
+ *   Cue Level (CC 47, relative)             transition length, 50 ms a detent; with Shift, the pad fade time
+ *
+ * Visual Sidechain: Record (note 93) panics or restores; Metronome (note 90) taps the tempo, with Shift locks or
+ * unlocks the BPM; Shift + Tap Tempo resyncs to the downbeat.
  *
  * The transport section sets the video speed through Fadester Companion and VJster (an OBS media source restarts when
  * its speed changes, so live video speed is VJster's): the engine adds the steps up and sends them as one vendor event.
  *
  *   Tempo knob (CC 13, relative)            each detent 0.05x faster or slower; with Shift held 0.25x
  *   Nudge - / Nudge + (notes 100 / 101)     0.25x slower / faster
- *   Tap Tempo (note 99)                     back to 1x
+ *   Tap Tempo (note 99)                     back to 1x (with Shift: Visual Sidechain downbeat resync)
  *   Play (note 91)                          play or pause the video
  *
  * Darken is left out of the punch modes: fading a Darken layer down turns its rectangle black.
- * It also says which colour each pad should show.
+ *
+ * It also says what each LED should show. Scenes: Program red, Preview green pulsing, other scenes dim blue, no scene
+ * off. Sources: dim white when idle, the blend colour when punched, bright white while flashing, amber when faded
+ * out, at 0 % or blacked out, blinking red when hidden, azure on row 5 when the column is pinned, off without a
+ * source. Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
  */
 
 #include <stdbool.h>
@@ -41,20 +61,29 @@ extern "C" {
 
 #define MFD_VJ_STRIPS 8U
 #define MFD_VJ_MAX_ACTIONS 8U
-#define MFD_VJ_MAX_LEDS 24U
+#define MFD_VJ_SCENES 5U
+#define MFD_VJ_MAX_LEDS 64U
 
 /* The APC40 mkII notes (Akai's protocol for the mkII), all on MIDI channel 1 (0 here). */
-#define MFD_VJ_NOTE_ROW_BLEND 0U /* bottom clip row: notes 0..7 */
-#define MFD_VJ_NOTE_ROW_FLASH 8U /* second row: notes 8..15 */
-#define MFD_VJ_NOTE_ROW_FADE 16U /* third row: notes 16..23 */
+#define MFD_VJ_NOTE_ROW_BLEND 0U    /* bottom clip row: notes 0..7 */
+#define MFD_VJ_NOTE_ROW_FLASH 8U    /* second row: notes 8..15 */
+#define MFD_VJ_NOTE_ROW_FADE 16U    /* third row: notes 16..23 */
+#define MFD_VJ_NOTE_ROW_SHOW 24U    /* fourth row: notes 24..31 */
+#define MFD_VJ_NOTE_ROW_RESTART 32U /* top row: notes 32..39 */
+#define MFD_VJ_NOTE_CLIP_STOP 52U   /* one per track: the track's MIDI channel (0..7) says which */
 #define MFD_VJ_NOTE_STOP_ALL 81U
+#define MFD_VJ_NOTE_SCENE 82U /* Scene Launch 1..5: notes 82..86, 82 at the top */
+#define MFD_VJ_NOTE_METRONOME 90U
+#define MFD_VJ_NOTE_RECORD 93U
+#define MFD_VJ_NOTE_SESSION 102U
 #define MFD_VJ_NOTE_SHIFT 98U
 #define MFD_VJ_NOTE_PLAY 91U
 #define MFD_VJ_NOTE_TAP_TEMPO 99U
 #define MFD_VJ_NOTE_NUDGE_DOWN 100U
 #define MFD_VJ_NOTE_NUDGE_UP 101U
-#define MFD_VJ_CC_TEMPO 13U   /* endless knob, relative: 1..63 is +n detents, 64..127 is n - 128 */
-#define MFD_VJ_COARSE_STEPS 5 /* Shift + Tempo and Nudge: 5 steps of 0.05x = 0.25x */
+#define MFD_VJ_CC_TEMPO 13U     /* endless knob, relative: 1..63 is +n detents, 64..127 is n - 128 */
+#define MFD_VJ_CC_CUE_LEVEL 47U /* endless knob, relative like Tempo */
+#define MFD_VJ_COARSE_STEPS 5   /* Shift + Tempo and Nudge: 5 steps of 0.05x = 0.25x */
 
 enum mfd_vj_blend {
 	MFD_VJ_BLEND_NORMAL = 0,
@@ -78,20 +107,47 @@ enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_SPEED_STEPS,  /* steps: video speed by steps x 0.05x (through Fadester Companion) */
 	MFD_VJ_ACTION_SPEED_RESET,  /* video back to 1x */
 	MFD_VJ_ACTION_PLAY_PAUSE,   /* play or pause the video */
+	MFD_VJ_ACTION_BLACKOUT_ON,  /* strip: hold the layer at 0 % (Shift + row 2) */
+	MFD_VJ_ACTION_BLACKOUT_OFF, /* strip */
+	MFD_VJ_ACTION_SNAP,         /* strip: straight to 0 % when it shows, else back up (Shift + row 3) */
+	MFD_VJ_ACTION_SHOW_TOGGLE,  /* strip: the source's eye on or off (row 4) */
+	MFD_VJ_ACTION_WAKE,         /* strip: shown, 100 %, blend Normal (Shift + row 4) */
+	MFD_VJ_ACTION_RESTART,      /* strip: restart the source's video (row 5) */
+	MFD_VJ_ACTION_PIN_TOGGLE,   /* strip: pin the column to its source, or let it follow the scene again */
+	MFD_VJ_ACTION_COLUMN_CLEAN, /* strip: blend Normal, flash and blackout let go (Clip Stop) */
+	MFD_VJ_ACTION_SCENE_PICK,   /* strip = scene 0..4: to Preview, or take it when it is in Preview */
+	MFD_VJ_ACTION_SCENE_CUT,    /* strip = scene 0..4: straight to Program */
+	MFD_VJ_ACTION_TAKE,         /* Preview to Program with the transition */
+	MFD_VJ_ACTION_CUT,          /* Preview to Program at once */
+	MFD_VJ_ACTION_VS_PANIC,     /* Visual Sidechain panic, or restore when it is panicked */
+	MFD_VJ_ACTION_VS_TAP,       /* Visual Sidechain tap tempo */
+	MFD_VJ_ACTION_VS_LOCK,      /* Visual Sidechain BPM lock on or off */
+	MFD_VJ_ACTION_VS_RESYNC,    /* Visual Sidechain downbeat resync */
+	MFD_VJ_ACTION_CUE_STEPS,    /* steps: transition length by steps x 50 ms */
+	MFD_VJ_ACTION_FADE_STEPS,   /* steps: pad fade time by steps x 50 ms */
+};
+
+/* What a Scene Launch button shows. */
+enum mfd_vj_scene_state {
+	MFD_VJ_SCENE_NONE = 0, /* no scene at this place in the list */
+	MFD_VJ_SCENE_IDLE,
+	MFD_VJ_SCENE_PREVIEW,
+	MFD_VJ_SCENE_PROGRAM,
 };
 
 struct mfd_vj_action {
 	enum mfd_vj_action_kind kind;
 	int strip; /* 0..7, -1 when the action is not about one strip */
 	enum mfd_vj_blend blend;
-	int steps; /* SPEED_STEPS only, signed */
+	int steps; /* SPEED_STEPS, CUE_STEPS and FADE_STEPS only, signed */
 };
 
 /* One LED: the note and channel the desk lights it by, and the velocity (an RGB pad's colour). */
 struct mfd_vj_led {
-	uint8_t channel;
+	uint8_t channel; /* an RGB pad's channel is its animation: 0 solid, 10 pulsing, 15 blinking (both at 1/2) */
 	uint8_t note;
 	uint8_t velocity;
+	bool rgb; /* a clip pad or Scene Launch pad: turned off (and its animation stopped) on channel 0 */
 };
 
 struct mfd_vj_pads {
@@ -99,13 +155,20 @@ struct mfd_vj_pads {
 	uint8_t flashing;  /* a bit per strip held at 100 % by its row-2 pad */
 	uint8_t faded;     /* a bit per strip a row-3 pad faded out */
 	uint8_t has_layer; /* a bit per strip that drives a layer the pads can act on */
+	uint8_t blackout;  /* a bit per strip held at 0 % by Shift + its row-2 pad */
+	uint8_t hidden;    /* a bit per strip whose source's eye is off in its scene */
+	uint8_t zero;      /* a bit per strip whose layer is at 0 % */
+	uint8_t pinned;    /* a bit per strip that keeps its source when the scene on air changes */
 	enum mfd_vj_blend current[MFD_VJ_STRIPS];
 	enum mfd_vj_blend punch[MFD_VJ_STRIPS];
+	enum mfd_vj_scene_state scene[MFD_VJ_SCENES];
+	bool vs_panic;   /* Visual Sidechain is panicked (Record blinks) */
+	bool take_ready; /* Studio Mode with another scene in Preview (Session lights) */
 };
 
 void mfd_vj_pads_init(struct mfd_vj_pads *p);
 
-/* Whether this note address is one of the VJ pads. */
+/* Whether this note address is one of the VJ pads or buttons. */
 bool mfd_vj_pads_is_button(uint8_t channel, uint8_t note);
 
 /*
@@ -118,25 +181,30 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 		      size_t max, size_t *out_count);
 
 /*
- * Feeds one control change. Returns false when it is not the Tempo knob (nothing changes). A detent (or a fast turn's
- * several) becomes one SPEED_STEPS action; Shift held makes each detent MFD_VJ_COARSE_STEPS steps.
+ * Feeds one control change. Returns false when it is not the Tempo or Cue Level knob (nothing changes). A Tempo detent
+ * (or a fast turn's several) becomes one SPEED_STEPS action; Shift held makes each detent MFD_VJ_COARSE_STEPS steps.
+ * Cue Level becomes CUE_STEPS, or FADE_STEPS with Shift held.
  */
 bool mfd_vj_pads_feed_cc(struct mfd_vj_pads *p, uint8_t channel, uint8_t cc, uint8_t value, struct mfd_vj_action *out,
 			 size_t max, size_t *out_count);
 
-/* Whether this control change address is the Tempo knob. */
+/* Whether this control change address is the Tempo or Cue Level knob. */
 bool mfd_vj_pads_is_knob(uint8_t channel, uint8_t cc);
 
-/* The MIDI controller went away: actions that let go of every held pad (flash off), Shift cleared. */
+/* The MIDI controller went away: actions that let go of every held pad (flash and blackout off), Shift cleared. */
 size_t mfd_vj_pads_release_all(struct mfd_vj_pads *p, struct mfd_vj_action *out, size_t max);
 
 void mfd_vj_pads_set_current(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend blend);
 void mfd_vj_pads_set_has_layer(struct mfd_vj_pads *p, int strip, bool has_layer);
 void mfd_vj_pads_set_faded(struct mfd_vj_pads *p, int strip, bool faded);
+void mfd_vj_pads_set_hidden(struct mfd_vj_pads *p, int strip, bool hidden);
+void mfd_vj_pads_set_zero(struct mfd_vj_pads *p, int strip, bool zero);
+void mfd_vj_pads_set_pinned(struct mfd_vj_pads *p, int strip, bool pinned);
+void mfd_vj_pads_set_scene(struct mfd_vj_pads *p, int scene, enum mfd_vj_scene_state state);
 /* A saved punch mode; Normal and Darken are not punch modes and are ignored. */
 void mfd_vj_pads_set_punch(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend blend);
 
-/* Every VJ pad LED and the colour it should show now (out holds at least MFD_VJ_MAX_LEDS). */
+/* Every VJ LED and what it should show now, always in the same order (out holds at least MFD_VJ_MAX_LEDS). */
 size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, size_t max);
 
 /* An RGB pad colour (APC40 mkII palette velocity) for a blend mode. */

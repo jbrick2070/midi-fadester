@@ -8,21 +8,34 @@
 
 #include <string.h>
 
-/* APC40 mkII RGB palette velocities. */
+/* APC40 mkII RGB palette velocities (Akai's protocol v1.2 palette). */
 #define COLOR_OFF 0U
 #define COLOR_WHITE_DIM 1U
 #define COLOR_WHITE 3U
 #define COLOR_RED 5U
-#define COLOR_GREEN_DIM 23U
+#define COLOR_AMBER 9U
+#define COLOR_GREEN 21U
+#define COLOR_AZURE 37U
+#define COLOR_BLUE_DIM 46U
+
+/* An RGB pad's MIDI channel picks its animation; the rate is the desk's slowest, 1/2 (a two-beat breath). */
+#define CH_SOLID 0U
+#define CH_PULSE 10U /* channel 11: pulsing, 1/2 */
+#define CH_BLINK 15U /* channel 16: blinking, 1/2 */
+
+/* A single-colour button (Clip Stop, Record, Session): 0 off, 1 on, 2 blinking. */
+#define LAMP_OFF 0U
+#define LAMP_ON 1U
+#define LAMP_BLINK 2U
 
 static const uint8_t k_blend_color[MFD_VJ_BLEND_COUNT] = {
-	3U,  /* Normal: white */
-	37U, /* Lighten: cyan */
-	13U, /* Screen: yellow */
-	9U,  /* Additive: orange */
-	53U, /* Multiply: purple */
-	57U, /* Subtract: magenta */
-	45U, /* Darken: blue */
+	COLOR_WHITE_DIM, /* Normal: dim white, an idle source */
+	37U,             /* Lighten: azure */
+	13U,             /* Screen: yellow */
+	9U,              /* Additive: orange */
+	53U,             /* Multiply: violet */
+	57U,             /* Subtract: magenta */
+	45U,             /* Darken: blue */
 };
 
 static const char *const k_blend_name[MFD_VJ_BLEND_COUNT] = {"Normal",   "Lighten",  "Screen", "Additive",
@@ -59,15 +72,20 @@ void mfd_vj_pads_init(struct mfd_vj_pads *p)
 
 bool mfd_vj_pads_is_button(uint8_t channel, uint8_t note)
 {
+	if (note == MFD_VJ_NOTE_CLIP_STOP) {
+		return channel < MFD_VJ_STRIPS;
+	}
 	return channel == 0U &&
-	       (note < MFD_VJ_NOTE_ROW_FADE + MFD_VJ_STRIPS || note == MFD_VJ_NOTE_STOP_ALL ||
-		note == MFD_VJ_NOTE_SHIFT || note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO ||
-		note == MFD_VJ_NOTE_NUDGE_DOWN || note == MFD_VJ_NOTE_NUDGE_UP);
+	       (note < MFD_VJ_NOTE_ROW_RESTART + MFD_VJ_STRIPS || note == MFD_VJ_NOTE_STOP_ALL ||
+		(note >= MFD_VJ_NOTE_SCENE && note < MFD_VJ_NOTE_SCENE + MFD_VJ_SCENES) || note == MFD_VJ_NOTE_SHIFT ||
+		note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO || note == MFD_VJ_NOTE_NUDGE_DOWN ||
+		note == MFD_VJ_NOTE_NUDGE_UP || note == MFD_VJ_NOTE_METRONOME || note == MFD_VJ_NOTE_RECORD ||
+		note == MFD_VJ_NOTE_SESSION);
 }
 
 bool mfd_vj_pads_is_knob(uint8_t channel, uint8_t cc)
 {
-	return channel == 0U && cc == MFD_VJ_CC_TEMPO;
+	return channel == 0U && (cc == MFD_VJ_CC_TEMPO || cc == MFD_VJ_CC_CUE_LEVEL);
 }
 
 static void push(struct mfd_vj_action *out, size_t max, size_t *count, enum mfd_vj_action_kind kind, int strip,
@@ -82,11 +100,81 @@ static void push(struct mfd_vj_action *out, size_t max, size_t *count, enum mfd_
 	}
 }
 
+static void push_steps(struct mfd_vj_action *out, size_t max, size_t *count, enum mfd_vj_action_kind kind, int steps)
+{
+	push(out, max, count, kind, -1, MFD_VJ_BLEND_NORMAL);
+	if (out && *count > 0 && out[*count - 1].kind == kind) {
+		out[*count - 1].steps = steps;
+	}
+}
+
 /* The punch mode after this one: Lighten, Screen, Additive, Multiply, Subtract, round again. */
 static enum mfd_vj_blend next_punch(enum mfd_vj_blend b)
 {
 	int n = (int)b + 1;
 	return n >= (int)MFD_VJ_BLEND_DARKEN ? MFD_VJ_BLEND_LIGHTEN : (enum mfd_vj_blend)n;
+}
+
+/* A bottom-row pad. A strip without a layer has nothing to blend, so nothing changes. */
+static void feed_blend(struct mfd_vj_pads *p, int s, struct mfd_vj_action *out, size_t max, size_t *count)
+{
+	if (!(p->has_layer & bit(s))) {
+		return;
+	}
+	if (p->shift) {
+		p->punch[s] = next_punch(p->punch[s]);
+		/* Only a strip already blending changes on air: from one blend mode to the next. */
+		if (p->current[s] != MFD_VJ_BLEND_NORMAL) {
+			p->current[s] = p->punch[s];
+			push(out, max, count, MFD_VJ_ACTION_SET_BLEND, s, p->punch[s]);
+		}
+	} else {
+		enum mfd_vj_blend b = p->current[s] != MFD_VJ_BLEND_NORMAL ? MFD_VJ_BLEND_NORMAL : p->punch[s];
+		p->current[s] = b;
+		push(out, max, count, MFD_VJ_ACTION_SET_BLEND, s, b);
+	}
+}
+
+/* A row-2 pad: flash while held, or with Shift a blackout while held. Its note off lets go of whichever it holds. */
+static void feed_hold(struct mfd_vj_pads *p, bool note_on, int s, struct mfd_vj_action *out, size_t max, size_t *count)
+{
+	if (note_on) {
+		if ((p->flashing | p->blackout) & bit(s)) {
+			return; /* already held: a second note on changes nothing */
+		}
+		if (p->shift) {
+			p->blackout |= bit(s);
+			push(out, max, count, MFD_VJ_ACTION_BLACKOUT_ON, s, MFD_VJ_BLEND_NORMAL);
+		} else {
+			p->flashing |= bit(s);
+			push(out, max, count, MFD_VJ_ACTION_FLASH_ON, s, MFD_VJ_BLEND_NORMAL);
+		}
+	} else if (p->flashing & bit(s)) {
+		p->flashing &= (uint8_t)~bit(s);
+		push(out, max, count, MFD_VJ_ACTION_FLASH_OFF, s, MFD_VJ_BLEND_NORMAL);
+	} else if (p->blackout & bit(s)) {
+		p->blackout &= (uint8_t)~bit(s);
+		push(out, max, count, MFD_VJ_ACTION_BLACKOUT_OFF, s, MFD_VJ_BLEND_NORMAL);
+	}
+}
+
+static void feed_transport(struct mfd_vj_pads *p, uint8_t note, struct mfd_vj_action *out, size_t max, size_t *count)
+{
+	if (note == MFD_VJ_NOTE_PLAY) {
+		push(out, max, count, MFD_VJ_ACTION_PLAY_PAUSE, -1, MFD_VJ_BLEND_NORMAL);
+	} else if (note == MFD_VJ_NOTE_TAP_TEMPO) {
+		push(out, max, count, p->shift ? MFD_VJ_ACTION_VS_RESYNC : MFD_VJ_ACTION_SPEED_RESET, -1,
+		     MFD_VJ_BLEND_NORMAL);
+	} else if (note == MFD_VJ_NOTE_NUDGE_DOWN || note == MFD_VJ_NOTE_NUDGE_UP) {
+		push_steps(out, max, count, MFD_VJ_ACTION_SPEED_STEPS,
+			   note == MFD_VJ_NOTE_NUDGE_UP ? MFD_VJ_COARSE_STEPS : -MFD_VJ_COARSE_STEPS);
+	} else if (note == MFD_VJ_NOTE_METRONOME) {
+		push(out, max, count, p->shift ? MFD_VJ_ACTION_VS_LOCK : MFD_VJ_ACTION_VS_TAP, -1, MFD_VJ_BLEND_NORMAL);
+	} else if (note == MFD_VJ_NOTE_RECORD) {
+		push(out, max, count, MFD_VJ_ACTION_VS_PANIC, -1, MFD_VJ_BLEND_NORMAL);
+	} else if (note == MFD_VJ_NOTE_SESSION) {
+		push(out, max, count, p->shift ? MFD_VJ_ACTION_CUT : MFD_VJ_ACTION_TAKE, -1, MFD_VJ_BLEND_NORMAL);
+	}
 }
 
 bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint8_t note, struct mfd_vj_action *out,
@@ -102,18 +190,20 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 
 	if (note == MFD_VJ_NOTE_SHIFT) {
 		p->shift = note_on;
+	} else if (note == MFD_VJ_NOTE_CLIP_STOP) {
+		if (note_on && (p->has_layer & bit((int)channel))) {
+			push(out, max, &count, MFD_VJ_ACTION_COLUMN_CLEAN, (int)channel, MFD_VJ_BLEND_NORMAL);
+		}
+	} else if (note >= MFD_VJ_NOTE_SCENE && note < MFD_VJ_NOTE_SCENE + MFD_VJ_SCENES) {
+		if (note_on) {
+			push(out, max, &count, p->shift ? MFD_VJ_ACTION_SCENE_CUT : MFD_VJ_ACTION_SCENE_PICK,
+			     (int)(note - MFD_VJ_NOTE_SCENE), MFD_VJ_BLEND_NORMAL);
+		}
 	} else if (note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO || note == MFD_VJ_NOTE_NUDGE_DOWN ||
-		   note == MFD_VJ_NOTE_NUDGE_UP) {
-		if (note_on && note == MFD_VJ_NOTE_PLAY) {
-			push(out, max, &count, MFD_VJ_ACTION_PLAY_PAUSE, -1, MFD_VJ_BLEND_NORMAL);
-		} else if (note_on && note == MFD_VJ_NOTE_TAP_TEMPO) {
-			push(out, max, &count, MFD_VJ_ACTION_SPEED_RESET, -1, MFD_VJ_BLEND_NORMAL);
-		} else if (note_on) {
-			push(out, max, &count, MFD_VJ_ACTION_SPEED_STEPS, -1, MFD_VJ_BLEND_NORMAL);
-			if (count > 0) {
-				out[count - 1].steps = note == MFD_VJ_NOTE_NUDGE_UP ? MFD_VJ_COARSE_STEPS
-										    : -MFD_VJ_COARSE_STEPS;
-			}
+		   note == MFD_VJ_NOTE_NUDGE_UP || note == MFD_VJ_NOTE_METRONOME || note == MFD_VJ_NOTE_RECORD ||
+		   note == MFD_VJ_NOTE_SESSION) {
+		if (note_on) {
+			feed_transport(p, note, out, max, &count);
 		}
 	} else if (note == MFD_VJ_NOTE_STOP_ALL) {
 		if (note_on) {
@@ -128,38 +218,28 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 				push(out, max, &count, MFD_VJ_ACTION_CLEAN, -1, MFD_VJ_BLEND_NORMAL);
 			}
 		}
-	} else if (note >= MFD_VJ_NOTE_ROW_FADE) {
-		if (note_on) {
-			push(out, max, &count, MFD_VJ_ACTION_FADE_TOGGLE, (int)(note - MFD_VJ_NOTE_ROW_FADE),
+	} else if (note >= MFD_VJ_NOTE_ROW_RESTART) {
+		int s = (int)(note - MFD_VJ_NOTE_ROW_RESTART);
+		if (note_on && p->shift) {
+			push(out, max, &count, MFD_VJ_ACTION_PIN_TOGGLE, s, MFD_VJ_BLEND_NORMAL);
+		} else if (note_on && (p->has_layer & bit(s))) {
+			push(out, max, &count, MFD_VJ_ACTION_RESTART, s, MFD_VJ_BLEND_NORMAL);
+		}
+	} else if (note >= MFD_VJ_NOTE_ROW_SHOW) {
+		int s = (int)(note - MFD_VJ_NOTE_ROW_SHOW);
+		if (note_on && (p->has_layer & bit(s))) {
+			push(out, max, &count, p->shift ? MFD_VJ_ACTION_WAKE : MFD_VJ_ACTION_SHOW_TOGGLE, s,
 			     MFD_VJ_BLEND_NORMAL);
 		}
+	} else if (note >= MFD_VJ_NOTE_ROW_FADE) {
+		if (note_on) {
+			push(out, max, &count, p->shift ? MFD_VJ_ACTION_SNAP : MFD_VJ_ACTION_FADE_TOGGLE,
+			     (int)(note - MFD_VJ_NOTE_ROW_FADE), MFD_VJ_BLEND_NORMAL);
+		}
 	} else if (note >= MFD_VJ_NOTE_ROW_FLASH) {
-		int s = (int)(note - MFD_VJ_NOTE_ROW_FLASH);
-		if (note_on && !(p->flashing & bit(s))) {
-			p->flashing |= bit(s);
-			push(out, max, &count, MFD_VJ_ACTION_FLASH_ON, s, MFD_VJ_BLEND_NORMAL);
-		} else if (!note_on && (p->flashing & bit(s))) {
-			p->flashing &= (uint8_t)~bit(s);
-			push(out, max, &count, MFD_VJ_ACTION_FLASH_OFF, s, MFD_VJ_BLEND_NORMAL);
-		}
+		feed_hold(p, note_on, (int)(note - MFD_VJ_NOTE_ROW_FLASH), out, max, &count);
 	} else if (note_on) {
-		/* A bottom-row pad. A strip without a layer has nothing to blend, so nothing changes. */
-		int s = (int)(note - MFD_VJ_NOTE_ROW_BLEND);
-		if (p->has_layer & bit(s)) {
-			if (p->shift) {
-				p->punch[s] = next_punch(p->punch[s]);
-				/* Only a strip already blending changes on air: from one blend mode to the next. */
-				if (p->current[s] != MFD_VJ_BLEND_NORMAL) {
-					p->current[s] = p->punch[s];
-					push(out, max, &count, MFD_VJ_ACTION_SET_BLEND, s, p->punch[s]);
-				}
-			} else {
-				enum mfd_vj_blend b = p->current[s] != MFD_VJ_BLEND_NORMAL ? MFD_VJ_BLEND_NORMAL
-											   : p->punch[s];
-				p->current[s] = b;
-				push(out, max, &count, MFD_VJ_ACTION_SET_BLEND, s, b);
-			}
-		}
+		feed_blend(p, (int)(note - MFD_VJ_NOTE_ROW_BLEND), out, max, &count);
 	}
 
 	if (out_count) {
@@ -181,9 +261,12 @@ bool mfd_vj_pads_feed_cc(struct mfd_vj_pads *p, uint8_t channel, uint8_t cc, uin
 	value &= 0x7FU;
 	int detents = value < 64U ? (int)value : (int)value - 128; /* 0 is no turn */
 	if (detents != 0) {
-		push(out, max, &count, MFD_VJ_ACTION_SPEED_STEPS, -1, MFD_VJ_BLEND_NORMAL);
-		if (count > 0) {
-			out[count - 1].steps = p->shift ? detents * MFD_VJ_COARSE_STEPS : detents;
+		if (cc == MFD_VJ_CC_CUE_LEVEL) {
+			push_steps(out, max, &count, p->shift ? MFD_VJ_ACTION_FADE_STEPS : MFD_VJ_ACTION_CUE_STEPS,
+				   detents);
+		} else {
+			push_steps(out, max, &count, MFD_VJ_ACTION_SPEED_STEPS,
+				   p->shift ? detents * MFD_VJ_COARSE_STEPS : detents);
 		}
 	}
 	if (out_count) {
@@ -202,8 +285,12 @@ size_t mfd_vj_pads_release_all(struct mfd_vj_pads *p, struct mfd_vj_action *out,
 		if (p->flashing & bit(i)) {
 			push(out, max, &count, MFD_VJ_ACTION_FLASH_OFF, i, MFD_VJ_BLEND_NORMAL);
 		}
+		if (p->blackout & bit(i)) {
+			push(out, max, &count, MFD_VJ_ACTION_BLACKOUT_OFF, i, MFD_VJ_BLEND_NORMAL);
+		}
 	}
 	p->flashing = 0;
+	p->blackout = 0;
 	p->shift = false;
 	return count;
 }
@@ -215,25 +302,54 @@ void mfd_vj_pads_set_current(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend
 	}
 }
 
+static void set_bit(uint8_t *bits, int strip, bool on)
+{
+	if (on) {
+		*bits |= bit(strip);
+	} else {
+		*bits &= (uint8_t)~bit(strip);
+	}
+}
+
 void mfd_vj_pads_set_has_layer(struct mfd_vj_pads *p, int strip, bool has_layer)
 {
 	if (p && valid_strip(strip)) {
-		if (has_layer) {
-			p->has_layer |= bit(strip);
-		} else {
-			p->has_layer &= (uint8_t)~bit(strip);
-		}
+		set_bit(&p->has_layer, strip, has_layer);
 	}
 }
 
 void mfd_vj_pads_set_faded(struct mfd_vj_pads *p, int strip, bool faded)
 {
 	if (p && valid_strip(strip)) {
-		if (faded) {
-			p->faded |= bit(strip);
-		} else {
-			p->faded &= (uint8_t)~bit(strip);
-		}
+		set_bit(&p->faded, strip, faded);
+	}
+}
+
+void mfd_vj_pads_set_hidden(struct mfd_vj_pads *p, int strip, bool hidden)
+{
+	if (p && valid_strip(strip)) {
+		set_bit(&p->hidden, strip, hidden);
+	}
+}
+
+void mfd_vj_pads_set_zero(struct mfd_vj_pads *p, int strip, bool zero)
+{
+	if (p && valid_strip(strip)) {
+		set_bit(&p->zero, strip, zero);
+	}
+}
+
+void mfd_vj_pads_set_pinned(struct mfd_vj_pads *p, int strip, bool pinned)
+{
+	if (p && valid_strip(strip)) {
+		set_bit(&p->pinned, strip, pinned);
+	}
+}
+
+void mfd_vj_pads_set_scene(struct mfd_vj_pads *p, int scene, enum mfd_vj_scene_state state)
+{
+	if (p && scene >= 0 && scene < (int)MFD_VJ_SCENES && (int)state >= 0 && state <= MFD_VJ_SCENE_PROGRAM) {
+		p->scene[scene] = state;
 	}
 }
 
@@ -244,14 +360,21 @@ void mfd_vj_pads_set_punch(struct mfd_vj_pads *p, int strip, enum mfd_vj_blend b
 	}
 }
 
-static void led(struct mfd_vj_led *out, size_t max, size_t *count, uint8_t note, uint8_t velocity)
+static void led(struct mfd_vj_led *out, size_t max, size_t *count, uint8_t channel, uint8_t note, uint8_t velocity,
+		bool rgb)
 {
 	if (*count < max) {
-		out[*count].channel = 0U;
+		out[*count].channel = channel;
 		out[*count].note = note;
 		out[*count].velocity = velocity;
+		out[*count].rgb = rgb;
 		++*count;
 	}
+}
+
+static void pad(struct mfd_vj_led *out, size_t max, size_t *count, uint8_t note, uint8_t velocity)
+{
+	led(out, max, count, CH_SOLID, note, velocity, true);
 }
 
 size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, size_t max)
@@ -261,19 +384,55 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		return 0;
 	}
 	for (int i = 0; i < (int)MFD_VJ_STRIPS; ++i) {
-		bool layer = (p->has_layer & bit(i)) != 0;
+		uint8_t b = bit(i);
+		bool layer = (p->has_layer & b) != 0;
 		/* Bottom row: the blend on air; with Shift held, the punch mode the pad would switch to. */
-		uint8_t blend = !layer ? COLOR_OFF : k_blend_color[p->shift ? p->punch[i] : p->current[i]];
-		led(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_BLEND + (unsigned)i), blend);
-		led(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_FLASH + (unsigned)i),
-		    !layer                   ? COLOR_OFF
-		    : (p->flashing & bit(i)) ? COLOR_WHITE
-					     : COLOR_WHITE_DIM);
-		led(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_FADE + (unsigned)i),
-		    !layer                ? COLOR_OFF
-		    : (p->faded & bit(i)) ? COLOR_RED
-					  : COLOR_GREEN_DIM);
+		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_BLEND + (unsigned)i),
+		    !layer ? COLOR_OFF : k_blend_color[p->shift ? p->punch[i] : p->current[i]]);
+		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_FLASH + (unsigned)i),
+		    !layer              ? COLOR_OFF
+		    : (p->flashing & b) ? COLOR_WHITE
+		    : (p->blackout & b) ? COLOR_AMBER
+					: COLOR_WHITE_DIM);
+		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_FADE + (unsigned)i),
+		    !layer           ? COLOR_OFF
+		    : (p->faded & b) ? COLOR_AMBER
+				     : COLOR_WHITE_DIM);
+		uint8_t show = (uint8_t)(MFD_VJ_NOTE_ROW_SHOW + (unsigned)i);
+		if (layer && (p->hidden & b)) {
+			led(out, max, &count, CH_BLINK, show, COLOR_RED, true);
+		} else {
+			pad(out, max, &count, show, !layer ? COLOR_OFF : (p->zero & b) ? COLOR_AMBER : COLOR_WHITE_DIM);
+		}
+		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_RESTART + (unsigned)i),
+		    !layer            ? COLOR_OFF
+		    : (p->pinned & b) ? COLOR_AZURE
+				      : COLOR_WHITE_DIM);
+		led(out, max, &count, (uint8_t)i, MFD_VJ_NOTE_CLIP_STOP,
+		    layer && (p->current[i] != MFD_VJ_BLEND_NORMAL || ((p->flashing | p->blackout) & b)) ? LAMP_ON
+													 : LAMP_OFF,
+		    false);
 	}
+	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
+		uint8_t note = (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)j);
+		switch (p->scene[j]) {
+		case MFD_VJ_SCENE_PROGRAM:
+			pad(out, max, &count, note, COLOR_RED);
+			break;
+		case MFD_VJ_SCENE_PREVIEW:
+			led(out, max, &count, CH_PULSE, note, COLOR_GREEN, true);
+			break;
+		case MFD_VJ_SCENE_IDLE:
+			pad(out, max, &count, note, COLOR_BLUE_DIM);
+			break;
+		case MFD_VJ_SCENE_NONE:
+		default:
+			pad(out, max, &count, note, COLOR_OFF);
+			break;
+		}
+	}
+	led(out, max, &count, 0U, MFD_VJ_NOTE_RECORD, p->vs_panic ? LAMP_BLINK : LAMP_OFF, false);
+	led(out, max, &count, 0U, MFD_VJ_NOTE_SESSION, p->take_ready ? LAMP_ON : LAMP_OFF, false);
 	return count;
 }
 

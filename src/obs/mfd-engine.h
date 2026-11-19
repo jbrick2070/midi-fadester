@@ -84,8 +84,12 @@ struct mfd_fader_slot {
 	enum mfd_crossfade_curve curve;
 	bool audio_follows_video;
 	bool invert;
-	/* APC40 mkII VJ buttons: Solo holds this layer at 100 %; fader moves update the value but not OBS meanwhile. */
+	/* APC40 mkII VJ buttons: a row-2 pad holds this layer at 100 % (flash) or, with Shift, 0 % (blackout); fader moves
+	 * update the value but not OBS meanwhile. */
 	bool vj_flash_held;
+	/* Filled from the scene on air (strips 1..8) and refilled when Program changes, until the user sets the strip or
+	 * pins it. Saved. */
+	bool auto_follow;
 
 	/* Cached filter property metadata (refreshed on signals, never on video tick) */
 	bool filter_prop_valid;
@@ -150,6 +154,7 @@ struct mfd_ui_scene_entry {
 	bool layers_truncated;
 	char layers[MFD_CATALOG_MAX_SCENE_LAYERS][MFD_SOURCE_NAME_MAX]; /* bottom -> top, deduplicated */
 	bool layer_has_audio[MFD_CATALOG_MAX_SCENE_LAYERS];
+	bool layer_has_video[MFD_CATALOG_MAX_SCENE_LAYERS];
 };
 
 struct mfd_ui_audio_entry {
@@ -318,6 +323,38 @@ typedef void (*mfd_filter_host_cb)(const char *source_name, bool is_scene, void 
 typedef void (*mfd_source_filter_cb)(const char *filter_name, const char *type_id, bool enabled, void *param);
 typedef void (*mfd_numeric_prop_cb)(const struct mfd_filter_prop_info *info, void *param);
 
+/* An APC40 desk command that has to run in OBS's UI thread, with no Midi Fadester or libobs lock held: queued by the
+ * pads and carried out by mfd_engine_flush_pending_ui_work. */
+enum mfd_vj_command_kind {
+	MFD_VJ_CMD_PREVIEW = 0, /* scene to Preview */
+	MFD_VJ_CMD_PROGRAM,     /* scene straight to Program */
+	MFD_VJ_CMD_TAKE,        /* Preview to Program with the transition */
+	MFD_VJ_CMD_SET_VISIBLE, /* scene, source, arg 1 shown / 0 hidden */
+	MFD_VJ_CMD_RESTART,     /* source: restart its video */
+	MFD_VJ_CMD_VS_PANIC,    /* Visual Sidechain panic, or restore when panicked */
+	MFD_VJ_CMD_VS_TAP,      /* Visual Sidechain tap tempo */
+	MFD_VJ_CMD_VS_LOCK,     /* Visual Sidechain BPM lock toggled */
+	MFD_VJ_CMD_VS_RESYNC,   /* Visual Sidechain downbeat resync */
+	MFD_VJ_CMD_TRANSITION,  /* arg: transition length change in ms */
+};
+
+#define MFD_VJ_CMD_MAX 16
+
+struct mfd_vj_command {
+	enum mfd_vj_command_kind kind;
+	int arg;
+	char scene[MFD_SOURCE_NAME_MAX];
+	char source[MFD_SOURCE_NAME_MAX];
+};
+
+/* What "Fill empty faders from the scene on air" did. */
+enum mfd_fill_status {
+	MFD_FILL_OK = 0,          /* at least one strip filled */
+	MFD_FILL_NO_SCENE,        /* no scene on air, or the scene asked for is not there */
+	MFD_FILL_NO_EMPTY_STRIPS, /* every strip 1..8 has a job of its own */
+	MFD_FILL_NO_VIDEO_LAYERS, /* the scene has no video source left for them */
+};
+
 struct mfd_scene_graph_ops {
 	bool (*source_exists)(const char *source_name, void *user_data);
 	bool (*scene_exists)(const char *scene_name, void *user_data);
@@ -358,6 +395,11 @@ struct mfd_scene_graph_ops {
 	/* Optional: read / write a scene item's blend mode (an obs_blending_type value; headless tests). */
 	bool (*get_blend_mode)(const char *scene_name, const char *source_name, int *out_mode, void *user_data);
 	bool (*set_blend_mode)(const char *scene_name, const char *source_name, int mode, void *user_data);
+
+	/* Optional: whether a scene item is shown (its eye; headless tests). */
+	bool (*get_item_visible)(const char *scene_name, const char *source_name, bool *out_visible, void *user_data);
+	/* Optional: carry out an APC40 desk command instead of calling OBS (headless tests). */
+	void (*run_vj_command)(const struct mfd_vj_command *cmd, void *user_data);
 };
 
 /*
@@ -443,6 +485,10 @@ struct mfd_engine {
 	bool cached_studio_mode;
 	char cached_preview_scene[MFD_SOURCE_NAME_MAX];
 	char cached_program_scene[MFD_SOURCE_NAME_MAX];
+	/* The first scenes in OBS's Scenes list, top first: the APC40's Scene Launch buttons. */
+	char cached_scenes[MFD_VJ_SCENES][MFD_SOURCE_NAME_MAX];
+	int cached_scene_count;
+	bool scene_list_override_set; /* tests: the list above is set by hand */
 
 	struct mfd_persisted_cal_entry cal_entries[MFD_MAX_CAL_ENTRIES];
 	struct mfd_fader_slot fader_slots[MFD_MAX_FADER_SLOTS];
@@ -475,12 +521,21 @@ struct mfd_engine {
 	bool vj_disabled;
 	int vj_fade_ms; /* 0 = the default, 1000 ms */
 	struct mfd_vj_pads vj;
-	float vj_fade_restore[MFD_VJ_STRIPS]; /* the level a Clip Stop faded out from */
-	uint8_t vj_led_sent[MFD_VJ_MAX_LEDS]; /* the velocity last sent per mfd_vj_pads_leds index; 255 = unknown */
-	bool vj_refresh_pending;              /* re-read the strips' layers and blend modes on the next tick */
-	bool vj_was_active;                   /* the pads applied last tick (to turn the lights off when they stop) */
-	bool vj_state_dirty;                  /* a pad changed something: tell obs-websocket clients once */
-	char vj_said[MFD_VJ_STRIPS][96];      /* the last "why not" line per strip, said once */
+	float vj_fade_restore[MFD_VJ_STRIPS];  /* the level a Clip Stop faded out from */
+	uint16_t vj_led_sent[MFD_VJ_MAX_LEDS]; /* channel << 8 | velocity last sent per LED index; 0xFFFF = unknown */
+	bool vj_refresh_pending;               /* re-read the strips' layers and blend modes on the next tick */
+	bool vj_was_active;                    /* the pads applied last tick (to turn the lights off when they stop) */
+	bool vj_state_dirty;                   /* a pad changed something: tell obs-websocket clients once */
+	char vj_said[MFD_VJ_STRIPS][96];       /* the last "why not" line per strip, said once */
+	unsigned vj_status_ticks;              /* counts ticks between re-reads of each source's eye */
+	uint8_t vj_eye_hold;                   /* strips whose eye change is queued: not re-read until it is done */
+	bool vj_autofill_done;                 /* the eight empty strips were filled from the scene once (saved) */
+	bool vj_autofill_pending;              /* try that fill from the UI thread (the desk opened, pads turned on) */
+	bool vj_follow_pending;                /* refill following strips from Program when the T-bar is at rest */
+	bool vs_panic;                         /* Visual Sidechain said it is panicked */
+	int vj_cue_ms;                         /* Cue Level turns not sent yet, in ms of transition length */
+	struct mfd_vj_command vj_cmds[MFD_VJ_CMD_MAX];
+	int vj_cmd_count;
 	/* APC40 video speed for Fadester Companion: Tempo / Nudge steps added up, and Tap Tempo / Play pressed, sent as
 	 * vendor events by mfd_engine_unlock after the lock is let go (steps at most every 50 ms). */
 #define MFD_VJ_SPEED_RESET_BIT 1U
@@ -519,10 +574,32 @@ void mfd_engine_discard_scene_graph_changes(struct mfd_engine *eng);
 void mfd_engine_connect_signal_callbacks_for_test(struct mfd_engine *eng, signal_handler_t *sh);
 /* Tests: run the frontend event callback (event is an enum obs_frontend_event). */
 void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event);
+/* Tests: write and read the strips as global.json and the scene collection keep them. */
+void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root);
+void mfd_engine_deserialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root);
 void mfd_engine_bump_slot_rev(struct mfd_engine *eng, int slot_index);
 
 void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, void *user_data);
+/* UI thread, no lock held: saves, MIDI health, APC40 desk commands, fills and refills from the scene on air. */
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng);
+
+/*
+ * Fills strips 1..8 from a scene's video sources, bottom source first (strip 1 = the lowest layer), as Show or hide a
+ * layer jobs that follow the scene on air. include_empty: strips with no job are filled too (the button, the first
+ * start); otherwise only strips already following are refilled. replace_layers: Show or hide a layer strips the user
+ * set follow too (the obs-websocket "all" option). Other strips the user set, or pinned, never change, and a source
+ * one of them uses is skipped. scene NULL = Program. No lock held. Returns the strips now on a source. The change is
+ * saved from the UI thread.
+ */
+int mfd_engine_fill_strips_from_scene(struct mfd_engine *eng, const char *scene, bool include_empty,
+				      bool replace_layers, enum mfd_fill_status *out_status, char *out_scene,
+				      size_t out_scene_size);
+/* Tests: the Scenes list as OBS would give it, top first. */
+void mfd_engine_set_test_scene_list(struct mfd_engine *eng, const char *const *names, int count);
+/* Whether strip 1..8 follows the scene on air. */
+bool mfd_engine_slot_follows_scene(struct mfd_engine *eng, int slot_index);
+/* Visual Sidechain's panic state as it answered (the Record LED). */
+void mfd_engine_set_vs_panic(struct mfd_engine *eng, bool panic);
 
 struct mfd_ui_catalog *mfd_ui_catalog_create(void);
 void mfd_ui_catalog_destroy(struct mfd_ui_catalog *cat);

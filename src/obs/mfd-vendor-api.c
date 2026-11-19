@@ -744,11 +744,25 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 	obs_data_set_array(response_data, "slots", arr);
 	obs_data_array_release(arr);
 
-	/* APC40 mkII VJ pads (additive, api_version stays 1): per strip 1..8 its blend, punch mode, flash and fade. */
+	/* APC40 mkII VJ pads (additive, api_version stays 1): per strip 1..8 its blend, punch mode, flash, fade, eye and
+	 * whether it follows the scene on air; the Scene Launch scenes; Visual Sidechain's panic as last answered. */
 	obs_data_t *vj = obs_data_create();
 	obs_data_set_bool(vj, "enabled", mfd_engine_vj_buttons_enabled(eng));
 	obs_data_set_int(vj, "fade_ms", mfd_engine_vj_fade_ms(eng));
 	obs_data_set_bool(vj, "lights", mfd_winmm_has_output(&eng->midi_dev));
+	obs_data_set_bool(vj, "vs_panic", eng->vs_panic);
+	static const char *const k_scene_state[] = {"none", "idle", "preview", "program"};
+	obs_data_array_t *scenes = obs_data_array_create();
+	for (int j = 0; j < eng->cached_scene_count && j < (int)MFD_VJ_SCENES; ++j) {
+		obs_data_t *sc = obs_data_create();
+		obs_data_set_string(sc, "name", eng->cached_scenes[j]);
+		int stv = (int)eng->vj.scene[j];
+		obs_data_set_string(sc, "state", (stv >= 0 && stv <= 3) ? k_scene_state[stv] : "none");
+		obs_data_array_push_back(scenes, sc);
+		obs_data_release(sc);
+	}
+	obs_data_set_array(vj, "scenes", scenes);
+	obs_data_array_release(scenes);
 	obs_data_array_t *strips = obs_data_array_create();
 	for (unsigned i = 0; i < MFD_VJ_STRIPS; ++i) {
 		obs_data_t *st = obs_data_create();
@@ -757,6 +771,9 @@ void mfd_vendor_handle_get_state(obs_data_t *request_data, obs_data_t *response_
 		obs_data_set_string(st, "punch", mfd_vj_blend_id(eng->vj.punch[i]));
 		obs_data_set_bool(st, "flashing", (eng->vj.flashing & (1U << i)) != 0);
 		obs_data_set_bool(st, "faded", (eng->vj.faded & (1U << i)) != 0);
+		obs_data_set_bool(st, "blackout", (eng->vj.blackout & (1U << i)) != 0);
+		obs_data_set_bool(st, "hidden", (eng->vj.hidden & (1U << i)) != 0);
+		obs_data_set_bool(st, "follows_scene", eng->fader_slots[i + 1U].auto_follow);
 		obs_data_array_push_back(strips, st);
 		obs_data_release(st);
 	}
@@ -1081,6 +1098,108 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 	mfd_engine_unlock(eng);
 }
 
+/* fill_from_scene {scene?, all?}: strips 1..8 that are empty (all: also Show or hide a layer strips) take the scene's
+ * video sources, bottom first, and follow the scene on air from then on. */
+void mfd_vendor_handle_fill_from_scene(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	struct mfd_engine *eng = (struct mfd_engine *)priv_data;
+	if (!eng) {
+		eng = mfd_engine_get();
+	}
+	if (!response_data || !eng || os_atomic_load_bool(&g_vendor_shutting_down)) {
+		return;
+	}
+	sync_scene_graph_for_request(eng, request_data);
+	const char *scene = NULL;
+	if (request_data && obs_data_has_user_value(request_data, "scene")) {
+		obs_data_item_t *it = obs_data_item_byname(request_data, "scene");
+		bool is_string = it && obs_data_item_gettype(it) == OBS_DATA_STRING;
+		obs_data_item_release(&it);
+		if (!is_string) {
+			obs_data_set_string(response_data, "error", "invalid_parameter");
+			obs_data_set_string(response_data, "comment", "Field 'scene' must be a scene name.");
+			return;
+		}
+		scene = obs_data_get_string(request_data, "scene");
+	}
+	bool all = request_data && obs_data_get_bool(request_data, "all");
+	enum mfd_fill_status st = MFD_FILL_NO_SCENE;
+	char used[MFD_SOURCE_NAME_MAX] = {0};
+	int n = mfd_engine_fill_strips_from_scene(eng, scene, true, all, &st, used, sizeof(used));
+	if (st == MFD_FILL_NO_SCENE) {
+		obs_data_set_string(response_data, "error", "scene_not_found");
+		obs_data_set_string(response_data, "comment",
+				    used[0] != '\0' ? "That scene is not in OBS." : "No scene is on air.");
+		return;
+	}
+	static const char *const k_status[] = {"ok", "no_scene", "no_empty_strips", "no_video_layers"};
+	obs_data_set_string(response_data, "scene", used);
+	obs_data_set_int(response_data, "filled", n);
+	obs_data_set_string(response_data, "status", k_status[(int)st]);
+}
+
+static obs_data_t *call_visual_sidechain(const char *request_type, obs_data_t *request_data)
+{
+	if (!obs_websocket_ensure_ph()) {
+		return NULL;
+	}
+	obs_data_t *outer = obs_data_create();
+	obs_data_set_string(outer, "vendorName", "visual-sidechain");
+	obs_data_set_string(outer, "requestType", request_type);
+	if (request_data) {
+		obs_data_set_obj(outer, "requestData", request_data);
+	}
+	struct obs_websocket_request_response *resp = obs_websocket_call_request("CallVendorRequest", outer);
+	obs_data_release(outer);
+	if (!resp) {
+		return NULL;
+	}
+	obs_data_t *parsed = NULL;
+	if (resp->status_code == 100 && resp->response_data) {
+		obs_data_t *full = obs_data_create_from_json(resp->response_data);
+		if (full) {
+			parsed = obs_data_get_obj(full, "responseData");
+			obs_data_release(full);
+		}
+	}
+	obs_websocket_request_response_free(resp);
+	return parsed;
+}
+
+bool mfd_vendor_call_visual_sidechain_desk(const char *request, bool *out_panic)
+{
+	if (!request) {
+		return false;
+	}
+	const char *req = request;
+	obs_data_t *rd = obs_data_create();
+	bool is_panic = strcmp(request, "panic") == 0;
+	if (is_panic || strcmp(request, "lock_bpm") == 0) {
+		/* Both toggle: ask how it is now first. */
+		obs_data_t *now = call_visual_sidechain(is_panic ? "get_safety" : "get_signals", NULL);
+		if (!now) {
+			obs_data_release(rd);
+			return false;
+		}
+		if (is_panic) {
+			req = obs_data_get_bool(now, "panic") ? "restore" : "panic";
+		} else {
+			obs_data_set_bool(rd, "locked", !obs_data_get_bool(now, "bpm_locked"));
+		}
+		obs_data_release(now);
+	}
+	obs_data_t *resp = call_visual_sidechain(req, rd);
+	obs_data_release(rd);
+	if (!resp) {
+		return false;
+	}
+	if (out_panic) {
+		*out_panic = strcmp(req, "panic") == 0;
+	}
+	obs_data_release(resp);
+	return true;
+}
+
 void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
 	struct mfd_engine *eng = (struct mfd_engine *)priv_data;
@@ -1120,6 +1239,9 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	bool has_bypass = obs_data_has_user_value(request_data, "bypass_at_zero");
 	bool has_cal_min = obs_data_has_user_value(request_data, "cal_min");
 	bool has_cal_max = obs_data_has_user_value(request_data, "cal_max");
+	if (has_target || has_scene || has_sa || has_sb) {
+		s->auto_follow = false; /* a job of the caller's own: it no longer follows the scene on air */
+	}
 	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
 	int new_cal_max = has_cal_max ? (int)obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
 
@@ -1487,11 +1609,13 @@ bool mfd_vendor_api_register(struct mfd_engine *eng)
 	bool r6 = obs_websocket_vendor_register_request(g_vendor, "load_profile", mfd_vendor_handle_load_profile, eng);
 	bool r7 = obs_websocket_vendor_register_request(g_vendor, "get_catalog", mfd_vendor_handle_get_catalog, eng);
 	bool r8 = obs_websocket_vendor_register_request(g_vendor, "reset_fx", mfd_vendor_handle_reset_fx, eng);
+	bool r9 = obs_websocket_vendor_register_request(g_vendor, "fill_from_scene", mfd_vendor_handle_fill_from_scene,
+							eng);
 
 	obs_log(LOG_INFO,
-		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d, get_catalog=%d, reset_fx=%d)",
-		MFD_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8);
-	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && mix_reply;
+		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d, get_catalog=%d, reset_fx=%d, fill_from_scene=%d)",
+		MFD_VENDOR_NAME, (int)r1, (int)r2, (int)r3, (int)r4, (int)r5, (int)r6, (int)r7, (int)r8, (int)r9);
+	return r1 && r2 && r3 && r4 && r5 && r6 && r7 && r8 && r9 && mix_reply;
 }
 
 void mfd_vendor_api_shutdown(struct mfd_engine *eng)
@@ -1508,6 +1632,7 @@ void mfd_vendor_api_shutdown(struct mfd_engine *eng)
 		obs_websocket_vendor_unregister_request(g_vendor, "load_profile");
 		obs_websocket_vendor_unregister_request(g_vendor, "get_catalog");
 		obs_websocket_vendor_unregister_request(g_vendor, "reset_fx");
+		obs_websocket_vendor_unregister_request(g_vendor, "fill_from_scene");
 	}
 	if (!eng) {
 		eng = mfd_engine_get();
