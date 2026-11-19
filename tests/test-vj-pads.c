@@ -277,6 +277,13 @@ int main(void)
 		REQUIRE(feed(&h, true, 0, 0) && n == 0 && h.punch[0] == MFD_VJ_BLEND_MULTIPLY);
 		REQUIRE(feed(&h, false, 0, 98));
 		REQUIRE(feed(&h, true, 0, 0) && acts[0].blend == MFD_VJ_BLEND_MULTIPLY);
+		/* Punched (Multiply) with Shift: straight on to the next mode on air, Subtract. */
+		REQUIRE(feed(&h, true, 0, 98));
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_SUBTRACT);
+		/* From Subtract the cycle wraps to Lighten (Screen, the home, is skipped on the way). */
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_LIGHTEN);
+		REQUIRE(feed(&h, true, 0, 0) && n == 1 && acts[0].blend == MFD_VJ_BLEND_ADDITIVE);
+		REQUIRE(feed(&h, false, 0, 98));
 		REQUIRE(feed(&h, true, 0, 81) && n == 1 && acts[0].kind == MFD_VJ_ACTION_CLEAN &&
 			h.current[0] == MFD_VJ_BLEND_SCREEN);
 	}

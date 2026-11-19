@@ -2998,7 +2998,26 @@ static int test_vj_fill_follow_and_desk(void)
 		vj_tap(eng, (uint8_t)col);
 		vj_tap(eng, 81);
 		REQUIRE(vj_blend_in("Scene B", "B2") == (int)OBS_BLEND_SCREEN);
+		/* Punched when the scene changes: the strip leaves B2 back on Screen, so B2's home is still Screen when a
+		 * strip takes it again. */
+		vj_tap(eng, (uint8_t)col);
+		REQUIRE(vj_blend_in("Scene B", "B2") != (int)OBS_BLEND_SCREEN);
+		vj_program(eng, "Scene B", "Scene A");
+		REQUIRE(vj_blend_in("Scene B", "B2") == (int)OBS_BLEND_SCREEN);
+		vj_program(eng, "Scene A", "Scene B");
+		REQUIRE(eng->vj.home[col] == MFD_VJ_BLEND_SCREEN);
+		/* Changed by mouse in OBS: that becomes the source's blend (no punch shown, Clean keeps it). */
+		home->mode = (int)OBS_BLEND_ADDITIVE;
+		mfd_engine_reevaluate_slots(eng, false);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->vj.home[col] == MFD_VJ_BLEND_ADDITIVE && eng->vj.current[col] == MFD_VJ_BLEND_ADDITIVE);
+		vj_tap(eng, 81);
+		REQUIRE(vj_blend_in("Scene B", "B2") == (int)OBS_BLEND_ADDITIVE);
 		home->mode = (int)OBS_BLEND_NORMAL;
+		mfd_engine_reevaluate_slots(eng, false);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->vj.home[col] == MFD_VJ_BLEND_NORMAL);
+		mfd_engine_flush_pending_ui_work(eng);
 	}
 
 	/* 12g. A layer added to the scene on air reaches the following strips; pinning an empty column does nothing. */
@@ -3007,6 +3026,9 @@ static int test_vj_fill_follow_and_desk(void)
 	mfd_engine_reevaluate_slots(eng, false); /* as the item_add signal does through the scene-graph queue */
 	mfd_engine_tick(eng, 0.016f);
 	mfd_engine_flush_pending_ui_work(eng);
+	mfd_engine_tick(eng, 0.016f);
+	mfd_engine_flush_pending_ui_work(eng); /* the one no-op refill after the change */
+	REQUIRE(!eng->vj_follow_pending);
 	{
 		bool b3 = false;
 		for (int k = 1; k <= 8; ++k) {

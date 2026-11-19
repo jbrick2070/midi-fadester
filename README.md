@@ -310,7 +310,8 @@ bright white while flashing, amber when faded out, blacked out or at 0 %, row 4 
 has no source. Clip Stop lights while its column has a blend punched; Session lights when a take is ready; Record
 blinks while Visual Sidechain is panicked. Pulses and blinks use the desk's slowest rate, and start from the dim colour, so a pad stays lit even if the desk does
 not animate it. A source's own blend is the one it had in the scene when its column took it: Clean never turns a shape on
-black into a black wall by forcing Normal.
+black into a black wall by forcing Normal. When a column moves to another source (a scene change, a layer added),
+the source it leaves goes back to its own blend, and a blend you change in OBS with the mouse becomes that source's own.
 
 The video speed controls drive VJster (the Chrome extension or the OBS video page) through
 [Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester) 0.1.15 or later with its controls and VJster on:

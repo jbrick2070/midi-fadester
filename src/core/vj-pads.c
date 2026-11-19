@@ -131,10 +131,13 @@ static void feed_blend(struct mfd_vj_pads *p, int s, struct mfd_vj_action *out, 
 		return;
 	}
 	if (p->shift) {
-		p->punch[s] = next_punch(p->punch[s]);
-		if (p->punch[s] == p->home[s]) {
-			p->punch[s] = next_punch(p->punch[s]); /* the home blend is not a punch for this source */
+		/* The next punch mode after the one on air (or the saved one at home); never the home blend itself. */
+		enum mfd_vj_blend from = p->current[s] != p->home[s] ? p->current[s] : p->punch[s];
+		enum mfd_vj_blend nb = next_punch(from);
+		if (nb == p->home[s]) {
+			nb = next_punch(nb);
 		}
+		p->punch[s] = nb;
 		/* Only a strip already punched changes on air: from one blend mode to the next. */
 		if (p->current[s] != p->home[s]) {
 			p->current[s] = p->punch[s];

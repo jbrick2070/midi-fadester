@@ -5442,6 +5442,7 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 			}
 		}
 		obs_log(LOG_INFO, "APC40 pads: Clean / All FX Off, every source back to its own blend");
+		eng->vj_refresh_pending = true; /* a source not found keeps its blend: show what OBS has */
 		eng->vj_state_dirty = true;
 		break;
 	case MFD_VJ_ACTION_FADE_ALL_OUT:
@@ -5640,17 +5641,22 @@ static void vj_refresh_locked(struct mfd_engine *eng)
 			eng->vj_home_key[i][0] = '\0';
 			continue;
 		}
+		const enum mfd_vj_blend before = eng->vj.current[i];
 		bool read = vj_blend_io(eng, scene, source, false, &b);
-		if (read) {
-			mfd_vj_pads_set_current(&eng->vj, i, b);
+		if (!read) {
+			continue; /* not readable now (loading, briefly missing): keep what is known, read it next time */
 		}
 		char key[sizeof(eng->vj_home_key[0])];
 		snprintf(key, sizeof(key), "%s\n%s", scene, source);
 		if (strcmp(key, eng->vj_home_key[i]) != 0) {
 			/* A new source on this strip: its blend in the scene now is the one Clean goes back to. */
 			snprintf(eng->vj_home_key[i], sizeof(eng->vj_home_key[i]), "%s", key);
-			mfd_vj_pads_set_home(&eng->vj, i, read ? b : MFD_VJ_BLEND_NORMAL);
+			mfd_vj_pads_set_home(&eng->vj, i, b);
+		} else if (b != before) {
+			/* Changed outside Midi Fadester (the mouse, a script): that is the source's blend now. */
+			mfd_vj_pads_set_home(&eng->vj, i, b);
 		}
+		mfd_vj_pads_set_current(&eng->vj, i, b);
 	}
 	vj_status_locked(eng, true);
 }
@@ -5902,6 +5908,20 @@ static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_sl
 
 /* Points strip k (1..8) at a source in a scene, or at nothing, as a strip that follows the scene. What the pads held
  * on the old source is let go first, so it is not left at 100 % or 0 %. Returns whether anything changed. */
+/* Strip s is about to leave its source: a punched blend goes back to the source's own, so the scene it stays in looks
+ * as it was built, and the next strip to take that source reads its true blend. */
+static void vj_leave_source_locked(struct mfd_engine *eng, int s)
+{
+	const char *scene = NULL, *source = NULL;
+	if (eng->vj.current[s] != eng->vj.home[s] && vj_strip_layer(eng, s, &scene, &source)) {
+		enum mfd_vj_blend b = eng->vj.home[s];
+		if (vj_blend_io(eng, scene, source, true, &b)) {
+			mfd_vj_pads_set_current(&eng->vj, s, b);
+		}
+	}
+	eng->vj_home_key[s][0] = '\0'; /* the next source's blend is read afresh */
+}
+
 static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *scene, const char *source)
 {
 	struct mfd_fader_slot *s = &eng->fader_slots[k];
@@ -5917,12 +5937,14 @@ static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *sce
 	if (source && s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
 	    strcmp(s->source_a_name, source) == 0) {
 		/* The same source in the scene now on air: its level, fade, flash and pick-up carry on. */
+		vj_leave_source_locked(eng, k - 1);
 		snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
 		s->resolved_scene_name[0] = '\0';
 		return true;
 	}
 	int strip = k - 1;
 	uint8_t b = (uint8_t)(1U << (unsigned)strip);
+	vj_leave_source_locked(eng, strip);
 	if (s->vj_flash_held) {
 		s->vj_flash_held = false;
 		apply_source_opacity_and_afv(eng, s->source_a_name, s->last_applied_val, s->audio_follows_video);
