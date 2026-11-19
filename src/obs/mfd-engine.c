@@ -3001,8 +3001,8 @@ static bool source_shows_video(obs_source_t *src)
 	const char *dot = file ? strrchr(file, '.') : NULL;
 	bool audio_file = false;
 	if (dot && settings && obs_data_get_bool(settings, "is_local_file")) {
-		static const char *const k_audio_ext[] = {".mp3", ".ogg", ".oga", ".opus", ".wav", ".flac",
-							  ".m4a", ".aac", ".wma", ".aif",  ".aiff"};
+		static const char *const k_audio_ext[] = {".mp3", ".mp2", ".ogg", ".oga", ".opus", ".wav", ".flac",
+							  ".m4a", ".aac", ".wma", ".aif", ".aiff", ".mka", ".weba"};
 		for (size_t i = 0U; i < sizeof(k_audio_ext) / sizeof(k_audio_ext[0]) && !audio_file; ++i) {
 			const char *e = k_audio_ext[i];
 			size_t n = strlen(e);
