@@ -23,6 +23,7 @@ Midi Fadester turns the faders and knobs on a MIDI controller into live controls
 - [FX & Knobs and Clean / All FX Off](#fx--knobs-and-clean--all-fx-off)
 - [Controllers](#controllers)
 - [How it feels](#how-it-feels)
+- [Visual Sidechain is built in](#visual-sidechain-is-built-in)
 - [Works with](#works-with)
 - [Control it from scripts and other programs](#control-it-from-scripts-and-other-programs)
 - [Where settings live](#where-settings-live)
@@ -48,7 +49,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.8.0 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.9.0 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -57,7 +58,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.8.0, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 0.9.0, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -179,10 +180,15 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 - **Calibration.** Each control starts with the full MIDI range and widens it whenever it sends a value beyond anything seen before, saved per layout and control. A fader that stops at 125 instead of 127 still reaches 100 %, because the top 3 % of the travel counts as the end.
 - **Resolution.** Ordinary 7-bit controls, high-resolution 14-bit CC pairs and pitch bend are all accepted. A binding remembers the MIDI channel as well as the number: the APC40 mkII's eight faders all send CC 7 and differ only by channel, and that works.
 
+## Visual Sidechain is built in
+
+From 0.9.0, Midi Fadester includes **Visual Sidechain**, which used to be a separate plugin: video effects that move with your music, an Audio Modulator that moves your other filters' settings to the beat, Panic and Restore visuals hotkeys with a 3 flashes per second limit, and the **Tape Deck**, which plays a video file at 25% to 800% speed. Add them from a source's **Filters** as **`Visual Sidechain: Shader Filter`**, **`Visual Sidechain: Audio Modulator`** and **`Visual Sidechain: Tape Deck`**. Every fader and FX knob can drive their settings. Its guide is **[docs/VISUAL-SIDECHAIN.md](docs/VISUAL-SIDECHAIN.md)**.
+
+If you had the separate Visual Sidechain plugin, close OBS and run the Midi Fadester installer: it removes the old plugin, and your filters, decks, hotkeys and Stream Deck keys keep working (same names, same obs-websocket vendor `visual-sidechain`). If an old copy is still found, Visual Sidechain stays off and the Fadester Desk dock names the file to remove.
+
 ## Works with
 
 - **[Fadester for OBS](https://github.com/jbrick2070/streamdeck-fadester)**, a plugin for the Stream Deck and Stream Deck +. Its dials and keys move the same slots: a dial nudges a fader or an FX knob, a key starts a timed fade or presses Clean / All FX Off, and the dial screens show the live values. It talks to Midi Fadester through the obs-websocket server, not MIDI, so it never takes the MIDI port; turn the server on in OBS (**Tools → WebSocket Server Settings**); the Stream Deck plugin fills in the password OBS saved on the same computer. The Midi Fadester dialog shows a *Use a Stream Deck?* card until you click **Hide**, and keeps a **Fadester for OBS...** button on the Strips screen. Midi Fadester works without a Stream Deck, and the FX bank and Clean / All FX Off need Midi Fadester 0.6.0 or later.
-- **[Visual Sidechain](https://github.com/jbrick2070/visual-sidechain)**, an audio-reactive filter suite. An FX knob can trim its reactivity amount like any other filter setting, and Visual Sidechain can read the fader values inside OBS to drive its shaders.
 
 ## Control it from scripts and other programs
 
@@ -358,7 +364,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.8.0** (November 2026) is the current release. It adds the **Fadester Desk** dock (Docks → Fadester Desk): the APC40 mkII on screen, with the scene buttons, the pad grid in the desk's own colours, Clip Stop, the faders and Visual Sidechain's tempo, beat, lock and panic, and buttons that act like the desk's (see [APC40 mkII pads](#apc40-mkii-pads)). Designed with reviews by Codex and Antigravity. Visual Sidechain moves to 0.8.0 with it (no changes there).
+**0.9.0** (November 2026) is the current release. **Visual Sidechain is now part of Midi Fadester**: one plugin, one install, one version. The installer removes the old separate Visual Sidechain plugin (on Windows its own uninstaller runs; the Mac package deletes the old `visual-sidechain.plugin`). Filter names, hotkeys, saved scenes and the `visual-sidechain` obs-websocket vendor are unchanged, so Fadester for OBS and the Companion keep working. If the old plugin is still found, Visual Sidechain stays off and the Fadester Desk dock shows which file to remove. See [Visual Sidechain is built in](#visual-sidechain-is-built-in).
+
+**0.8.0** (November 2026). It adds the **Fadester Desk** dock (Docks → Fadester Desk): the APC40 mkII on screen, with the scene buttons, the pad grid in the desk's own colours, Clip Stop, the faders and Visual Sidechain's tempo, beat, lock and panic, and buttons that act like the desk's (see [APC40 mkII pads](#apc40-mkii-pads)). Designed with reviews by Codex and Antigravity. Visual Sidechain moves to 0.8.0 with it (no changes there).
 
 **0.7.8** (November 2026). From two second-opinion code reviews of the APC40 desk: with Studio Mode's Duplicate Scene option, blend and show / hide now reach the copy of the scene on air, not only the scene in Preview; two Scene Launch presses faster than OBS answers no longer put the wrong scene on air (a take goes ahead only for the scene it meant); a punched blend survives quitting OBS (saved with the scene collection and put back at the next start); a blend changed with the mouse is read at the next press, so Clip Stop and Clean keep it; Clean writes only columns you punched; renaming a punched source keeps its own blend; changing a fader's source while its blackout is held lets go of the old source; a fill from a named scene is not put straight back to the scene on air; Record lights from Visual Sidechain's panic state (also when a hotkey set it) and always gets through a burst of presses. Visual Sidechain 0.7.8 fixes a possible freeze when a scene collection is saved with an Audio Modulator running.
 
@@ -401,6 +409,7 @@ The built plugin lands in `build_x64\rundir\RelWithDebInfo\midi-fadester\`; copy
 - [PLAN.md](PLAN.md): the OBS 33 and APC40 mkII audit, the architecture, the phased plan and the risk register.
 - [PLAN-UI.md](PLAN-UI.md): the Strips screen, the Set up sheet and the controller picture.
 - [PLAN-FX.md](PLAN-FX.md): the FX bank, filter settings, Clean / All FX Off and the cross-plugin rollout.
+- [docs/VISUAL-SIDECHAIN.md](docs/VISUAL-SIDECHAIN.md): Visual Sidechain's guide (shaders, Audio Modulator, Panic, Tape Deck, its vendor API).
 - [TESTING.md](TESTING.md): the test suites and the screenshot gallery of every dialog state.
 - [API-CONTRACT.md](https://github.com/jbrick2070/streamdeck-fadester/blob/main/API-CONTRACT.md): the vendor API, kept in the Stream Deck repository because both sides build to it.
 

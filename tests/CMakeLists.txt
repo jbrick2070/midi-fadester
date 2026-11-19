@@ -152,6 +152,7 @@ add_executable(
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.cpp"
+  "${CMAKE_SOURCE_DIR}/src/vs/vs-conflict.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
@@ -238,6 +239,7 @@ set(
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.hpp"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.cpp"
+  "${CMAKE_SOURCE_DIR}/src/vs/vs-conflict.c"
   "${CMAKE_SOURCE_DIR}/src/core/apc40-palette.h"
 )
 
@@ -334,3 +336,6 @@ foreach(
   )
   set_tests_properties(check-locale-files-catches-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
 endforeach()
+
+# Visual Sidechain's suite (part of Midi Fadester since 0.9.0)
+add_subdirectory(vs)
