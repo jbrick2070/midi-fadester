@@ -70,7 +70,7 @@ Moving physical Crossfader past the `6%` bottom-rail deadband transitions into `
 
 Each strip reports the highest-priority actionable sentence without abbreviations:
 - **Crossfader:** Completed throw parked at target rail (`"At end."`, emerald bar).
-- **Fader 1:** Soft Takeover waiting for physical fader (`48%`) to move down to OBS's target (`12%`) — amber bar, hollow target marker, downward arrow glyph, and `"Move down to 12% to pick up"`.
+- **Fader 1:** Soft Takeover waiting for physical fader (`48%`) to move down to OBS's target (`12%`) — amber bar, hollow target marker, downward arrow glyph, and `"Move the fader down to 12% to start."`.
 - **Strip 4:** Missing layer in scene (`"Color 2 is not in Red"` + `[Fix]`).
 - **Strip 5:** Deleted scene (`"Scene OldScene was removed"` + `[Fix]`).
 - **Strip 6:** Video-only source assigned to Volume (`"Color has no audio"` + `[Fix]`).

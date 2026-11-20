@@ -5113,10 +5113,46 @@ int main(void)
 		push_midi_cc(&eng, 0, 16, 64);
 		mfd_engine_tick(&eng, 0.016f);
 		REQUIRE(eng.midi_parser.cc_has_msb[0][16]);
+		/* QA-08: a file the user picks in Import never brings the first-run layout or the dock's first show with it.
+		 * An old export has neither key: both count as done. */
+		const bool was_layout_applied = eng.first_run_layout_applied;
+		const bool was_dock_shown = eng.desk_dock_shown;
+		eng.first_run_layout_applied = false;
+		eng.desk_dock_shown = false;
 		REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_same_json));
 		remove(tmp_same_json);
 		REQUIRE(eng.midi_dev.is_open && eng.midi_dev.error_kind == MFD_WINMM_OK);
 		REQUIRE(!eng.midi_parser.cc_has_msb[0][16]);
+		REQUIRE(eng.first_run_layout_applied);
+		REQUIRE(eng.desk_dock_shown);
+		{
+			/* An export from a new install that had not seen its APC40 yet says "not yet" twice: the layout is
+			 * still never applied after Import (Master keeps what the file gave it), and a dock this
+			 * installation already showed stays shown. */
+			const char *tmp_fresh_json = "test-mfd-import-fresh-export.json";
+			FILE *fresh_fp = fopen(tmp_fresh_json, "wb");
+			REQUIRE(fresh_fp != NULL);
+			fputs("{\"device_name\":\"Fadester Test Port B\",\"active_profile\":\"apc40mk2\","
+			      "\"first_run_offer_dismissed\":false,\"first_run_layout_applied\":false,"
+			      "\"desk_dock_shown\":false}\n",
+			      fresh_fp);
+			fclose(fresh_fp);
+			REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_fresh_json));
+			REQUIRE(eng.first_run_layout_applied);
+			REQUIRE(eng.desk_dock_shown);
+			const enum mfd_target_type master_job = eng.fader_slots[9].target_type;
+			const uint64_t master_rev = eng.slot_config_rev[9];
+			mfd_engine_apply_first_run_layout(&eng);
+			REQUIRE(eng.fader_slots[9].target_type == master_job);
+			REQUIRE(eng.slot_config_rev[9] == master_rev);
+			/* the same file read as the plugin's own settings (OBS starting) keeps what it says */
+			REQUIRE(mfd_engine_import_config_file(&eng, tmp_fresh_json));
+			REQUIRE(!eng.first_run_layout_applied);
+			REQUIRE(!eng.desk_dock_shown);
+			remove(tmp_fresh_json);
+		}
+		eng.first_run_layout_applied = was_layout_applied;
+		eng.desk_dock_shown = was_dock_shown;
 
 		snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "%s", saved_dev);
 		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);

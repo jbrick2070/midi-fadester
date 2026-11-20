@@ -9037,9 +9037,14 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		/* Upgrading from 0.1.x global.json without first_run_offer_dismissed: never prompt to reset */
 		eng->first_run_offer_dismissed = true;
 	}
-	if (obs_data_has_user_value(data, "first_run_layout_applied")) {
+	if (user_file) {
+		/* A file the user picked in Import is a set-up they chose: whatever it says (an export from a new install
+		 * says "not yet"), the first-run layout is never applied on top of it, so Import never gives Master a job
+		 * by surprise. */
+		eng->first_run_layout_applied = true;
+	} else if (obs_data_has_user_value(data, "first_run_layout_applied")) {
 		eng->first_run_layout_applied = obs_data_get_bool(data, "first_run_layout_applied");
-	} else if (!user_file) {
+	} else {
 		/* The plugin's own settings from before this key: this is not a first run, whatever the old offer's
 		 * state. An update never gives Master a job by itself, in the middle of someone's show set-up; the
 		 * notice still shows while the old offer was never answered, and leaves Master out of its sentence. */
@@ -9061,9 +9066,15 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		 * an update never takes a control away from a dock in use. A new install has no file and starts without. */
 		eng->desk_video_controls = true;
 	}
-	if (obs_data_has_user_value(data, "desk_dock_shown")) {
+	if (user_file) {
+		/* Import never opens the dock by surprise: a file without the key counts as shown, and a file that says
+		 * "not shown yet" does not undo a dock this installation has already shown. */
+		if (!obs_data_has_user_value(data, "desk_dock_shown") || obs_data_get_bool(data, "desk_dock_shown")) {
+			eng->desk_dock_shown = true;
+		}
+	} else if (obs_data_has_user_value(data, "desk_dock_shown")) {
 		eng->desk_dock_shown = obs_data_get_bool(data, "desk_dock_shown");
-	} else if (!user_file) {
+	} else {
 		/* settings from before this key: the user has lived with the dock where it is; never open it for them */
 		eng->desk_dock_shown = true;
 	}
