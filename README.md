@@ -317,8 +317,7 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 dim white at their own blend, the blend colour when punched (Lighten azure, Screen yellow, Additive orange, Multiply violet, Subtract magenta),
 bright white while flashing, amber when faded out, blacked out or at 0 %, row 4 blinking dim / bright red when the source is hidden
 (pressing its pads would change nothing you can see), rows 1 to 4 dark when the column has no source. Row 5 is always
-green: eight shades from dark (the longest fade) to bright (the shortest) while a scene waits in Preview, all dim
-otherwise. Clip Stop lights while its column has a blend punched, and while Shift is held it shows the pinned columns
+green: eight shades from light (the longest fade, on the left) to dark (the shortest, on the right). Clip Stop lights while its column has a blend punched, and while Shift is held it shows the pinned columns
 instead; Session blinks while Program is blacked out; Record
 blinks while Visual Sidechain is panicked. Pulses and blinks use the desk's slowest rate, and start from the dim colour, so a pad stays lit even if the desk does
 not animate it. A source's own blend is the one it had in the scene when its column took it: Clean never turns a shape on

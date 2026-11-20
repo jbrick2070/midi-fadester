@@ -20,9 +20,9 @@
 #define COLOR_AZURE 37U
 #define COLOR_BLUE_DIM 46U
 
-/* The top row's scene fades, longest to shortest: palette greens from dark to bright (white-lifted at the short end so
+/* The top row's scene fades, longest to shortest: palette greens from light to dark (white-lifted at the long end so
  * all eight read as different on the desk). */
-static const uint8_t k_fade_green[MFD_VJ_STRIPS] = {23U, 123U, 22U, 76U, 122U, 21U, 20U, 114U};
+static const uint8_t k_fade_green[MFD_VJ_STRIPS] = {114U, 20U, 21U, 122U, 76U, 22U, 123U, 23U};
 
 /* An RGB pad's MIDI channel picks its animation; the rate is the desk's slowest, 1/2 (a two-beat breath). */
 #define CH_SOLID 0U
@@ -440,9 +440,8 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		} else {
 			pad(out, max, &count, show, !layer ? COLOR_OFF : (p->zero & b) ? COLOR_AMBER : COLOR_WHITE_DIM);
 		}
-		/* scene fades: eight greens, darkest (longest) to brightest, while a scene waits in Preview; dim otherwise */
-		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_RESTART + (unsigned)i),
-		    p->take_ready ? k_fade_green[i] : k_fade_green[0]);
+		/* scene fades: eight greens, always, lightest (longest) to darkest (shortest) */
+		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_RESTART + (unsigned)i), k_fade_green[i]);
 		led(out, max, &count, (uint8_t)i, MFD_VJ_NOTE_CLIP_STOP,
 		    p->shift ? ((p->pinned & b) ? LAMP_ON : LAMP_OFF) /* Shift held: which columns are pinned */
 		    : layer && (p->current[i] != p->home[i] || ((p->flashing | p->blackout) & b)) ? LAMP_ON

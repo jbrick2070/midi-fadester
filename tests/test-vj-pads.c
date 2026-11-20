@@ -204,10 +204,10 @@ int main(void)
 	/* 12. Row 4 lights (hidden blinks red on channel 16, 0 % is amber), the scene-fade greens, pinned columns on
 	 * Clip Stop while Shift is held. */
 	uint8_t ch = 0;
-	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 23U && led_velocity(&q, 39) == 23U);
-	q.take_ready = true; /* a scene waits in Preview: the row lights in its eight greens, dark to bright */
-	REQUIRE(led_velocity(&q, 32) == 23U && led_velocity(&q, 33) == 123U && led_velocity(&q, 37) == 21U &&
-		led_velocity(&q, 39) == 114U);
+	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 114U && led_velocity(&q, 39) == 23U);
+	q.take_ready = true; /* the row shows its eight greens, light to dark, whether or not a scene waits */
+	REQUIRE(led_velocity(&q, 32) == 114U && led_velocity(&q, 33) == 20U && led_velocity(&q, 37) == 22U &&
+		led_velocity(&q, 39) == 23U);
 	q.take_ready = false;
 	mfd_vj_pads_set_hidden(&q, 0, true);
 	REQUIRE(led_at(&q, 24, -1, &ch) == 5U && ch == 15U);
@@ -219,7 +219,8 @@ int main(void)
 	q.shift = true;
 	REQUIRE(led_at(&q, 52, 0, NULL) == 1U && led_at(&q, 52, 1, NULL) == 0U); /* Shift: Clip Stop shows the pins */
 	q.shift = false;
-	REQUIRE(led_velocity(&q, 26) == 0U && led_velocity(&q, 34) == 23U); /* no source: row 4 dark, fades dim green */
+	REQUIRE(led_velocity(&q, 26) == 0U &&
+		led_velocity(&q, 34) == 21U); /* no source: row 4 dark, the fades still green */
 
 	/* 13. Scenes: Scene Launch picks (Shift: straight to Program); Session is Blackout. Lights: Program red, Preview green
 	 * pulsing (channel 11), idle dim blue, no scene off. */
