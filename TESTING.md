@@ -48,9 +48,9 @@ ctest --preset windows-x64 -C RelWithDebInfo -R test-ui-dialog --output-on-failu
 Copy-Item -Force .\build_x64\tests\ui_screenshots\*.png .\docs\screenshots\
 ```
 
-### State 1 — First-Run Offer Banner (`APC40 mkII` Detected on Fresh Config)
+### State 1 — First-Run Notice (`APC40 mkII` Detected on Fresh Config)
 
-When an Akai APC40 mkII is connected and no prior `slots.json` exists, Midi Fadester pre-populates the usual layout (Crossfader switches scenes via T-bar; Master controls Desktop Audio volume; Faders 1–8 stay `[Not used]` with their physical CCs bound and live) and offers `[Yes]` or `[I'll set it up]`.
+When an Akai APC40 mkII is connected on a new installation, Midi Fadester applies the usual layout by itself (Crossfader switches scenes via T-bar; Master becomes the volume of Desktop Audio when OBS has that source; Faders 1–8 fill themselves from the scene on air) and the dialog shows a notice, not a question: `Set up for you: …` with `[OK]` (no strip changes) and a small `[Start empty]`, which asks `Clear all 18 strips? …` before it clears them. An installation that already has settings is not changed. While the notice shows, the Studio Mode bar and the Stream Deck line wait: one bar at a time.
 
 ![State 1: First-Run Offer](docs/screenshots/01-first-run-offer.png)
 
@@ -98,7 +98,7 @@ Step 3 asks the operator to move the physical control (`"Move the control. This 
 
 ### State 8 — `[Show controller]` Live APC40 mkII SVG Desk Map (Hardware-Verified)
 
-Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Akai APC40 mkII desk showing labeled orientation zones above the faders (`"Clip launch pads (for desk orientation — Midi Fadester uses the faders below)"` and `"Scene pads"`), all 8 track faders (`Ch 1–8 CC 7`), Master fader (`Ch 1 CC 14`), horizontal Crossfader (`Ch 1 CC 15`), live `%` positions, short assignment labels, and color-coded state accents (`Active / Ready`, `At end (parked)`, `Needs pick-up or Studio Mode`, `Needs attention`) updating event-driven on every MIDI/OBS change.
+Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Akai APC40 mkII desk showing labeled orientation zones above the faders (`"Pads: see the Fadester Desk dock."` and `"Scene pads"`), all 8 track faders (`Ch 1–8 CC 7`), Master fader (`Ch 1 CC 14`), horizontal Crossfader (`Ch 1 CC 15`), live `%` positions, short assignment labels, and color-coded state accents (`Active / Ready`, `At end (parked)`, `Needs pick-up or Studio Mode`, `Needs attention`) updating event-driven on every MIDI/OBS change.
 
 ![State 8: Live APC40 mkII SVG Desk View](docs/screenshots/08-show-controller-svg.png)
 

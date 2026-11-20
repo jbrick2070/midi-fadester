@@ -882,9 +882,9 @@ static void shader_filter_get_defaults(obs_data_t *settings)
 	obs_data_set_default_string(
 		settings, S_SHADER_TEXT,
 		"float4 mainImage(VertData v_in) : TARGET\n{\n\tfloat4 c = image.Sample(texture_sampler, v_in.uv);\n\treturn float4(c.rgb * (1.0 + audio_kick * 0.5), c.a);\n}\n");
-	obs_data_set_default_double(settings, S_CUSTOM_LOW_HZ, 60.0);
-	obs_data_set_default_double(settings, S_CUSTOM_HIGH_HZ, 150.0);
-	obs_data_set_default_int(settings, S_CUSTOM_MODE, (long long)VS_HZ_MODE_AVERAGE);
+	obs_data_set_default_double(settings, S_CUSTOM_LOW_HZ, VS_SHADER_CUSTOM_LOW_HZ_DEFAULT);
+	obs_data_set_default_double(settings, S_CUSTOM_HIGH_HZ, VS_SHADER_CUSTOM_HIGH_HZ_DEFAULT);
+	obs_data_set_default_int(settings, S_CUSTOM_MODE, (long long)VS_SHADER_CUSTOM_MODE_DEFAULT);
 	obs_data_set_default_double(settings, S_EFFECT_MIX, 100.0);
 	obs_data_set_default_double(settings, S_AUDIO_REACTIVITY, 100.0);
 	obs_data_set_default_int(settings, S_MIX_FADER_SLOT, VS_FADER_SLOT_NONE);
@@ -1839,9 +1839,9 @@ static bool shader_shows_custom_band(struct vs_shader_filter *sf)
 	return show;
 }
 
-/* What waits behind "More settings" (U1-15): the three Custom Band controls and the Fader Control group. A group that
- * holds a fader assignment is never hidden, so nothing that acts is out of sight. Reload shows for a custom shader
- * only. UI thread. */
+/* What waits behind "More settings" (U1-15): the three Custom Band controls and the Fader Control group. A Custom Band
+ * that is not at a new filter's values, and a group that holds a fader assignment, are never hidden, so nothing that
+ * acts is out of sight. Reload shows for a custom shader only. UI thread. */
 static void refresh_shader_more_visibility(struct vs_shader_filter *sf, obs_properties_t *props, obs_data_t *settings)
 {
 	if (!props || !settings)
@@ -1849,7 +1849,11 @@ static void refresh_shader_more_visibility(struct vs_shader_filter *sf, obs_prop
 	const char *preset = obs_data_get_string(settings, S_PRESET_SHADER);
 	const bool is_custom = strcmp(preset, PRESET_CUSTOM_FILE) == 0 || strcmp(preset, PRESET_CUSTOM_TEXT) == 0;
 	const bool more = obs_data_get_bool(settings, S_SHOW_MORE);
-	const bool band = more && shader_shows_custom_band(sf);
+	/* a band the user set is acting on the effect: it is never out of sight (as the Fader Control group below) */
+	const bool band_in_use = vs_shader_custom_band_in_use(obs_data_get_double(settings, S_CUSTOM_LOW_HZ),
+							      obs_data_get_double(settings, S_CUSTOM_HIGH_HZ),
+							      obs_data_get_int(settings, S_CUSTOM_MODE));
+	const bool band = (more || band_in_use) && shader_shows_custom_band(sf);
 	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_LOW_HZ), band);
 	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_HIGH_HZ), band);
 	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_MODE), band);

@@ -413,7 +413,8 @@ private:
 	QPushButton *help_btn_ = nullptr;
 	QPushButton *gear_btn_ = nullptr;
 	QPointer<QDialog> help_;
-	int base_px_ = 0; /* the font size the larger texts were last worked out from */
+	int base_px_ = 0;    /* the font size the larger texts were last worked out from */
+	bool built_ = false; /* the constructor has made every widget (a font or style change can arrive before) */
 
 	struct mfd_engine *eng_ = nullptr;
 	QLabel *title_ = nullptr;
@@ -899,6 +900,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	root->addStretch(1);
 
 	clock_.start();
+	built_ = true; /* every label exists from here on: event() may size them */
 	applyFontSizes();
 	refresh();
 }
@@ -1007,7 +1009,7 @@ bool MfdDeskDock::event(QEvent *e)
 	/* Alt-Tab or a click elsewhere while a pad is held down: let go of the dock's holds. */
 	if (e->type() == QEvent::WindowDeactivate) {
 		releaseHolds();
-	} else if ((e->type() == QEvent::FontChange || e->type() == QEvent::StyleChange) && title_ && status_) {
+	} else if ((e->type() == QEvent::FontChange || e->type() == QEvent::StyleChange) && built_) {
 		applyFontSizes(); /* OBS's theme or font size changed */
 	}
 	return QWidget::event(e);

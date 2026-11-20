@@ -6230,22 +6230,30 @@ bool mfd_engine_desk_video_controls(const struct mfd_engine *eng)
 	return eng && eng->desk_video_controls;
 }
 
-bool mfd_engine_take_desk_first_show(struct mfd_engine *eng)
+bool mfd_engine_desk_first_show_due(struct mfd_engine *eng)
 {
 	if (!eng) {
 		return false;
 	}
 	mfd_engine_lock(eng);
-	bool take = !eng->desk_dock_shown && eng->frontend_finished_loading && eng->midi_dev.is_open &&
-		    mfd_is_apc40_mk2_name(eng->midi_dev.opened_name);
-	if (take) {
-		eng->desk_dock_shown = true;
-	}
+	bool due = !eng->desk_dock_shown && eng->frontend_finished_loading && eng->midi_dev.is_open &&
+		   mfd_is_apc40_mk2_name(eng->midi_dev.opened_name);
 	mfd_engine_unlock(eng);
-	if (take) {
+	return due;
+}
+
+void mfd_engine_desk_first_show_done(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	bool changed = !eng->desk_dock_shown;
+	eng->desk_dock_shown = true;
+	mfd_engine_unlock(eng);
+	if (changed) {
 		mfd_engine_save_global_config(eng);
 	}
-	return take;
 }
 
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
@@ -9031,6 +9039,11 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	}
 	if (obs_data_has_user_value(data, "first_run_layout_applied")) {
 		eng->first_run_layout_applied = obs_data_get_bool(data, "first_run_layout_applied");
+	} else if (!user_file) {
+		/* The plugin's own settings from before this key: this is not a first run, whatever the old offer's
+		 * state. An update never gives Master a job by itself, in the middle of someone's show set-up; the
+		 * notice still shows while the old offer was never answered, and leaves Master out of its sentence. */
+		eng->first_run_layout_applied = true;
 	}
 	if (obs_data_has_user_value(data, "stream_deck_companion_dismissed")) {
 		eng->stream_deck_companion_dismissed = obs_data_get_bool(data, "stream_deck_companion_dismissed");

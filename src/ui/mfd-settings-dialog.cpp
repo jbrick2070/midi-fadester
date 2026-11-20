@@ -1201,7 +1201,7 @@ private:
 		root->addLayout(telemetry_bar);
 
 		auto *applies_note = new QLabel(mfdText("Dialog.Advanced.AppliesAtOnce",
-							"Changes on this page take effect at once and are saved."),
+							"Changes on this page apply at once and are saved."),
 						adv_tab);
 		applies_note->setObjectName(QStringLiteral("mfdAdvAppliesAtOnce"));
 		applies_note->setWordWrap(true);
@@ -2784,8 +2784,8 @@ static void show_desk_the_first_time()
 {
 	/* the usual layout too, without a question (U1-02): the settings dialog then says what was set up */
 	mfd_engine_apply_first_run_layout(mfd_engine_get());
-	if (mfd_engine_take_desk_first_show(mfd_engine_get())) {
-		mfd_desk_dock_show();
+	if (mfd_engine_desk_first_show_due(mfd_engine_get()) && mfd_desk_dock_show()) {
+		mfd_engine_desk_first_show_done(mfd_engine_get()); /* only once it really showed */
 	}
 }
 

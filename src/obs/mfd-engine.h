@@ -890,10 +890,11 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng);
 /* The dock's video speed rows, shown or hidden. Persisted with the global settings. */
 void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown);
-/* UI thread. True exactly once in an installation's life: OBS has finished loading (so its dock layout is restored),
- * an APC40 mkII is open, and the dock has never shown itself. The flag is set and saved before it returns true, so the
- * caller only has to show the dock. */
-bool mfd_engine_take_desk_first_show(struct mfd_engine *eng);
+/* UI thread. The dock's first show, once in an installation's life. _due: OBS has finished loading (so its dock layout
+ * is restored), an APC40 mkII is open, and the dock has never shown itself. _done: the caller showed it; only then is
+ * the flag set and saved, so a dock that could not be shown yet (not registered, no dock frame) gets its turn later. */
+bool mfd_engine_desk_first_show_due(struct mfd_engine *eng);
+void mfd_engine_desk_first_show_done(struct mfd_engine *eng);
 bool mfd_engine_desk_video_controls(const struct mfd_engine *eng);
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng);
 

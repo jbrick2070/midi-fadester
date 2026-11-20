@@ -6051,6 +6051,47 @@ int main(void)
 		REQUIRE(snap->slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
 	}
 
+	/* QA-01: an updating user who never answered the old question. Their settings file has the offer still open
+	 * and no first_run_layout_applied key: the layout is not applied to them, Master keeps no job, and the notice
+	 * (still pending) does not claim one. */
+	{
+		const char *tmp_old_json = "test_upgrade_090_unanswered_global.json";
+		FILE *fp = fopen(tmp_old_json, "wb");
+		REQUIRE(fp != NULL);
+		fputs("{\"device_name\":\"APC40 mkII\",\"active_profile\":\"apc40mk2\",\"smooth_tau_ms\":16.0,"
+		      "\"first_run_offer_dismissed\":false}\n",
+		      fp);
+		fclose(fp);
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_offer_dismissed = true;
+		eng.first_run_layout_applied = false;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_old_json));
+		os_unlink(tmp_old_json);
+		REQUIRE(!eng.first_run_offer_dismissed);
+		REQUIRE(eng.first_run_layout_applied);
+		mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", true);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		const uint64_t rev9_old = eng.slot_config_rev[9];
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		REQUIRE(eng.slot_config_rev[9] == rev9_old);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(snap->first_run_offer_pending);
+		/* a file that says the layout was not applied yet (written by a new install before its first APC40)
+		 * keeps saying so */
+		const char *tmp_new_json = "test_new_install_global.json";
+		eng.first_run_layout_applied = false;
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_new_json));
+		eng.first_run_layout_applied = true;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_new_json));
+		os_unlink(tmp_new_json);
+		REQUIRE(!eng.first_run_layout_applied);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_offer_dismissed = false;
+	}
+
 	/* [I'll set it up]: all 10 APC40 addresses stay bound & live, all 10 modes = MFD_TARGET_UNASSIGNED */
 	eng.first_run_offer_dismissed = false;
 	mfd_engine_decline_first_run_usual_layout(&eng);
@@ -6083,7 +6124,8 @@ int main(void)
 		REQUIRE(mfd_engine_desk_video_controls(&eng));
 		/* U1-01: settings from before the dock showed itself count as shown: an update never pops the dock open */
 		REQUIRE(eng.desk_dock_shown);
-		REQUIRE(!mfd_engine_take_desk_first_show(&eng));
+		REQUIRE(!mfd_engine_desk_first_show_due(&eng));
+		REQUIRE(eng.first_run_layout_applied); /* QA-01: not a first run */
 		mfd_engine_get_ui_snapshot(&eng, snap);
 		REQUIRE(!snap->first_run_offer_pending);
 		os_unlink(tmp_v013_json);
@@ -6128,20 +6170,25 @@ int main(void)
 			eng.frontend_finished_loading = false;
 			eng.midi_dev.is_open = true;
 			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "APC40 mkII");
-			REQUIRE(!mfd_engine_take_desk_first_show(
+			REQUIRE(!mfd_engine_desk_first_show_due(
 				&eng)); /* OBS still loading: its dock layout is not back */
 			eng.frontend_finished_loading = true;
 			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "nanoKONTROL2");
-			REQUIRE(!mfd_engine_take_desk_first_show(
+			REQUIRE(!mfd_engine_desk_first_show_due(
 				&eng)); /* another controller: the dock is the APC40's */
 			eng.midi_dev.is_open = false;
 			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "APC40 mkII");
-			REQUIRE(!mfd_engine_take_desk_first_show(&eng)); /* no APC40 open */
+			REQUIRE(!mfd_engine_desk_first_show_due(&eng)); /* no APC40 open */
 			REQUIRE(!eng.desk_dock_shown);
 			eng.midi_dev.is_open = true;
-			REQUIRE(mfd_engine_take_desk_first_show(&eng));
+			/* due stays due until the dock really showed: a dock that could not be shown yet gets its turn
+			 * later (QA-03) */
+			REQUIRE(mfd_engine_desk_first_show_due(&eng));
+			REQUIRE(!eng.desk_dock_shown);
+			REQUIRE(mfd_engine_desk_first_show_due(&eng));
+			mfd_engine_desk_first_show_done(&eng);
 			REQUIRE(eng.desk_dock_shown);
-			REQUIRE(!mfd_engine_take_desk_first_show(&eng)); /* once */
+			REQUIRE(!mfd_engine_desk_first_show_due(&eng)); /* once */
 			REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
 			eng.desk_dock_shown = false;
 			REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));

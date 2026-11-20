@@ -95,7 +95,7 @@ On Windows you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 
    ![Set up, step 1 of 3: what should this control do?](docs/screenshots/05-setup-step1-cards.png)
 
-6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. When a desk has no ready layout but another desk's layout is in use, a blue bar at the top says so. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab also has a **Learn** button on every row; changes on that tab take effect at once and are saved.
+6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. When a desk has no ready layout but another desk's layout is in use, a blue bar at the top says so. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab also has a **Learn** button on every row; changes on that tab apply at once and are saved.
 
 The jobs are saved with the scene collection and the controller settings per Windows user; both come back the next time OBS starts.
 
@@ -179,7 +179,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 ## How it feels
 
 - **Smoothing.** Every move gets a short glide (30 ms by default, *Smoothing (ms)* on the Advanced tab; 0 turns it off), so the 128 steps of a MIDI fader do not show as steps on screen.
-- **Pick-up.** If a value moved without the fader (someone dragged it in OBS, a Stream Deck dial turned it, a scene collection loaded), the fader does not make it jump. The strip shows an amber bar, a marker at the target and *Move the fader up to 40 % to pick up.* Once the fader crosses that point it takes over without a step.
+- **Pick-up.** If a value moved without the fader (someone dragged it in OBS, a Stream Deck dial turned it, a scene collection loaded), the fader does not make it jump. The strip shows an amber bar, a marker at the target and *Move the fader up to 40% to start.* Once the fader crosses that point it acts again, without a step. On the Fadester Desk dock the same fader's bar is amber, with the same marker.
 - **Rails.** The top and bottom 3 % of the travel are the rails. A control resting there is parked (*At end.*), so hand jitter against the end stop never flickers a layer or re-triggers a transition. Moving 8 % back unparks it, and the rest of the travel is rescaled so there is no jump.
 - **Calibration.** Each control starts with the full MIDI range and widens it whenever it sends a value beyond anything seen before, saved per layout and control. A fader that stops at 125 instead of 127 still reaches 100 %, because the top 3 % of the travel counts as the end.
 - **Resolution.** Ordinary 7-bit controls, high-resolution 14-bit CC pairs and pitch bend are all accepted. A binding remembers the MIDI channel as well as the number: the APC40 mkII's eight faders all send CC 7 and differ only by channel, and that works.
