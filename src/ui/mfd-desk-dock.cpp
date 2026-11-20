@@ -32,7 +32,9 @@
 #include <QLabel>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QPainter>
+#include <QPen>
 #include <QPointer>
 #include <QScrollArea>
 #include <QProgressBar>

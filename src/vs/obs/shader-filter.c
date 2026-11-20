@@ -56,6 +56,10 @@
 #define S_AUDIO_REACTIVITY "vs_audio_reactivity_pct"
 #define S_FADER_NOT_LOADED "vs_shader_fader_not_loaded"
 #define S_PANIC_HINT "vs_panic_hint"
+/* "More settings": the window opens on the few controls most people need (the effect, Effect Mix, Audio Reactivity, the
+ * effect's own parameters, Audio Input); the Custom Band controls and the Fader Control group wait behind this. */
+#define S_SHOW_MORE "vs_show_more"
+#define S_FADER_GROUP "vs_shader_fader_group"
 #define S_FLASH_LIMIT_STATUS "vs_flash_limit_status"
 #define S_CUSTOM_FLASH_NOTICE "vs_custom_shader_flash_notice"
 
@@ -1563,6 +1567,8 @@ static bool on_preset_changed(obs_properties_t *props, obs_property_t *property,
 	obs_property_set_visible(obs_properties_get(props, S_SHADER_TEXT), is_text);
 	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_FLASH_NOTICE), is_file || is_text);
 	obs_property_set_visible(obs_properties_get(props, S_OVERRIDE_EFFECT), is_file || is_text);
+	/* a built-in effect has nothing to reload */
+	obs_property_set_visible(obs_properties_get(props, S_RELOAD_SHADER), is_file || is_text);
 	return true;
 }
 
@@ -1760,6 +1766,8 @@ static void normalize_shader_fader_targets_for_ui(obs_data_t *settings)
 	}
 }
 
+static void refresh_shader_more_visibility(struct vs_shader_filter *sf, obs_properties_t *props, obs_data_t *settings);
+
 static bool on_shader_param_fader_changed(void *priv, obs_properties_t *props, obs_property_t *property,
 					  obs_data_t *settings)
 {
@@ -1816,6 +1824,44 @@ static bool on_shader_param_fader_changed(void *priv, obs_properties_t *props, o
 	}
 
 	refresh_shader_fader_props_visibility(props, settings, has_bindable);
+	refresh_shader_more_visibility(sf, props, settings);
+	return true;
+}
+
+/* True when the effect in use reads the Custom Band (or none is compiled yet). */
+static bool shader_shows_custom_band(struct vs_shader_filter *sf)
+{
+	if (!sf)
+		return true;
+	obs_enter_graphics();
+	const bool show = !sf->effect || sf->p_audio_custom_band != NULL;
+	obs_leave_graphics();
+	return show;
+}
+
+/* What waits behind "More settings" (U1-15): the three Custom Band controls and the Fader Control group. A group that
+ * holds a fader assignment is never hidden, so nothing that acts is out of sight. Reload shows for a custom shader
+ * only. UI thread. */
+static void refresh_shader_more_visibility(struct vs_shader_filter *sf, obs_properties_t *props, obs_data_t *settings)
+{
+	if (!props || !settings)
+		return;
+	const char *preset = obs_data_get_string(settings, S_PRESET_SHADER);
+	const bool is_custom = strcmp(preset, PRESET_CUSTOM_FILE) == 0 || strcmp(preset, PRESET_CUSTOM_TEXT) == 0;
+	const bool more = obs_data_get_bool(settings, S_SHOW_MORE);
+	const bool band = more && shader_shows_custom_band(sf);
+	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_LOW_HZ), band);
+	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_HIGH_HZ), band);
+	obs_property_set_visible(obs_properties_get(props, S_CUSTOM_MODE), band);
+	obs_property_set_visible(obs_properties_get(props, S_RELOAD_SHADER), is_custom);
+	obs_property_set_visible(obs_properties_get(props, S_FADER_GROUP),
+				 more || shader_fader_bindings_stored(settings));
+}
+
+static bool on_shader_more_changed(void *priv, obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	(void)property;
+	refresh_shader_more_visibility((struct vs_shader_filter *)priv, props, settings);
 	return true;
 }
 
@@ -2123,6 +2169,10 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	/* The Panic and Restore hotkeys have no key until the user sets one, and no other place in OBS names them */
 	vs_properties_add_info(props, S_PANIC_HINT, obs_module_text("Shader.PanicHint"));
 
+	/* the rest waits behind this (off when the filter is new) */
+	obs_property_t *p_more = obs_properties_add_bool(props, S_SHOW_MORE, obs_module_text("VisualSidechain.More"));
+	obs_property_set_modified_callback2(p_more, on_shader_more_changed, sf);
+
 	/* 4. Fader Control (Midi & Stream Deck Fadester) */
 	vs_fader_bridge_poll_once();
 	const bool fadester_loaded = vs_fader_bridge_is_midi_fadester_loaded();
@@ -2218,8 +2268,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 					   on_shader_fader_reset_clicked, sf);
 	}
 
-	obs_properties_add_group(props, "vs_shader_fader_group", obs_module_text("Shader.FaderGroup"), OBS_GROUP_NORMAL,
-				 f_grp);
+	obs_properties_add_group(props, S_FADER_GROUP, obs_module_text("Shader.FaderGroup"), OBS_GROUP_NORMAL, f_grp);
 
 	/* 5. Audio Sidechain & Analysis group (defaulting to Track 1); advanced tuning hidden by default */
 	vs_audio_tap_add_properties_with_tap(props, sf ? sf->context : NULL, sf ? &sf->tap : NULL);
@@ -2228,12 +2277,14 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 		obs_data_t *cur_s = obs_source_get_settings(sf->context);
 		if (cur_s) {
 			refresh_shader_fader_props_visibility(props, cur_s, has_bindable_params);
+			refresh_shader_more_visibility(sf, props, cur_s);
 			obs_data_release(cur_s);
 		}
 	} else {
 		obs_data_t *tmp_s = obs_data_create();
 		shader_filter_get_defaults(tmp_s);
 		refresh_shader_fader_props_visibility(props, tmp_s, has_bindable_params);
+		refresh_shader_more_visibility(sf, props, tmp_s);
 		obs_data_release(tmp_s);
 	}
 
