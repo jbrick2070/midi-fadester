@@ -18,11 +18,20 @@
 	} while (0)
 
 /* Overwrites with spaces every "#ifdef MFD_ENABLE_SELF_TEST" block up to its own #endif (nested #if blocks counted),
- * keeping the line breaks. */
+ * keeping the line breaks. Only a directive that begins its line opens a block: the same words in a comment or a string
+ * do not, so they cannot hide the real code after them. */
 static void blank_self_test_blocks(char *buf)
 {
 	char *p = buf;
 	while ((p = strstr(p, "#ifdef MFD_ENABLE_SELF_TEST")) != NULL) {
+		const char *before = p;
+		while (before > buf && (before[-1] == ' ' || before[-1] == '\t')) {
+			--before;
+		}
+		if (before > buf && before[-1] != '\n') {
+			p += 6; /* inside a line: not a directive */
+			continue;
+		}
 		int depth = 0;
 		char *line = p;
 		for (;;) {

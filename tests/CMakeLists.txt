@@ -222,6 +222,27 @@ add_test(
 )
 set_tests_properties(test-shader-syntax PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
+# The guard's one exception, the self-test block, is blanked exactly: a timer inside it passes, a timer outside it fails,
+# and the directive's words in a comment open no block.
+add_test(
+  NAME test-shader-syntax-guard-inside
+  COMMAND
+    test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/guard-timer-inside.c"
+)
+foreach(_fixture IN ITEMS guard-timer-outside guard-comment-trap)
+  add_test(
+    NAME test-shader-syntax-${_fixture}
+    COMMAND
+      test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_fixture}.c"
+  )
+  set_tests_properties(
+    test-shader-syntax-${_fixture}
+    PROPERTIES PASS_REGULAR_EXPRESSION "forbidden token 'QTimer' found in .*${_fixture}\\.c"
+  )
+endforeach()
+
 add_test(
   NAME check-locale-keys
   COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-keys.cmake"
