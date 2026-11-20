@@ -1348,20 +1348,7 @@ private:
 			if (path.isEmpty()) {
 				return;
 			}
-			if (mfd_engine_import_config_file_and_reopen(eng_, path.toUtf8().constData())) {
-				mfd_engine_save_global_config(eng_);
-				mfd_engine_notify_state_changed(eng_);
-				populate_device_combos();
-				last_adv_topology_rev_ = ~0ULL;
-				refresh_from_engine();
-			} else {
-				QMessageBox::warning(
-					this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
-					mfdFill(mfdText("Dialog.Import.Failed",
-							"Could not read %1. It is not a Midi Fadester settings "
-							"file, or it is damaged. Nothing was changed."),
-						{QDir::toNativeSeparators(path)}));
-			}
+			import_config(path);
 		});
 
 		connect(btn_export, &QPushButton::clicked, this, [this]() {
@@ -1405,6 +1392,21 @@ private:
 			const auto chosen_prof = profile_combo_ ? static_cast<enum mfd_controller_profile>(
 									  profile_combo_->currentData().toInt())
 								: snap_.active_profile;
+			/* one click here removes every job on every strip, in the middle of a show if the dialog is open:
+			 * it asks first (U1-18) */
+			const struct mfd_controller_profile_def *chosen_def = mfd_profile_get_def(chosen_prof);
+			const bool generic = !chosen_def || chosen_def->id == MFD_PROFILE_GENERIC;
+			if (!confirm(btn_defaults_->text(),
+				     generic ? mfdText("Dialog.Clear.Confirm",
+						       "Clear all 18 strips? The jobs you gave them are removed.")
+					     : mfdFill(mfdText("Dialog.Reset.Confirm",
+							       "Reset all 18 strips to the %1 layout? The jobs you gave "
+							       "them are removed."),
+						       {QString::fromUtf8(mfd_profile_ui_short_name(chosen_def))}),
+				     generic ? mfdText("Dialog.Clear.Yes", "Clear")
+					     : mfdText("Dialog.Reset.Yes", "Reset"))) {
+				return;
+			}
 			mfd_engine_select_profile(eng_, chosen_prof, true);
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
@@ -1576,24 +1578,36 @@ private:
 		controller_view_dlg_->raise();
 	}
 
-	/* Asks before work is cleared: a question, the button that does it (named for what it does) and Cancel, which is
-	 * the default. The title shows the version, like every Midi Fadester window. */
+	/* Import replaces every strip's job and control: it asks first (U1-18). Public to the test through the button's
+	 * path only; the file dialog is the one part a test cannot drive. */
+	void import_config(const QString &path)
+	{
+		if (!confirm(mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
+			     mfdFill(mfdText("Dialog.Import.Confirm",
+					     "Replace the whole set-up with %1? Every strip's job and control is replaced. "
+					     "Export first to keep the current one."),
+				     {QDir::toNativeSeparators(path)}),
+			     mfdText("Dialog.Import.Yes", "Import"))) {
+			return;
+		}
+		if (mfd_engine_import_config_file_and_reopen(eng_, path.toUtf8().constData())) {
+			mfd_engine_save_global_config(eng_);
+			mfd_engine_notify_state_changed(eng_);
+			populate_device_combos();
+			last_adv_topology_rev_ = ~0ULL;
+			refresh_from_engine();
+		} else {
+			QMessageBox::warning(this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
+					     mfdFill(mfdText("Dialog.Import.Failed",
+							     "Could not read %1. It is not a Midi Fadester settings "
+							     "file, or it is damaged. Nothing was changed."),
+						     {QDir::toNativeSeparators(path)}));
+		}
+	}
+
 	bool confirm(const QString &window, const QString &question, const QString &do_it)
 	{
-		QMessageBox box(this);
-		box.setObjectName(QStringLiteral("mfdConfirmBox"));
-		box.setAttribute(Qt::WA_DontShowOnScreen, testAttribute(Qt::WA_DontShowOnScreen)); /* the UI test */
-		box.setIcon(QMessageBox::Warning);
-		box.setWindowTitle(mfdWindowTitle(window));
-		box.setText(question);
-		QPushButton *yes = box.addButton(do_it, QMessageBox::AcceptRole);
-		yes->setObjectName(QStringLiteral("mfdConfirmYes"));
-		QPushButton *no = box.addButton(mfdText("Setup.Cancel", "Cancel"), QMessageBox::RejectRole);
-		no->setObjectName(QStringLiteral("mfdConfirmCancel"));
-		box.setDefaultButton(no);
-		box.setEscapeButton(no);
-		box.exec();
-		return box.clickedButton() == yes;
+		return mfdConfirm(this, window, question, do_it);
 	}
 
 	/* Shown while the open desk's name matches no ready layout and a layout for another desk is in use (the

@@ -10,6 +10,9 @@
 
 #include <plugin-support.h>
 
+#include <QMessageBox>
+#include <QPushButton>
+
 QString mfdText(const char *key, const char *english)
 {
 	return QString::fromUtf8(mfd_text(key, english));
@@ -40,4 +43,23 @@ QString mfdWindowTitle(const QString &window)
 {
 	return mfdFill(mfdText("Window.Title", "Midi Fadester %1 \xE2\x80\x94 %2"),
 		       {QString::fromUtf8(PLUGIN_VERSION), window});
+}
+
+bool mfdConfirm(QWidget *parent, const QString &window, const QString &question, const QString &do_it)
+{
+	QMessageBox box(parent);
+	box.setObjectName(QStringLiteral("mfdConfirmBox"));
+	/* off screen when its window is (the UI test) */
+	box.setAttribute(Qt::WA_DontShowOnScreen, parent && parent->testAttribute(Qt::WA_DontShowOnScreen));
+	box.setIcon(QMessageBox::Warning);
+	box.setWindowTitle(mfdWindowTitle(window));
+	box.setText(question);
+	QPushButton *yes = box.addButton(do_it, QMessageBox::AcceptRole);
+	yes->setObjectName(QStringLiteral("mfdConfirmYes"));
+	QPushButton *no = box.addButton(mfdText("Setup.Cancel", "Cancel"), QMessageBox::RejectRole);
+	no->setObjectName(QStringLiteral("mfdConfirmCancel"));
+	box.setDefaultButton(no);
+	box.setEscapeButton(no);
+	box.exec();
+	return box.clickedButton() == yes;
 }

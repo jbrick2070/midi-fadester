@@ -2550,6 +2550,78 @@ int main(int argc, char **argv)
 		eng.setup_session.active = was_setup;
 		eng.learning_slot_index = was_learning;
 	}
+
+	{
+		/* U1-18: the three actions that clear work ask first, and Cancel (the default) keeps everything */
+		mfd_engine_cancel_setup_session(&eng);
+		std::unique_ptr<QDialog> cdlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+		cdlg->setAttribute(Qt::WA_DontShowOnScreen, true);
+		cdlg->show();
+		pump_ui();
+		int with_job = -1;
+		for (int i = 1; i <= 9 && with_job < 0; ++i) {
+			if (eng.fader_slots[i].enabled && eng.fader_slots[i].target_type != MFD_TARGET_UNASSIGNED) {
+				with_job = i;
+			}
+		}
+		REQUIRE(with_job > 0);
+		const enum mfd_target_type job = eng.fader_slots[with_job].target_type;
+
+		/* Not used, in the Set up sheet: the one button there that acts without Done */
+		must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(with_job))->click();
+		pump_ui();
+		auto *csheet = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+		auto *not_used = must_find<QPushButton>(csheet, QStringLiteral("mfdBtnNotUsed"));
+		REQUIRE(not_used->text() == QStringLiteral("Not used"));
+		g_confirm_seen = 0;
+		answer_next_confirm(false);
+		not_used->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 1);
+		REQUIRE(g_confirm_text.startsWith(QStringLiteral("Remove the job of ")));
+		REQUIRE(g_confirm_title.startsWith(QStringLiteral("Midi Fadester ") +
+						   QString::fromUtf8(PLUGIN_VERSION)));
+		REQUIRE(!csheet->isHidden());
+		REQUIRE(eng.fader_slots[with_job].target_type == job);
+		csheet->reject();
+		pump_ui();
+
+		/* Reset all strips, on the Advanced tab */
+		auto *reset = must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdAdvDefaultsBtn"));
+		answer_next_confirm(false);
+		reset->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 2);
+		REQUIRE(g_confirm_text.startsWith(QStringLiteral("Reset all 18 strips to the ")) ||
+			g_confirm_text.startsWith(QStringLiteral("Clear all 18 strips?")));
+		REQUIRE(g_confirm_text.endsWith(QStringLiteral("The jobs you gave them are removed.")));
+		REQUIRE(eng.fader_slots[with_job].target_type == job); /* Cancel: nothing changed */
+
+		/* ... and confirmed, each does what it did before */
+		must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(with_job))->click();
+		pump_ui();
+		csheet = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+		answer_next_confirm(true);
+		must_find<QPushButton>(csheet, QStringLiteral("mfdBtnNotUsed"))->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 3);
+		REQUIRE(eng.fader_slots[with_job].target_type == MFD_TARGET_UNASSIGNED);
+		/* a strip with no job has nothing to lose: no question */
+		must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(with_job))->click();
+		pump_ui();
+		csheet = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+		must_find<QPushButton>(csheet, QStringLiteral("mfdBtnNotUsed"))->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 3);
+
+		eng.fader_slots[0].target_type = MFD_TARGET_UNASSIGNED; /* the crossfader's job, to see it come back */
+		answer_next_confirm(true);
+		reset->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 4);
+		cdlg->close();
+		cdlg.reset();
+	}
 	mfd_engine_destroy_mutex(&eng);
 	mfd_text_set_lookup(nullptr);
 	text_lookup_destroy(obs_module_lookup);

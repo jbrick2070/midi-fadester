@@ -204,7 +204,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p1_lay->addLayout(grid, 1);
 
 	auto *not_used_row = new QHBoxLayout();
-	btn_not_used_ = new QPushButton(mfdText("Setup.NotUsed", "Not used (turn off this strip's assignment)"), page1);
+	btn_not_used_ = new QPushButton(mfdText("Setup.NotUsed", "Not used"), page1);
 	btn_not_used_->setObjectName(QStringLiteral("mfdBtnNotUsed"));
 	btn_not_used_->setCursor(Qt::PointingHandCursor);
 	btn_not_used_->setStyleSheet(
@@ -227,6 +227,21 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	connect(card_filter_, &QPushButton::clicked, this,
 		[this]() { select_mode_and_go_step2(MFD_TARGET_FILTER_PARAM); });
 	connect(btn_not_used_, &QPushButton::clicked, this, [this]() {
+		/* the one button of this sheet that acts at once, without Done: when the strip has a job, it asks first
+		 * (U1-18) */
+		if (snap_.slots[slot_index_].target_type != MFD_TARGET_UNASSIGNED) {
+			char strip_title[64] = {0};
+			mfd_ui_strip_title(slot_index_, snap_.slots[slot_index_].label, strip_title,
+					   sizeof(strip_title));
+			if (!mfdConfirm(
+				    this, mfdText("Setup.NotUsed", "Not used"),
+				    mfdFill(mfdText("Setup.NotUsed.Confirm",
+						    "Remove the job of %1? It does nothing until you set it up again."),
+					    {QString::fromUtf8(strip_title)}),
+				    mfdText("Setup.NotUsed.Yes", "Remove"))) {
+				return;
+			}
+		}
 		committed_or_unassigned_ = true;
 		mfd_engine_unassign_slot_preserve_addr(eng_, slot_index_);
 		accept();
