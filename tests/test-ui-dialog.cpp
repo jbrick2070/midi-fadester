@@ -2100,6 +2100,11 @@ int main(int argc, char **argv)
 			std::snprintf(was_program, sizeof(was_program), "%s", eng.cached_program_scene);
 			const bool was_studio = mfd_engine_is_studio_mode_active(&eng);
 			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+			const int was_scene_count = eng.cached_scene_count;
+			std::snprintf(eng.cached_scenes[0], sizeof(eng.cached_scenes[0]), "Red");
+			std::snprintf(eng.cached_scenes[1], sizeof(eng.cached_scenes[1]), "Blue");
+			std::snprintf(eng.cached_scenes[2], sizeof(eng.cached_scenes[2]), "Q&A");
+			eng.cached_scene_count = 3;
 			QWidget *sd = mfd_desk_dock_create(&eng);
 			sd->resize(560, 760);
 			sd->show();
@@ -2124,6 +2129,28 @@ int main(int argc, char **argv)
 			REQUIRE(status->mapTo(sd, QPoint(0, 0)).y() < cut_pad->mapTo(sd, QPoint(0, 0)).y());
 			const QPoint fade_at = fade->mapTo(sd, QPoint(0, 0));
 
+			/* U1-03: ON AIR and PREVIEW are two lines, each with its word, and the largest text on the dock */
+			auto *on_air = sd->findChild<QLabel *>(QStringLiteral("mfdDeskOnAir"));
+			auto *preview = sd->findChild<QLabel *>(QStringLiteral("mfdDeskPreview"));
+			REQUIRE(on_air && preview && on_air->isVisible() && preview->isVisible());
+			REQUIRE(on_air->text() == QStringLiteral("ON AIR  Red"));
+			REQUIRE(preview->text() == QStringLiteral("PREVIEW  Blue"));
+			REQUIRE(preview->mapTo(sd, QPoint(0, 0)).y() > on_air->mapTo(sd, QPoint(0, 0)).y());
+			for (QLabel *l : sd->findChildren<QLabel *>()) {
+				if (l != on_air && l != preview && l->isVisible()) {
+					REQUIRE(l->fontInfo().pixelSize() < on_air->fontInfo().pixelSize());
+				}
+			}
+			{
+				/* the scene buttons mark the two scenes with a dot and a ring, not by colour alone */
+				int dots = 0, rings = 0;
+				for (QPushButton *b : sd->findChildren<QPushButton *>()) {
+					dots += b->text().startsWith(QChar(0x25CF)) ? 1 : 0;
+					rings += b->text().startsWith(QChar(0x25CB)) ? 1 : 0;
+				}
+				REQUIRE(dots == 1 && rings == 1);
+			}
+
 			/* Preview and Program the same scene: the grey pads and the status line say so */
 			mfd_engine_set_test_frontend_state(&eng, true, true, "Red", "Red", true);
 			again();
@@ -2138,6 +2165,7 @@ int main(int argc, char **argv)
 			REQUIRE(fade->isVisible() && !fade->isEnabled());
 			REQUIRE(fade->mapTo(sd, QPoint(0, 0)).x() == fade_at.x()); /* it does not slide */
 			REQUIRE(fade->toolTip() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(on_air->isVisible() && !preview->isVisible()); /* no Preview without Studio Mode */
 			REQUIRE(cut_pad->toolTip() == QStringLiteral("Studio Mode is off."));
 			REQUIRE(note->isVisible() && note->text() == QStringLiteral("Studio Mode is off."));
 			REQUIRE(studio_btn->isVisible() && studio_btn->text() == QStringLiteral("Turn on Studio Mode"));
@@ -2182,6 +2210,7 @@ int main(int argc, char **argv)
 
 			sd->hide();
 			delete sd;
+			eng.cached_scene_count = was_scene_count;
 			mfd_engine_set_test_frontend_state(&eng, true, was_studio, was_preview, was_program, true);
 		}
 		/* every language: no button or row name is cut off at a normal dock size (scene and column names elide on

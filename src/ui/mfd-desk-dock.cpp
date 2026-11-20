@@ -316,7 +316,8 @@ private:
 
 	struct mfd_engine *eng_ = nullptr;
 	QLabel *title_ = nullptr;
-	QLabel *on_air_ = nullptr;
+	QLabel *on_air_ = nullptr;  /* "ON AIR  <scene>", red */
+	QLabel *preview_ = nullptr; /* "PREVIEW  <scene>", green; Studio Mode only */
 	QLabel *row_names_[kRows] = {};
 	QLabel *timing_ = nullptr;
 	QPushButton *reconnect_ = nullptr;
@@ -469,10 +470,23 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	studio_row->addWidget(studio_btn_);
 	root->addLayout(studio_row);
 
+	/* What the audience sees and what is next: the largest text on the dock, one under the other (two chips side by
+	 * side do not fit the 364 px body), each with its word, so red against green is never the only sign (U1-03). */
+	auto *air_box = new QVBoxLayout();
+	air_box->setSpacing(3);
 	on_air_ = new QLabel(this);
 	on_air_->setObjectName(QStringLiteral("mfdDeskOnAir"));
-	on_air_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-	root->addWidget(on_air_);
+	on_air_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+	on_air_->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: bold; color: #ffffff; "
+					      "background-color: #b91c1c; border-radius: 3px; padding: 3px 6px;"));
+	air_box->addWidget(on_air_);
+	preview_ = new QLabel(this);
+	preview_->setObjectName(QStringLiteral("mfdDeskPreview"));
+	preview_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+	preview_->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: bold; color: #ffffff; "
+					       "background-color: #15803d; border-radius: 3px; padding: 3px 6px;"));
+	air_box->addWidget(preview_);
+	root->addLayout(air_box);
 
 	/* Scene Launch 1..5 */
 	auto *scene_row = new QHBoxLayout();
@@ -647,8 +661,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	/* Visual Sidechain */
 	auto *vs_row = new QHBoxLayout();
 	bpm_ = new QLabel(this);
-	bpm_->setStyleSheet(QStringLiteral("font-size: 18px; font-weight: bold;"));
-	bpm_->setMinimumWidth(92);
+	bpm_->setObjectName(QStringLiteral("mfdDeskBpm"));
+	bpm_->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: bold;")); /* smaller than what is on air */
+	bpm_->setMinimumWidth(72);
 	vs_row->addWidget(bpm_);
 	lock_ = new QLabel(this);
 	vs_row->addWidget(lock_);
@@ -967,10 +982,20 @@ void MfdDeskDock::refresh()
 				       : mfdText("Desk.StopAllShort", "Stop All"));
 	QString program = QString::fromUtf8(view_.program);
 	QString preview = QString::fromUtf8(view_.preview);
-	setLabel(on_air_,
-		 view_.studio_mode && !preview.isEmpty()
-			 ? mfdFill(mfdText("Desk.OnAirStudio", "On air: %1 \xC2\xB7 Preview: %2"), {program, preview})
-			 : mfdFill(mfdText("Desk.OnAir", "On air: %1"), {program}));
+	const QString none = QStringLiteral("\xE2\x80\x94");
+	/* each line elides on its own; the tooltip holds the whole name */
+	auto chip = [](QLabel *l, const QString &full) {
+		setTip(l, full);
+		setLabel(l, l->fontMetrics().elidedText(full, Qt::ElideRight, std::max(60, l->width() - 14)));
+	};
+	chip(on_air_, mfdFill(mfdText("Desk.OnAirChip", "ON AIR  %1"), {program.isEmpty() ? none : program}));
+	bool show_preview = view_.studio_mode && !preview.isEmpty();
+	if (preview_->isHidden() == show_preview) {
+		preview_->setVisible(show_preview);
+	}
+	if (show_preview) {
+		chip(preview_, mfdFill(mfdText("Desk.PreviewChip", "PREVIEW  %1"), {preview}));
+	}
 	timing_->setVisible(obs_initialized());
 	if (obs_initialized()) {
 		setLabel(timing_, mfdFill(mfdText("Desk.Timing", "Transition %1 ms \xC2\xB7 Pad fade %2 s"),
@@ -985,7 +1010,14 @@ void MfdDeskDock::refresh()
 		QString name = exists ? QString::fromUtf8(view_.scenes[j]) : QString();
 		/* A button reads '&' as a mnemonic: "Q&A" would show as "QA" and, on Windows, Alt+A would press the
 		 * button. Doubled, it is shown as written (F-02). */
-		QString shown = scenes_[j]->fontMetrics().elidedText(name, Qt::ElideRight,
+		/* a mark that is not colour: a filled dot on the scene on air, a ring on the one in Preview */
+		QString mark;
+		if (exists && name == program) {
+			mark = QStringLiteral("\xE2\x97\x8F ");
+		} else if (exists && view_.studio_mode && name == preview) {
+			mark = QStringLiteral("\xE2\x97\x8B ");
+		}
+		QString shown = scenes_[j]->fontMetrics().elidedText(mark + name, Qt::ElideRight,
 								     std::max(40, scenes_[j]->width() - 8));
 		shown.replace(QLatin1Char('&'), QStringLiteral("&&"));
 		setButtonText(scenes_[j], shown);
