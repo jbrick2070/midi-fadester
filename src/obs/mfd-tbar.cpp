@@ -14,6 +14,7 @@
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <util/platform.h>
 #include <util/bmem.h>
 #include <cassert>
 #include <cmath>
@@ -35,7 +36,6 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QThread>
-#include <QTimer>
 #include <QVariant>
 #include <QWidget>
 
@@ -209,31 +209,62 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 
 /*
  * OBS 33 raises TRANSITION_STOPPED when the video side of a transition stops; the audio side stops later, and until
- * then obs_transition_is_active() stays true. A command parked in that gap has no later event to flush it, so a
- * single retry chain polls until the transition is really over (at most about 3 s), then runs it.
+ * then obs_transition_is_active() stays true. A command parked in that gap has no later event to flush it, so it is
+ * tried again until the transition is really over (at most about 3 s), then run. The retry has no timer of its own
+ * (C-07): the engine's video tick sees g_deferred_retry_wanted through mfd_tbar_deferred() and asks the UI thread's
+ * flush to call back, about every 25 ms.
  */
-static int g_deferred_tbar_retries = 0;
-static bool g_deferred_flush_scheduled = false;
+#define MFD_TBAR_DEFERRED_MAX_NS 3000000000ULL
+static uint64_t g_deferred_tbar_since_ns = 0ULL; /* when the parked command began to wait; 0 = not waiting */
+static std::atomic<bool> g_deferred_retry_wanted{false};
 
 static void flush_deferred_tbar_on_ui_thread(void);
 
 static void schedule_deferred_flush(void)
 {
-	QWidget *ctx = g_main_win.data();
-	if (g_deferred_flush_scheduled || !ctx) {
-		return;
+	if (g_deferred_tbar_since_ns == 0ULL) {
+		g_deferred_tbar_since_ns = os_gettime_ns();
 	}
-	g_deferred_flush_scheduled = true;
-	QTimer::singleShot(25, ctx, []() {
-		g_deferred_flush_scheduled = false;
+	g_deferred_retry_wanted.store(true, std::memory_order_release);
+}
+
+/* mfd_tbar_deferred_fn: see mfd-engine.h. */
+static bool mfd_tbar_deferred(bool run)
+{
+	if (!run) {
+		return g_deferred_retry_wanted.load(std::memory_order_acquire);
+	}
+	if (g_deferred_retry_wanted.exchange(false, std::memory_order_acq_rel)) {
 		flush_deferred_tbar_on_ui_thread();
-	});
+	}
+	return g_deferred_retry_wanted.load(std::memory_order_acquire);
+}
+
+/* The parked command is given up: the engine has counted its throw as running or done, so it is told to start over
+ * (as when OBS resets the T-bar itself), or the strip would show a finished throw that never reached Program. Queued:
+ * the caller may be inside an engine step. */
+static void drop_deferred_tbar_on_ui_thread(void)
+{
+	g_pending_deferred_tbar.active = false;
+	g_deferred_tbar_since_ns = 0ULL;
+	g_deferred_retry_wanted.store(false, std::memory_order_release);
+	QWidget *main_win = g_main_win.data();
+	if (main_win) {
+		QMetaObject::invokeMethod(
+			main_win,
+			[]() {
+				if (!g_tbar_ui_throw_active && !g_pending_deferred_tbar.active) {
+					mfd_engine_on_external_tbar_reset(mfd_engine_get());
+				}
+			},
+			Qt::QueuedConnection);
+	}
 }
 
 static void flush_deferred_tbar_on_ui_thread(void)
 {
 	if (!g_pending_deferred_tbar.active) {
-		g_deferred_tbar_retries = 0;
+		g_deferred_tbar_since_ns = 0ULL;
 		return;
 	}
 	obs_source_t *tr = obs_get_output_source(0);
@@ -245,16 +276,19 @@ static void flush_deferred_tbar_on_ui_thread(void)
 		return; /* the coming TRANSITION_STOPPED flushes it */
 	}
 	if (active_tr) {
-		if (++g_deferred_tbar_retries > 120 || !g_main_win) {
+		const uint64_t now_ns = os_gettime_ns();
+		if (g_deferred_tbar_since_ns == 0ULL) {
+			g_deferred_tbar_since_ns = now_ns;
+		}
+		if (now_ns - g_deferred_tbar_since_ns > MFD_TBAR_DEFERRED_MAX_NS || !g_main_win) {
 			obs_log(LOG_WARNING, "Deferred T-bar command dropped: the previous transition did not finish.");
-			g_pending_deferred_tbar.active = false;
-			g_deferred_tbar_retries = 0;
+			drop_deferred_tbar_on_ui_thread();
 			return;
 		}
 		schedule_deferred_flush();
 		return;
 	}
-	g_deferred_tbar_retries = 0;
+	g_deferred_tbar_since_ns = 0ULL;
 	g_tbar_awaiting_transition_stop = false;
 	const mfd_deferred_tbar_cmd cmd = g_pending_deferred_tbar;
 	g_pending_deferred_tbar.active = false;
@@ -342,7 +376,7 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 		if (tr_busy) {
 			if (!g_pending_deferred_tbar.active || epoch > g_pending_deferred_tbar.epoch) {
 				g_pending_deferred_tbar = {true, pos_1024, do_set, do_release, epoch};
-				g_deferred_tbar_retries = 0; /* a new command gets the whole wait */
+				g_deferred_tbar_since_ns = 0ULL; /* a new command gets the whole wait */
 			} else if (epoch == g_pending_deferred_tbar.epoch && !g_pending_deferred_tbar.do_release) {
 				g_pending_deferred_tbar.pos_1024 = pos_1024;
 				g_pending_deferred_tbar.do_set = g_pending_deferred_tbar.do_set || do_set;
@@ -3028,6 +3062,7 @@ void mfd_tbar_init(void)
 #endif
 	mfd_engine_set_tbar_driver(mfd_tbar_driver_apply);
 	mfd_engine_set_tbar_unlatch_fn(mfd_tbar_reset_release_latch);
+	mfd_engine_set_tbar_deferred_fn(mfd_tbar_deferred);
 	obs_frontend_add_event_callback(on_tbar_frontend_event, nullptr);
 	g_tbar_frontend_cb = true;
 }
@@ -3047,6 +3082,9 @@ void mfd_tbar_shutdown(void)
 		g_tbar_frontend_cb = false;
 		obs_frontend_remove_event_callback(on_tbar_frontend_event, nullptr);
 	}
+	mfd_engine_set_tbar_deferred_fn(nullptr);
+	g_deferred_retry_wanted.store(false, std::memory_order_release);
+	g_deferred_tbar_since_ns = 0ULL;
 	mfd_engine_set_tbar_unlatch_fn(nullptr);
 	mfd_engine_set_tbar_driver(nullptr);
 	g_pending_deferred_tbar.active = false;

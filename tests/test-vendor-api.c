@@ -664,10 +664,27 @@ static bool fake_op_enum_source_filters(const char *source_name, bool *out_is_sc
 	return true;
 }
 
+static int g_fake_props_calls; /* how often a filter's properties were built (A-03) */
+
+/* C-07: a stand-in for the T-bar driver's parked command. */
+static bool g_fake_tbar_parked;
+static int g_fake_tbar_asked;
+static int g_fake_tbar_retried;
+static bool fake_tbar_deferred(bool run)
+{
+	if (!run) {
+		++g_fake_tbar_asked;
+		return g_fake_tbar_parked;
+	}
+	++g_fake_tbar_retried;
+	return g_fake_tbar_parked;
+}
+
 static obs_properties_t *fake_op_create_filter_properties(const char *source_name, const char *filter_name,
 							  void *user_data)
 {
 	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	++g_fake_props_calls;
 	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
 	if (!f) {
 		return NULL;
@@ -3529,16 +3546,51 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_set_desk_visible(eng, true);
 		REQUIRE(eng->vj_vs_poll_pending && eng->desk_visible);
 		eng->desk_frame_sec = 0.0f;
-		uint64_t rev0 = eng->telemetry_rev;
+		uint64_t rev0 = eng->desk_frame_rev;
 		mfd_engine_tick(eng, 0.01f);
 		REQUIRE(eng->desk_frame_sec > 0.0f); /* not yet 1/30 s */
+		uint64_t tele0 = eng->telemetry_rev;
+		uint64_t topo0 = eng->config_topology_rev;
 		mfd_engine_tick(eng, 0.03f);
-		REQUIRE(eng->telemetry_rev > rev0 && eng->desk_frame_sec == 0.0f);
+		REQUIRE(eng->desk_frame_rev > rev0 && eng->desk_frame_sec == 0.0f);
+		/* F-08: the dock frame clock is not a change for the settings window, which refreshes on these two */
+		REQUIRE(eng->telemetry_rev == tele0 && eng->config_topology_rev == topo0);
+		{
+			uint64_t t1 = 0U, t2 = 0U, t3 = 0U;
+			mfd_engine_get_ui_revs(eng, &t1, &t2, &t3);
+			REQUIRE(t1 == topo0 && t2 == tele0 && t3 == eng->desk_frame_rev);
+		}
 		mfd_engine_set_desk_visible(eng, false);
 		mfd_engine_flush_pending_ui_work(eng);
 		eng->desk_frame_sec = 0.0f;
 		mfd_engine_tick(eng, 0.05f);
 		REQUIRE(eng->desk_frame_sec == 0.0f); /* hidden: no repaint requests counted */
+
+		/* C-07: a parked T-bar command is retried from the video tick, with no timer. The tick only asks whether
+		 * one is parked; every 25 ms of ticks it has the UI thread's flush run the retry. */
+		eng->tbar_deferred = fake_tbar_deferred;
+		g_fake_tbar_parked = false;
+		g_fake_tbar_asked = 0;
+		g_fake_tbar_retried = 0;
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_asked == 2 && g_fake_tbar_retried == 0); /* nothing parked: nothing retried */
+		g_fake_tbar_parked = true;
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(!eng->tbar_deferred_due); /* 16 ms: not yet */
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_retried == 0);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->tbar_deferred_due); /* 32 ms */
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_retried == 1 && !eng->tbar_deferred_due);
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_retried == 1); /* one retry per request */
+		g_fake_tbar_parked = false;
+		mfd_engine_tick(eng, 0.05f);
+		REQUIRE(!eng->tbar_deferred_due && eng->tbar_deferred_wait_sec == 0.0f);
+		eng->tbar_deferred = NULL;
 		/* 14i. What Visual Sidechain's answers do to the dock's panic state. */
 		eng->vs_panic_known = false;
 		eng->vs_last_failed = false;
@@ -7081,6 +7133,47 @@ int main(void)
 		flt_blur->float_max_override = 50.0;
 		mfd_engine_handle_filter_properties_updated(&eng, "Color", "Blur");
 		REQUIRE(eng.fader_slots[10].cached_available);
+
+		/* A-03 / B-09: a re-check reuses the properties it read; it builds none when no filter changed. */
+		{
+			int calls = g_fake_props_calls;
+			const bool was_initialized = eng.initialized;
+			eng.initialized = true; /* queued scene-graph changes are drained only by a running engine */
+			mfd_engine_reevaluate_slots(&eng, true);
+			mfd_engine_report_scene_graph_change(&eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
+			mfd_engine_tick(&eng, 0.016f);
+			REQUIRE(g_fake_props_calls == calls);
+			REQUIRE(eng.fader_slots[10].cached_available);
+
+			/* On the video thread a filter change builds nothing either: the strip goes on with what it knew
+			 * and the UI thread's flush reads the properties, with no engine lock held, then re-checks. */
+			eng.filter_meta_defer_for_test = true;
+			flt_blur->float_max_override = 30.0; /* fx_1's to_val 50 is outside now */
+			mfd_engine_report_scene_graph_change(&eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
+			mfd_engine_tick(&eng, 0.016f);
+			REQUIRE(g_fake_props_calls == calls);
+			REQUIRE(eng.fader_slots[10].cached_available); /* the last known range */
+			REQUIRE(eng.filter_meta_refresh_pending);
+			mfd_engine_flush_pending_ui_work(&eng);
+			REQUIRE(g_fake_props_calls > calls);
+			REQUIRE(!eng.filter_meta_refresh_pending);
+			REQUIRE(!eng.fader_slots[10].cached_available);
+			REQUIRE(strstr(eng.fader_slots[10].cached_reason, "outside") != NULL);
+
+			calls = g_fake_props_calls;
+			mfd_engine_tick(&eng, 0.016f);
+			mfd_engine_flush_pending_ui_work(&eng);
+			REQUIRE(g_fake_props_calls == calls); /* read once, not on every flush */
+
+			/* The filter says its range is back: the UI thread reads it again and the strip works. */
+			flt_blur->float_max_override = 50.0;
+			mfd_engine_report_scene_graph_change(&eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
+			mfd_engine_tick(&eng, 0.016f);
+			mfd_engine_flush_pending_ui_work(&eng);
+			REQUIRE(eng.fader_slots[10].cached_available);
+			eng.filter_meta_defer_for_test = false;
+			eng.initialized = was_initialized;
+		}
 
 		/* 8. Profile switch apc40mk2 -> apcminimk2 -> apc40mk2 preserves fx_1..fx_8 enabled & bindings */
 		REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC_MINI_MK2, false));

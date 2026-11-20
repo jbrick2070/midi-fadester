@@ -91,7 +91,25 @@ struct mfd_fader_slot {
 	 * pins it. Saved. */
 	bool auto_follow;
 
-	/* Cached filter property metadata (refreshed on signals, never on video tick) */
+	/*
+	 * Cached filter property metadata. The filter's properties (obs_source_properties: the filter's own
+	 * get_properties and every modified callback) are read once per binding and kept in filter_meta_*; a re-check
+	 * reuses them. They are read again only when the binding changes or the filter says its properties changed, and
+	 * never on the video thread: a re-check there asks the UI thread, which reads them with no engine lock held
+	 * (A-03, mfd_engine_flush_pending_ui_work).
+	 */
+	bool filter_meta_cached;    /* filter_meta_* describe the three names below */
+	bool filter_meta_stale;     /* the filter changed since: read again when a thread that may do so comes by */
+	uint8_t filter_meta_result; /* enum mfd_filter_meta_result */
+	char filter_meta_source[MFD_SOURCE_NAME_MAX];
+	char filter_meta_filter[MFD_SOURCE_NAME_MAX];
+	char filter_meta_prop[MFD_FILTER_PROP_NAME_MAX];
+	bool filter_meta_is_int;
+	double filter_meta_min;
+	double filter_meta_max;
+	double filter_meta_step;
+	char filter_meta_suffix[32];
+	char filter_meta_label[MFD_FILTER_PROP_NAME_MAX];
 	bool filter_prop_valid;
 	bool filter_prop_is_int;
 	double filter_prop_min;
@@ -327,6 +345,13 @@ typedef bool (*mfd_tbar_apply_fn)(enum mfd_tbar_state state, float t_norm, bool 
 				  enum mfd_tbar_state *out_next_state, bool *out_completed_throw,
 				  bool *out_aborted_throw, char *out_err, size_t err_size);
 typedef void (*mfd_tbar_unlatch_fn)(void);
+/*
+ * The T-bar driver's parked command (C-07). With run == false it only answers whether a command is parked and waits
+ * for a retry: called from the video tick, so it must read an atomic and nothing else. With run == true it tries the
+ * parked command again: called on the UI thread from mfd_engine_flush_pending_ui_work, no engine lock held. The engine
+ * drives the retry from its tick; the driver has no timer.
+ */
+typedef bool (*mfd_tbar_deferred_fn)(bool run);
 typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
 typedef void (*mfd_filter_host_cb)(const char *source_name, bool is_scene, void *param);
 typedef void (*mfd_source_filter_cb)(const char *filter_name, const char *type_id, bool enabled, void *param);
@@ -420,7 +445,8 @@ struct mfd_scene_graph_ops {
  */
 enum mfd_graph_change_kind {
 	MFD_GRAPH_RESCAN = 0,      /* a source or filter appeared: connect signals, then re-check */
-	MFD_GRAPH_RECHECK,         /* scene items or a filter's properties changed: re-check */
+	MFD_GRAPH_RECHECK,         /* scene items changed: re-check */
+	MFD_GRAPH_FILTER_PROPS,    /* a filter was added or says its properties changed: read them again, re-check */
 	MFD_GRAPH_SOURCE_GONE,     /* a: the removed or destroyed source's name; flag: it was a filter or transition */
 	MFD_GRAPH_SOURCE_RENAMED,  /* a -> b */
 	MFD_GRAPH_FILTER_REMOVED,  /* a: host, b: filter */
@@ -482,6 +508,11 @@ struct mfd_engine {
 	struct mfd_midi_queue midi_queue;
 	struct mfd_midi_parser midi_parser;
 	struct mfd_winmm_device midi_dev;
+	bool midi_io_busy; /* this plugin is closing or opening the port with no engine lock held (A-02) */
+	/* A-03: a re-check on the video thread found a Filter Setting strip whose filter properties must be read
+	 * again; the UI thread's flush does it. */
+	bool filter_meta_refresh_pending;
+	bool filter_meta_defer_for_test; /* tests: behave as on the video thread (never read properties in a re-check) */
 	bool midi_disconnect_handled;
 
 	char configured_device_name[MFD_MIDI_DEV_NAME_MAX];
@@ -526,6 +557,9 @@ struct mfd_engine {
 
 	mfd_tbar_apply_fn tbar_driver;
 	mfd_tbar_unlatch_fn tbar_unlatch;
+	mfd_tbar_deferred_fn tbar_deferred;
+	float tbar_deferred_wait_sec; /* tick time since the parked T-bar command was last retried */
+	bool tbar_deferred_due;       /* the UI thread's flush retries it */
 	char tbar_error[256];
 
 	/* Optional test overrides when running outside live OBS */
@@ -569,6 +603,9 @@ struct mfd_engine {
 	uint8_t vj_hold_seen;                  /* the hold bits vj_hold_epoch last saw */
 	bool desk_visible;                     /* the Fadester Desk dock is on screen: Visual Sidechain is polled */
 	float desk_frame_sec;                  /* time since the dock was last asked to repaint */
+	/* Counts the dock's repaint requests. Its own number (F-08): the frame clock is the dock's business and must
+	 * not look like a change to the settings window, which is refreshed on config_topology_rev and telemetry_rev. */
+	uint64_t desk_frame_rev;
 	bool vs_panic_known;      /* Visual Sidechain has answered get_safety or panic since it last failed */
 	bool vs_last_failed;      /* the last Visual Sidechain command got no answer */
 	uint8_t vj_punched;       /* strips whose blend was off its own at this press, read before the feed */
@@ -653,6 +690,10 @@ struct mfd_ui_catalog *mfd_ui_catalog_create(void);
 void mfd_ui_catalog_destroy(struct mfd_ui_catalog *cat);
 void mfd_engine_get_ui_catalog(struct mfd_engine *eng, struct mfd_ui_catalog *out);
 void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *out);
+/* The three change counters, read under the engine lock: settings and layout, live values, and the dock's frame
+ * clock. The UI refreshes each window only when a counter it shows has moved (F-08). */
+void mfd_engine_get_ui_revs(struct mfd_engine *eng, uint64_t *topology_rev, uint64_t *telemetry_rev,
+			    uint64_t *desk_frame_rev);
 
 struct mfd_source_filter_catalog *mfd_source_filter_catalog_create(void);
 void mfd_source_filter_catalog_destroy(struct mfd_source_filter_catalog *cat);
@@ -868,6 +909,9 @@ bool mfd_engine_finish_tbar_throw(struct mfd_engine *eng, int slot_index);
 
 void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn);
 void mfd_engine_set_tbar_unlatch_fn(mfd_tbar_unlatch_fn unlatch_fn);
+void mfd_engine_set_tbar_deferred_fn(mfd_tbar_deferred_fn deferred_fn);
+/* Seconds of video ticks between two retries of a parked T-bar command. */
+#define MFD_TBAR_DEFERRED_RETRY_SEC 0.025f
 void mfd_engine_unlatch_tbar(struct mfd_engine *eng);
 void mfd_engine_on_external_tbar_reset(struct mfd_engine *eng);
 void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng);

@@ -58,6 +58,10 @@ struct mfd_winmm_device {
 	 * when the desk has none or it could not be opened (the buttons still work, unlit). */
 	void *out_handle;
 	char out_name[MFD_MIDI_DEV_NAME_MAX];
+	/* The device whose queue and device_closed_unexpectedly flag the MIDI In callback uses; NULL means this one.
+	 * The engine opens a port into a device on the stack with no engine lock held and then copies it into its own
+	 * device under the lock (A-02), so the callback must hold the engine's device, whose address never changes. */
+	struct mfd_winmm_device *callback_owner;
 };
 
 /*
@@ -77,10 +81,10 @@ void mfd_winmm_close(struct mfd_winmm_device *dev);
 bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_name);
 
 /*
- * Checks if the opened device is still present in WinMM enumeration; if unplugged, closes the handle
- * and sets dev->last_error and dev->error_kind so the UI shows a disconnected status without crashing.
+ * Whether the opened device is still listed (and, on macOS, not offline). Reads only: it changes nothing in dev and
+ * closes nothing, so the engine can call it on a copy with no engine lock held.
  */
-bool mfd_winmm_check_health(struct mfd_winmm_device *dev);
+bool mfd_winmm_is_present(const struct mfd_winmm_device *dev);
 
 /*
  * Sends one 3-byte message (a note on for an LED) to the opened controller's MIDI Out. False when there is no MIDI

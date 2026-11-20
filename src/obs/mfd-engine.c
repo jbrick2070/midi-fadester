@@ -383,6 +383,8 @@ static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
 static void vj_hold_epoch_sync_locked(struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
+static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng);
+static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng);
 
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 {
@@ -474,14 +476,21 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 		eng->pending_config_save = false;
 		do_save = true;
 	}
-	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+	if (midi_closed_unexpectedly_locked(eng)) {
 		check_health = true;
 	}
+	mfd_tbar_deferred_fn tbar_retry = eng->tbar_deferred_due ? eng->tbar_deferred : NULL;
+	eng->tbar_deferred_due = false;
 	mfd_engine_unlock(eng);
+
+	if (tbar_retry) {
+		(void)tbar_retry(true); /* UI thread, no engine lock: the driver may call back into the engine */
+	}
 
 	if (do_save && obs_initialized()) {
 		mfd_engine_save_global_config(eng);
 	}
+	refresh_filter_meta_on_ui_thread(eng);
 	if (check_health) {
 		mfd_engine_poll_midi_health_on_ui_thread(eng);
 	}
@@ -507,7 +516,31 @@ static void unlock_and_persist_global_config(struct mfd_engine *eng)
 	}
 }
 
-static void refresh_apc40_detected_locked(struct mfd_engine *eng)
+/*
+ * The MIDI In ports as the system lists them now. Listing asks the MIDI driver (WinMM, CoreMIDI), which can be slow
+ * or stall on a device that was just pulled, so it is always read with no engine lock held (A-02) and handed to the
+ * code that needs it under the lock.
+ */
+struct mfd_midi_port_list {
+	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
+	size_t count;
+	bool valid; /* false before OBS is up: nothing was read */
+};
+
+static void midi_port_list_read(struct mfd_midi_port_list *ports)
+{
+	ports->count = 0U;
+	ports->valid = obs_initialized();
+	if (ports->valid) {
+		ports->count = mfd_winmm_enumerate(ports->list, MFD_MAX_MIDI_DEVICES);
+	}
+}
+
+/* Serialises MIDI port work (open, close) between threads. Taken with no engine lock held; the engine lock is taken
+ * inside it for short state updates only, never the other way round. */
+static pthread_mutex_t g_midi_io_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void refresh_apc40_detected_locked(struct mfd_engine *eng, const struct mfd_midi_port_list *ports)
 {
 	if (!eng) {
 		return;
@@ -520,17 +553,76 @@ static void refresh_apc40_detected_locked(struct mfd_engine *eng)
 		eng->apc40_controller_detected = true;
 		return;
 	}
-	if (obs_initialized()) {
-		struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
-		size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
-		for (size_t i = 0U; i < count; ++i) {
-			if (list[i].is_apc40_mk2) {
+	if (ports && ports->valid) {
+		for (size_t i = 0U; i < ports->count; ++i) {
+			if (ports->list[i].is_apc40_mk2) {
 				eng->apc40_controller_detected = true;
 				return;
 			}
 		}
 		eng->apc40_controller_detected = false;
 	}
+}
+
+/*
+ * Takes the open handles out of the engine's device into `old`, under the engine lock, so the caller can close them
+ * with no engine lock held. The engine's device keeps is_open and opened_name until the caller stores the outcome, so
+ * the tick sees no "no controller" frame in between; with no MIDI Out handle it sends no light meanwhile.
+ */
+static void midi_detach_handles_locked(struct mfd_engine *eng, struct mfd_winmm_device *old)
+{
+	*old = eng->midi_dev;
+	old->callback_owner = NULL;
+	eng->midi_dev.handle = NULL;
+	eng->midi_dev.out_handle = NULL;
+	/* Closing a port raises device_closed_unexpectedly through its callback; the tick must not read that as an
+	 * unplug. Cleared again under the lock by midi_io_done_locked once the flag is back down. */
+	eng->midi_io_busy = true;
+}
+
+static void midi_io_done_locked(struct mfd_engine *eng)
+{
+	eng->midi_io_busy = false;
+}
+
+/* The MIDI In callback reported the port closed, and it was not this plugin closing it. Engine lock held. */
+static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng)
+{
+	return !eng->midi_io_busy && os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly);
+}
+
+/* Stores a device opened (or not) on the caller's stack into the engine's device, under the engine lock. */
+static void midi_install_device_locked(struct mfd_engine *eng, const struct mfd_winmm_device *fresh)
+{
+	struct mfd_winmm_device *dst = &eng->midi_dev;
+	dst->handle = fresh->handle;
+	dst->out_handle = fresh->out_handle;
+	dst->is_open = fresh->is_open;
+	dst->error_kind = fresh->error_kind;
+	dst->error_operation = fresh->error_operation;
+	dst->error_code = fresh->error_code;
+	memcpy(dst->error_device_name, fresh->error_device_name, sizeof(dst->error_device_name));
+	memcpy(dst->opened_name, fresh->opened_name, sizeof(dst->opened_name));
+	memcpy(dst->last_error, fresh->last_error, sizeof(dst->last_error));
+	memcpy(dst->out_name, fresh->out_name, sizeof(dst->out_name));
+}
+
+/*
+ * Closes `old` (handles taken with midi_detach_handles_locked) and opens `device_name` into `fresh`. No engine lock
+ * is held: the video tick keeps running while the MIDI driver works. The MIDI In callback of the new port is bound to
+ * the engine's own device (its queue and its closed flag).
+ */
+static bool midi_reopen_unlocked(struct mfd_engine *eng, struct mfd_winmm_device *old, const char *device_name,
+				 struct mfd_winmm_device *fresh)
+{
+	mfd_winmm_close(old);
+	/* Closing the old port may have raised the flag through its callback; no port is open now. */
+	os_atomic_store_bool(&eng->midi_dev.device_closed_unexpectedly, false);
+	mfd_winmm_init(fresh, &eng->midi_queue);
+	fresh->callback_owner = &eng->midi_dev;
+	bool ok = mfd_winmm_open_by_name(fresh, device_name);
+	fresh->callback_owner = NULL;
+	return ok;
 }
 
 static void clear_slot_filter_fields(struct mfd_fader_slot *s);
@@ -660,6 +752,15 @@ void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn)
 {
 	mfd_engine_lock(&g_engine);
 	g_engine.tbar_driver = driver_fn;
+	mfd_engine_unlock(&g_engine);
+}
+
+void mfd_engine_set_tbar_deferred_fn(mfd_tbar_deferred_fn deferred_fn)
+{
+	mfd_engine_lock(&g_engine);
+	g_engine.tbar_deferred = deferred_fn;
+	g_engine.tbar_deferred_due = false;
+	g_engine.tbar_deferred_wait_sec = 0.0f;
 	mfd_engine_unlock(&g_engine);
 }
 
@@ -2247,6 +2348,145 @@ void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng)
 	mfd_engine_unlock(eng);
 }
 
+enum mfd_filter_meta_result {
+	MFD_FILTER_META_NO_PROPS = 0, /* the filter gave no properties */
+	MFD_FILTER_META_NUMERIC,      /* the setting is a number: filter_meta_* hold its range */
+	MFD_FILTER_META_NOT_NUMERIC,  /* the setting exists but is not a number */
+	MFD_FILTER_META_MISSING,      /* the filter has no setting of that name */
+};
+
+struct mfd_filter_meta {
+	enum mfd_filter_meta_result result;
+	struct mfd_filter_prop_info info;
+};
+
+/* Reads one setting's description from the filter's properties. This runs the filter's own code
+ * (obs_source_properties): never call it on the video thread. */
+static void read_filter_meta(const struct mfd_engine *eng, const char *source, const char *filter, const char *prop,
+			     struct mfd_filter_meta *out)
+{
+	memset(out, 0, sizeof(*out));
+	obs_properties_t *props = sg_create_filter_properties(eng, source, filter);
+	if (!props) {
+		out->result = MFD_FILTER_META_NO_PROPS;
+		return;
+	}
+	bool found_non_num = false;
+	bool found_num = find_filter_prop_in_props_depth(props, NULL, prop, &found_non_num, &out->info, 0);
+	obs_properties_destroy(props);
+	out->result = found_num ? MFD_FILTER_META_NUMERIC
+				: (found_non_num ? MFD_FILTER_META_NOT_NUMERIC : MFD_FILTER_META_MISSING);
+}
+
+static bool filter_meta_matches_slot(const struct mfd_fader_slot *slot)
+{
+	return slot->filter_meta_cached && strcmp(slot->filter_meta_source, slot->source_a_name) == 0 &&
+	       strcmp(slot->filter_meta_filter, slot->filter_name) == 0 &&
+	       strcmp(slot->filter_meta_prop, slot->filter_prop) == 0;
+}
+
+static void store_filter_meta_locked(struct mfd_fader_slot *slot, const char *source, const char *filter,
+				     const char *prop, const struct mfd_filter_meta *meta)
+{
+	slot->filter_meta_cached = true;
+	slot->filter_meta_stale = false;
+	slot->filter_meta_result = (uint8_t)meta->result;
+	snprintf(slot->filter_meta_source, sizeof(slot->filter_meta_source), "%s", source);
+	snprintf(slot->filter_meta_filter, sizeof(slot->filter_meta_filter), "%s", filter);
+	snprintf(slot->filter_meta_prop, sizeof(slot->filter_meta_prop), "%s", prop);
+	slot->filter_meta_is_int = meta->info.is_int;
+	slot->filter_meta_min = meta->info.min_val;
+	slot->filter_meta_max = meta->info.max_val;
+	slot->filter_meta_step = meta->info.step;
+	snprintf(slot->filter_meta_suffix, sizeof(slot->filter_meta_suffix), "%s", meta->info.suffix);
+	snprintf(slot->filter_meta_label, sizeof(slot->filter_meta_label), "%s", meta->info.label);
+}
+
+/* Whether this thread may run a filter's properties code inside a re-check. Not the video thread (A-03). */
+static bool filter_meta_may_read_here(const struct mfd_engine *eng)
+{
+	return !eng->filter_meta_defer_for_test && !obs_in_task_thread(OBS_TASK_GRAPHICS);
+}
+
+/* Engine lock held. Every Filter Setting strip reads its filter's properties again at its next re-check. */
+static void mark_filter_meta_stale_locked(struct mfd_engine *eng, const char *source, const char *filter)
+{
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (!s->filter_meta_cached) {
+			continue;
+		}
+		if (source && strcmp(s->filter_meta_source, source) != 0) {
+			continue;
+		}
+		if (filter && strcmp(s->filter_meta_filter, filter) != 0) {
+			continue;
+		}
+		s->filter_meta_stale = true;
+	}
+}
+
+/*
+ * UI thread, no engine lock held. Reads the filter properties that a re-check on the video thread could not, stores
+ * them under the lock and re-checks. The properties code of a filter (this plugin's own, or anyone's) so never runs on
+ * the video thread and never holds up the engine lock (A-03, B-09).
+ */
+static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng)
+{
+	struct {
+		int slot;
+		char source[MFD_SOURCE_NAME_MAX];
+		char filter[MFD_SOURCE_NAME_MAX];
+		char prop[MFD_FILTER_PROP_NAME_MAX];
+		struct mfd_filter_meta meta;
+	} *jobs = NULL;
+	int n = 0;
+
+	mfd_engine_lock(eng);
+	if (!eng->filter_meta_refresh_pending) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->filter_meta_refresh_pending = false;
+	jobs = bzalloc(sizeof(*jobs) * MFD_MAX_FADER_SLOTS);
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (!s->enabled || s->target_type != MFD_TARGET_FILTER_PARAM || s->source_a_name[0] == '\0' ||
+		    s->filter_name[0] == '\0' || s->filter_prop[0] == '\0') {
+			continue;
+		}
+		if (filter_meta_matches_slot(s) && !s->filter_meta_stale) {
+			continue;
+		}
+		jobs[n].slot = i;
+		snprintf(jobs[n].source, sizeof(jobs[n].source), "%s", s->source_a_name);
+		snprintf(jobs[n].filter, sizeof(jobs[n].filter), "%s", s->filter_name);
+		snprintf(jobs[n].prop, sizeof(jobs[n].prop), "%s", s->filter_prop);
+		++n;
+	}
+	mfd_engine_unlock(eng);
+
+	for (int k = 0; k < n; ++k) {
+		read_filter_meta(eng, jobs[k].source, jobs[k].filter, jobs[k].prop, &jobs[k].meta);
+	}
+
+	if (n > 0) {
+		mfd_engine_lock(eng);
+		for (int k = 0; k < n; ++k) {
+			struct mfd_fader_slot *s = &eng->fader_slots[jobs[k].slot];
+			/* the strip may have been set to something else meanwhile: then its own re-check reads */
+			if (strcmp(s->source_a_name, jobs[k].source) == 0 &&
+			    strcmp(s->filter_name, jobs[k].filter) == 0 && strcmp(s->filter_prop, jobs[k].prop) == 0) {
+				store_filter_meta_locked(s, jobs[k].source, jobs[k].filter, jobs[k].prop,
+							 &jobs[k].meta);
+			}
+		}
+		mfd_engine_reevaluate_slots(eng, true);
+		mfd_engine_unlock(eng);
+	}
+	bfree(jobs);
+}
+
 static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot_index, bool *out_avail,
 						struct mfd_msg *out_reason)
 {
@@ -2266,50 +2506,48 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 		mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL, NULL);
 	} else if (!sg_filter_exists(eng, slot->source_a_name, slot->filter_name, NULL)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, slot->filter_name);
+		slot->filter_meta_cached = false; /* a filter of this name added later is read afresh */
 		mfd_msg_set(&rsn, MFD_MSG_FILTER_REMOVED, slot->filter_name, slot->source_a_name, NULL, NULL, NULL);
 	} else {
-		obs_properties_t *props = sg_create_filter_properties(eng, slot->source_a_name, slot->filter_name);
-		if (!props) {
+		/* The filter's properties are read once per binding and kept (A-03): a re-check on a scene change costs
+		 * no properties call. They are read again when the binding changed or the filter changed, on a thread
+		 * that may run the filter's code; the video thread hands that to the UI thread and goes on with what
+		 * it last knew. */
+		bool have = filter_meta_matches_slot(slot);
+		if (!have || slot->filter_meta_stale) {
+			if (filter_meta_may_read_here(eng)) {
+				struct mfd_filter_meta meta;
+				read_filter_meta(eng, slot->source_a_name, slot->filter_name, slot->filter_prop, &meta);
+				store_filter_meta_locked(slot, slot->source_a_name, slot->filter_name,
+							 slot->filter_prop, &meta);
+				have = true;
+			} else {
+				eng->filter_meta_refresh_pending = true;
+				eng->pending_ui_notify = true; /* wakes the UI thread's flush */
+			}
+		}
+		if (!have || slot->filter_meta_result == MFD_FILTER_META_NO_PROPS ||
+		    slot->filter_meta_result == MFD_FILTER_META_MISSING) {
 			mfd_msg_set(&rsn, MFD_MSG_SETTING_UNAVAILABLE, slot->filter_prop, slot->filter_name, NULL, NULL,
 				    NULL);
+		} else if (slot->filter_meta_result == MFD_FILTER_META_NOT_NUMERIC) {
+			mfd_msg_set(&rsn, MFD_MSG_SETTING_NOT_NUMERIC, slot->filter_prop, slot->filter_name, NULL, NULL,
+				    NULL);
 		} else {
-			obs_data_t *settings = sg_get_filter_settings(eng, slot->source_a_name, slot->filter_name);
-			bool found_non_num = false;
-			struct mfd_filter_prop_info info;
-			memset(&info, 0, sizeof(info));
-			bool found_num = find_filter_prop_in_props_depth(props, settings, slot->filter_prop,
-									 &found_non_num, &info, 0);
-			if (settings) {
-				obs_data_release(settings);
-			}
-			obs_properties_destroy(props);
-
-			if (!found_num) {
-				if (found_non_num) {
-					mfd_msg_set(&rsn, MFD_MSG_SETTING_NOT_NUMERIC, slot->filter_prop,
-						    slot->filter_name, NULL, NULL, NULL);
-				} else {
-					mfd_msg_set(&rsn, MFD_MSG_SETTING_UNAVAILABLE, slot->filter_prop,
-						    slot->filter_name, NULL, NULL, NULL);
-				}
-			} else if (!mfd_filter_range_is_valid(slot->filter_from_val, slot->filter_to_val, info.min_val,
-							      info.max_val)) {
-				slot->filter_prop_is_int = info.is_int;
-				slot->filter_prop_min = info.min_val;
-				slot->filter_prop_max = info.max_val;
-				slot->filter_prop_step = info.step;
-				snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s", info.suffix);
-				snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s", info.label);
+			slot->filter_prop_is_int = slot->filter_meta_is_int;
+			slot->filter_prop_min = slot->filter_meta_min;
+			slot->filter_prop_max = slot->filter_meta_max;
+			slot->filter_prop_step = slot->filter_meta_step;
+			snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s",
+				 slot->filter_meta_suffix);
+			snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s",
+				 slot->filter_meta_label);
+			if (!mfd_filter_range_is_valid(slot->filter_from_val, slot->filter_to_val,
+						       slot->filter_meta_min, slot->filter_meta_max)) {
 				set_range_outside_msg(&rsn, slot->filter_from_val, slot->filter_to_val,
-						      slot->filter_prop, info.min_val, info.max_val);
+						      slot->filter_prop, slot->filter_meta_min, slot->filter_meta_max);
 			} else {
 				slot->filter_prop_valid = true;
-				slot->filter_prop_is_int = info.is_int;
-				slot->filter_prop_min = info.min_val;
-				slot->filter_prop_max = info.max_val;
-				slot->filter_prop_step = info.step;
-				snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s", info.suffix);
-				snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s", info.label);
 				avail = true;
 				mfd_msg_clear(&rsn);
 			}
@@ -2719,6 +2957,9 @@ static bool rename_source_refs_locked(struct mfd_engine *eng, const char *prev_n
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		bool slot_touched = false;
 		if (strcmp(s->source_a_name, prev_name) == 0) {
+			if (filter_meta_matches_slot(s)) { /* the same source under a new name */
+				snprintf(s->filter_meta_source, sizeof(s->filter_meta_source), "%s", new_name);
+			}
 			snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", new_name);
 			slot_touched = true;
 		}
@@ -2779,6 +3020,9 @@ static bool rename_filter_refs_locked(struct mfd_engine *eng, const char *parent
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		if (s->target_type == MFD_TARGET_FILTER_PARAM && strcmp(s->source_a_name, parent_source_name) == 0 &&
 		    strcmp(s->filter_name, prev_name) == 0) {
+			if (filter_meta_matches_slot(s)) { /* the same filter under a new name: its properties hold */
+				snprintf(s->filter_meta_filter, sizeof(s->filter_meta_filter), "%s", new_name);
+			}
 			snprintf(s->filter_name, sizeof(s->filter_name), "%s", new_name);
 			mfd_engine_bump_slot_rev(eng, i);
 			touched = true;
@@ -2917,12 +3161,13 @@ void mfd_engine_handle_filter_settings_updated(struct mfd_engine *eng, const cha
 void mfd_engine_handle_filter_properties_updated(struct mfd_engine *eng, const char *parent_source_name,
 						 const char *filter_name)
 {
-	UNUSED_PARAMETER(parent_source_name);
-	UNUSED_PARAMETER(filter_name);
 	if (!eng) {
 		return;
 	}
+	mfd_engine_lock(eng);
+	mark_filter_meta_stale_locked(eng, parent_source_name, filter_name);
 	mfd_engine_reevaluate_slots(eng, true);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
@@ -3335,10 +3580,10 @@ bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *so
 		return false;
 	}
 	snprintf(out->source_name, sizeof(out->source_name), "%s", source_name);
-	mfd_engine_lock(eng);
+	/* No engine lock (F-04): this builds the properties of every filter on the source, which runs the filters' own
+	 * code and can be slow, and it reads nothing of the engine's state; the video tick must not wait for it. */
 	if (!mfd_engine_source_exists(eng, source_name)) {
 		out->source_exists = false;
-		mfd_engine_unlock(eng);
 		return false;
 	}
 	out->source_exists = true;
@@ -3346,7 +3591,6 @@ bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *so
 	bool is_sc = false;
 	(void)sg_enum_source_filters(eng, source_name, &is_sc, fill_source_filter_cat_cb, &ctx);
 	out->is_scene = is_sc || mfd_engine_scene_exists(eng, source_name);
-	mfd_engine_unlock(eng);
 	return true;
 }
 
@@ -3655,6 +3899,28 @@ bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const cha
 	obs_data_array_release(audio_arr);
 	obs_data_array_release(hosts_arr);
 	return true;
+}
+
+void mfd_engine_get_ui_revs(struct mfd_engine *eng, uint64_t *topology_rev, uint64_t *telemetry_rev,
+			    uint64_t *desk_frame_rev)
+{
+	uint64_t topo = 0U, tele = 0U, frame = 0U;
+	if (eng) {
+		mfd_engine_lock(eng);
+		topo = eng->config_topology_rev;
+		tele = eng->telemetry_rev;
+		frame = eng->desk_frame_rev;
+		mfd_engine_unlock(eng);
+	}
+	if (topology_rev) {
+		*topology_rev = topo;
+	}
+	if (telemetry_rev) {
+		*telemetry_rev = tele;
+	}
+	if (desk_frame_rev) {
+		*desk_frame_rev = frame;
+	}
 }
 
 void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *out)
@@ -3984,8 +4250,24 @@ bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const str
 	return ok;
 }
 
+static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+						struct mfd_msg *out_msg);
+
+/* Takes the engine lock (A-04, F-14): the check reads the other strips' names and the cached OBS state, which the
+ * video tick and obs-websocket threads rewrite under that lock. The lock is recursive, so a commit that validates
+ * while holding it still works. */
 bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					     struct mfd_msg *out_msg)
+{
+	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
+	mfd_engine_lock(lock_eng);
+	bool ok = validate_setup_candidate_msg_locked(eng, cand, out_msg);
+	mfd_engine_unlock(lock_eng);
+	return ok;
+}
+
+static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+						struct mfd_msg *out_msg)
 {
 	mfd_msg_clear(out_msg);
 	if (!eng || !cand || cand->slot_index < 0 || cand->slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -6211,7 +6493,14 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 
 bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng)
 {
-	return eng && !eng->vj_disabled;
+	if (!eng) {
+		return false;
+	}
+	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
+	mfd_engine_lock(lock_eng);
+	bool on = !eng->vj_disabled;
+	mfd_engine_unlock(lock_eng);
+	return on;
 }
 
 void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown)
@@ -6258,7 +6547,14 @@ void mfd_engine_desk_first_show_done(struct mfd_engine *eng)
 
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
 {
-	return vj_effective_fade_ms(eng);
+	if (!eng) {
+		return vj_effective_fade_ms(eng);
+	}
+	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
+	mfd_engine_lock(lock_eng);
+	int ms = vj_effective_fade_ms(eng);
+	mfd_engine_unlock(lock_eng);
+	return ms;
 }
 
 /* --- Strips that fill themselves from the scene on air --- */
@@ -7161,7 +7457,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 
 	mfd_engine_lock(eng);
 
-	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+	if (midi_closed_unexpectedly_locked(eng)) {
 		bool first = !eng->midi_disconnect_handled;
 		abort_open_tbar_slots_on_midi_disconnect_locked(eng);
 		if (first) {
@@ -7591,13 +7887,26 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	vj_tidy_locked(eng);
 	vj_hold_epoch_sync_locked(eng);
 	vj_flush_leds_locked(eng);
+	if (eng->tbar_deferred && eng->tbar_deferred(false)) {
+		/* A T-bar command is parked behind a transition that is still ending (C-07): the tick is the clock that
+		 * asks the UI thread to try it again, about every 25 ms. No timer. */
+		eng->tbar_deferred_wait_sec += seconds;
+		if (eng->tbar_deferred_wait_sec >= MFD_TBAR_DEFERRED_RETRY_SEC) {
+			eng->tbar_deferred_wait_sec = 0.0f;
+			eng->tbar_deferred_due = true;
+			eng->pending_ui_notify = true;
+		}
+	} else {
+		eng->tbar_deferred_wait_sec = 0.0f;
+	}
 	if (eng->desk_visible) {
 		/* The dock repaints on OBS's frame clock (no timers): about 30 times a second, for its pulsing pads and
 		 * Visual Sidechain's beat. */
 		eng->desk_frame_sec += seconds;
 		if (eng->desk_frame_sec >= 1.0f / 30.0f) {
 			eng->desk_frame_sec = 0.0f;
-			mfd_engine_mark_ui_dirty(eng, false);
+			++eng->desk_frame_rev; /* the dock only: the settings window does not refresh on this (F-08) */
+			eng->pending_ui_notify = true;
 		}
 	}
 	if (eng->vj_state_dirty) {
@@ -7911,6 +8220,10 @@ static void apply_named_change_locked(struct mfd_engine *eng, const struct mfd_g
 	case MFD_GRAPH_RECHECK:
 		*recheck = true;
 		break;
+	case MFD_GRAPH_FILTER_PROPS:
+		mark_filter_meta_stale_locked(eng, NULL, NULL);
+		*recheck = true;
+		break;
 	case MFD_GRAPH_SOURCE_GONE:
 		*prune = true;
 		if (!ch->flag) {
@@ -7930,6 +8243,8 @@ static void apply_named_change_locked(struct mfd_engine *eng, const struct mfd_g
 		*prune = true;
 		if (ch->a[0] != '\0') {
 			invalidate_filter_leases_for_removed_locked(eng, ch->a, ch->b[0] != '\0' ? ch->b : NULL);
+			/* a filter of the same name may be added in the same batch: it is another filter */
+			mark_filter_meta_stale_locked(eng, ch->a, ch->b[0] != '\0' ? ch->b : NULL);
 		}
 		*recheck = true;
 		break;
@@ -8056,7 +8371,8 @@ static bool graph_kind_is_droppable(enum mfd_graph_change_kind kind)
 
 static bool graph_kind_is_foldable(enum mfd_graph_change_kind kind)
 {
-	return kind == MFD_GRAPH_SOURCE_GONE || kind == MFD_GRAPH_FILTER_SETTINGS || kind == MFD_GRAPH_FILTER_ENABLED;
+	return kind == MFD_GRAPH_SOURCE_GONE || kind == MFD_GRAPH_FILTER_SETTINGS || kind == MFD_GRAPH_FILTER_ENABLED ||
+	       kind == MFD_GRAPH_FILTER_PROPS;
 }
 
 /* A rename or removal: an update queued after it may concern a different source or filter of the same name. */
@@ -8212,6 +8528,8 @@ static void on_obs_host_filter_add(void *data, calldata_t *cd)
 	if (flt && mfd_is_internal_filter(obs_source_get_name(flt), obs_source_get_id(flt))) {
 		return;
 	}
+	/* a filter of a bound name may have come (back): its properties are read again (A-03) */
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
 	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RESCAN, NULL, NULL, NULL, false);
 }
 
@@ -8252,7 +8570,7 @@ static void on_obs_filter_update_properties(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	struct mfd_engine *eng = engine_from_signal_data(data);
 	if (eng) {
-		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
 	}
 }
 
@@ -8461,6 +8779,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	if (!eng) {
 		return;
 	}
+	struct mfd_midi_port_list loaded_ports;
+	loaded_ports.count = 0U;
+	loaded_ports.valid = false;
 
 	/* Frontend events run on the UI thread with no libobs lock held: a safe place to catch up. */
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
@@ -8478,11 +8799,12 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		midi_port_list_read(&loaded_ports); /* before the lock (A-02) */
 		mfd_engine_lock(eng);
 		vj_restore_loaded_punches_locked(eng);
 		eng->frontend_finished_loading = true;
 		mfd_engine_mark_ui_dirty(eng, false); /* the UI thread looks once more: the dock's first show (U1-01) */
-		refresh_apc40_detected_locked(eng);
+		refresh_apc40_detected_locked(eng, &loaded_ports);
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
 		mfd_engine_unlock(eng);
@@ -9015,6 +9337,8 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		obs_data_release(data);
 		return false;
 	}
+	struct mfd_midi_port_list ports;
+	midi_port_list_read(&ports); /* before the lock (A-02) */
 	mfd_engine_lock(eng);
 	cancel_row_learn_locked(eng);
 	const char *dev = obs_data_get_string(data, "device_name");
@@ -9102,7 +9426,7 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	}
 	deserialize_calibrations(eng, data);
 	deserialize_slots(eng, data);
-	refresh_apc40_detected_locked(eng);
+	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
 	obs_data_release(data);
@@ -9183,18 +9507,36 @@ bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)
 	if (!eng) {
 		return false;
 	}
+	/* The port is closed and opened with no engine lock held (A-02): the video tick does not wait for the MIDI
+	 * driver. Call with no engine lock held. */
+	struct mfd_winmm_device old;
+	struct mfd_winmm_device fresh;
+	struct mfd_midi_port_list ports;
+	char name[MFD_MIDI_DEV_NAME_MAX];
+
+	pthread_mutex_lock(&g_midi_io_mutex);
 	mfd_engine_lock(eng);
 	if (device_name) {
 		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", device_name);
 	}
+	snprintf(name, sizeof(name), "%s", eng->configured_device_name);
+	midi_detach_handles_locked(eng, &old);
+	mfd_engine_unlock(eng);
+
+	bool ok = midi_reopen_unlocked(eng, &old, name, &fresh);
+	midi_port_list_read(&ports);
+
+	mfd_engine_lock(eng);
+	midi_install_device_locked(eng, &fresh);
+	midi_io_done_locked(eng);
 	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
-	bool ok = mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name);
 	if (ok) {
 		eng->midi_disconnect_handled = false;
 	}
-	refresh_apc40_detected_locked(eng);
+	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
+	pthread_mutex_unlock(&g_midi_io_mutex);
 	return ok;
 }
 
@@ -9258,58 +9600,102 @@ void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
 		return;
 	}
 
+	/*
+	 * Everything that asks the MIDI driver (listing the ports, closing, opening) runs with no engine lock held
+	 * (A-02), so the video tick never waits for it; the engine lock is taken only to read and store state. Call
+	 * with no engine lock held.
+	 */
+	struct mfd_winmm_device work;
+	struct mfd_winmm_device fresh;
+	struct mfd_midi_port_list ports;
+	char name[MFD_MIDI_DEV_NAME_MAX];
+
+	pthread_mutex_lock(&g_midi_io_mutex);
 	mfd_engine_lock(eng);
-	if (eng->midi_dev.is_open) {
-		if (!mfd_winmm_check_health(&eng->midi_dev)) {
+	work = eng->midi_dev;
+	snprintf(name, sizeof(name), "%s", eng->configured_device_name);
+	mfd_engine_unlock(eng);
+
+	if (work.is_open) {
+		bool healthy = mfd_winmm_is_present(&work) &&
+			       !os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly);
+		if (!healthy) {
+			midi_port_list_read(&ports);
+			mfd_engine_lock(eng);
+			midi_detach_handles_locked(eng, &work);
+			eng->midi_dev.is_open = false;
+			eng->midi_dev.out_name[0] = '\0';
+			eng->midi_dev.error_kind = MFD_WINMM_ERR_DISCONNECTED;
+			eng->midi_dev.error_operation = MFD_WINMM_OP_NONE;
+			eng->midi_dev.error_code = 0U;
+			snprintf(eng->midi_dev.error_device_name, sizeof(eng->midi_dev.error_device_name), "%s",
+				 work.opened_name);
+			snprintf(eng->midi_dev.last_error, sizeof(eng->midi_dev.last_error),
+				 "MIDI device '%s' was disconnected. Reconnect USB cable and click Reconnect.",
+				 work.opened_name);
+			obs_log(LOG_WARNING, "%s", eng->midi_dev.last_error);
 			abort_open_tbar_slots_on_midi_disconnect_locked(eng);
 			vj_release_all_locked(eng);
-			refresh_apc40_detected_locked(eng);
+			refresh_apc40_detected_locked(eng, &ports);
 			mfd_engine_notify_state_changed(eng);
+			mfd_engine_unlock(eng);
+			mfd_winmm_close(&work);
+			os_atomic_store_bool(&eng->midi_dev.device_closed_unexpectedly, false);
+			mfd_engine_lock(eng);
+			midi_io_done_locked(eng);
+			mfd_engine_unlock(eng);
 		}
-		mfd_engine_unlock(eng);
+		pthread_mutex_unlock(&g_midi_io_mutex);
 		return;
 	}
 
-	/* Event-driven hot-plug rescan on WM_DEVICECHANGE / Reconnect (R-MIDI-2) */
-	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
-	size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
-	if (count == 0U) {
-		refresh_apc40_detected_locked(eng);
-		mfd_engine_unlock(eng);
-		return;
-	}
+	/* Event-driven hot-plug rescan on WM_DEVICECHANGE / Reconnect (R-MIDI-2). The rescan always reads the list,
+	 * also before OBS is up. */
+	ports.valid = true;
+	ports.count = mfd_winmm_enumerate(ports.list, MFD_MAX_MIDI_DEVICES);
 
 	bool candidate_present = false;
-	if (eng->configured_device_name[0] != '\0') {
-		for (size_t i = 0U; i < count; ++i) {
-			if (strcmp(list[i].name, eng->configured_device_name) == 0) {
+	if (ports.count == 0U) {
+		candidate_present = false;
+	} else if (name[0] != '\0') {
+		for (size_t i = 0U; i < ports.count; ++i) {
+			if (strcmp(ports.list[i].name, name) == 0) {
 				candidate_present = true;
 				break;
 			}
 		}
 	} else {
-		for (size_t i = 0U; i < count; ++i) {
-			if (list[i].is_apc40_mk2) {
+		for (size_t i = 0U; i < ports.count; ++i) {
+			if (ports.list[i].is_apc40_mk2) {
 				candidate_present = true;
 				break;
 			}
 		}
-		if (!candidate_present && eng->midi_dev.error_kind != MFD_WINMM_ERR_BUSY_ALLOCATED) {
+		if (!candidate_present && work.error_kind != MFD_WINMM_ERR_BUSY_ALLOCATED) {
 			candidate_present = true;
 		}
 	}
 
+	bool opened = false;
 	if (candidate_present) {
-		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
-		if (mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name)) {
-			eng->midi_disconnect_handled = false;
-			refresh_apc40_detected_locked(eng);
-			mfd_engine_notify_state_changed(eng);
-		}
-	} else {
-		refresh_apc40_detected_locked(eng);
+		work.handle = NULL; /* nothing was open: nothing to close */
+		work.out_handle = NULL;
+		opened = midi_reopen_unlocked(eng, &work, name, &fresh);
 	}
+
+	mfd_engine_lock(eng);
+	if (candidate_present) {
+		midi_install_device_locked(eng, &fresh); /* also a failed open: its error is what the UI shows */
+		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
+	}
+	if (opened) {
+		eng->midi_disconnect_handled = false;
+		mfd_engine_notify_state_changed(eng);
+	}
+	ports.valid = obs_initialized(); /* as before: the "an APC40 is plugged in" flag is only kept once OBS is up */
+	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_unlock(eng);
+	pthread_mutex_unlock(&g_midi_io_mutex);
 }
 
 bool mfd_engine_init(void)
@@ -9345,7 +9731,11 @@ bool mfd_engine_init(void)
 			mfd_engine_load_profile_defaults(&g_engine, detected);
 		}
 	}
-	refresh_apc40_detected_locked(&g_engine);
+	{
+		struct mfd_midi_port_list init_ports;
+		midi_port_list_read(&init_ports);
+		refresh_apc40_detected_locked(&g_engine, &init_ports);
+	}
 	refresh_frontend_cache_on_ui_thread_locked(&g_engine);
 
 	connect_obs_signals(&g_engine);

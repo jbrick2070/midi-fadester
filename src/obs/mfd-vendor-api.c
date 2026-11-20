@@ -1645,6 +1645,15 @@ void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *respons
 	}
 
 	struct mfd_msg err_msg;
+	if (source && source[0] != '\0') {
+		/* One source's filters: this builds every filter's properties (the filters' own code) and reads no
+		 * engine state, so it runs with no engine lock held (F-04, A-03); the video tick does not wait. */
+		mfd_engine_unlock(eng);
+		if (!mfd_engine_fill_vendor_catalog_msg_locked(eng, source, response_data, &err_msg)) {
+			set_error_msg(response_data, &err_msg);
+		}
+		return;
+	}
 	if (!mfd_engine_fill_vendor_catalog_msg_locked(eng, source, response_data, &err_msg)) {
 		set_error_msg(response_data, &err_msg);
 	}

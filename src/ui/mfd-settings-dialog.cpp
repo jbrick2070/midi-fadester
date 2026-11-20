@@ -12,6 +12,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dbt.h>
 #endif
 
 #include "ui/mfd-settings-dialog.hpp"
@@ -654,7 +655,25 @@ public:
 		adv_catalog_ = nullptr;
 	}
 
-	void on_hardware_ports_changed() { populate_device_combos(); }
+	bool any_port_list_open() const
+	{
+		const bool z1_open = zone1_device_combo_ && zone1_device_combo_->view() &&
+				     zone1_device_combo_->view()->isVisible();
+		const bool adv_open = device_combo_ && device_combo_->view() && device_combo_->view()->isVisible();
+		return z1_open || adv_open;
+	}
+
+	/* A MIDI device came or went. A port list that is dropped down is not refilled under the pointer (F-05): the
+	 * refill waits for the next refresh after it closes. */
+	void on_hardware_ports_changed()
+	{
+		if (any_port_list_open()) {
+			ports_refill_pending_ = true;
+			return;
+		}
+		ports_refill_pending_ = false;
+		populate_device_combos();
+	}
 
 	void refresh_from_engine()
 	{
@@ -663,13 +682,10 @@ public:
 		}
 		mfd_engine_get_ui_snapshot(eng_, &snap_);
 
-		if (snap_.midi_connected != last_midi_connected_) {
-			last_midi_connected_ = snap_.midi_connected;
-			const bool z1_open = zone1_device_combo_ && zone1_device_combo_->view() &&
-					     zone1_device_combo_->view()->isVisible();
-			const bool adv_open = device_combo_ && device_combo_->view() &&
-					      device_combo_->view()->isVisible();
-			if (!z1_open && !adv_open) {
+		if (snap_.midi_connected != last_midi_connected_ || ports_refill_pending_) {
+			if (!any_port_list_open()) {
+				last_midi_connected_ = snap_.midi_connected;
+				ports_refill_pending_ = false;
 				populate_device_combos();
 			}
 		}
@@ -2658,6 +2674,7 @@ private:
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
 	bool last_midi_connected_ = false;
+	bool ports_refill_pending_ = false; /* ports changed while a port list was dropped down (F-05) */
 	bool showing_fx_bank_ = false;
 	QString adv_edit_error_;
 
@@ -2775,6 +2792,10 @@ public:
 
 static std::mutex g_ui_bridge_mu;
 static std::atomic<bool> g_ui_refresh_queued{false};
+static std::atomic<bool> g_ports_changed_queued{false};
+/* The engine change counters as the settings window last saw them (F-08). */
+static uint64_t g_dialog_seen_topology_rev = ~0ULL;
+static uint64_t g_dialog_seen_telemetry_rev = ~0ULL;
 static MfdUiDispatcher *g_ui_dispatcher = nullptr;
 static QPointer<MfdSettingsDialog> g_dialog;
 
@@ -2794,7 +2815,16 @@ void MfdUiDispatcher::on_drain()
 	g_ui_refresh_queued.store(false);
 	mfd_engine_flush_pending_ui_work(mfd_engine_get());
 	show_desk_the_first_time();
-	if (g_dialog) {
+	/* The engine wakes this about 30 times a second while the dock is visible, for the dock's pulsing pads. The
+	 * settings window is refreshed only when something it shows has changed (F-08), not on every dock frame. */
+	uint64_t topology_rev = 0U;
+	uint64_t telemetry_rev = 0U;
+	mfd_engine_get_ui_revs(mfd_engine_get(), &topology_rev, &telemetry_rev, nullptr);
+	const bool dialog_changed = topology_rev != g_dialog_seen_topology_rev ||
+				    telemetry_rev != g_dialog_seen_telemetry_rev;
+	g_dialog_seen_topology_rev = topology_rev;
+	g_dialog_seen_telemetry_rev = telemetry_rev;
+	if (g_dialog && dialog_changed) {
 		g_dialog->refresh_from_engine();
 	}
 	mfd_desk_dock_refresh();
@@ -2826,6 +2856,7 @@ static void ui_notify_bridge_cb(void *unused)
 /* A MIDI device was plugged in or out: re-check the open port and refresh the dialog's port list. */
 static void on_midi_ports_changed()
 {
+	g_ports_changed_queued.store(false);
 	mfd_engine_poll_midi_health_on_ui_thread(mfd_engine_get());
 	if (g_dialog) {
 		g_dialog->on_hardware_ports_changed();
@@ -2833,6 +2864,21 @@ static void on_midi_ports_changed()
 	}
 	show_desk_the_first_time(); /* an APC40 plugged in after OBS started */
 	mfd_desk_dock_refresh();
+}
+
+/*
+ * One queued re-check for a burst of device messages (F-05). Windows sends WM_DEVICECHANGE to every top-level window
+ * and several times per plug or unplug, and CoreMIDI sends one notification per object: the first one queues a call on
+ * the UI thread and the rest are dropped until it has run. No timer (the rule in tests/test-shader-syntax.c).
+ */
+static void queue_midi_ports_changed()
+{
+	if (!g_ui_dispatcher || g_ports_changed_queued.exchange(true)) {
+		return;
+	}
+	if (!QMetaObject::invokeMethod(g_ui_dispatcher, on_midi_ports_changed, Qt::QueuedConnection)) {
+		g_ports_changed_queued.store(false);
+	}
 }
 
 #ifdef _WIN32
@@ -2846,8 +2892,12 @@ public:
 		}
 		if (eventType == "windows_generic_MSG" || eventType == "windows_dispatcher_MSG") {
 			const auto *msg = static_cast<const MSG *>(message);
-			if (msg->message == WM_DEVICECHANGE) {
-				on_midi_ports_changed();
+			/* Only the events that can add or remove a MIDI port: a device tree change, an arrival, a
+			 * completed removal. Queries, pending removals and custom events are not looked at. */
+			if (msg->message == WM_DEVICECHANGE &&
+			    (msg->wParam == DBT_DEVNODES_CHANGED || msg->wParam == DBT_DEVICEARRIVAL ||
+			     msg->wParam == DBT_DEVICEREMOVECOMPLETE)) {
+				queue_midi_ports_changed();
 			}
 		}
 		return false;
@@ -2855,12 +2905,6 @@ public:
 };
 
 static MfdDeviceChangeFilter *g_dev_change_filter = nullptr;
-#else
-static void queue_midi_ports_changed()
-{
-	if (g_ui_dispatcher)
-		QMetaObject::invokeMethod(g_ui_dispatcher, on_midi_ports_changed, Qt::QueuedConnection);
-}
 #endif
 
 static void open_settings_from_dock()
