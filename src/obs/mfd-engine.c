@@ -12,6 +12,7 @@
 #include "core/slot-messages.h"
 #include "core/mfd-text.h"
 #include "core/tbar-logic.h"
+#include "vs/core/tempo.h"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <util/platform.h>
@@ -5502,13 +5503,6 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		eng->vj_state_dirty = true;
 		break;
 	}
-	case MFD_VJ_ACTION_RESTART: {
-		const char *scene = NULL, *source = NULL;
-		if (vj_strip_layer(eng, s, &scene, &source)) {
-			vj_queue_cmd_locked(eng, MFD_VJ_CMD_RESTART, scene, source, 0);
-		}
-		break;
-	}
 	case MFD_VJ_ACTION_PIN_TOGGLE: {
 		struct mfd_fader_slot *slot = vj_slot(eng, s);
 		if (!slot) {
@@ -6591,14 +6585,14 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 		if (already || !meant) {
 			break; /* on air already, or Preview holds another scene by now: nothing unexpected goes out */
 		}
-		double bpm = 120.0; /* Visual Sidechain's tempo when it knows one */
+		double bpm = VS_TEMPO_DEFAULT_BPM; /* Visual Sidechain's tempo when it knows one */
 		proc_handler_t *ph = obs_get_proc_handler();
 		if (ph) {
 			calldata_t cd;
 			calldata_init(&cd);
 			if (proc_handler_call(ph, "visual_sidechain_get_signals", &cd) && calldata_bool(&cd, "ok")) {
 				double b = calldata_float(&cd, "bpm");
-				if (isfinite(b) && b >= 40.0 && b <= 300.0) {
+				if (isfinite(b) && b >= VS_TEMPO_MIN_BPM && b <= VS_TEMPO_MAX_BPM) {
 					bpm = b;
 				}
 			}
@@ -6634,14 +6628,6 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 			}
 		}
 		obs_source_release(scene_src);
-		break;
-	}
-	case MFD_VJ_CMD_RESTART: {
-		obs_source_t *src = obs_get_source_by_name(cmd->source);
-		if (src) {
-			obs_source_media_restart(src);
-			obs_source_release(src);
-		}
 		break;
 	}
 	case MFD_VJ_CMD_TRANSITION: {
