@@ -167,15 +167,27 @@ static void *listener_thread(void *param)
 {
 	UNUSED_PARAMETER(param);
 	os_set_thread_name("tubester-listener");
+	bool error_logged = false;
 	while (!os_atomic_load_bool(&g.stop)) {
 		int ready = tub_socket_wait_readable(g.sock, TUB_POLL_US);
-		if (ready <= 0)
+		if (ready == 0)
 			continue;
 		struct sockaddr_in from;
 		tub_socklen_t from_len = sizeof(from);
-		tub_socket_t client = accept(g.sock, (struct sockaddr *)&from, &from_len);
-		if (client == TUB_INVALID_SOCKET)
+		tub_socket_t client = ready > 0 ? accept(g.sock, (struct sockaddr *)&from, &from_len)
+						: TUB_INVALID_SOCKET;
+		if (client == TUB_INVALID_SOCKET) {
+			/* A failed wait returns at once, and a failed accept (no descriptor left) leaves the connection
+			 * queued, so the wait says readable again: pause, or this thread spins a core (E-03). */
+			if (!error_logged) {
+				error_logged = true;
+				LISTENER_LOG(LOG_WARNING, "listener: %s failed (%d); retrying",
+					     ready > 0 ? "accept" : "wait", tub_socket_error());
+			}
+			os_sleep_ms(50);
 			continue;
+		}
+		error_logged = false;
 		tub_socket_no_inherit(client);
 		/* Bound to 127.0.0.1, so every peer is local; the check costs nothing and documents the intent. */
 		if (from.sin_addr.s_addr == htonl(INADDR_LOOPBACK))

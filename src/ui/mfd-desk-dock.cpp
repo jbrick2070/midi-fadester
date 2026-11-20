@@ -493,8 +493,14 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 					    30, 14);
 		clip_stops_[i] = b;
 		connect(b, &QPushButton::pressed, this, [this, i, b]() {
-			if (physical(b)) {
-				pressNote((uint8_t)i, MFD_VJ_NOTE_CLIP_STOP, true, false);
+			if (!physical(b)) {
+				return;
+			}
+			/* the latched Shift pins the column, as the lit Clip Stop row and its tooltip promise (F-01) */
+			bool shift = shift_->isChecked();
+			pressNote((uint8_t)i, MFD_VJ_NOTE_CLIP_STOP, true, shift);
+			if (shift) {
+				shift_->setChecked(false);
 			}
 		});
 		connect(b, &QPushButton::released, this,
@@ -907,8 +913,12 @@ void MfdDeskDock::refresh()
 		const struct mfd_vj_led &led = view_.leds[48 + j];
 		bool exists = j < view_.scene_count;
 		QString name = exists ? QString::fromUtf8(view_.scenes[j]) : QString();
-		setButtonText(scenes_[j], scenes_[j]->fontMetrics().elidedText(name, Qt::ElideRight,
-									       std::max(40, scenes_[j]->width() - 8)));
+		/* A button reads '&' as a mnemonic: "Q&A" would show as "QA" and, on Windows, Alt+A would press the
+		 * button. Doubled, it is shown as written (F-02). */
+		QString shown = scenes_[j]->fontMetrics().elidedText(name, Qt::ElideRight,
+								     std::max(40, scenes_[j]->width() - 8));
+		shown.replace(QLatin1Char('&'), QStringLiteral("&&"));
+		setButtonText(scenes_[j], shown);
 		QString what =
 			!view_.studio_mode
 				? mfdText("Desk.SceneTip.Program", "Click: put this scene on air.")
@@ -1108,6 +1118,10 @@ void on_frontend_event(enum obs_frontend_event event, void *unused)
 			g_dock->hide(); /* lets go of held pads; the engine stops asking for repaints */
 		}
 		remove_dock();
+		if (g_callback) { /* OBS takes its callbacks away right after EXIT, before modules unload */
+			g_callback = false;
+			obs_frontend_remove_event_callback(on_frontend_event, nullptr);
+		}
 	}
 }
 

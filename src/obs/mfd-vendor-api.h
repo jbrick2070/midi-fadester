@@ -92,6 +92,10 @@ void mfd_vendor_handle_load_profile(obs_data_t *request_data, obs_data_t *respon
 void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_data, void *priv_data);
 
+/* Makes every string in data (nested objects and arrays included) valid UTF-8 in place. Every reply and event goes
+ * through it before obs-websocket, which cannot send a string that is not valid UTF-8 and stops OBS when asked to. */
+void mfd_vendor_make_utf8_valid(obs_data_t *data);
+
 #ifdef __cplusplus
 }
 #endif

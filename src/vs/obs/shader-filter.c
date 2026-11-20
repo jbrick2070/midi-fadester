@@ -113,6 +113,12 @@ struct vs_shader_filter {
 	struct vs_user_uniform_binding user_bindings[VS_SHADER_MAX_UNIFORMS];
 	bool panic_passthrough;
 	struct vs_panic_param_slot panic_slots[VS_SHADER_MAX_UNIFORMS];
+	/* What shader_filter_save writes: the float parameters Panic zeroed, with their pre-panic values. Published under
+	 * save_mutex by the code that changes panic_slots (inside the graphics lock); save reads it under save_mutex
+	 * alone. save_mutex is innermost: nothing else is locked while it is held (D-01). */
+	pthread_mutex_t save_mutex;
+	struct vs_panic_param_slot save_slots[VS_SHADER_MAX_UNIFORMS];
+	size_t save_slot_count;
 
 	/* Built-in effect parameter handles */
 	gs_eparam_t *p_image;
@@ -182,6 +188,7 @@ struct vs_shader_filter {
 	gs_texrender_t *output_texrender[2];
 	int ping_pong_idx;
 	bool feedback_seeded;
+	uint64_t feedback_frame_time; /* video frame of the last feedback pass (D-06) */
 	uint32_t feedback_width;
 	uint32_t feedback_height;
 	enum gs_color_space feedback_space;
@@ -237,6 +244,24 @@ static void destroy_feedback_targets_locked(struct vs_shader_filter *sf)
 	sf->feedback_height = 0;
 }
 
+/* Caller must hold obs_enter_graphics(). Copies the float parameters Panic saved into save_slots for
+ * shader_filter_save, which must not take the graphics lock. */
+static void publish_save_slots_locked(struct vs_shader_filter *sf)
+{
+	pthread_mutex_lock(&sf->save_mutex);
+	size_t n = 0;
+	for (size_t i = 0; i < sf->parsed.param_count && i < VS_SHADER_MAX_UNIFORMS; i++) {
+		if (sf->panic_slots[i].saved_valid && sf->parsed.params[i].type == VS_SHADER_PARAM_FLOAT) {
+			sf->save_slots[n] = sf->panic_slots[i];
+			snprintf(sf->save_slots[n].name, sizeof(sf->save_slots[n].name), "%s",
+				 sf->parsed.params[i].name);
+			n++;
+		}
+	}
+	sf->save_slot_count = n;
+	pthread_mutex_unlock(&sf->save_mutex);
+}
+
 /* Caller must hold obs_enter_graphics(). */
 static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 {
@@ -255,6 +280,39 @@ static void destroy_shader_effect_locked(struct vs_shader_filter *sf)
 	vs_shader_parse_result_free(&sf->parsed);
 	memset(sf->user_bindings, 0, sizeof(sf->user_bindings));
 	memset(sf->panic_slots, 0, sizeof(sf->panic_slots));
+	pthread_mutex_lock(&sf->save_mutex);
+	sf->save_slot_count = 0;
+	pthread_mutex_unlock(&sf->save_mutex);
+	/* The effect is really freed now (it is not cached, D-03): no handle into it may survive. */
+	sf->p_image = NULL;
+	sf->p_previous_image = NULL;
+	sf->p_previous_output = NULL;
+	sf->p_uv_offset = NULL;
+	sf->p_uv_scale = NULL;
+	sf->p_uv_pixel_interval = NULL;
+	sf->p_uv_size = NULL;
+	sf->p_elapsed_time = NULL;
+	sf->p_loops = NULL;
+	sf->p_loop_second = NULL;
+	sf->p_rand_f = NULL;
+	sf->p_rand_instance_f = NULL;
+	sf->p_rand_activation_f = NULL;
+	sf->p_audio_level = NULL;
+	sf->p_audio_sub_bass = NULL;
+	sf->p_audio_bass = NULL;
+	sf->p_audio_mid = NULL;
+	sf->p_audio_high = NULL;
+	sf->p_audio_kick = NULL;
+	sf->p_audio_snare = NULL;
+	sf->p_audio_beat = NULL;
+	sf->p_audio_spectral_centroid = NULL;
+	sf->p_audio_spectral_flux = NULL;
+	sf->p_audio_peak = NULL;
+	sf->p_audio_magnitude = NULL;
+	sf->p_audio_spectrum = NULL;
+	sf->p_audio_fft = NULL;
+	for (int i = 0; i < VS_FADER_SLOT_COUNT; i++)
+		sf->p_fader[i] = NULL;
 	sf->p_audio_custom_band = NULL;
 	sf->p_audio_kick_safe = NULL;
 	sf->p_audio_snare_safe = NULL;
@@ -349,6 +407,23 @@ static char *read_text_file_utf8(const char *path)
 	if (!path || path[0] == '\0')
 		return NULL;
 	return os_quick_read_utf8_file(path);
+}
+
+/* The #include loader: OBS's UTF-8 path reader, as for the main file (plain fopen takes the ANSI code page on
+ * Windows, so a folder with a non-ASCII name failed) and its byte-order mark dropped the same way (G-05).
+ * shader-parse frees the text with free(), so it is copied out of OBS's allocation. */
+static char *load_include_utf8(const char *path, void *user_data)
+{
+	UNUSED_PARAMETER(user_data);
+	char *text = read_text_file_utf8(path);
+	if (!text)
+		return NULL;
+	const size_t len = strlen(text);
+	char *out = (char *)malloc(len + 1u);
+	if (out)
+		memcpy(out, text, len + 1u);
+	bfree(text);
+	return out;
 }
 
 static void resolve_shader_path_and_base_dir(const struct vs_shader_filter *sf, char *out_file_path, size_t file_cap,
@@ -521,7 +596,7 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 
 	struct vs_shader_parse_result local_parsed;
 	const enum vs_shader_error perr =
-		vs_shader_ExpandAndParse(raw_source, base_dir, is_full_effect, NULL, NULL, &local_parsed);
+		vs_shader_ExpandAndParse(raw_source, base_dir, is_full_effect, load_include_utf8, NULL, &local_parsed);
 	bfree(raw_source);
 
 	if (perr != VS_SHADER_OK) {
@@ -563,7 +638,18 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 	sf->feedback_seeded = false;
 	sf->parsed = local_parsed;
 
-	sf->effect = gs_effect_create(sf->parsed.full_effect_source, shader_label, &gs_err);
+	/* No file name: libobs caches an effect created with one and gs_effect_destroy then does nothing, so every
+	 * compile stayed allocated until OBS exits (D-03). shader_label still names it in the log. */
+	sf->effect = gs_effect_create(sf->parsed.full_effect_source, NULL, &gs_err);
+	if (gs_err) {
+		/* libobs starts each error line with the file name it was given: "(null)" now. The UI line and the log
+		 * name the shader themselves. */
+		struct dstr err_text = {0};
+		dstr_copy(&err_text, gs_err);
+		dstr_replace(&err_text, "(null) (", "(");
+		bfree(gs_err);
+		gs_err = err_text.array;
+	}
 	if (sf->effect) {
 		/* Resolve the host percent controls against the new shader's parameters before their values are read;
 		 * the update synchronizes the fader controls again afterwards. */
@@ -655,6 +741,7 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 
 	const bool ok = (sf->effect != NULL);
 	const size_t compiled_params = sf->parsed.param_count;
+	publish_save_slots_locked(sf);
 	obs_leave_graphics();
 
 	if (!ok) {
@@ -896,19 +983,24 @@ static void shader_filter_save(void *data, obs_data_t *settings)
 		return;
 
 	/* If OBS saves the scene collection while Panic is active, write pre-panic uniform values into settings
-	 * for serialization while keeping runtime panic_passthrough active on live video output. */
-	obs_enter_graphics();
-	for (size_t i = 0; i < sf->parsed.param_count; i++) {
-		if (sf->panic_slots[i].saved_valid && sf->parsed.params[i].type == VS_SHADER_PARAM_FLOAT) {
-			obs_data_set_double(settings, sf->parsed.params[i].name, sf->panic_slots[i].saved_value);
-		}
+	 * for serialization while keeping runtime panic_passthrough active on live video output.
+	 * No graphics lock here: Copy and Paste Filters call save while libobs holds the source's filter lock, and the
+	 * render thread takes the graphics lock first and the filter lock second, so the two threads froze each other
+	 * (D-01). save_slots is the copy the graphics-side code publishes. */
+	pthread_mutex_lock(&sf->save_mutex);
+	for (size_t i = 0; i < sf->save_slot_count; i++) {
+		obs_data_set_double(settings, sf->save_slots[i].name, sf->save_slots[i].saved_value);
 	}
-	obs_leave_graphics();
+	pthread_mutex_unlock(&sf->save_mutex);
 }
 
 static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)bzalloc(sizeof(*sf));
+	if (pthread_mutex_init(&sf->save_mutex, NULL) != 0) {
+		bfree(sf);
+		return NULL;
+	}
 	sf->context = source;
 	sf->rand_instance_f = next_unit_rand();
 	sf->rand_activation_f = next_unit_rand();
@@ -939,6 +1031,7 @@ static void shader_filter_destroy(void *data)
 	vs_audio_tap_destroy(&sf->tap);
 	destroy_shader_effect(sf);
 
+	pthread_mutex_destroy(&sf->save_mutex);
 	bfree(sf->shader_text);
 	bfree(sf);
 }
@@ -1256,6 +1349,25 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 	}
 }
 
+/* Caller must hold obs_enter_graphics(). Draws a finished feedback output to the filter chain. */
+static void present_feedback_output(gs_texture_t *out_tex, uint32_t cx, uint32_t cy)
+{
+	if (!out_tex)
+		return;
+	const bool srgb = gs_framebuffer_srgb_enabled();
+	gs_enable_framebuffer_srgb(true);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_eparam_t *img = gs_effect_get_param_by_name(default_effect, "image");
+	gs_effect_set_texture_srgb(img, out_tex);
+	while (gs_effect_loop(default_effect, "Draw")) {
+		gs_draw_sprite(out_tex, 0, cx, cy);
+	}
+	gs_blend_state_pop();
+	gs_enable_framebuffer_srgb(srgb);
+}
+
 static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *target, uint32_t cx, uint32_t cy,
 				     enum gs_color_space source_space, const float faders[VS_FADER_SLOT_COUNT],
 				     bool fadester_loaded)
@@ -1277,6 +1389,15 @@ static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *
 		sf->feedback_height = cy;
 		sf->feedback_space = source_space;
 	}
+
+	/* Drawn again in the same video frame (Studio Mode with one scene in both views, a multiview, a projector, the
+	 * filter's own window): show this frame's result once more, so the trails advance once per frame (D-06). */
+	const uint64_t frame_time = obs_get_video_frame_time();
+	if (sf->feedback_seeded && frame_time != 0 && frame_time == sf->feedback_frame_time) {
+		present_feedback_output(gs_texrender_get_texture(sf->output_texrender[1 - sf->ping_pong_idx]), cx, cy);
+		return;
+	}
+
 	const int cur = sf->ping_pong_idx;
 	const int prev = 1 - cur;
 
@@ -1290,7 +1411,14 @@ static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *
 	struct vec4 clear_color = {0.0f, 0.0f, 0.0f, 0.0f};
 	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
 	gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
-	obs_source_video_render(target);
+	/* As libobs does for the first filter: a parent that draws with an effect it does not bring (an Image source)
+	 * needs the default render, or it draws with none and the input stays empty (D-04). */
+	obs_source_t *parent = obs_filter_get_parent(sf->context);
+	const uint32_t parent_flags = parent ? obs_source_get_output_flags(parent) : 0;
+	if (target == parent && (parent_flags & (OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_ASYNC)) == 0)
+		obs_source_default_render(target);
+	else
+		obs_source_video_render(target);
 	gs_texrender_end(sf->input_texrender[cur]);
 
 	gs_texture_t *cur_in_tex = gs_texrender_get_texture(sf->input_texrender[cur]);
@@ -1331,24 +1459,11 @@ static void render_feedback_pipeline(struct vs_shader_filter *sf, obs_source_t *
 	gs_texrender_end(sf->output_texrender[cur]);
 
 	/* Present output_texrender[cur] to the filter chain (premultiplied alpha, R-SHD-5) */
-	gs_texture_t *out_tex = gs_texrender_get_texture(sf->output_texrender[cur]);
-	if (out_tex) {
-		const bool srgb = gs_framebuffer_srgb_enabled();
-		gs_enable_framebuffer_srgb(true);
-		gs_blend_state_push();
-		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-		gs_effect_t *default_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-		gs_eparam_t *img = gs_effect_get_param_by_name(default_effect, "image");
-		gs_effect_set_texture_srgb(img, out_tex);
-		while (gs_effect_loop(default_effect, "Draw")) {
-			gs_draw_sprite(out_tex, 0, cx, cy);
-		}
-		gs_blend_state_pop();
-		gs_enable_framebuffer_srgb(srgb);
-	}
+	present_feedback_output(gs_texrender_get_texture(sf->output_texrender[cur]), cx, cy);
 
 	sf->ping_pong_idx = prev;
 	sf->feedback_seeded = true;
+	sf->feedback_frame_time = frame_time;
 }
 
 static void shader_filter_video_render(void *data, gs_effect_t *effect)
@@ -2179,6 +2294,7 @@ void vs_shader_filter_apply_panic(obs_source_t *source)
 				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
 		}
 	}
+	publish_save_slots_locked(sf);
 	obs_leave_graphics();
 
 	if (settings)
@@ -2211,6 +2327,7 @@ void vs_shader_filter_apply_restore(obs_source_t *source)
 				obs_data_set_double(settings, info->name, sf->panic_slots[i].current_value);
 		}
 	}
+	publish_save_slots_locked(sf);
 	obs_leave_graphics();
 
 	if (settings)

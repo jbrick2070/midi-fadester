@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "tubester/tape-url.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -33,6 +34,10 @@ char *tub_command_hello(const char *deck_id, int port, const char *token);
  * a paused deck paused (R-CTL-4). */
 char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, double start_seconds, bool from_start,
 		       bool loop, bool playing);
+/* The same for the addresses of the given system: the plugin uses the host's (tub_command_tape); the tests check both
+ * on every platform. Windows: file:///X:/... or file://server/share/...; POSIX (macOS): file:///<absolute path>. */
+char *tub_command_tape_as(enum tub_path_style style, uint64_t gen, const char *file_url, double at_seconds,
+			  double start_seconds, bool from_start, bool loop, bool playing);
 /* Takes the tape out: the page empties its player, so the deck reads Ready with no tape. It carries a new generation,
  * like a tape command, so reports about the old tape stop counting at once. */
 char *tub_command_eject(uint64_t gen);

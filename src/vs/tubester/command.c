@@ -77,16 +77,31 @@ char *tub_command_hello(const char *deck_id, int port, const char *token)
 char *tub_command_tape(uint64_t gen, const char *file_url, double at_seconds, double start_seconds, bool from_start,
 		       bool loop, bool playing)
 {
-	/* Only what tub_path_to_file_url writes: file:///X:/... or file://server/share/... */
+	return tub_command_tape_as(TUB_PATH_STYLE_HOST, gen, file_url, at_seconds, start_seconds, from_start, loop,
+				   playing);
+}
+
+char *tub_command_tape_as(enum tub_path_style style, uint64_t gen, const char *file_url, double at_seconds,
+			  double start_seconds, bool from_start, bool loop, bool playing)
+{
+	/* Only what tub_path_to_file_url_as writes for that system. Windows: file:///X:/... or file://server/share/...
+	 * POSIX: file:///<absolute path>, runs of '/' written once (the Mac deck refused every tape before, E-01). */
 	if (gen == 0 || !file_url || strncmp(file_url, "file://", 7) != 0 || !isfinite(at_seconds) || at_seconds < 0 ||
 	    !isfinite(start_seconds) || start_seconds < 0)
 		return NULL;
 	const char *rest = file_url + 7;
-	bool drive = rest[0] == '/' && ((rest[1] >= 'A' && rest[1] <= 'Z') || (rest[1] >= 'a' && rest[1] <= 'z')) &&
-		     rest[2] == ':' && rest[3] == '/' && rest[4] != '\0';
-	bool share = rest[0] != '\0' && rest[0] != '/' && strchr(rest, '/') != NULL && strchr(rest, '/')[1] != '\0';
-	if (!drive && !share)
-		return NULL;
+	if (style == TUB_PATH_STYLE_POSIX) {
+		if (rest[0] != '/' || rest[1] == '\0' || rest[1] == '/')
+			return NULL;
+	} else {
+		bool drive = rest[0] == '/' &&
+			     ((rest[1] >= 'A' && rest[1] <= 'Z') || (rest[1] >= 'a' && rest[1] <= 'z')) &&
+			     rest[2] == ':' && rest[3] == '/' && rest[4] != '\0';
+		bool share = rest[0] != '\0' && rest[0] != '/' && strchr(rest, '/') != NULL &&
+			     strchr(rest, '/')[1] != '\0';
+		if (!drive && !share)
+			return NULL;
+	}
 	obs_data_t *d = obs_data_create();
 	obs_data_set_int(d, "gen", (long long)gen);
 	obs_data_set_string(d, "tape", file_url);

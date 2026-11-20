@@ -222,11 +222,18 @@ static void load_frontend_hotkeys(void)
 	load_frontend_hotkey(profile, g_resync_downbeat_hotkey_id, "visual_sidechain_resync_downbeat");
 }
 
+static bool g_vs_frontend_cb; /* UI thread: our frontend event callback is registered */
+
 static void on_frontend_event(enum obs_frontend_event event, void *data)
 {
 	UNUSED_PARAMETER(data);
 	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_PROFILE_CHANGED)
 		load_frontend_hotkeys();
+	if (event == OBS_FRONTEND_EVENT_EXIT && g_vs_frontend_cb) {
+		/* OBS takes its callbacks away right after EXIT, before modules unload */
+		g_vs_frontend_cb = false;
+		obs_frontend_remove_event_callback(on_frontend_event, NULL);
+	}
 }
 
 static bool g_vs_active;
@@ -266,6 +273,7 @@ bool vs_module_load(void)
 								   obs_module_text("Hotkey.ResyncDownbeat"),
 								   on_resync_downbeat_hotkey, NULL);
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
+	g_vs_frontend_cb = true;
 	obs_log(LOG_INFO, "Visual Sidechain effects loaded (part of Midi Fadester %s)", PLUGIN_VERSION);
 	return true;
 }
@@ -282,7 +290,10 @@ void vs_module_unload(void)
 	if (!g_vs_active)
 		return;
 	g_vs_active = false;
-	obs_frontend_remove_event_callback(on_frontend_event, NULL);
+	if (g_vs_frontend_cb) { /* already gone when OBS sent EXIT */
+		g_vs_frontend_cb = false;
+		obs_frontend_remove_event_callback(on_frontend_event, NULL);
+	}
 	if (g_panic_hotkey_id != OBS_INVALID_HOTKEY_ID) {
 		obs_hotkey_unregister(g_panic_hotkey_id);
 		g_panic_hotkey_id = OBS_INVALID_HOTKEY_ID;

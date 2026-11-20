@@ -254,7 +254,7 @@ try {
     # Every built-in compiles; repeatedly switching feedback to a nonfeedback preset exercises cache release. A failed
     # compile only logs and renders the source unchanged, so the proof is in this run's new log lines: each built-in
     # logs "Compiled shader '<file>'", and no new line reports a compile or parse failure.
-    $shaders = Get-ChildItem -LiteralPath "$PSScriptRoot\..\data\shaders" -Filter '*.shader'
+    $shaders = Get-ChildItem -LiteralPath "$PSScriptRoot\..\..\data\shaders" -Filter '*.shader'
     $compileLog = Get-ChildItem -LiteralPath "$ObsRoot\config\obs-studio\logs" -Filter '*.txt' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $compileLogStart = @(Get-Content -LiteralPath $compileLog.FullName).Count
     foreach ($shader in $shaders) {

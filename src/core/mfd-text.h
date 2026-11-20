@@ -38,6 +38,16 @@ const char *mfd_text_or_english(bool translate, const char *key, const char *eng
  * NUL. Returns the length written. */
 size_t mfd_text_fill(char *out, size_t out_size, const char *text, const char *const *values, size_t count);
 
+/* True when s is well-formed UTF-8 (no sequence cut short, no overlong form, no surrogate, nothing past
+ * U+10FFFF). NULL counts as valid. */
+bool mfd_utf8_is_valid(const char *s);
+
+/* Makes s valid UTF-8 in place by dropping every byte that does not start a complete, well-formed sequence: the
+ * half character a fixed-size buffer leaves at its end when a long non-ASCII name is cut, a stray continuation
+ * byte, an overlong form. obs-websocket refuses to send a string that is not valid UTF-8, so every string that
+ * leaves the plugin through it passes here. Returns true when s was changed. */
+bool mfd_utf8_make_valid(char *s);
+
 #ifdef __cplusplus
 }
 #endif

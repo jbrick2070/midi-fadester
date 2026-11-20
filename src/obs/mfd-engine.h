@@ -455,7 +455,8 @@ struct mfd_engine {
 	struct mfd_graph_change *graph_items;
 	size_t graph_count;
 	size_t graph_cap;
-	bool graph_draining;         /* written only by the engine-lock holder */
+	bool graph_draining;             /* written only by the engine-lock holder */
+	bool frontend_callbacks_removed; /* UI thread: taken away at OBS_FRONTEND_EVENT_EXIT, or at unload */
 	volatile long graph_pending; /* 1 while anything is queued: a lock-free hint so an idle tick takes no lock */
 	bool pending_ui_notify;
 	bool pending_state_event;
@@ -501,6 +502,8 @@ struct mfd_engine {
 	struct mfd_fader_slot fader_slots[MFD_MAX_FADER_SLOTS];
 	struct mfd_filter_bypass_lease filter_leases[MFD_MAX_FADER_SLOTS];
 	struct mfd_tracked_signal_entry *tracked_signals_head;
+	bool pruning_tracked_signals; /* written only by the engine-lock holder: a prune is walking the list */
+	bool prune_tracked_again;     /* a prune was asked for while one was walking: walk once more */
 	const char *removing_filter_host;
 	const char *removing_filter_name;
 	struct mfd_setup_session setup_session;

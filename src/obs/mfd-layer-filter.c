@@ -150,8 +150,10 @@ static void mfd_layer_filter_render(void *data, gs_effect_t *unused_effect)
 	const enum gs_color_space source_space = mfd_layer_filter_get_color_space(
 		f, sizeof(preferred_spaces) / sizeof(preferred_spaces[0]), preferred_spaces);
 
-	if (obs_source_process_filter_begin_with_color_space(f->context, GS_RGBA, source_space,
-							     OBS_ALLOW_DIRECT_RENDERING)) {
+	/* the texture's format follows the colour space, as OBS's own filters do: GS_RGBA would clip HDR and 16-bit
+	 * sources as soon as the fader leaves 100 % (C-04) */
+	if (obs_source_process_filter_begin_with_color_space(f->context, gs_get_format_from_space(source_space),
+							     source_space, OBS_ALLOW_DIRECT_RENDERING)) {
 		gs_blend_state_push();
 		gs_blend_function_separate(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA, GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 		if (f->param_opacity) {

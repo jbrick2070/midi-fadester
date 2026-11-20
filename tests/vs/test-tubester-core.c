@@ -48,8 +48,19 @@ static void test_posix_path_usable(void)
 	assert(!posix_usable("/tapes/re\nel.mp4"));
 	assert(!posix_usable("/tapes/re\x7f"
 			     "el.mp4"));
-	assert(!posix_usable("/tapes/re*el.mp4"));
-	assert(!posix_usable("/tapes/re\"el.mp4"));
+	/* ? * < > | " cannot be in a Windows name but are legal in a Mac one (E-05) */
+	assert(posix_usable("/tapes/re*el.mp4"));
+	assert(posix_usable("/tapes/re\"el.mp4"));
+	assert(posix_usable("/Users/me/Movies/Why?.mp4"));
+	assert(posix_usable("/Users/me/<a|b>.mp4"));
+	assert(!win_usable("C:\\tapes\\re*el.mp4"));
+	assert(!win_usable("C:\\tapes\\re\"el.mp4"));
+	assert(!win_usable("C:\\tapes\\Why?.mp4"));
+	{
+		char url[128];
+		assert(posix_url("/tapes/Why?.mp4", url, sizeof(url)) > 0);
+		assert(strcmp(url, "file:///tapes/Why%3F.mp4") == 0);
+	}
 	char *too_long = malloc(TUB_PATH_MAX + 2);
 	memset(too_long, 'a', TUB_PATH_MAX + 1);
 	too_long[0] = '/';

@@ -15,6 +15,7 @@
 #include "vs/core/tempo.h"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <util/darray.h>
 #include <util/platform.h>
 #include "plugin-support.h"
 #include <ctype.h>
@@ -1865,27 +1866,25 @@ static void sg_set_filter_enabled(const struct mfd_engine *eng, const char *sour
 	obs_source_release(src);
 }
 
-static float query_live_filter_unmapped_deflection_locked(const struct mfd_engine *eng,
-							  const struct mfd_fader_slot *slot)
+/* The value OBS holds now for the strip's filter setting, in the setting's own units. False when the source, the
+ * filter or the setting is not there. */
+static bool query_live_filter_value_locked(const struct mfd_engine *eng, const struct mfd_fader_slot *slot,
+					   double *out_live)
 {
-	if (!eng || !slot || slot->source_a_name[0] == '\0' || slot->filter_name[0] == '\0' ||
+	if (!eng || !slot || !out_live || slot->source_a_name[0] == '\0' || slot->filter_name[0] == '\0' ||
 	    slot->filter_prop[0] == '\0') {
-		return 0.0f;
-	}
-	if (fabs(slot->filter_to_val - slot->filter_from_val) < MFD_FILTER_MIN_RANGE_SPAN) {
-		return 0.0f;
+		return false;
 	}
 	if (!mfd_engine_source_exists(eng, slot->source_a_name) ||
 	    !sg_filter_exists(eng, slot->source_a_name, slot->filter_name, NULL)) {
-		return 0.0f;
+		return false;
 	}
 	obs_data_t *settings = sg_get_filter_settings(eng, slot->source_a_name, slot->filter_name);
 	if (!settings) {
-		return 0.0f;
+		return false;
 	}
 	bool has_val = obs_data_has_user_value(settings, slot->filter_prop) ||
 		       obs_data_has_default_value(settings, slot->filter_prop);
-	float t = 0.0f;
 	if (has_val) {
 		bool is_int = slot->filter_prop_is_int;
 		if (!slot->filter_prop_valid) {
@@ -1895,12 +1894,41 @@ static float query_live_filter_unmapped_deflection_locked(const struct mfd_engin
 				obs_data_item_release(&it);
 			}
 		}
-		double live_val = is_int ? (double)obs_data_get_int(settings, slot->filter_prop)
-					 : obs_data_get_double(settings, slot->filter_prop);
-		t = mfd_filter_unmap_value(live_val, slot->filter_from_val, slot->filter_to_val);
+		*out_live = is_int ? (double)obs_data_get_int(settings, slot->filter_prop)
+				   : obs_data_get_double(settings, slot->filter_prop);
 	}
 	obs_data_release(settings);
-	return t;
+	return has_val;
+}
+
+static float query_live_filter_unmapped_deflection_locked(const struct mfd_engine *eng,
+							  const struct mfd_fader_slot *slot)
+{
+	if (!slot || fabs(slot->filter_to_val - slot->filter_from_val) < MFD_FILTER_MIN_RANGE_SPAN) {
+		return 0.0f;
+	}
+	double live_val = 0.0;
+	if (!query_live_filter_value_locked(eng, slot, &live_val)) {
+		return 0.0f;
+	}
+	return mfd_filter_unmap_value(live_val, slot->filter_from_val, slot->filter_to_val);
+}
+
+/* True when the filter setting OBS holds is still what this strip last wrote (before its first write: what its value
+ * maps to), so nobody else changed it. It compares with the written value, not with last_applied_val: that one runs
+ * ahead whenever the write gate skips a step too small to write, and a second strip on the same filter would then
+ * look like an outside edit and stop this strip's fade (B-02). */
+static bool filter_live_value_is_ours(const struct mfd_fader_slot *slot, double live_val)
+{
+	if (slot->has_last_written_mapped) {
+		return slot->filter_prop_is_int ? (llround(live_val) == slot->last_written_int)
+						: (fabs(live_val - slot->last_written_float) <= 1e-9);
+	}
+	double cur_mapped = mfd_filter_map_value(slot->last_applied_val, slot->filter_from_val, slot->filter_to_val,
+						 slot->filter_prop_min, slot->filter_prop_max,
+						 slot->filter_prop_is_int);
+	return slot->filter_prop_is_int ? (llround(live_val) == llround(cur_mapped))
+					: (fabs(live_val - cur_mapped) <= 1e-6);
 }
 
 bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
@@ -2529,7 +2557,9 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 	}
 
 	if (out_label && label_size > 0U) {
+		/* lbl holds names cut to 127 bytes: a long non-ASCII name can end in half a character */
 		snprintf(out_label, label_size, "%s", lbl);
+		mfd_utf8_make_valid(out_label);
 	}
 	if (out_available) {
 		*out_available = avail;
@@ -2860,12 +2890,7 @@ void mfd_engine_handle_filter_settings_updated(struct mfd_engine *eng, const cha
 		}
 		double live_val = slot->filter_prop_is_int ? (double)obs_data_get_int(settings, slot->filter_prop)
 							   : obs_data_get_double(settings, slot->filter_prop);
-		double cur_mapped = mfd_filter_map_value(slot->last_applied_val, slot->filter_from_val,
-							 slot->filter_to_val, slot->filter_prop_min,
-							 slot->filter_prop_max, slot->filter_prop_is_int);
-		bool same = slot->filter_prop_is_int ? (llround(live_val) == llround(cur_mapped))
-						     : (fabs(live_val - cur_mapped) <= 1e-6);
-		if (same) {
+		if (filter_live_value_is_ours(slot, live_val)) {
 			continue;
 		}
 		float t_ext = mfd_filter_unmap_value(live_val, slot->filter_from_val, slot->filter_to_val);
@@ -3682,13 +3707,15 @@ void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *
 		struct mfd_msg rsn;
 		char res_sc[MFD_SOURCE_NAME_MAX] = {0};
 		bool a_above = out->slots[i].a_is_above_b;
+		/* live = false: the re-check keeps the cached result current on every scene-graph and frontend
+		 * change, and a live look-up of every strip here would hold the engine lock (and the video tick) on
+		 * every dock frame while the dialog is open (B-10). The resolved scene and layer order stay as the
+		 * re-check stored them. */
 		evaluate_slot_preconditions(eng, &out->slots[i], lbl, sizeof(lbl), &avail, &rsn, res_sc, sizeof(res_sc),
-					    &a_above, true);
+					    &a_above, false);
 		out->slots[i].cached_available = avail;
 		out->slots[i].cached_reason_msg = rsn;
 		mfd_msg_format_english(&rsn, out->slots[i].cached_reason, sizeof(out->slots[i].cached_reason));
-		snprintf(out->slots[i].resolved_scene_name, sizeof(out->slots[i].resolved_scene_name), "%s", res_sc);
-		out->slots[i].a_is_above_b = a_above;
 	}
 	mfd_engine_unlock(eng);
 }
@@ -7521,36 +7548,58 @@ static void disconnect_all_tracked_signals_locked(struct mfd_engine *eng)
 	}
 }
 
-/* Drops tracked entries for sources that were removed or destroyed, and for filters no longer on their host. */
+/* Drops tracked entries for sources that were removed or destroyed, and for filters no longer on their host.
+ *
+ * The strong references the walk takes are let go only after it: the last release of a source destroys it on this
+ * thread, libobs then emits filter_remove, our handler applies the change in place (we hold the recursive engine
+ * lock) and asks for another prune, which would free the entry this walk stands on (A-01). A prune asked for while
+ * one is walking only sets a flag, and the walk runs again. */
 static void prune_tracked_signals_locked(struct mfd_engine *eng)
 {
 	if (!eng || !obs_initialized()) {
 		return;
 	}
-	struct mfd_tracked_signal_entry **pp = &eng->tracked_signals_head;
-	while (*pp != NULL) {
-		struct mfd_tracked_signal_entry *cur = *pp;
-		obs_source_t *src = cur->weak_src ? obs_weak_source_get_source(cur->weak_src) : NULL;
-		bool keep = src && !obs_source_removed(src);
-		if (keep && cur->is_filter) {
-			obs_source_t *parent = cur->weak_parent ? obs_weak_source_get_source(cur->weak_parent) : NULL;
-			keep = parent && !obs_source_removed(parent) && obs_filter_get_parent(src) == parent;
-			if (parent) {
-				obs_source_release(parent);
-			}
-		}
-		if (keep) {
-			obs_source_release(src);
-			pp = &cur->next;
-			continue;
-		}
-		*pp = cur->next;
-		if (src) {
-			disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(src));
-			obs_source_release(src);
-		}
-		free_tracked_signal_entry(cur);
+	if (eng->pruning_tracked_signals) {
+		eng->prune_tracked_again = true;
+		return;
 	}
+	eng->pruning_tracked_signals = true;
+	do {
+		eng->prune_tracked_again = false;
+		DARRAY(obs_source_t *) held;
+		da_init(held);
+		struct mfd_tracked_signal_entry **pp = &eng->tracked_signals_head;
+		while (*pp != NULL) {
+			struct mfd_tracked_signal_entry *cur = *pp;
+			obs_source_t *src = cur->weak_src ? obs_weak_source_get_source(cur->weak_src) : NULL;
+			if (src) {
+				da_push_back(held, &src);
+			}
+			bool keep = src && !obs_source_removed(src);
+			if (keep && cur->is_filter) {
+				obs_source_t *parent = cur->weak_parent ? obs_weak_source_get_source(cur->weak_parent)
+									: NULL;
+				if (parent) {
+					da_push_back(held, &parent);
+				}
+				keep = parent && !obs_source_removed(parent) && obs_filter_get_parent(src) == parent;
+			}
+			if (keep) {
+				pp = &cur->next;
+				continue;
+			}
+			*pp = cur->next;
+			if (src) {
+				disconnect_tracked_entry_signals(cur, obs_source_get_signal_handler(src));
+			}
+			free_tracked_signal_entry(cur);
+		}
+		for (size_t k = 0; k < held.num; ++k) {
+			obs_source_release(held.array[k]);
+		}
+		da_free(held);
+	} while (eng->prune_tracked_again);
+	eng->pruning_tracked_signals = false;
 }
 
 static void connect_filter_source_signals_locked(struct mfd_engine *eng, obs_source_t *host_src, obs_source_t *flt)
@@ -8213,22 +8262,27 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 				mfd_smoother_reset(&slot->smoother, 0.0f);
 				mfd_takeover_sync_external(&slot->takeover, 0.0f);
 			}
-		} else if (slot->target_type == MFD_TARGET_AUDIO_VOLUME && slot->source_a_name[0] != '\0' &&
-			   obs_initialized()) {
-			obs_source_t *src = obs_get_source_by_name(slot->source_a_name);
-			if (src) {
-				float mul = obs_source_get_volume(src);
-				mfd_takeover_sync_external(&slot->takeover, mfd_mul_to_deflection(mul));
-				obs_source_release(src);
-			}
 		}
+		/* An audio strip is not synced here: OBS's volume is the smoothed value, which trails a fader that is
+		 * moving, so a scene change in the middle of a move (a fade ending is one) would drop the fader out of
+		 * pick-up. The tick already notices a volume changed from outside (sync_volume_slots_from_live_locked). */
 	}
 	mfd_engine_reevaluate_slots(eng, false);
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *slot = &eng->fader_slots[i];
 		if (slot->enabled && slot->target_type == MFD_TARGET_FILTER_PARAM && slot->cached_available &&
 		    !slot->pending_clean_apply_on_avail && !slot->auto_fade_active) {
-			float t_live = query_live_filter_unmapped_deflection_locked(eng, slot);
+			/* Only a value somebody else wrote is taken over: a knob that is moving, or one whose setting
+			 * is still what it wrote, keeps its pick-up (a coarse whole-number setting would otherwise
+			 * differ from the knob by more than the pick-up window and freeze it). */
+			double live_val = 0.0;
+			if (mfd_smoother_is_active(&slot->smoother) || !slot->filter_prop_valid ||
+			    !query_live_filter_value_locked(eng, slot, &live_val) ||
+			    filter_live_value_is_ours(slot, live_val) ||
+			    fabs(slot->filter_to_val - slot->filter_from_val) < MFD_FILTER_MIN_RANGE_SPAN) {
+				continue;
+			}
+			float t_live = mfd_filter_unmap_value(live_val, slot->filter_from_val, slot->filter_to_val);
 			slot->last_applied_val = t_live;
 			slot->has_last_written_mapped = false;
 			mfd_smoother_reset(&slot->smoother, t_live);
@@ -8238,6 +8292,8 @@ static void sync_slots_on_scene_change(struct mfd_engine *eng, bool reset_tbar)
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
 }
+
+static void on_save_callback(obs_data_t *save_data, bool saving, void *private_data);
 
 static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 {
@@ -8273,9 +8329,10 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		vj_follow_program(eng);
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		/* The leases were cleared at SCENE_COLLECTION_CLEANUP: the ones the load callback made since then
+		 * carry the saved on/off state of "bypass at 0 %" filters and must stay. */
 		mfd_engine_lock(eng);
 		vj_restore_loaded_punches_locked(eng);
-		memset(eng->filter_leases, 0, sizeof(eng->filter_leases));
 		disconnect_all_tracked_signals_locked(eng);
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
@@ -8307,12 +8364,28 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		}
 		mfd_engine_unlock(eng);
 		break;
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+		/* After OBS saved the old collection and released its sources, before the next one loads: the old
+		 * filters' leases go now, so the load callback's leases for the new collection survive (B-03). */
+		mfd_engine_lock(eng);
+		memset(eng->filter_leases, 0, sizeof(eng->filter_leases));
+		mfd_engine_unlock(eng);
+		break;
 	case OBS_FRONTEND_EVENT_EXIT:
 		mfd_engine_lock(eng);
 		vj_restore_all_punches_locked(eng); /* punched blends are the desk's: the saved scenes keep their own */
+		/* Usually finds no lease: OBS cleared the scene data (SCENE_COLLECTION_CLEANUP) before EXIT, and the
+		 * saved strips carry each filter's own on/off state for the next start. */
 		mfd_engine_restore_all_bypass_leases(eng);
 		disconnect_obs_signals(eng);
 		mfd_engine_unlock(eng);
+		/* OBS takes its frontend callbacks away right after this event, before modules unload: remove ours
+		 * now (removing the running one is safe, OBS walks the list from the end) (A-06). */
+		if (!eng->frontend_callbacks_removed) {
+			eng->frontend_callbacks_removed = true;
+			obs_frontend_remove_save_callback(on_save_callback, eng);
+			obs_frontend_remove_event_callback(on_frontend_event, eng);
+		}
 		break;
 	default:
 		break;
@@ -9109,8 +9182,11 @@ void mfd_engine_shutdown(void)
 
 	obs_remove_tick_callback(mfd_engine_video_tick, &g_engine);
 	mfd_blackout_shutdown();
-	obs_frontend_remove_save_callback(on_save_callback, &g_engine);
-	obs_frontend_remove_event_callback(on_frontend_event, &g_engine);
+	if (!g_engine.frontend_callbacks_removed) { /* already gone when OBS sent EXIT */
+		g_engine.frontend_callbacks_removed = true;
+		obs_frontend_remove_save_callback(on_save_callback, &g_engine);
+		obs_frontend_remove_event_callback(on_frontend_event, &g_engine);
+	}
 
 	mfd_engine_save_global_config(&g_engine);
 	mfd_engine_lock(&g_engine);

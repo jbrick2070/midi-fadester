@@ -144,7 +144,9 @@ build() {
   popd
 
   log_group "Testing ${product_name}..."
-  ctest --test-dir build_macos -C ${config} --output-on-failure --no-tests=error
+  # The shader compile test is the only check that the built-in shaders translate to GLSL and Metal: on CI a renderer
+  # that cannot create its device fails it rather than skipping it (tests/vs/test-shader-gpu.c).
+  VS_GPU_REQUIRE_ALL=1 ctest --test-dir build_macos -C ${config} --output-on-failure --no-tests=error
 
   log_group "Installing ${product_name}..."
   rm -rf "${project_root}/release/${config}"

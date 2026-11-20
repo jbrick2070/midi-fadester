@@ -12,6 +12,7 @@
 #include "modulation.h"
 
 #include <math.h>
+#include <ctype.h>
 #include <string.h>
 
 static inline bool is_finite_f64(double v)
@@ -105,6 +106,25 @@ static bool is_canonical_luminance_setting(const char *setting_name)
 	return false;
 }
 
+/* A setting whose name says it changes how bright or how visible the picture is, compared without case. Used for a
+ * filter this file does not know (Image Mask/Blend, third-party filters), so the guard fails closed there (D-10). */
+static bool name_suggests_luminance(const char *setting_name)
+{
+	static const char *const k_words[] = {
+		"opacity", "brightness", "alpha", "gamma", "contrast", "luma", "exposure",
+	};
+	char lower[128];
+	size_t n = 0;
+	for (; setting_name[n] != '\0' && n + 1 < sizeof(lower); n++)
+		lower[n] = (char)tolower((unsigned char)setting_name[n]);
+	lower[n] = '\0';
+	for (size_t i = 0; i < sizeof(k_words) / sizeof(k_words[0]); i++) {
+		if (strstr(lower, k_words[i]) != NULL)
+			return true;
+	}
+	return false;
+}
+
 bool vs_mod_is_luminance_target(const char *filter_id, const char *setting_name)
 {
 	if (!setting_name || setting_name[0] == '\0')
@@ -138,9 +158,12 @@ bool vs_mod_is_luminance_target(const char *filter_id, const char *setting_name)
 			if (strcmp(setting_name, k_shader_luma_params[i]) == 0)
 				return true;
 		}
+		return false;
 	}
 
-	return false;
+	/* Any other filter: judge by the setting's name, so a kick on Image Mask/Blend's opacity (or a third-party
+	 * filter's brightness) is still held to 3 flashes per second (D-10). */
+	return is_canonical_luminance_setting(setting_name) || name_suggests_luminance(setting_name);
 }
 
 bool vs_mod_slot_uses_flash_clock(const struct vs_mod_slot_config *cfg)

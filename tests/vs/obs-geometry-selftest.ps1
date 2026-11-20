@@ -3,7 +3,7 @@
 # Attach to an already running portable OBS; never starts, closes, or kills OBS.
 param(
     [string]$ObsRoot = 'C:\Users\jeffr\OBS-Studio-33-Portable',
-    [string]$OutputDirectory = "$PSScriptRoot\..\build_x64\geometry-previews"
+    [string]$OutputDirectory = "$PSScriptRoot\..\..\build_x64\geometry-previews"
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
