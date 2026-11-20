@@ -8,6 +8,10 @@
 
 Midi Fadester turns the faders and knobs on a MIDI controller into live controls for OBS Studio. Fade from one scene to the next with a real crossfader. Mix two layers. Fade a camera in and out. Ride a volume. Sweep any filter setting. It is made for the Akai APC40 mkII and works with other controllers through MIDI Learn.
 
+[![Demo: the APC40 crossfader throws OBS's Studio Mode T-bar between two VJ scenes while the Fadester Desk dock follows](docs/demo/Midi-Fadester-0.9.0-demo-preview.webp)](docs/demo/Midi-Fadester-0.9.0-demo.mp4)
+
+**[Watch the one-minute demo](docs/demo/Midi-Fadester-0.9.0-demo.mp4)** (MP4, 9 MB): the crossfader throws the Studio Mode T-bar, channel faders fade the layers of the scene on air, Visual Sidechain's Beat Zoom moves with the music, Panic and Restore visuals, tap and lock the tempo, and the Fadester Desk dock follows all of it. The APC40 in the corner is a drawing of the desk moves; OBS was driven by a script for the recording.
+
 ![The Strips screen: a throw in progress on the crossfader, a two-layer mix, a layer fade, a volume and the master](docs/screenshots/03-strips-throwing-and-active.png)
 
 > **Disclaimer:** Midi Fadester is an independent third-party plugin for OBS Studio. It is not made, endorsed, or supported by the OBS Project or by Akai Professional / inMusic Brands.
