@@ -20,6 +20,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QDial>
+#include <QDialog>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QWheelEvent>
@@ -405,6 +406,9 @@ private:
 	void sayStatus(const QString &text, bool over_reason = true);
 	void paintButton(QPushButton *b, uint32_t rgb, bool enabled);
 	void applyFontSizes();
+	void showHelp();
+	QPushButton *help_btn_ = nullptr;
+	QPointer<QDialog> help_;
 	int base_px_ = 0; /* the font size the larger texts were last worked out from */
 
 	struct mfd_engine *eng_ = nullptr;
@@ -498,7 +502,17 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	title_ = new QLabel(this);
 	title_->setObjectName(QStringLiteral("mfdDeskTitle"));
 	title_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-	root->addWidget(title_);
+	auto *title_row = new QHBoxLayout();
+	title_row->setSpacing(4);
+	title_row->addWidget(title_, 1);
+	/* the only guide to the pads, where the pads are (it used to be three paragraphs on the Advanced tab) */
+	help_btn_ = makeButton(mfdText("Desk.Help.Title", "What the pads do"), kButtonHeight, kButtonHeight);
+	help_btn_->setObjectName(QStringLiteral("mfdDeskHelpBtn"));
+	help_btn_->setText(QStringLiteral("?"));
+	help_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	connect(help_btn_, &QPushButton::clicked, this, [this]() { showHelp(); });
+	title_row->addWidget(help_btn_);
+	root->addLayout(title_row);
 	/* Panic first: it must be seen however short the dock is */
 	panic_ = new QLabel(this);
 	panic_->setObjectName(QStringLiteral("mfdDeskPanicBar"));
@@ -872,6 +886,70 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	clock_.start();
 	applyFontSizes();
 	refresh();
+}
+
+/* What the pads do: the dock's own guide, opened by its "?" button. One window, raised when it is already open. */
+void MfdDeskDock::showHelp()
+{
+	if (help_) {
+		help_->show();
+		help_->raise();
+		help_->activateWindow();
+		return;
+	}
+	auto *dlg = new QDialog(window());
+	dlg->setObjectName(QStringLiteral("mfdDeskHelpDialog"));
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->setWindowTitle(mfdWindowTitle(mfdText("Desk.Help.Title", "What the pads do")));
+	dlg->setStyleSheet(QStringLiteral("QDialog { background-color: #0b1120; } QLabel { color: #e2e8f0; }"));
+	auto *col = new QVBoxLayout(dlg);
+	col->setContentsMargins(14, 12, 14, 12);
+	col->setSpacing(10);
+	const std::pair<const char *, QString> parts[] = {
+		{"mfdDeskHelpPads",
+		 mfdText("Desk.Help.Pads",
+			 "Columns 1\xE2\x80\x93"
+			 "8 are the sources of the scene on air, bottom layer first: empty faders fill "
+			 "themselves and follow the scene; a fader you set yourself stays. Blend (the bottom pad row on the APC40): "
+			 "the source's other blend (Shift: next blend). Flash: 100 % while held (Shift: dark while held). Fade "
+			 "out: out and back (Shift: cut out). Show / hide: the source's eye in OBS (Shift: show at 100 %). Fade, "
+			 "beats (the top row): the yellow pad cuts Preview on air; the green pads fade it over 32, 16, 8, 4, 2, "
+			 "1 or \xC2\xBD beats. Reset (Clip Stop on the APC40): that column back to its own blend (Shift: pin the "
+			 "column to its source). Reset all (Stop All Clips): every effect off and every source back to its own "
+			 "blend (Shift: fade every source out).")},
+		{"mfdDeskHelpScenes",
+		 mfdText("Desk.Help.Scenes",
+			 "The five scene buttons (Scene Launch 1\xE2\x80\x93"
+			 "5 on the APC40) are the first five scenes in the "
+			 "Scenes list. Press once for Preview, again to fade it on air; Shift + button (Ctrl-click on the dock, "
+			 "Cmd-click on a Mac) sends it straight on air. On air red, Preview green. Blackout (Session): the audience "
+			 "sees black, and the picture comes back on the next press. Cue Level knob: transition length (Shift: source "
+			 "fade time). Panic (Record): all Visual Sidechain effects off, then Restore. Tap (Metronome): its tap "
+			 "tempo (Shift: Hold BPM). Shift + Tap Tempo: Beat 1.")},
+		{"mfdDeskHelpSpeed",
+		 mfdText("Desk.Help.Speed",
+			 "Video speed (with Fadester Companion and VJster running): the Tempo knob makes the video 0.05x faster "
+			 "or slower per click (Shift + Tempo: 0.25x), Nudge \xE2\x88\x92 / + 0.25x slower or faster, Tap Tempo "
+			 "back to 1x, Play plays or pauses it. It goes through VJster because an OBS media source restarts when "
+			 "its speed changes.")},
+	};
+	for (const auto &part : parts) {
+		auto *text = new QLabel(part.second, dlg);
+		text->setObjectName(QString::fromUtf8(part.first));
+		text->setWordWrap(true);
+		text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		col->addWidget(text);
+	}
+	auto *buttons = new QHBoxLayout();
+	buttons->addStretch(1);
+	auto *close = new QPushButton(mfdText("Dialog.Close", "Close"), dlg);
+	close->setObjectName(QStringLiteral("mfdDeskHelpClose"));
+	connect(close, &QPushButton::clicked, dlg, &QDialog::close);
+	buttons->addWidget(close);
+	col->addLayout(buttons);
+	dlg->resize(560, dlg->sizeHint().height());
+	help_ = dlg;
+	dlg->show();
 }
 
 /* The dock's text is OBS's own, its font-size setting included: nothing here fixes a size. Only what must stand out is
@@ -1325,6 +1403,7 @@ void MfdDeskDock::refresh()
 									: mfdText("Desk.VsPanicShort", "Panic"));
 	paintButton(vs_panic_, view_.vs_panic_known && view_.vs_panic ? 0xEF4444U : 0x475569U, vs_loaded_);
 	paintButton(vs_tap_, 0x475569U, vs_loaded_);
+	paintButton(help_btn_, 0x334155U, true);
 	paintButton(vs_lock_, locked ? 0x0EA5E9U : 0x475569U, vs_loaded_);
 	paintButton(vs_downbeat_, 0x475569U, vs_loaded_);
 	if (vj_box_->isHidden() == view_.video_controls) {

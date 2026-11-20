@@ -2263,6 +2263,41 @@ int main(int argc, char **argv)
 			pump_ui();
 			REQUIRE(!eng.vj_disabled && grid->isVisible() && !turn_on->isVisible());
 
+			/* U1-09: the guide to the pads is on the dock (its "?" button), not three paragraphs on the Advanced
+			 * tab; it uses the dock's own words and shows the version in its title */
+			{
+				auto *help_btn = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskHelpBtn"));
+				REQUIRE(help_btn && help_btn->isVisible() && help_btn->text() == QStringLiteral("?"));
+				REQUIRE(help_btn->mapTo(sd, QPoint(0, 0)).y() < on_air->mapTo(sd, QPoint(0, 0)).y());
+				help_btn->click();
+				pump_ui();
+				auto *help = sd->window()->findChild<QDialog *>(QStringLiteral("mfdDeskHelpDialog"));
+				REQUIRE(help && help->isVisible());
+				REQUIRE(help->windowTitle() ==
+					QStringLiteral("Midi Fadester ") + QString::fromUtf8(PLUGIN_VERSION) +
+						QString::fromUtf8(" \xE2\x80\x94 What the pads do"));
+				const QString pads_text =
+					help->findChild<QLabel *>(QStringLiteral("mfdDeskHelpPads"))->text();
+				REQUIRE(pads_text.contains(QStringLiteral("Reset (Clip Stop on the APC40)")));
+				REQUIRE(pads_text.contains(QString::fromUtf8("32, 16, 8, 4, 2, 1 or \xC2\xBD beats")));
+				REQUIRE(!pads_text.contains(QStringLiteral("punch")) &&
+					!pads_text.contains(QStringLiteral("bars")));
+				REQUIRE(help->findChild<QLabel *>(QStringLiteral("mfdDeskHelpScenes"))
+						->text()
+						.contains(QStringLiteral("Blackout (Session)")));
+				REQUIRE(help->findChild<QLabel *>(QStringLiteral("mfdDeskHelpSpeed")) != nullptr);
+				help_btn->click(); /* a second click raises the same window */
+				pump_ui();
+				REQUIRE(sd->window()
+						->findChildren<QDialog *>(QStringLiteral("mfdDeskHelpDialog"))
+						.size() == 1);
+				help->close();
+				pump_ui();
+				std::unique_ptr<QDialog> adlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+				REQUIRE(adlg->findChild<QLabel *>(QStringLiteral("mfdAdvVjLegend")) == nullptr);
+				REQUIRE(adlg->findChild<QLabel *>(QStringLiteral("mfdAdvVjScenesLegend")) == nullptr);
+			}
+
 			/* U1-14: a fader that waits to pick up shows it on its bar: amber, with the marker where it starts to
 			 * act, and the sentence in its tooltip */
 			{

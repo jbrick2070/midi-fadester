@@ -1190,45 +1190,8 @@ private:
 		desk_video_check_->setObjectName(QStringLiteral("mfdAdvDeskVideoCheck"));
 		desk_video_check_->setStyleSheet(QStringLiteral("color: #e2e8f0;"));
 		root->addWidget(desk_video_check_);
-		auto *vj_legend = new QLabel(
-			mfdText("Dialog.VjPadsLegend",
-				"Columns 1–8 are the sources of the scene on air, bottom layer first: empty faders fill "
-				"themselves and follow the scene; a fader you set yourself stays. Bottom pad row: blend punch "
-				"(Shift + pad: next punch mode). Row 2: flash while held (Shift: blackout). Row 3: fade out and "
-				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: pad 1 (yellow) cuts "
-				"Preview to Program; pads 2–8 fade it in time with the beat, from 8 bars down to 1/2 beat. Clip "
-				"Stop: that "
-				"column back to its own blend (Shift: pin the column to its source). Stop All "
-				"Clips: Clean, every effect off and every source back to its own blend (Shift: fade every layer "
-				"out)."),
-			adv_tab);
-		vj_legend->setObjectName(QStringLiteral("mfdAdvVjLegend"));
-		vj_legend->setWordWrap(true);
-		vj_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		root->addWidget(vj_legend);
-		auto *vj_speed_legend = new QLabel(
-			mfdText("Dialog.VjSpeedLegend",
-				"Video speed (with Fadester Companion and VJster running): the Tempo knob makes the video 0.05x "
-				"faster or slower per click (Shift + Tempo: 0.25x), Nudge − / + 0.25x slower or faster, Tap Tempo "
-				"back to 1x, Play plays or pauses it. It goes through VJster because an OBS media source restarts "
-				"when its speed changes."),
-			adv_tab);
-		vj_speed_legend->setObjectName(QStringLiteral("mfdAdvVjSpeedLegend"));
-		vj_speed_legend->setWordWrap(true);
-		vj_speed_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		root->addWidget(vj_speed_legend);
-		auto *vj_scene_legend = new QLabel(
-			mfdText("Dialog.VjScenesLegend",
-				"Scene Launch 1–5: the first five scenes in the Scenes list. Press once for Preview, again to "
-				"fade it to Program; Shift + button sends it straight to Program. Program red, Preview green. "
-				"Session: Program fades to black, and back on the next press. Cue Level: transition "
-				"length (Shift: pad fade time). Record: Visual Sidechain panic or restore. Metronome: its tap "
-				"tempo (Shift: lock the BPM). Shift + Tap Tempo: back to its downbeat."),
-			adv_tab);
-		vj_scene_legend->setObjectName(QStringLiteral("mfdAdvVjScenesLegend"));
-		vj_scene_legend->setWordWrap(true);
-		vj_scene_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		root->addWidget(vj_scene_legend);
+		/* what each pad row does is one click away on the dock itself (its "?" button, U1-09): three paragraphs here left the
+		 * strip table three rows */
 		auto *vj_fill_bar = new QHBoxLayout();
 		auto *btn_vj_fill =
 			new QPushButton(mfdText("Dialog.VjFill", "Fill empty faders from the scene on air"), adv_tab);
