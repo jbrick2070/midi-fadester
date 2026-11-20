@@ -657,6 +657,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		auto *name = new QLabel(rowShortName(r), this);
 		name->setToolTip(rowName(r));
 		name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
+		name->setWordWrap(true);    /* a long name takes two lines rather than being cut at 380 px */
 		row_names_[r] = name;
 		const int grid_row = r == 0 ? 0
 					    : r + 2; /* the scene fades on top, the columns' rows under their names */
@@ -687,6 +688,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 				      "Reset: this column back to its own blend (Shift: pin the column). On the "
 				      "APC40: Clip Stop."));
 	clip_name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
+	clip_name->setWordWrap(true);
 	grid->addWidget(clip_name, kRows + 2, 0);
 	for (int i = 0; i < kStrips; ++i) {
 		QPushButton *b =
