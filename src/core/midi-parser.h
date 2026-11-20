@@ -27,6 +27,7 @@ struct mfd_midi_parser {
 	bool cc_lsb_independent[16][32]; /* CC (32 + i) is bound as its own 7-bit control */
 	uint8_t cc_pair_count[16][32];   /* CC n messages in a row that were followed by CC n+32 inside the window */
 	bool cc_msb_paired[16][32];      /* the last CC n message got its CC n+32 */
+	bool lsb_table_built; /* set by the owner of cc_lsb_independent once it is filled; init and clear unset it */
 	bool learning;
 	bool has_learned;
 	struct mfd_midi_addr learned_addr;
@@ -37,7 +38,6 @@ void mfd_midi_parser_start_learn(struct mfd_midi_parser *p);
 void mfd_midi_parser_cancel_learn(struct mfd_midi_parser *p);
 bool mfd_midi_parser_is_learning(const struct mfd_midi_parser *p);
 bool mfd_midi_parser_pop_learned(struct mfd_midi_parser *p, struct mfd_midi_addr *out_addr);
-bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mfd_midi_decoded *out_decoded);
 bool mfd_midi_parser_feed_at(struct mfd_midi_parser *p, uint32_t raw_msg, uint32_t timestamp_ms,
 			     struct mfd_midi_decoded *out_decoded);
 void mfd_midi_parser_set_lsb_independent(struct mfd_midi_parser *p, uint8_t channel, uint8_t cc, bool independent);

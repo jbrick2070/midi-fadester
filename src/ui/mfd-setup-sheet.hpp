@@ -42,6 +42,7 @@ private:
 	void repopulate_step2_pickers();
 	void repopulate_layer_combos_for_scene();
 	void repopulate_filter_combos_for_host(bool preserve_range);
+	void disable_filter_range_controls();
 	void repopulate_prop_combo_for_filter(bool preserve_range);
 	void configure_spinboxes_for_prop(bool preserve_range);
 	void update_step2_notes_and_validation();

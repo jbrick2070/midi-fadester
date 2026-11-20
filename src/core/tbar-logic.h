@@ -21,7 +21,6 @@ extern "C" {
  * ((1023 - val) <= 102 ==> val >= 921, ~90.03%). This is OBS's minimum for a release, NOT our trigger.
  */
 #define MFD_TBAR_OBS_MIN_RELEASE_POS (MFD_TBAR_RANGE_MAX - MFD_TBAR_CLAMP)
-#define MFD_TBAR_COMPLETE_POS MFD_TBAR_OBS_MIN_RELEASE_POS
 
 /*
  * Calibrated 3% rail zone threshold and 6% origin start band (R-TBAR-SM, zero timers anywhere):

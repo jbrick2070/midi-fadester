@@ -53,8 +53,6 @@ static void test_init(void)
 	assert(!tub_link_init(&l, "short"));
 	assert(!tub_link_init(&l, "0123456789abcdef0123456789abcdeg"));
 	assert(!tub_link_init(&l, "0123456789abcdef0123456789abcdef0"));
-	assert(tub_link_next_gen(&l) == 1);
-	assert(tub_link_next_gen(&l) == 2);
 	/* a link whose init failed accepts nothing, not even a report with no token at all */
 	assert(!tub_link_init(&l, "short"));
 	assert(accept(&l, report("", "p", 0, 1, "hello-ok", NULL), SEC) == TUB_REPORT_BAD_TOKEN);
@@ -148,9 +146,9 @@ static void test_report_read(void)
 	assert(tub_report_read(d, &r));
 	assert(r.duration == 122.56);
 	assert(strcmp(r.incarnation, "page1") == 0 && r.gen == 3 && r.seq == 7);
-	assert(strcmp(r.event, "playing") == 0 && strcmp(r.src, "reel.mp4") == 0);
+	assert(strcmp(r.event, "playing") == 0);
 	assert(r.current_time == 12.5 && r.rate == 1.5 && r.ready_state == 4 && r.video_width == 1920);
-	assert(r.video_height == 1080 && !r.paused && !r.ended && !r.no_picture && r.error_code == 0);
+	assert(!r.paused && !r.ended && !r.no_picture && r.error_code == 0);
 	obs_data_release(d);
 	/* missing fields and negative numbers are refused; long strings are cut, never overrun */
 	/* a length the page could not know (a stream, a broken file) reads 0 */
@@ -194,7 +192,6 @@ static void test_report_read(void)
 	assert(tub_report_read(d, &r));
 	assert(strlen(r.incarnation) == TUB_INCARNATION_MAX - 1);
 	assert(strlen(r.event) == 15);
-	assert(strlen(r.src) == TUB_SRC_MAX - 1);
 	obs_data_release(d);
 	assert(!tub_report_read(NULL, &r));
 	printf("  test_report_read: PASS\n");
@@ -204,7 +201,7 @@ static void test_accept_ordering(void)
 {
 	struct tub_link l;
 	assert(tub_link_init(&l, TOKEN));
-	uint64_t gen = tub_link_next_gen(&l);
+	uint64_t gen = ++l.gen;
 	assert(gen == 1);
 
 	/* the first report links the page */
@@ -227,7 +224,7 @@ static void test_accept_ordering(void)
 	assert(tub_link_state(&l, 12 * SEC) == TUB_STATE_PLAYING);
 
 	/* a newer tape was commanded: reports from the old tape keep the link alive but do not set state */
-	gen = tub_link_next_gen(&l);
+	gen = ++l.gen;
 	assert(gen == 2);
 	assert(accept(&l, report(TOKEN, "page1", 1, 3, "ended", "\"ended\":true"), 13 * SEC) ==
 	       TUB_REPORT_OLD_GENERATION);
@@ -274,7 +271,7 @@ static void test_page_outlives_filter(void)
 	       TUB_REPORT_NEW_PAGE);
 	assert(l.gen == 5);
 	/* the next tape command carries 6, which the page will not ignore as old */
-	assert(tub_link_next_gen(&l) == 6);
+	assert(++l.gen == 6);
 	assert(accept(&l, report(TOKEN, "old-page", 5, 401, "playing", "\"rs\":4,\"vw\":1280"), 2 * SEC) ==
 	       TUB_REPORT_OLD_GENERATION);
 	assert(accept(&l, report(TOKEN, "old-page", 6, 402, "playing", "\"rs\":4,\"vw\":1280"), 3 * SEC) ==
@@ -322,7 +319,7 @@ static void test_states(void)
 {
 	struct tub_link l;
 	assert(tub_link_init(&l, TOKEN));
-	tub_link_next_gen(&l);
+	++l.gen;
 	assert(accept(&l, report(TOKEN, "p", 1, 1, "hello-ok", NULL), SEC) == TUB_REPORT_NEW_PAGE);
 	assert(tub_link_state(&l, SEC) == TUB_STATE_READY);
 	assert(accept(&l, report(TOKEN, "p", 1, 2, "loadedmetadata", "\"rs\":1,\"vw\":640,\"paused\":true"), SEC) ==

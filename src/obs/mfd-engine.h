@@ -513,6 +513,10 @@ struct mfd_engine {
 
 	struct mfd_midi_queue midi_queue;
 	struct mfd_midi_parser midi_parser;
+	/* What the parser's "own 7-bit control" table was last built from (B-11): the table is rebuilt only when this
+	 * changes, not on every tick. key[0] is 1 when every CC 32..63 is independent; the rest are the bound CCs.
+	 * The parser itself says whether its table is still the one built (midi_parser.lsb_table_built). */
+	uint16_t lsb_sync_key[MFD_MAX_FADER_SLOTS + 2];
 	struct mfd_winmm_device midi_dev;
 	bool midi_io_busy; /* this plugin is closing or opening the port with no engine lock held (A-02) */
 	/* The settings file (per user) has been read or written with a strip list: it owns each strip's MIDI address,

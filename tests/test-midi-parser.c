@@ -22,6 +22,13 @@ static uint32_t pack_midi(uint8_t status, uint8_t data1, uint8_t data2)
 	return (uint32_t)status | ((uint32_t)data1 << 8U) | ((uint32_t)data2 << 16U);
 }
 
+/* A message with no time stamp: the pairing window (3 ms) is then always open. The product always passes the time
+ * (mfd_midi_parser_feed_at); the tests of the window do too. */
+static bool feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mfd_midi_decoded *out_decoded)
+{
+	return mfd_midi_parser_feed_at(p, raw_msg, 0U, out_decoded);
+}
+
 int main(void)
 {
 	struct mfd_midi_parser p;
@@ -34,7 +41,7 @@ int main(void)
 
 	for (uint8_t ch = 0; ch < 8U; ++ch) {
 		uint8_t val = (uint8_t)(ch * 15U + 10U);
-		REQUIRE(mfd_midi_parser_feed(&p, pack_midi((uint8_t)(0xB0U | ch), 7U, val), &dec));
+		REQUIRE(feed(&p, pack_midi((uint8_t)(0xB0U | ch), 7U, val), &dec));
 		REQUIRE(dec.addr.type == MFD_MIDI_CC);
 		REQUIRE(dec.addr.channel == ch);
 		REQUIRE(dec.addr.number == 7U);
@@ -56,17 +63,17 @@ int main(void)
 	mfd_midi_parser_start_learn(&p);
 	REQUIRE(mfd_midi_parser_is_learning(&p));
 
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
 	REQUIRE(!mfd_midi_parser_is_learning(&p));
 	/* G-02: one CC n followed by CC n+32 is not yet a 14-bit control; a run of MFD_MIDI_14BIT_PAIR_REPEATS is. */
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
 	REQUIRE(dec.addr.number == 47U && !dec.addr.is_14bit);
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
 	REQUIRE(dec.addr.number == 15U && !dec.addr.is_14bit);
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
 	REQUIRE(dec.addr.number == 47U && !dec.addr.is_14bit);
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
 	REQUIRE(dec.addr.type == MFD_MIDI_CC);
 	REQUIRE(dec.addr.channel == 0U);
 	REQUIRE(dec.addr.number == 15U);
@@ -83,11 +90,11 @@ int main(void)
 
 	/* 3. Note On with velocity 0 is treated as Note Off and ignored by Learn */
 	mfd_midi_parser_start_learn(&p);
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0x93U, 50U, 0U), &dec));
+	REQUIRE(feed(&p, pack_midi(0x93U, 50U, 0U), &dec));
 	REQUIRE(dec.addr.type == MFD_MIDI_NOTE_OFF);
 	REQUIRE(mfd_midi_parser_is_learning(&p));
 
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0x93U, 50U, 127U), &dec));
+	REQUIRE(feed(&p, pack_midi(0x93U, 50U, 127U), &dec));
 	REQUIRE(dec.addr.type == MFD_MIDI_NOTE_ON);
 	REQUIRE(mfd_midi_parser_pop_learned(&p, &learned));
 	REQUIRE(learned.type == MFD_MIDI_NOTE_ON);
@@ -99,7 +106,7 @@ int main(void)
 	mfd_format_last_midi_readout(false, NULL, readout, sizeof(readout));
 	REQUIRE(strcmp(readout, "No MIDI received yet") == 0);
 
-	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 7U, 64U), &dec));
+	REQUIRE(feed(&p, pack_midi(0xB0U, 7U, 64U), &dec));
 	mfd_format_last_midi_readout(true, &dec, readout, sizeof(readout));
 	REQUIRE(strcmp(readout, "Last MIDI: Ch 1 CC 7 = 64") == 0);
 

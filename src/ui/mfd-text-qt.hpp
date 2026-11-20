@@ -20,6 +20,10 @@ QString mfdText(const char *key, const char *english);
  * stays. */
 QString mfdFill(const QString &text, const QStringList &values);
 
+/* text made safe for QProgressBar::setFormat, which reads %p, %v and %m: a word joiner (invisible) after such a "%"
+ * keeps a filled name or a translation from turning into a format code. */
+QString mfdProgressFormat(const QString &text);
+
 /* The title of every Midi Fadester window: "Midi Fadester <version>, a dash, <window>" (the suite's rule). */
 QString mfdWindowTitle(const QString &window);
 

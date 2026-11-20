@@ -72,11 +72,6 @@ bool mfd_midi_addr_matches(const struct mfd_midi_addr *binding, const struct mfd
 	return binding->number == incoming->number;
 }
 
-bool mfd_midi_parser_feed(struct mfd_midi_parser *p, uint32_t raw_msg, struct mfd_midi_decoded *out_decoded)
-{
-	return mfd_midi_parser_feed_at(p, raw_msg, 0U, out_decoded);
-}
-
 bool mfd_midi_parser_feed_at(struct mfd_midi_parser *p, uint32_t raw_msg, uint32_t timestamp_ms,
 			     struct mfd_midi_decoded *out_decoded)
 {
@@ -213,6 +208,7 @@ void mfd_midi_parser_clear_lsb_independent(struct mfd_midi_parser *p)
 {
 	if (p) {
 		memset(p->cc_lsb_independent, 0, sizeof(p->cc_lsb_independent));
+		p->lsb_table_built = false;
 	}
 }
 

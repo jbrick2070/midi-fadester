@@ -162,23 +162,6 @@ static QString output_bar_stylesheet(const QString &chunk_hex, const QString &bo
 		.arg(chunk_hex, border_hex);
 }
 
-/* QProgressBar::setFormat reads %p, %v and %m; a word joiner after any such "%" keeps a filled name or a
- * translation from turning into a format code. */
-static QString progress_format_text(const QString &text)
-{
-	QString out;
-	out.reserve(text.size() + 4);
-	for (qsizetype i = 0; i < text.size(); ++i) {
-		out.append(text.at(i));
-		if (text.at(i) == QLatin1Char('%') && i + 1 < text.size() &&
-		    (text.at(i + 1) == QLatin1Char('p') || text.at(i + 1) == QLatin1Char('v') ||
-		     text.at(i + 1) == QLatin1Char('m'))) {
-			out.append(QChar(0x2060));
-		}
-	}
-	return out;
-}
-
 static QString stream_deck_companion_url()
 {
 	return QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester");
@@ -187,46 +170,6 @@ static QString stream_deck_companion_url()
 static void open_stream_deck_companion_url()
 {
 	QDesktopServices::openUrl(QUrl(stream_deck_companion_url()));
-}
-
-static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_slot &s,
-					       struct mfd_ui_strip_presentation *out)
-{
-	char disp_buf[64] = {0};
-	mfd_engine_format_slot_display_value_ex(&s, s.last_applied_val, true, disp_buf, sizeof(disp_buf));
-
-	struct mfd_ui_strip_input in;
-	std::memset(&in, 0, sizeof(in));
-	in.slot_index = idx;
-	in.slot_label = s.label;
-	in.is_horizontal = (idx == 0);
-	in.enabled = s.enabled;
-	in.addr_type = s.addr.type;
-	in.target_type = s.target_type;
-	in.auto_follow = s.auto_follow;
-	in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
-	in.source_a_name = s.source_a_name;
-	in.source_b_name = s.source_b_name;
-	in.filter_name = s.filter_name;
-	in.filter_prop = s.filter_prop;
-	in.filter_prop_label = s.filter_prop_label;
-	in.display_value = disp_buf;
-	in.available = s.cached_available;
-	in.reason = s.cached_reason;
-	in.reason_msg = &s.cached_reason_msg;
-	in.raw_norm = s.last_raw_norm;
-	in.applied_val = s.last_applied_val;
-	in.alpha_a = s.last_alpha_a;
-	in.alpha_b = s.last_alpha_b;
-	in.audio_db = mfd_deflection_to_db(s.last_applied_val);
-	in.auto_fade_active = s.auto_fade_active;
-	in.tbar_state = s.tbar_state;
-	in.takeover_state = s.takeover.state;
-	in.takeover_hint = s.takeover.hint;
-	in.has_last_fader = s.takeover.has_last_fader;
-	in.polarity_reversed = s.takeover.polarity_reversed;
-	in.target_obs = s.takeover.target_obs;
-	mfd_ui_format_strip_presentation(&in, out);
 }
 
 class MfdStripBarWidget final : public QWidget {
@@ -1753,7 +1696,7 @@ private:
 			strip_cards_[i]->setVisible(show_strip);
 
 			struct mfd_ui_strip_presentation sp;
-			build_strip_presentation_from_slot(i, s, &sp);
+			mfd_ui_strip_presentation_from_slot(i, s, &sp);
 			strip_bottom_actions_[i] = sp.bottom_action;
 
 			QString border_hex = QStringLiteral("#1e293b");
@@ -2612,7 +2555,7 @@ private:
 			}
 
 			struct mfd_ui_strip_presentation sp;
-			build_strip_presentation_from_slot(row, s, &sp);
+			mfd_ui_strip_presentation_from_slot(row, s, &sp);
 
 			const int desired_pct = sp.bar_percent;
 			const QString pct_q = QString::number(desired_pct);
@@ -2662,7 +2605,7 @@ private:
 			if (bar->value() != desired_pct) {
 				bar->setValue(desired_pct);
 			}
-			desired_text = progress_format_text(desired_text);
+			desired_text = mfdProgressFormat(desired_text);
 			if (bar->format() != desired_text) {
 				bar->setFormat(desired_text);
 			}

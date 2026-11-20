@@ -41,20 +41,6 @@ static QString msg_text(const struct mfd_msg &msg)
 	return QString::fromUtf8(text);
 }
 
-/* QProgressBar::setFormat reads %p, %v and %m; a filled name or value must never form one. */
-static QString progress_format(const QString &text)
-{
-	QString out = text;
-	for (qsizetype i = out.size() - 2; i >= 0; --i) {
-		const QChar next = out.at(i + 1);
-		if (out.at(i) == QLatin1Char('%') &&
-		    (next == QLatin1Char('p') || next == QLatin1Char('v') || next == QLatin1Char('m'))) {
-			out.insert(i + 1, QChar(0x2060)); /* word joiner: invisible, breaks the pair */
-		}
-	}
-	return out;
-}
-
 static QString format_plain_midi_addr(const struct mfd_midi_addr &addr)
 {
 	switch (addr.type) {
@@ -1265,12 +1251,7 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 			combo_filter_name_->setEnabled(false);
 			combo_filter_prop_->clear();
 			combo_filter_prop_->setEnabled(false);
-			spin_filter_from_->setEnabled(false);
-			spin_filter_to_->setEnabled(false);
-			btn_use_current_from_->setEnabled(false);
-			btn_use_current_to_->setEnabled(false);
-			chk_filter_bypass_->setEnabled(false);
-			lbl_filter_limits_note_->clear();
+			disable_filter_range_controls();
 			step2_empty_filter_note_->setText(
 				mfdText("Setup.NoFilterHosts",
 					"No sources or scenes have filters yet. Right-click a source or scene in OBS, "
@@ -1281,6 +1262,17 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 
 	updating_widgets_ = false;
 	update_step2_notes_and_validation();
+}
+
+/* No setting is chosen (no filter host, no filter, or no numeric setting): nothing to set a range on (F-15). */
+void MfdSetupSheetDialog::disable_filter_range_controls()
+{
+	spin_filter_from_->setEnabled(false);
+	spin_filter_to_->setEnabled(false);
+	btn_use_current_from_->setEnabled(false);
+	btn_use_current_to_->setEnabled(false);
+	chk_filter_bypass_->setEnabled(false);
+	lbl_filter_limits_note_->clear();
 }
 
 void MfdSetupSheetDialog::repopulate_filter_combos_for_host(bool preserve_range)
@@ -1298,12 +1290,7 @@ void MfdSetupSheetDialog::repopulate_filter_combos_for_host(bool preserve_range)
 		chosen_filter_prop_.clear();
 		combo_filter_name_->setEnabled(false);
 		combo_filter_prop_->setEnabled(false);
-		spin_filter_from_->setEnabled(false);
-		spin_filter_to_->setEnabled(false);
-		btn_use_current_from_->setEnabled(false);
-		btn_use_current_to_->setEnabled(false);
-		chk_filter_bypass_->setEnabled(false);
-		lbl_filter_limits_note_->clear();
+		disable_filter_range_controls();
 		step2_empty_filter_note_->setText(
 			mfdFill(mfdText("Setup.NoFiltersOnHost",
 					"No filters were found on '%1'. Add a filter in OBS Filters first."),
@@ -1350,12 +1337,7 @@ void MfdSetupSheetDialog::repopulate_prop_combo_for_filter(bool preserve_range)
 	if (!fe || fe->prop_count == 0U) {
 		chosen_filter_prop_.clear();
 		combo_filter_prop_->setEnabled(false);
-		spin_filter_from_->setEnabled(false);
-		spin_filter_to_->setEnabled(false);
-		btn_use_current_from_->setEnabled(false);
-		btn_use_current_to_->setEnabled(false);
-		chk_filter_bypass_->setEnabled(false);
-		lbl_filter_limits_note_->clear();
+		disable_filter_range_controls();
 		step2_empty_filter_note_->setText(
 			mfdFill(mfdText("Setup.NoNumericSettings",
 					"Filter '%1' has no numeric settings that Midi Fadester can sweep."),
@@ -1398,12 +1380,7 @@ void MfdSetupSheetDialog::configure_spinboxes_for_prop(bool preserve_range)
 
 	const struct mfd_filter_prop_info *pi = find_selected_filter_prop();
 	if (!pi) {
-		spin_filter_from_->setEnabled(false);
-		spin_filter_to_->setEnabled(false);
-		btn_use_current_from_->setEnabled(false);
-		btn_use_current_to_->setEnabled(false);
-		chk_filter_bypass_->setEnabled(false);
-		lbl_filter_limits_note_->clear();
+		disable_filter_range_controls();
 		updating_widgets_ = prev_upd;
 		return;
 	}
@@ -1675,20 +1652,20 @@ void MfdSetupSheetDialog::update_step3_controls()
 						   chosen_filter_bypass_, true, sim_disp, sizeof(sim_disp));
 		const QStringList values = {QString::number(meter_pct), QString::fromUtf8(sim_disp)};
 		if (snap_.setup.has_candidate_input) {
-			candidate_meter_->setFormat(progress_format(
+			candidate_meter_->setFormat(mfdProgressFormat(
 				mfdFill(mfdText("Setup.MeterTestValue", "Hardware test: %1% \xC2\xB7 %2"), values)));
 		} else {
-			candidate_meter_->setFormat(progress_format(mfdFill(
+			candidate_meter_->setFormat(mfdProgressFormat(mfdFill(
 				mfdText("Setup.MeterWaitValue", "Move the control to test it (%1% \xC2\xB7 %2)"),
 				values)));
 		}
 	} else if (snap_.setup.has_candidate_input) {
-		candidate_meter_->setFormat(progress_format(
+		candidate_meter_->setFormat(mfdProgressFormat(
 			mfdFill(mfdText("Setup.MeterTest", "Hardware test: %1%"), {QString::number(meter_pct)})));
 	} else {
 		candidate_meter_->setFormat(
-			progress_format(mfdFill(mfdText("Setup.MeterWait", "Move the control to test it (%1%)"),
-						{QString::number(meter_pct)})));
+			mfdProgressFormat(mfdFill(mfdText("Setup.MeterWait", "Move the control to test it (%1%)"),
+						  {QString::number(meter_pct)})));
 	}
 
 	feel_box_->setVisible(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX);

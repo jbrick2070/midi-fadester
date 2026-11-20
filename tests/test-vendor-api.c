@@ -5098,12 +5098,32 @@ int main(void)
 	REQUIRE(eng.fader_slots[1].cal.cal_max == 127);
 
 	/* On the Generic layout the desk is unknown: a run of pairs is a 14-bit control, one pair is not yet. */
+	REQUIRE(eng.midi_parser.cc_lsb_independent[0][7]); /* a known layout: CC 39 is its own control */
 	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_GENERIC, false));
 	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
 	push_midi_cc(&eng, 0, 7, 32);
 	push_midi_cc(&eng, 0, 39, 0);
 	mfd_engine_tick(&eng, 0.016f);
 	REQUIRE(!eng.fader_slots[1].addr.is_14bit);
+	{
+		/* B-11: the table of "own 7-bit control" CCs is rebuilt when what it is built from changes (here the
+		 * layout, then one strip's address), and only then: a mark put in by hand outlives a tick in which
+		 * nothing changed, and goes with the next real change. */
+		REQUIRE(!eng.midi_parser.cc_lsb_independent[0][7] && eng.midi_parser.lsb_table_built);
+		const struct mfd_midi_addr was = eng.fader_slots[17].addr;
+		eng.fader_slots[17].addr.type = MFD_MIDI_CC;
+		eng.fader_slots[17].addr.channel = 2U;
+		eng.fader_slots[17].addr.number = 40U;
+		eng.fader_slots[17].addr.is_14bit = false;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.midi_parser.cc_lsb_independent[2][8]);
+		eng.midi_parser.cc_lsb_independent[5][5] = true;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.midi_parser.cc_lsb_independent[5][5]);
+		eng.fader_slots[17].addr = was;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(!eng.midi_parser.cc_lsb_independent[2][8] && !eng.midi_parser.cc_lsb_independent[5][5]);
+	}
 	/* Send 14-bit 25% (v14 = 4096 -> MSB = 32, LSB = 0) on Ch 1 CC 7 / CC 39 */
 	push_midi_cc(&eng, 0, 7, 32);
 	push_midi_cc(&eng, 0, 39, 0);

@@ -34,11 +34,6 @@ bool tub_link_init(struct tub_link *l, const char *token)
 	return true;
 }
 
-uint64_t tub_link_next_gen(struct tub_link *l)
-{
-	return ++l->gen;
-}
-
 /* A quiet check that a body is a report-shaped JSON object, so anything else is dropped without a word: the JSON reader
  * in libobs (jansson, with JSON_REJECT_DUPLICATES) logs an error for every text it refuses, and a local process could
  * fill the log that way. A report is one flat object: string keys without escapes, no key twice, and values that are
@@ -52,11 +47,6 @@ static const char *json_ws(const char *p, const char *end)
 	while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
 		p++;
 	return p;
-}
-
-static bool json_hex(char c)
-{
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
 static unsigned json_hex_value(const char *p)
@@ -120,8 +110,7 @@ static const char *json_string(const char *p, const char *end, bool allow_escape
 			if (!allow_escapes || ++p >= end)
 				return NULL;
 			if (*p == 'u') {
-				if (end - p < 5 || !json_hex(p[1]) || !json_hex(p[2]) || !json_hex(p[3]) ||
-				    !json_hex(p[4]))
+				if (end - p < 5 || !is_hex(p[1]) || !is_hex(p[2]) || !is_hex(p[3]) || !is_hex(p[4]))
 					return NULL;
 				unsigned cp = json_hex_value(p + 1);
 				if (cp == 0 || (cp >= 0xD800 && cp <= 0xDFFF))
@@ -288,7 +277,6 @@ bool tub_report_read(obs_data_t *data, struct tub_report *r)
 	    !obs_data_has_user_value(data, "ev"))
 		return false;
 	copy_string(r->incarnation, sizeof(r->incarnation), obs_data_get_string(data, "inc"));
-	copy_string(r->src, sizeof(r->src), obs_data_get_string(data, "src"));
 	copy_string(r->event, sizeof(r->event), obs_data_get_string(data, "ev"));
 	if (r->incarnation[0] == '\0' || r->event[0] == '\0')
 		return false;
@@ -317,7 +305,6 @@ bool tub_report_read(obs_data_t *data, struct tub_report *r)
 	r->rate = (isfinite(rate) && rate > 0.0) ? (rate < TUB_REPORT_MAX_RATE ? rate : TUB_REPORT_MAX_RATE) : 0.0;
 	r->ready_state = (int)obs_data_get_int(data, "rs");
 	r->video_width = (int)obs_data_get_int(data, "vw");
-	r->video_height = (int)obs_data_get_int(data, "vh");
 	r->error_code = (int)obs_data_get_int(data, "err");
 	r->paused = obs_data_get_bool(data, "paused");
 	r->ended = obs_data_get_bool(data, "ended");

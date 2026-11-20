@@ -123,7 +123,6 @@ enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_COLUMN_CLEAN,    /* strip: its own (home) blend, flash and blackout let go (Clip Stop) */
 	MFD_VJ_ACTION_SCENE_PICK,      /* strip = scene 0..4: to Preview, or take it when it is in Preview */
 	MFD_VJ_ACTION_SCENE_PROGRAM,   /* strip = scene 0..4: straight to Program, skipping Preview */
-	MFD_VJ_ACTION_TAKE,            /* Preview to Program with the transition */
 	MFD_VJ_ACTION_VS_PANIC,        /* Visual Sidechain panic, or restore when it is panicked */
 	MFD_VJ_ACTION_VS_TAP,          /* Visual Sidechain tap tempo */
 	MFD_VJ_ACTION_VS_LOCK,         /* Visual Sidechain BPM lock on or off */

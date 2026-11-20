@@ -64,6 +64,21 @@ QString mfdFill(const QString &text, const QStringList &values)
 	return out;
 }
 
+QString mfdProgressFormat(const QString &text)
+{
+	QString out;
+	out.reserve(text.size() + 4);
+	for (qsizetype i = 0; i < text.size(); ++i) {
+		out.append(text.at(i));
+		if (text.at(i) == QLatin1Char('%') && i + 1 < text.size() &&
+		    (text.at(i + 1) == QLatin1Char('p') || text.at(i + 1) == QLatin1Char('v') ||
+		     text.at(i + 1) == QLatin1Char('m'))) {
+			out.append(QChar(0x2060));
+		}
+	}
+	return out;
+}
+
 QString mfdWindowTitle(const QString &window)
 {
 	return mfdFill(mfdText("Window.Title", "Midi Fadester %1 \xE2\x80\x94 %2"),

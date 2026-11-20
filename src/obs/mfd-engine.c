@@ -5553,7 +5553,31 @@ static float normalize_decoded_sample(struct mfd_engine *eng, struct mfd_midi_ad
  * switched off. */
 static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
 {
+	/* The table depends only on the desk, the layout and the bound addresses: work those out (19 small compares)
+	 * and leave the table alone while they are what it was built from (B-11). 0xFFFF is "no CC here". */
+	const bool all_independent = (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) ||
+				     mfd_engine_get_active_profile(eng) != MFD_PROFILE_GENERIC;
+	uint16_t key[MFD_MAX_FADER_SLOTS + 2];
+	key[0] = all_independent ? 1U : 0U;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_midi_addr *a = &eng->fader_slots[i].addr;
+		const bool own = a->type == MFD_MIDI_CC && !a->is_14bit && a->number >= 32U && a->number < 64U;
+		key[i + 1] = own ? (uint16_t)(((uint16_t)a->channel << 8) | a->number) : (uint16_t)0xFFFFU;
+	}
+	{
+		const struct mfd_midi_addr *c = &eng->setup_session.candidate_addr;
+		const bool own = eng->setup_session.active && c->type == MFD_MIDI_CC && !c->is_14bit &&
+				 c->number >= 32U && c->number < 64U;
+		key[MFD_MAX_FADER_SLOTS + 1] = own ? (uint16_t)(((uint16_t)c->channel << 8) | c->number)
+						   : (uint16_t)0xFFFFU;
+	}
+	if (eng->midi_parser.lsb_table_built && memcmp(key, eng->lsb_sync_key, sizeof(key)) == 0) {
+		return;
+	}
+	memcpy(eng->lsb_sync_key, key, sizeof(key));
+
 	mfd_midi_parser_clear_lsb_independent(&eng->midi_parser);
+	eng->midi_parser.lsb_table_built = true;
 	/* The APC40 mkII sends only 7-bit CCs, but its controls sit on 14-bit LSB numbers: Cue Level (CC 47) is the
 	 * crossfader's (CC 15) partner and the track knobs (CC 48..55) the Device knobs' (CC 16..23). Turning one within
 	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar.
@@ -5562,8 +5586,7 @@ static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
 	 * on several a second control sits 32 numbers above a fader (the nanoKONTROL2's S buttons above its sliders,
 	 * the MIDImix's knob rows). Only the Generic layout, where the desk is unknown, pairs CC n with CC n+32, and
 	 * there the parser asks for a run of pairs first (MFD_MIDI_14BIT_PAIR_REPEATS). */
-	if ((eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) ||
-	    mfd_engine_get_active_profile(eng) != MFD_PROFILE_GENERIC) {
+	if (all_independent) {
 		for (uint8_t ch = 0; ch < 16U; ++ch) {
 			for (uint8_t cc = 32U; cc < 64U; ++cc) {
 				mfd_midi_parser_set_lsb_independent(&eng->midi_parser, ch, cc, true);
@@ -6096,9 +6119,6 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		break;
 	case MFD_VJ_ACTION_SCENE_PROGRAM:
 		vj_scene_locked(eng, s, true);
-		break;
-	case MFD_VJ_ACTION_TAKE:
-		vj_take_locked(eng);
 		break;
 	case MFD_VJ_ACTION_SCENE_FADE:
 		vj_scene_fade_locked(eng, s);
