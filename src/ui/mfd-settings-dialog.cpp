@@ -1182,6 +1182,14 @@ private:
 		vj_bar->addWidget(vj_fade_spin_);
 		vj_bar->addStretch(1);
 		root->addLayout(vj_bar);
+		/* the dock's video speed rows act only with Fadester Companion and VJster running: off unless asked for */
+		desk_video_check_ = new QCheckBox(
+			mfdText("Dialog.DeskVideo",
+				"Show video speed controls on the dock (needs Fadester Companion and VJster)"),
+			adv_tab);
+		desk_video_check_->setObjectName(QStringLiteral("mfdAdvDeskVideoCheck"));
+		desk_video_check_->setStyleSheet(QStringLiteral("color: #e2e8f0;"));
+		root->addWidget(desk_video_check_);
 		auto *vj_legend = new QLabel(
 			mfdText("Dialog.VjPadsLegend",
 				"Columns 1–8 are the sources of the scene on air, bottom layer first: empty faders fill "
@@ -1418,6 +1426,13 @@ private:
 			}
 		});
 
+		connect(desk_video_check_, &QCheckBox::toggled, this, [this](bool checked) {
+			if (!rebuilding_adv_table_) {
+				mfd_engine_set_desk_video_controls(eng_, checked);
+				mfd_engine_save_global_config(eng_);
+				mfd_desk_dock_refresh();
+			}
+		});
 		connect(vj_check_, &QCheckBox::toggled, this, [this](bool checked) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_vj_buttons(eng_, checked, vj_fade_spin_->value());
@@ -1996,6 +2011,11 @@ private:
 			vj_check_->blockSignals(true);
 			vj_check_->setChecked(mfd_engine_vj_buttons_enabled(eng_));
 			vj_check_->blockSignals(false);
+			if (desk_video_check_) {
+				desk_video_check_->blockSignals(true);
+				desk_video_check_->setChecked(mfd_engine_desk_video_controls(eng_));
+				desk_video_check_->blockSignals(false);
+			}
 			if (!vj_fade_spin_->hasFocus()) {
 				vj_fade_spin_->blockSignals(true);
 				vj_fade_spin_->setValue(mfd_engine_vj_fade_ms(eng_));
@@ -2663,6 +2683,7 @@ private:
 	QDoubleSpinBox *tau_spin_ = nullptr;
 	QCheckBox *flip_check_ = nullptr;
 	QCheckBox *vj_check_ = nullptr;
+	QCheckBox *desk_video_check_ = nullptr;
 	QSpinBox *vj_fade_spin_ = nullptr;
 	QLabel *vj_fill_result_ = nullptr;
 

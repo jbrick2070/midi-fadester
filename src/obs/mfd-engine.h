@@ -529,6 +529,10 @@ struct mfd_engine {
 
 	/* APC40 mkII VJ buttons (core/vj-pads.h): blend punch and pick, flash, fades, Clean FX. On unless turned off. */
 	bool vj_disabled;
+	/* The Fadester Desk dock shows its video speed rows (VJster through Fadester Companion). Off on a new install:
+	 * they do nothing for most people. A settings file written before this key keeps them on, so nothing disappears
+	 * from a dock that is in use when the plugin is updated. */
+	bool desk_video_controls;
 	int vj_fade_ms; /* 0 = the default, 1000 ms */
 	struct mfd_vj_pads vj;
 	float vj_fade_restore[MFD_VJ_STRIPS];  /* the level a Clip Stop faded out from */
@@ -731,7 +735,8 @@ struct mfd_desk_view {
 	bool vs_panic;
 	bool vs_panic_known;
 	bool vs_last_failed;
-	bool blackout; /* Program black or fading to or from black */
+	bool blackout;       /* Program black or fading to or from black */
+	bool video_controls; /* show the video speed rows (the Advanced tab's switch) */
 };
 
 /* A snapshot for the dock, copied under the engine lock (no OBS calls). The LEDs are worked out with Shift held when
@@ -856,6 +861,9 @@ void mfd_engine_set_tbar_bidirectional_flip(struct mfd_engine *eng, bool flip);
 /* APC40 mkII VJ buttons: on/off and the Clip Stop fade time (50..20000 ms). Persisted with the global settings. */
 void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms);
 bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng);
+/* The dock's video speed rows, shown or hidden. Persisted with the global settings. */
+void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown);
+bool mfd_engine_desk_video_controls(const struct mfd_engine *eng);
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng);
 
 void mfd_engine_start_learn(struct mfd_engine *eng, int slot_index);

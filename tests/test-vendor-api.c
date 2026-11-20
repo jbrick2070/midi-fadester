@@ -6028,6 +6028,10 @@ int main(void)
 		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v013_json));
 		REQUIRE(eng.first_run_offer_dismissed);
 		REQUIRE(!eng.stream_deck_companion_dismissed);
+		/* U1-13: settings from before the dock's video switch keep the video speed rows (nothing disappears on an
+		 * update); a new install, which has no settings file, starts without them */
+		REQUIRE(eng.desk_video_controls);
+		REQUIRE(mfd_engine_desk_video_controls(&eng));
 		mfd_engine_get_ui_snapshot(&eng, snap);
 		REQUIRE(!snap->first_run_offer_pending);
 		os_unlink(tmp_v013_json);
@@ -6043,7 +6047,24 @@ int main(void)
 		REQUIRE(eng.slot_config_rev[0] > rev0_pre_imp);
 		REQUIRE(!eng.first_run_offer_dismissed);
 		mfd_engine_cancel_setup_session(&eng);
+		/* the switch is saved and read back, off as well as on */
+		mfd_engine_set_desk_video_controls(&eng, false);
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+		eng.desk_video_controls = true;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+		REQUIRE(!eng.desk_video_controls);
+		mfd_engine_set_desk_video_controls(&eng, true);
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+		eng.desk_video_controls = false;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+		REQUIRE(eng.desk_video_controls);
+		eng.desk_video_controls = false;
 		os_unlink(tmp_v020_json);
+		{
+			struct mfd_engine fresh;
+			memset(&fresh, 0, sizeof(fresh));
+			REQUIRE(!mfd_engine_desk_video_controls(&fresh)); /* a new install: hidden */
+		}
 	}
 
 	/* 16f: Bounded 4-mode candidate-validator equivalence matrix (MIDI-FADESTER-UI.md Property Test)

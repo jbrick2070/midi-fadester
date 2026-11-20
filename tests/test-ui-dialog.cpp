@@ -2263,6 +2263,27 @@ int main(int argc, char **argv)
 			pump_ui();
 			REQUIRE(!eng.vj_disabled && grid->isVisible() && !turn_on->isVisible());
 
+			/* U1-13: the video speed rows show only when switched on, on the Advanced tab */
+			{
+				auto *video = sd->findChild<QWidget *>(QStringLiteral("mfdDeskVideoBox"));
+				std::unique_ptr<QDialog> vdlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+				auto *check = must_find<QCheckBox>(vdlg.get(), QStringLiteral("mfdAdvDeskVideoCheck"));
+				REQUIRE(video);
+				const bool was_video = eng.desk_video_controls;
+				mfd_engine_set_desk_video_controls(&eng, false);
+				again();
+				REQUIRE(!video->isVisible());
+				REQUIRE(sd->findChild<QWidget *>(QStringLiteral("mfdDeskSpeedDial"))->isHidden() ||
+					!sd->findChild<QWidget *>(QStringLiteral("mfdDeskSpeedDial"))->isVisible());
+				check->setChecked(false);
+				check->setChecked(true); /* the user ticks it */
+				REQUIRE(eng.desk_video_controls);
+				again();
+				REQUIRE(video->isVisible());
+				REQUIRE(sd->findChild<QWidget *>(QStringLiteral("mfdDeskSpeedDial"))->isVisible());
+				eng.desk_video_controls = was_video;
+			}
+
 			/* no APC40: the reason and Reconnect on top, the grid gone */
 			eng.midi_dev.is_open = false;
 			again();
@@ -2291,6 +2312,7 @@ int main(int argc, char **argv)
 			for (int look = 0; look < 4; ++look) {
 				const bool emergency = look == 1 || look == 2;
 				eng.vj.shift = look == 3;
+				eng.desk_video_controls = look != 1; /* the video speed rows too, wide and narrow */
 				if (emergency) {
 					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, true);
 					mfd_blackout_toggle(300);
@@ -2338,6 +2360,7 @@ int main(int argc, char **argv)
 					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
 				}
 				eng.vj.shift = false;
+				eng.desk_video_controls = false;
 			}
 			mfd_text_set_lookup(test_locale_text);
 			text_lookup_destroy(g_lang_lookup);

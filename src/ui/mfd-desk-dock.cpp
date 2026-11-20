@@ -383,6 +383,7 @@ private:
 	MfdSpeedDial *speed_dial_ = nullptr;
 	QPushButton *vj_play_ = nullptr;
 	QPushButton *vj_presets_[6] = {};
+	QWidget *vj_box_ = nullptr; /* the video speed rows: shown only when switched on (the Advanced tab) */
 	void vjSteps(int steps);
 	QElapsedTimer clock_;
 	QElapsedTimer status_age_;
@@ -750,8 +751,13 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 
 	/* VJster: the video's speed through Fadester Companion. A dial for fine changes (the desk's Tempo knob), a row of
 	 * preset speeds with 1x (the desk's Tap Tempo), and Play / Pause. */
+	vj_box_ = new QWidget(this);
+	vj_box_->setObjectName(QStringLiteral("mfdDeskVideoBox"));
+	auto *vj_col = new QVBoxLayout(vj_box_);
+	vj_col->setContentsMargins(0, 0, 0, 0);
+	vj_col->setSpacing(6);
 	auto *vj_row = new QHBoxLayout();
-	auto *vj_name = new QLabel(mfdText("Desk.VjsterTitle", "VJster video"), this);
+	auto *vj_name = new QLabel(mfdText("Desk.VjsterTitle", "Video speed"), this);
 	vj_name->setToolTip(mfdText("Desk.VjsterNote",
 				    "Video speed in VJster (Chrome or the OBS video page), through Fadester "
 				    "Companion with VJster on (the preset speeds need 0.1.17 or later). Midi "
@@ -774,7 +780,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		}
 	});
 	vj_row->addWidget(vj_play_);
-	root->addLayout(vj_row);
+	vj_col->addLayout(vj_row);
 	auto *preset_row = new QHBoxLayout();
 	preset_row->setSpacing(3);
 	static const double k_presets[6] = {0.5, 0.75, 1.0, 1.25, 1.5, 2.0};
@@ -804,7 +810,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		});
 		preset_row->addWidget(b);
 	}
-	root->addLayout(preset_row);
+	vj_col->addLayout(preset_row);
+	root->addWidget(vj_box_);
 
 	root->addStretch(1);
 
@@ -1254,6 +1261,9 @@ void MfdDeskDock::refresh()
 	paintButton(vs_tap_, 0x475569U, vs_loaded_);
 	paintButton(vs_lock_, locked ? 0x0EA5E9U : 0x475569U, vs_loaded_);
 	paintButton(vs_downbeat_, 0x475569U, vs_loaded_);
+	if (vj_box_->isHidden() == view_.video_controls) {
+		vj_box_->setVisible(view_.video_controls);
+	}
 	paintButton(vj_play_, 0x334155U, true); /* always: VJster does not need the desk */
 	for (int k = 0; k < 6; ++k) {
 		paintButton(vj_presets_[k], k == 2 ? 0x64748BU : 0x334155U, true); /* 1x stands out */

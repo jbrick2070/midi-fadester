@@ -6113,6 +6113,22 @@ bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng)
 	return eng && !eng->vj_disabled;
 }
 
+void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	eng->desk_video_controls = shown;
+	mfd_engine_mark_ui_dirty(eng, false);
+	mfd_engine_unlock(eng);
+}
+
+bool mfd_engine_desk_video_controls(const struct mfd_engine *eng)
+{
+	return eng && eng->desk_video_controls;
+}
+
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
 {
 	return vj_effective_fade_ms(eng);
@@ -6860,6 +6876,7 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 	out->crossfader = eng->fader_slots[0].last_applied_val;
 	out->vs_panic = eng->vs_panic;
 	out->blackout = mfd_blackout_is_on();
+	out->video_controls = eng->desk_video_controls;
 	out->vs_panic_known = eng->vs_panic_known;
 	out->vs_last_failed = eng->vs_last_failed;
 	mfd_engine_unlock(eng);
@@ -8804,6 +8821,7 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_bool(data, "first_run_offer_dismissed", eng->first_run_offer_dismissed);
 	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
 	obs_data_set_bool(data, "vj_buttons_enabled", !eng->vj_disabled);
+	obs_data_set_bool(data, "desk_video_controls", eng->desk_video_controls);
 	obs_data_set_int(data, "vj_fade_ms", vj_effective_fade_ms(eng));
 	obs_data_set_bool(data, "vj_autofill_done", eng->vj_autofill_done);
 	obs_data_array_t *punch = obs_data_array_create();
@@ -8881,6 +8899,13 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	}
 	if (obs_data_has_user_value(data, "vj_buttons_enabled")) {
 		eng->vj_disabled = !obs_data_get_bool(data, "vj_buttons_enabled");
+	}
+	if (obs_data_has_user_value(data, "desk_video_controls")) {
+		eng->desk_video_controls = obs_data_get_bool(data, "desk_video_controls");
+	} else if (!user_file) {
+		/* The plugin's own settings from before this key (0.9.0 and older showed the rows always): keep them, so
+		 * an update never takes a control away from a dock in use. A new install has no file and starts without. */
+		eng->desk_video_controls = true;
 	}
 	if (obs_data_has_user_value(data, "vj_fade_ms")) {
 		long long ms = obs_data_get_int(data, "vj_fade_ms");
