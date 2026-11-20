@@ -53,8 +53,8 @@
  * It also says what each LED should show. Scenes: Program red, Preview green pulsing, other scenes dim blue, no scene
  * off (Preview pulses between dim and bright green, so it stays lit if the desk does not animate). Sources: dim white
  * at their home blend, the blend colour when punched, bright white while flashing, amber when faded
- * out, at 0 % or blacked out, blinking dim / bright red when hidden, off without a source. Row 5: eight greens, light (the longest
- * fade) to dark (the shortest). Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
+ * out, at 0 % or blacked out, blinking dim / bright red when hidden, off without a source. Row 5: eight greens, dark (the longest
+ * fade) to light (the shortest). Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
  */
 
 #include <stdbool.h>
