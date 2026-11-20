@@ -1430,7 +1430,7 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_5"))->text() ==
 		QStringLiteral("Scene OldScene was deleted."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_6"))->text() ==
-		QStringLiteral("Guest Mic was deleted."));
+		QStringLiteral("Guest Mic was deleted. Click Set up to choose another."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_7"))->text() ==
 		QStringLiteral("Title Card has no audio."));
 
@@ -1574,7 +1574,7 @@ int main(int argc, char **argv)
 	pump_ui();
 	REQUIRE(!sheet->isHidden());
 	REQUIRE(!err_banner->isHidden());
-	REQUIRE(err_banner->text().contains(QStringLiteral("changed externally")));
+	REQUIRE(err_banner->text().contains(QStringLiteral("changed from somewhere else")));
 
 	btn_done->click();
 	pump_ui();

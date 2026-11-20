@@ -377,7 +377,7 @@ static bool validate_slot_movement_locked(struct mfd_engine *eng, struct mfd_fad
 {
 	if (eng->setup_session.active && eng->setup_session.slot_index == slot_index) {
 		set_error_comment(response_data, mfd_msg_slug(MFD_MSG_STRIP_PAUSED_IN_SETUP),
-				  "Strip is currently paused while Set up is open.");
+				  "This strip is paused while Set up is open.");
 		return false;
 	}
 	if (!mfd_engine_is_slot_writable(eng, slot)) {

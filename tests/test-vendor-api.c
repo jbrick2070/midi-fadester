@@ -1146,7 +1146,7 @@ static int test_config_abort_and_movement_errors(void)
 			expected = "Studio Mode is off.";
 		} else {
 			mfd_engine_begin_setup_session(eng, 0);
-			expected = "Strip is currently paused while Set up is open.";
+			expected = "This strip is paused while Set up is open.";
 		}
 		mfd_engine_reevaluate_slots(eng, false);
 		int driver_calls = g_mock_tbar_calls;
@@ -6032,7 +6032,8 @@ int main(void)
 
 	/*
 	 * 16. 0.2.0 Step 1 Engine Contracts:
-	 *     - 16a: Deleted audio source ("Mic/Aux was deleted.") vs silent source ("Silent Card has no audio.")
+	 *     - 16a: Deleted audio source ("Mic/Aux was deleted. Click Set up to choose another.") vs silent source
+	 *            ("Silent Card has no audio.")
 	 *     - 16b: Heap-allocated atomic UI catalog & snapshot sorting/stacking/dB units
 	 *     - 16c: Setup session broadcast isolation, candidate_invert, [Not used] address preservation,
 	 *            Learn mutual exclusion & multi-slot collision transfer
@@ -6064,7 +6065,7 @@ int main(void)
 		char rsn_del[160] = {0};
 		mfd_engine_get_slot_status(&eng, &eng.fader_slots[3], NULL, 0U, &avail_del, rsn_del, sizeof(rsn_del));
 		REQUIRE(!avail_del);
-		REQUIRE(strcmp(rsn_del, "Mic/Aux was deleted.") == 0);
+		REQUIRE(strcmp(rsn_del, "Mic/Aux was deleted. Click Set up to choose another.") == 0);
 	}
 	vol_writes_before = fake_sg.total_volume_writes;
 	push_midi_cc(&eng, 2, 7, 77);
@@ -6272,7 +6273,7 @@ int main(void)
 	obs_data_release(res);
 
 	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
-	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	REQUIRE(strstr(commit_err, "changed from somewhere else") != NULL);
 	/* base_slot_rev refreshed on first conflict notice, so pressing Done a second time succeeds */
 	REQUIRE(mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
 
@@ -6282,7 +6283,7 @@ int main(void)
 	mfd_engine_handle_source_rename(&eng, "Color 2", "Color Two");
 	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color Two");
 	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
-	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	REQUIRE(strstr(commit_err, "changed from somewhere else") != NULL);
 	fake_sg_rename(&fake_sg, "Color Two", "Color 2");
 	mfd_engine_handle_source_rename(&eng, "Color Two", "Color 2");
 	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color 2");
@@ -6297,7 +6298,7 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
-	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	REQUIRE(strstr(commit_err, "changed from somewhere else") != NULL);
 	mfd_engine_cancel_setup_session(&eng);
 
 	/* Mid-setup precondition invalidation: layer removed from scene before pressing Done */
@@ -6961,7 +6962,7 @@ int main(void)
 		obs_data_set_string(req, "filter_prop", "mode"); /* OBS_PROPERTY_LIST */
 		mfd_vendor_handle_set_slot(req, res, &eng);
 		REQUIRE(obs_data_has_user_value(res, "error"));
-		REQUIRE(strstr(obs_data_get_string(res, "comment"), "not a numeric") != NULL);
+		REQUIRE(strstr(obs_data_get_string(res, "comment"), "is not a number") != NULL);
 		obs_data_release(req);
 		obs_data_release(res);
 
