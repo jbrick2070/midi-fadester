@@ -9,6 +9,7 @@
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-svg-canvas.hpp"
 #include "obs/mfd-engine.h"
+#include "obs/mfd-blackout.h"
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
@@ -2053,6 +2054,43 @@ int main(int argc, char **argv)
 		desk->hide();
 		delete desk;
 		desk = nullptr;
+		/* U1-08: the two emergency states. The Panic bar names the button as it now reads (Restore); the Blackout
+		 * bar is as solid as the Panic bar, and its button says what a press does (End blackout). */
+		{
+			mfd_blackout_init();
+			REQUIRE(!mfd_blackout_is_on());
+			mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, true);
+			mfd_blackout_toggle(300);
+			REQUIRE(mfd_blackout_is_on());
+			QWidget *ed = mfd_desk_dock_create(&eng);
+			ed->resize(560, 520);
+			ed->show();
+			pump_ui();
+			auto *panic_bar = ed->findChild<QLabel *>(QStringLiteral("mfdDeskPanicBar"));
+			auto *panic_btn = ed->findChild<QPushButton *>(QStringLiteral("mfdDeskPanicBtn"));
+			auto *black_bar = ed->findChild<QLabel *>(QStringLiteral("mfdDeskBlackoutBar"));
+			auto *black_btn = ed->findChild<QPushButton *>(QStringLiteral("mfdDeskBlackoutBtn"));
+			REQUIRE(panic_bar && panic_btn && black_bar && black_btn);
+			REQUIRE(panic_bar->isVisible() && black_bar->isVisible());
+			REQUIRE(panic_btn->text() == QStringLiteral("Restore"));
+			REQUIRE(panic_bar->text().contains(QStringLiteral("Press Restore")));
+			REQUIRE(!panic_bar->text().contains(QStringLiteral("Panic again")));
+			REQUIRE(black_btn->text() == QStringLiteral("End blackout"));
+			REQUIRE(black_bar->text().contains(QStringLiteral("Press End blackout")));
+			REQUIRE(black_bar->styleSheet().contains(QStringLiteral("background-color: #b91c1c")));
+			REQUIRE(panic_bar->styleSheet().contains(QStringLiteral("background-color: #b91c1c")));
+			REQUIRE(black_btn->isEnabled()); /* a blackout can always be ended */
+			/* both bars stand above the scene row: seen however short the dock is */
+			auto *first_pad = ed->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_0"));
+			REQUIRE(first_pad &&
+				panic_bar->mapTo(ed, QPoint(0, 0)).y() < first_pad->mapTo(ed, QPoint(0, 0)).y());
+			REQUIRE(black_bar->mapTo(ed, QPoint(0, 0)).y() < first_pad->mapTo(ed, QPoint(0, 0)).y());
+			ed->hide();
+			delete ed;
+			mfd_blackout_toggle(300);
+			mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+			REQUIRE(!mfd_blackout_is_on());
+		}
 		/* every language: no button or row name is cut off at a normal dock size (scene and column names elide on
 		 * purpose); German and Russian are saved for a look */
 		const QDir desk_locale_dir = QFileInfo(QString::fromUtf8(MFD_TEST_LOCALE_FILE)).dir();
@@ -2062,40 +2100,56 @@ int main(int argc, char **argv)
 			g_lang_lookup = text_lookup_create(desk_locale_dir.filePath(file).toUtf8().constData());
 			REQUIRE(g_lang_lookup != nullptr);
 			mfd_text_set_lookup(lang_locale_text);
-			QWidget *ld = mfd_desk_dock_create(&eng);
-			ld->resize(560, 760);
-			ld->show();
-			pump_ui();
-			for (QPushButton *b : ld->findChildren<QPushButton *>()) {
-				if (!b->isVisible() || (b->objectName().isEmpty() && b->text().isEmpty())) {
-					continue;
+			/* two looks: the show, and both emergency bars on */
+			for (int look = 0; look < 2; ++look) {
+				const bool emergency = look >= 1;
+				if (emergency) {
+					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, true);
+					mfd_blackout_toggle(300);
 				}
-				if (b->fontMetrics().horizontalAdvance(b->text()) > b->width() - 4) {
-					desk_cut << QStringLiteral("%1: button \"%2\" (%3 px)")
-							    .arg(file, b->text())
-							    .arg(b->width());
+				QWidget *ld = mfd_desk_dock_create(&eng);
+				ld->resize(look == 2 ? 380 : 560, 760);
+				ld->show();
+				pump_ui();
+				for (QPushButton *b : ld->findChildren<QPushButton *>()) {
+					if (!b->isVisible() || (b->objectName().isEmpty() && b->text().isEmpty())) {
+						continue;
+					}
+					if (b->fontMetrics().horizontalAdvance(b->text()) > b->width() - 4) {
+						desk_cut << QStringLiteral("%1: button \"%2\" (%3 px)")
+								    .arg(file, b->text())
+								    .arg(b->width());
+					}
 				}
-			}
-			for (QLabel *l : ld->findChildren<QLabel *>()) {
-				if (!l->isVisible() || l->wordWrap() ||
-				    l->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored || l->text().isEmpty()) {
-					continue;
+				for (QLabel *l : ld->findChildren<QLabel *>()) {
+					if (!l->isVisible() || l->wordWrap() ||
+					    l->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored ||
+					    l->text().isEmpty()) {
+						continue;
+					}
+					if (l->fontMetrics().horizontalAdvance(l->text()) > l->width()) {
+						desk_cut << QStringLiteral("%1: label \"%2\" (%3 px)")
+								    .arg(file, l->text())
+								    .arg(l->width());
+					}
 				}
-				if (l->fontMetrics().horizontalAdvance(l->text()) > l->width()) {
-					desk_cut << QStringLiteral("%1: label \"%2\" (%3 px)")
-							    .arg(file, l->text())
-							    .arg(l->width());
-				}
-			}
-			if (file == QStringLiteral("de-DE.ini") || file == QStringLiteral("ru-RU.ini")) {
-				QPixmap pm = ld->grab();
-				REQUIRE(pm.save(QDir(screenshot_dir)
+				if (file == QStringLiteral("de-DE.ini") || file == QStringLiteral("ru-RU.ini")) {
+					QPixmap pm = ld->grab();
+					REQUIRE(pm.save(
+						QDir(screenshot_dir)
 							.filePath(QStringLiteral("desk-") + file.left(5) +
+								  (look == 0 ? QString()
+									     : QStringLiteral("-look%1").arg(look)) +
 								  QStringLiteral(".png")),
 						"PNG"));
+				}
+				ld->hide();
+				delete ld;
+				if (emergency) {
+					mfd_blackout_toggle(300);
+					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+				}
 			}
-			ld->hide();
-			delete ld;
 			mfd_text_set_lookup(test_locale_text);
 			text_lookup_destroy(g_lang_lookup);
 			g_lang_lookup = nullptr;

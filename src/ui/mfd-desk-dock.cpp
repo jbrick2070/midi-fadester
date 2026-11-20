@@ -403,9 +403,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	root->addWidget(title_);
 	/* Panic first: it must be seen however short the dock is */
 	panic_ = new QLabel(this);
+	panic_->setObjectName(QStringLiteral("mfdDeskPanicBar"));
 	panic_->setWordWrap(true);
 	root->addWidget(panic_);
 	blackout_ = new QLabel(this); /* its own line: Panic and Blackout can both be on */
+	blackout_->setObjectName(QStringLiteral("mfdDeskBlackoutBar"));
 	blackout_->setWordWrap(true);
 	root->addWidget(blackout_);
 	on_air_ = new QLabel(this);
@@ -539,6 +541,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	blackout_btn_ = makeButton(mfdText("Desk.Blackout",
 					   "Blackout: Program fades to black; again, back (Session on the desk)"),
 				   70, 24);
+	blackout_btn_->setObjectName(QStringLiteral("mfdDeskBlackoutBtn"));
 	blackout_btn_->setText(mfdText("Desk.RowBlackoutShort", "Blackout"));
 	connect(blackout_btn_, &QPushButton::clicked, this, [this]() {
 		if (eng_) {
@@ -548,6 +551,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	transport->addWidget(stop_all_);
 	transport->addWidget(shift_);
 	transport->addWidget(session_);
+	transport->addSpacing(12); /* Blackout stands apart from Fade, the most used button */
 	transport->addWidget(blackout_btn_);
 
 	/* fader levels (read-only), under their columns */
@@ -594,6 +598,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	root->addLayout(vs_row);
 	auto *vs_buttons = new QHBoxLayout();
 	vs_panic_ = makeButton(mfdText("Desk.VsPanic", "Panic / Restore (Record)"), 70, 24);
+	vs_panic_->setObjectName(QStringLiteral("mfdDeskPanicBtn"));
 	vs_panic_->setText(mfdText("Desk.VsPanicShort", "Panic"));
 	vs_tap_ = makeButton(mfdText("Desk.VsTap", "Tap tempo (Metronome)"), 50, 24);
 	vs_tap_->setText(mfdText("Desk.VsTapShort", "Tap"));
@@ -995,12 +1000,15 @@ void MfdDeskDock::refresh()
 	session_->setVisible(view_.studio_mode);
 	paintButton(session_, view_.take_ready ? 0x22C55EU : 0x475569U, view_.take_ready && !view_.tbar_busy);
 	paintButton(blackout_btn_, view_.blackout ? 0xEF4444U : 0x475569U, view_.finished_loading);
+	/* the button says what a press does now, as Panic turns into Restore */
+	setButtonText(blackout_btn_, view_.blackout ? mfdText("Desk.BlackoutEndShort", "End blackout")
+						    : mfdText("Desk.RowBlackoutShort", "Blackout"));
 	if (view_.blackout) {
-		setLabel(blackout_, mfdText("Desk.BlackoutOn", "BLACKOUT \xE2\x80\x94 Program is black. Press Blackout "
-							       "(or Session on the desk) again to bring it back."));
-		setCss(blackout_,
-		       QStringLiteral("color: #f8fafc; background-color: #111827; border: 1px solid #ef4444; "
-				      "padding: 4px;"));
+		/* as solid as the Panic bar: the audience sees nothing, which is the larger of the two emergencies */
+		setLabel(blackout_, mfdText("Desk.BlackoutOn", "BLACKOUT: the audience sees black. Press End blackout "
+							       "(Session on the APC40)."));
+		setCss(blackout_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; font-weight: bold; "
+						 "padding: 4px;"));
 	} else {
 		setLabel(blackout_, QString());
 		setCss(blackout_, QString());
@@ -1039,9 +1047,10 @@ void MfdDeskDock::refresh()
 					 {QString::fromUtf8(old_vs)}));
 		setCss(panic_, QStringLiteral("color: #0b1120; background-color: #fbbf24; padding: 4px;"));
 	} else if (view_.vs_panic_known && view_.vs_panic) {
-		setLabel(panic_, mfdText("Desk.PanicOn", "PANIC \xE2\x80\x94 Visual Sidechain's effects are held safe. "
-							 "Press Panic again to restore."));
-		setCss(panic_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; padding: 4px;"));
+		setLabel(panic_,
+			 mfdText("Desk.PanicOn", "PANIC: all Visual Sidechain effects are off. Press Restore."));
+		setCss(panic_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; font-weight: bold; "
+					      "padding: 4px;"));
 	} else if (view_.vs_last_failed) {
 		setLabel(panic_, mfdText("Desk.VsNoAnswer",
 					 "Visual Sidechain did not answer (it needs obs-websocket switched on)."));
