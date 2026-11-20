@@ -90,6 +90,10 @@ struct vs_user_uniform_binding {
 struct vs_shader_filter {
 	obs_source_t *context;
 	struct vs_audio_tap tap;
+	/* Graphics thread only. Whether this filter is being drawn (D-05, D-11). */
+	struct vs_render_watch render_watch;
+	bool on_screen;         /* the last tick's answer */
+	bool custom_band_stale; /* the tick skipped the custom band: the first draw reads it */
 
 	/* Requests from other threads to the graphics thread, the only one that compiles or touches the tap */
 	volatile bool reload_requested;      /* Reload & Recompile: the next update compiles */
@@ -1128,10 +1132,21 @@ static void shader_filter_video_tick(void *data, float seconds)
 			obs_data_release(s);
 		}
 	}
+	/* A filter that is not being drawn still analyses its audio (the beat stays locked for the cut to its scene,
+	 * and Track 1 feeds the dock's signals), but it uploads no texture and works out no custom band (D-11), and it
+	 * takes no flash from the shared budget (D-05). */
+	sf->on_screen = vs_render_watch_tick(&sf->render_watch);
+	sf->tap.upload_paused = !sf->on_screen;
 	vs_audio_tap_tick(&sf->tap, sf->context, seconds);
 
-	sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame, VS_SIG_CUSTOM_HZ,
-							 sf->custom_low_hz, sf->custom_high_hz, sf->custom_mode);
+	if (sf->on_screen && sf->p_audio_custom_band) {
+		sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame,
+								 VS_SIG_CUSTOM_HZ, sf->custom_low_hz,
+								 sf->custom_high_hz, sf->custom_mode);
+		sf->custom_band_stale = false;
+	} else {
+		sf->custom_band_stale = true;
+	}
 
 	sf->elapsed_time += seconds;
 	sf->rand_f = next_unit_rand();
@@ -1166,7 +1181,9 @@ static void shader_filter_video_tick(void *data, float seconds)
 										    faders, fadester_loaded)
 						     : (float)VS_FLASH_RATE_DEFAULT_HZ;
 	const bool panic = vs_fader_bridge_is_panic_active();
-	const bool can_admit = (!panic && (!sf->context || obs_source_enabled(sf->context)) && mix > 0.0f);
+	/* Only a filter that is on screen with a compiled shader may take a flash (D-05). */
+	const bool can_admit = (!panic && (!sf->context || obs_source_enabled(sf->context)) && mix > 0.0f &&
+				sf->on_screen && sf->effect != NULL);
 	uint64_t frame_token = obs_get_video_frame_time();
 	if (frame_token == 0 &&
 	    (sf->uses_flash_envelope || sf->uses_kick_safe || sf->uses_snare_safe || sf->uses_flux_safe)) {
@@ -1474,6 +1491,17 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 {
 	(void)effect;
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+
+	/* Being drawn: the next tick counts this filter as on screen. What the off-screen ticks skipped is caught up
+	 * here, so the first frame after a cut draws with this frame's audio. */
+	vs_render_watch_mark_rendered(&sf->render_watch);
+	vs_audio_tap_upload_if_stale(&sf->tap);
+	if (sf->custom_band_stale && sf->p_audio_custom_band) {
+		sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame,
+								 VS_SIG_CUSTOM_HZ, sf->custom_low_hz,
+								 sf->custom_high_hz, sf->custom_mode);
+		sf->custom_band_stale = false;
+	}
 
 	if (vs_fader_bridge_should_shader_passthrough(sf->panic_passthrough, sf->effect != NULL)) {
 		obs_source_skip_video_filter(sf->context);

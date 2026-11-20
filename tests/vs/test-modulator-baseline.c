@@ -224,6 +224,34 @@ static void test_removed_filter_forgets_old_baseline_before_recreation(void)
 	assert(double_near(target.intensity, 0.9, 1e-6));
 }
 
+/* D-07: a renamed target keeps its baselines, so disabling the modulator still puts the real value back. */
+static void test_renamed_target_keeps_its_baseline(void)
+{
+	struct vs_baseline_table table;
+	vs_baseline_init(&table);
+	assert(vs_baseline_record_before_write_float(&table, "Color", "opacity", 0.80, 0.20));
+	assert(vs_baseline_record_before_write_float(&table, "Color", "gamma", 0.10, 0.50));
+	assert(vs_baseline_record_before_write_float(&table, "Blur", "radius", 4.0, 9.0));
+	assert(vs_baseline_rename_filter(&table, "Color", "Colour grade") == 2);
+	assert(vs_baseline_find(&table, "Color", "opacity") == NULL);
+	const struct vs_baseline_entry *e = vs_baseline_find(&table, "Colour grade", "opacity");
+	assert(e && fabs(e->original_float - 0.80) < 1e-12 && fabs(e->last_written_float - 0.20) < 1e-12);
+	assert(vs_baseline_find(&table, "Blur", "radius") != NULL);
+	assert(vs_baseline_rename_filter(&table, "Color", "Other") == 0); /* nothing left under the old name */
+	assert(vs_baseline_rename_filter(&table, "Blur", "Blur") == 0);
+	assert(vs_baseline_rename_filter(&table, NULL, "x") == 0);
+}
+
+/* D-08, D-09: what a modulator does with the record it finds on a target. */
+static void test_target_claims(void)
+{
+	assert(vs_baseline_claim(false, false, false) == VS_CLAIM_FREE);
+	assert(vs_baseline_claim(false, true, true) == VS_CLAIM_FREE);
+	assert(vs_baseline_claim(true, true, true) == VS_CLAIM_MINE);
+	assert(vs_baseline_claim(true, false, true) == VS_CLAIM_TAKEN);   /* a second modulator: refused */
+	assert(vs_baseline_claim(true, false, false) == VS_CLAIM_ORPHAN); /* a copied filter: value put back first */
+}
+
 int main(void)
 {
 	test_baseline_capture_once_during_pulse();
@@ -232,6 +260,8 @@ int main(void)
 	test_manual_edit_during_steady_signal_survives_restore_and_save();
 	test_baseline_crash_recovery_reload();
 	test_removed_filter_forgets_old_baseline_before_recreation();
+	test_renamed_target_keeps_its_baseline();
+	test_target_claims();
 	printf("test-modulator-baseline: all assertions passed\n");
 	return 0;
 }

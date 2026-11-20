@@ -386,6 +386,51 @@ static void test_modulation_flash_guard_caps_luminance_direction_changes(void)
 	assert(!vs_mod_is_luminance_target("visual_sidechain_shader_filter", "tunnel_speed"));
 }
 
+/* D-05: the flash budget is one for all filters. A filter that is not being drawn must not take a flash from it: of
+ * two filters hearing the same kick, the one in the scene on air gets the hit, whichever ticks first. */
+static void test_off_screen_filter_takes_no_flash(void)
+{
+	struct vs_render_watch shown;
+	struct vs_render_watch hidden;
+	vs_render_watch_reset(&shown);
+	vs_render_watch_reset(&hidden);
+	assert(!vs_render_watch_tick(&shown)); /* never drawn yet: not on screen */
+	vs_render_watch_mark_rendered(&shown);
+	assert(vs_render_watch_tick(&shown));
+	assert(vs_render_watch_tick(&shown));  /* one tick without a draw: still within the grace period */
+	assert(vs_render_watch_tick(&shown));  /* two */
+	assert(!vs_render_watch_tick(&shown)); /* three: off screen */
+	vs_render_watch_mark_rendered(&shown);
+	assert(vs_render_watch_tick(&shown));
+
+	struct vs_flash_clock clock;
+	struct vs_flash_limiter lim_hidden, lim_shown;
+	vs_flash_clock_reset(&clock);
+	vs_flash_limiter_reset(&lim_hidden);
+	vs_flash_limiter_reset(&lim_shown);
+	const float dt = 1.0f / 60.0f;
+	int hits_shown = 0;
+	int hits_hidden = 0;
+	for (int frame = 0; frame < 240; frame++) {
+		const uint64_t token = (uint64_t)(frame + 1);
+		const float kick = (frame % 30) == 0 ? 1.0f : 0.0f; /* 120 BPM */
+		vs_render_watch_mark_rendered(&shown);              /* drawn every frame; `hidden` never is */
+		const bool hidden_on = vs_render_watch_tick(&hidden);
+		const bool shown_on = vs_render_watch_tick(&shown);
+		/* the hidden filter ticks first, as the one created first does */
+		(void)vs_flash_clock_step(&clock, &lim_hidden, token,
+					  hidden_on ? vs_flash_trigger_over(kick, 0.3f) : 0.0f, 3.0f, dt);
+		(void)vs_flash_clock_step(&clock, &lim_shown, token,
+					  shown_on ? vs_flash_trigger_over(kick, 0.3f) : 0.0f, 3.0f, dt);
+		if (lim_hidden.has_admitted && lim_hidden.since_admit_sec == 0.0) /* admitted on this step */
+			hits_hidden++;
+		if (lim_shown.has_admitted && lim_shown.since_admit_sec == 0.0)
+			hits_shown++;
+	}
+	assert(hits_hidden == 0);
+	assert(hits_shown >= 6); /* 8 kicks in 4 s, at most 3 flashes a second */
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -398,6 +443,7 @@ int main(void)
 	test_duplicate_target_has_one_owner();
 	test_extreme_and_invalid_numeric_bounds();
 	test_modulation_flash_guard_caps_luminance_direction_changes();
+	test_off_screen_filter_takes_no_flash();
 	printf("test-modulation: all assertions passed\n");
 	return 0;
 }

@@ -41,6 +41,24 @@ struct vs_flash_clock {
 	bool has_admitted;
 };
 
+/*
+ * Whether a filter is being drawn. libobs ticks every source on every frame, shown or not, but renders only what is
+ * on a screen; a filter that did not render in the last two ticks is off screen. Such a filter takes no flash from the
+ * shared budget (D-05: a Strobe in a scene that is not shown would use up the hits the one on air needs) and uploads
+ * nothing to the GPU (D-11). The render callback marks, the video tick asks; both run on the graphics thread.
+ */
+#define VS_RENDER_WATCH_GRACE_TICKS 2U
+struct vs_render_watch {
+	bool rendered_since_tick;
+	uint8_t ticks_since_render;
+	bool ever_rendered;
+};
+
+void vs_render_watch_reset(struct vs_render_watch *w);
+void vs_render_watch_mark_rendered(struct vs_render_watch *w);
+/* Call once per video tick. Returns whether the filter rendered within the grace period. */
+bool vs_render_watch_tick(struct vs_render_watch *w);
+
 void vs_flash_clock_reset(struct vs_flash_clock *clock);
 void vs_flash_limiter_reset(struct vs_flash_limiter *lim);
 

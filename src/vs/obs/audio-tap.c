@@ -282,6 +282,11 @@ static void upload_tap_textures(struct vs_audio_tap *tap)
 {
 	if (!tap || !tap->upload_gpu_textures)
 		return;
+	if (tap->upload_paused) {
+		tap->textures_stale = true;
+		return;
+	}
+	tap->textures_stale = false;
 
 	obs_enter_graphics();
 	if (!tap->tex_spectrum) {
@@ -382,6 +387,16 @@ static void tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, floa
 void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds)
 {
 	tap_tick(tap, filter_source, seconds, NULL);
+}
+
+void vs_audio_tap_upload_if_stale(struct vs_audio_tap *tap)
+{
+	if (!tap || !tap->textures_stale)
+		return;
+	const bool paused = tap->upload_paused;
+	tap->upload_paused = false;
+	upload_tap_textures(tap);
+	tap->upload_paused = paused;
 }
 
 void vs_audio_tap_tick_with_lookup(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds,

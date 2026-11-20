@@ -36,6 +36,11 @@ struct vs_audio_tap {
 	char source_name[256];
 	volatile bool react_when_muted; /* Audio callback reads via os_atomic_load_bool(). */
 	bool upload_gpu_textures;
+	/* The owner is not being drawn: the tick analyses as always (the beat must stay locked for the moment the
+	 * scene is cut to) but uploads no texture (D-11). textures_stale then says the GPU copies are behind;
+	 * vs_audio_tap_upload_if_stale brings them up to date before the first draw. */
+	bool upload_paused;
+	bool textures_stale;
 
 	bool raw_cb_active;
 	size_t active_mix_idx;
@@ -76,6 +81,8 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 void vs_audio_tap_detach_parent(struct vs_audio_tap *tap);
 
 void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds);
+/* Graphics thread. Uploads the spectrum and FFT textures if a paused tick left them behind. */
+void vs_audio_tap_upload_if_stale(struct vs_audio_tap *tap);
 
 /* The Named Source that this tick's once-a-second retry will look up, found by the caller outside a lock that the
  * frontend's save takes after the sources lock (the Audio Modulator's mutex): obs_get_source_by_name takes the sources
