@@ -85,9 +85,9 @@ On Windows you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 ## The first five minutes
 
 1. **Plug in the controller**, ideally before you start OBS. If you plug it in later, the plugin picks it up when Windows reports it; if it does not, the controller bar shows a **Reconnect** button.
-2. **Open Tools → Midi Fadester.** With an APC40 mkII connected for the first time, a blue bar at the top offers the usual layout: *Crossfader switches scenes, Master is Desktop Audio volume.* Click **Yes**. Master takes the volume job only if your OBS has a source called Desktop Audio. The eight channel faders stay free for you to assign.
+2. **With an APC40 mkII, the plugin sets itself up.** The first time it sees the APC40 it uses the usual layout without asking: the crossfader switches scenes, faders 1 to 8 fill themselves from the scene on air and follow it, and Master becomes the volume of Desktop Audio (only if your OBS has that source). The **Fadester Desk** dock, the screen for the show, opens by itself that one time. **Tools → Midi Fadester** then shows a blue bar that says what was set up. Click **OK**. The small **Start empty** clears all 18 strips instead, after asking, and the faders then no longer fill themselves.
 
-   ![First run: the usual layout offer](docs/screenshots/01-first-run-offer.png)
+   ![First run: what was set up](docs/screenshots/01-first-run-offer.png)
 
 3. **Turn on Studio Mode.** If it is off, the crossfader strip says *Studio Mode is off.* and offers a **Turn on Studio Mode** button. Click it.
 4. **Throw the crossfader** all the way to the other end. Program fades to what was in Preview. When the throw finishes, OBS moves the old Program scene into Preview (its default *Swap Preview/Program Scenes After Transitioning* setting), ready for the next throw, and the strip reads *At end.* Pick another scene in Preview and throw the crossfader back the other way.
@@ -344,15 +344,24 @@ because fading a Darken layer down turns its rectangle black. A strip learned on
 the desk's MIDI Out; the pads work without them. The Advanced tab turns the pads off and sets the fade time; the
 obs-websocket `get_state` reply lists them under `vj_pads`, with the five scenes and which strips follow the scene.
 
-**Fadester Desk dock.** Turn it on in OBS under **Docks → Fadester Desk** (it starts hidden; OBS remembers where you put it). It shows what the desk shows: the five scene buttons (Program red, Preview pulsing green), the 8 × 5 pad grid in the desk's own colours with each column's source name above it, Clip Stop, Stop All, **Fade** (Preview to Program with your transition) and **Blackout** (it works with or without the desk, so a blackout can always be ended; a banner says when Program is black), the eight faders and the crossfader, and Visual Sidechain's BPM, tempo lock, beat (four dots for the bar) and a red banner while it is panicked. Click a button and it does what the desk button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Shift** on the dock is for the next pad only; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air. A greyed button says why in its tooltip (no source on the column, a fader learned that button, a crossfader throw under way). Without the desk the dock still shows the scenes, faders and Visual Sidechain, and its Panic, Tap, Lock and Downbeat buttons still work (they need obs-websocket, like the desk's). A dock press never cancels a pad or Shift you are holding on the desk, and a Shift held on the desk shifts a dock click too (the row names show it).
+**Fadester Desk dock.** On a new installation it opens by itself the first time an APC40 mkII is seen; after that it is under **Docks → Fadester Desk**, and **Show Fadester Desk** on the settings dialog's **Strips** tab opens it too (OBS remembers where you put it). An installation that already had settings is left as it is. From top to bottom it shows:
 
-Also on the dock: a red Panic banner at the very top while Visual Sidechain is panicked; **On air** and **Preview** scene
-names; the transition length and pad fade time (what the Cue Level knob just changed); a **Reconnect** button when the
-APC40 drops; row names that switch to Wake, Snap, Blackout and Punch mode while Shift is armed; beat 1 in amber;
-**Escape** lets go of anything held from the dock. The **VJster video** row drives the video speed through
+- the connection and the version, with **?** (what the pads do) and a gear (the settings dialog);
+- a red bar while Visual Sidechain is panicked (*Press Restore*) and a red bar while Program is black (*Press End blackout*), always at the top;
+- the reason something waits, with its button: **Reconnect** when the APC40 is gone, **Turn on** when the pads are switched off, **Turn on Studio Mode** when Studio Mode is off;
+- **ON AIR** and **PREVIEW** with the scene names, the largest text on the dock;
+- the five scene buttons (a filled dot marks the scene on air, a ring the one in Preview);
+- the pad grid in the APC40's own colours with each column's source name above it: the framed row **Fade, beats** (✂ 32 16 8 4 2 1 ½), then Show / hide, Fade out, Flash, Blend and Reset, and the eight fader levels. A fader that waits to pick up shows an amber bar with a marker where it starts to act;
+- **Reset all** and **Shift** (for the next pad only; the row names then read Show at 100 %, Cut out, Dark (hold) and Next blend);
+- **Fade** (Preview on air with your transition; it stays in place, greyed, when Studio Mode is off or Preview and Program are the same scene) and **Blackout** (it works with or without the APC40, so a blackout can always be ended; it reads **End blackout** while Program is black);
+- the crossfader, the transition length and source fade time, and Visual Sidechain's BPM, **Panic**, **Tap**, **Hold BPM** and **Beat 1**.
+
+Click a button and it does what the APC40's button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air; **Escape** lets go of anything held from the dock. Without an APC40, with the pads switched off or on another controller's layout, the pad grid is hidden and Fade, Blackout and the tempo buttons stay. The dock's text follows OBS's font size.
+
+The **Video speed** rows are hidden until you tick **Show video speed controls on the dock** on the **Advanced** tab (an installation that already had settings keeps them). They drive the video speed through
 [Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester): an endless speed dial (0.05x per notch, like the
 Tempo knob; click it first to use the scroll wheel or arrow keys), preset speeds 0.5x, 0.75x, **1x**, 1.25x, 1.5x and 2x
-(the presets other than 1x need Companion 0.1.17 or later), and Play / Pause. It works without the APC40. Midi Fadester
+(the presets other than 1x need Companion 0.1.17 or later), and Play / Pause. They work without the APC40. Midi Fadester
 does not hear back from the video, so the dock shows only the last speed it asked for, marked unconfirmed.
 
 ![The Fadester Desk dock](docs/screenshots/13-desk-dock.png)
@@ -364,7 +373,7 @@ does not hear back from the video, so the dock shows only the last speed it aske
 - OBS 33.0.0 or newer only.
 - Lights: the APC40 mkII's clip pads, Scene Launch, Clip Stop, Session and Record are lit; the knob rings are not driven yet.
 - Buttons that latch inside the desk (Solo, Activator, Record Arm, Crossfade A|B) and Track Select need the desk switched to another mode first, so they are not mapped yet.
-- The Fadester Desk dock works the pads only while the APC40 mkII is connected; its faders are read-only.
+- The Fadester Desk dock works the pads only while the APC40 mkII is connected (without it the pad grid is hidden); its faders are read-only.
 - No luma key or wipe faders, and no A/B bus matrix across eight strips.
 
 These are planned phases 2 to 5 in [PLAN.md](PLAN.md).

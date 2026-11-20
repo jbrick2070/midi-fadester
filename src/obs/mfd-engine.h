@@ -484,6 +484,9 @@ struct mfd_engine {
 	bool tbar_bidirectional_flip;
 
 	bool first_run_offer_dismissed;
+	/* The usual layout's one change beyond the defaults (Master = Desktop Audio volume) was made, once, the first
+	 * time an APC40 mkII was seen (mfd_engine_apply_first_run_layout). */
+	bool first_run_layout_applied;
 	bool stream_deck_companion_dismissed;
 	bool frontend_finished_loading;
 	bool apc40_controller_detected;
@@ -826,6 +829,13 @@ bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_se
 bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					 struct mfd_msg *out_msg);
 
+/* UI thread. The usual layout without a question (U1-02): the first time an APC40 mkII is seen on its own layout after
+ * OBS has finished loading, Master becomes the volume of OBS's Desktop Audio when OBS has that source and Master has no
+ * job yet. Nothing else changes: the crossfader and the eight faders are already set (the defaults and the fill from
+ * the scene on air). Once per installation; the settings dialog then shows a notice of what was set up. */
+void mfd_engine_apply_first_run_layout(struct mfd_engine *eng);
+/* The notice's OK: it is not shown again. No strip changes. */
+void mfd_engine_acknowledge_first_run(struct mfd_engine *eng);
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_set_stream_deck_companion_dismissed(struct mfd_engine *eng, bool dismissed);

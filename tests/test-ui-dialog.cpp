@@ -61,6 +61,8 @@ static const char *lang_locale_text(const char *key)
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QMetaObject>
 #include <QRegularExpression>
 #include <QWidget>
 
@@ -158,6 +160,36 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 	const uint32_t raw_msg = static_cast<uint32_t>(0xB0U | (ch & 0x0FU)) |
 				 (static_cast<uint32_t>(cc & 0x7FU) << 8) | (static_cast<uint32_t>(val & 0x7FU) << 16);
 	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
+}
+
+/* Answers the next confirmation box (the settings dialog's and the Set up sheet's "mfdConfirmBox"): its named button, or
+ * Cancel. Queued, so it runs inside the box's own event loop; what the box said is handed back for the test to read. */
+static QString g_confirm_text;
+static QString g_confirm_title;
+static int g_confirm_seen = 0;
+static void answer_next_confirm(bool yes)
+{
+	QMetaObject::invokeMethod(
+		qApp,
+		[yes]() {
+			QMessageBox *box = nullptr;
+			for (QWidget *w : QApplication::topLevelWidgets()) {
+				if (w->objectName() == QStringLiteral("mfdConfirmBox") && !w->isHidden()) {
+					box = qobject_cast<QMessageBox *>(w);
+				}
+			}
+			REQUIRE(box != nullptr);
+			++g_confirm_seen;
+			g_confirm_text = box->text();
+			g_confirm_title = box->windowTitle();
+			auto *btn = box->findChild<QPushButton *>(yes ? QStringLiteral("mfdConfirmYes")
+								      : QStringLiteral("mfdConfirmCancel"));
+			REQUIRE(btn != nullptr);
+			REQUIRE(box->defaultButton() == box->findChild<QPushButton *>(QStringLiteral(
+								"mfdConfirmCancel"))); /* Enter keeps the work */
+			btn->click();
+		},
+		Qt::QueuedConnection);
 }
 
 static void pump_ui()
@@ -1003,26 +1035,50 @@ int main(int argc, char **argv)
 	dlg->show();
 	pump_ui();
 
-	/* --- 1. First-Run Offer: screenshot, [I'll set it up], and [Yes] --- */
+	/* --- 1. First run (U1-02, U1-10): the layout is applied without a question; a notice says what was set up, with OK
+	 * and a small Start empty that asks before it clears all 18 strips; one coloured bar at a time --- */
 	auto *fr_banner = must_find<QWidget>(dlg.get(), QStringLiteral("mfdFirstRunBanner"));
 	auto *fr_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdFirstRunText"));
 	auto *fr_yes = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdFirstRunYesBtn"));
 	auto *fr_custom = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdFirstRunCustomBtn"));
-	REQUIRE(!fr_banner->isHidden());
-	REQUIRE(fr_text->text().contains(QStringLiteral("Start with the usual layout?")));
-
-	/* Optional companion discovery stays separate from MIDI controller selection. */
 	auto *sd_card = must_find<QWidget>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionCard"));
-	auto *sd_title = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionTitle"));
-	auto *sd_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionText"));
-	auto *sd_learn = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckLearn"));
-	auto *sd_dismiss = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckDismiss"));
-	REQUIRE(!sd_card->isHidden());
-	REQUIRE(sd_title->text() == QStringLiteral("Use a Stream Deck?"));
-	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester slots")));
-	REQUIRE(sd_dismiss->text() == QStringLiteral("Hide"));
-	REQUIRE(sd_learn->property("destinationUrl").toString() ==
-		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
+	auto *studio_bar = must_find<QWidget>(dlg.get(), QStringLiteral("mfdStudioNote"));
+	REQUIRE(!fr_banner->isHidden());
+	/* before the engine has applied the layout, Master has no job and the notice does not claim one */
+	REQUIRE(fr_text->text() ==
+		QStringLiteral("Set up for you: the crossfader switches scenes, and faders 1 to 8 follow "
+			       "the scene on air. Click a strip to change it."));
+	REQUIRE(!eng.first_run_layout_applied);
+	mfd_engine_apply_first_run_layout(&eng); /* what the UI thread does once OBS has finished loading */
+	pump_ui();
+	REQUIRE(eng.first_run_layout_applied && !eng.first_run_offer_dismissed);
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	REQUIRE(eng.fader_slots[0].target_type == MFD_TARGET_TBAR);
+	REQUIRE(fr_text->text() ==
+		QStringLiteral(
+			"Set up for you: the crossfader switches scenes, faders 1 to 8 follow the scene on air, and "
+			"Master is the volume of Desktop Audio. Click a strip to change it."));
+	REQUIRE(!fr_text->text().contains(QLatin1Char('?'))); /* a notice, not a question */
+	REQUIRE(fr_yes->text() == QStringLiteral("OK"));
+	REQUIRE(fr_custom->text() == QStringLiteral("Start empty"));
+	REQUIRE(fr_custom->height() < fr_yes->height() || fr_custom->font().pixelSize() < fr_yes->font().pixelSize() ||
+		fr_custom->fontInfo().pixelSize() < fr_yes->fontInfo().pixelSize()); /* the quiet one of the two */
+	/* one bar at a time: the Stream Deck line and the Studio Mode bar wait for the notice to go */
+	REQUIRE(sd_card->isHidden());
+	REQUIRE(studio_bar->isHidden());
+	mfd_engine_set_test_frontend_state(&eng, true, false, "", "Red", true);
+	pump_ui();
+	REQUIRE(!fr_banner->isHidden() && studio_bar->isHidden() && sd_card->isHidden());
+	mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+	pump_ui();
+	/* applying it a second time changes nothing (once per installation) */
+	eng.fader_slots[9].target_type = MFD_TARGET_UNASSIGNED;
+	mfd_engine_apply_first_run_layout(&eng);
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+	eng.first_run_layout_applied = false;
+	mfd_engine_apply_first_run_layout(&eng);
+	pump_ui();
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
 
 	auto *z1_name = must_find<QLabel>(dlg.get(), QStringLiteral("mfdControllerNameLabel"));
 	auto *z1_status = must_find<QLabel>(dlg.get(), QStringLiteral("mfdControllerStatusLabel"));
@@ -1033,14 +1089,23 @@ int main(int argc, char **argv)
 
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("01-first-run-offer.png"));
 
-	sd_dismiss->click();
-	pump_ui();
-	REQUIRE(sd_card->isHidden());
-	REQUIRE(eng.stream_deck_companion_dismissed);
-
-	/* Click [I'll set it up] -> all 10 strips become Not used, APC40 CCs remain bound and live */
+	/* [Start empty] asks first, names 18 strips, and Cancel keeps everything */
+	g_confirm_seen = 0;
+	answer_next_confirm(false);
 	fr_custom->click();
 	pump_ui();
+	REQUIRE(g_confirm_seen == 1);
+	REQUIRE(g_confirm_text.startsWith(QStringLiteral("Clear all 18 strips?")));
+	REQUIRE(g_confirm_title == QStringLiteral("Midi Fadester ") + QString::fromUtf8(PLUGIN_VERSION) +
+					   QString::fromUtf8(" \xE2\x80\x94 Start empty"));
+	REQUIRE(!fr_banner->isHidden());
+	REQUIRE(eng.fader_slots[0].target_type == MFD_TARGET_TBAR);
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	/* ... and confirmed: all 18 strips become Not used, the APC40 CCs remain bound and live */
+	answer_next_confirm(true);
+	fr_custom->click();
+	pump_ui();
+	REQUIRE(g_confirm_seen == 2);
 	REQUIRE(fr_banner->isHidden());
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		auto *assign_lbl = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_%1").arg(i));
@@ -1056,17 +1121,44 @@ int main(int argc, char **argv)
 	REQUIRE((g_mock_tbar_set_writes + sg.total_opacity_writes + sg.total_volume_writes) ==
 		writes_before_unassigned);
 
-	/* Re-arm First-Run Offer and click [Yes] -> Crossfader = T-bar, Master = Desktop Audio volume */
+	/* With the notice gone, the Stream Deck line shows: one quiet line with a link and a cross. It stays separate from
+	 * MIDI controller selection. */
+	auto *sd_title = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionTitle"));
+	auto *sd_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionText"));
+	auto *sd_learn = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckLearn"));
+	auto *sd_dismiss = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckDismiss"));
+	REQUIRE(!sd_card->isHidden());
+	REQUIRE(sd_title->text() == QStringLiteral("Use a Stream Deck?"));
+	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester slots")));
+	REQUIRE(sd_dismiss->text() == QString(QChar(0x00D7)));
+	REQUIRE(sd_dismiss->accessibleName() == QStringLiteral("Hide"));
+	REQUIRE(!sd_card->styleSheet().contains(QStringLiteral("#172554"))); /* no filled card */
+	REQUIRE(sd_card->height() < fr_yes->sizeHint().height() + 24);
+	REQUIRE(sd_learn->property("destinationUrl").toString() ==
+		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
+	sd_dismiss->click();
+	pump_ui();
+	REQUIRE(sd_card->isHidden());
+	REQUIRE(eng.stream_deck_companion_dismissed);
+
+	/* A new first run: the defaults, the layout applied, and [OK] only takes the notice away: no strip changes */
 	mfd_engine_lock(&eng);
+	mfd_engine_load_apc40_defaults(&eng);
 	eng.first_run_offer_dismissed = false;
+	eng.first_run_layout_applied = false;
 	mfd_engine_mark_ui_dirty(&eng, true);
 	mfd_engine_unlock(&eng);
+	mfd_engine_apply_first_run_layout(&eng);
 	pump_ui();
 	REQUIRE(!fr_banner->isHidden());
+	REQUIRE(fr_text->text().contains(QStringLiteral("Master is the volume of Desktop Audio")));
+	const uint64_t rev9_before_ok = eng.slot_config_rev[9];
 
 	fr_yes->click();
 	pump_ui();
 	REQUIRE(fr_banner->isHidden());
+	REQUIRE(eng.first_run_offer_dismissed);
+	REQUIRE(eng.slot_config_rev[9] == rev9_before_ok);
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_0"))->text() ==
 		QStringLiteral("Switches scenes (T-bar)"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_0"))->text() == QStringLiteral("Ready"));

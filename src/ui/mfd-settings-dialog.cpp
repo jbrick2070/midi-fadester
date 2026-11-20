@@ -433,26 +433,27 @@ public:
 		auto *fr_lay = new QHBoxLayout(first_run_banner_);
 		fr_lay->setContentsMargins(12, 8, 12, 8);
 		fr_lay->setSpacing(10);
-		auto *fr_lbl = new QLabel(
-			mfdText("Dialog.FirstRun.Text",
-				"Start with the usual layout? Crossfader switches scenes, Master is Desktop Audio volume. "
-				"Change anything by clicking a strip."),
-			first_run_banner_);
+		/* a notice, not a question: the layout is already applied (mfd_engine_apply_first_run_layout); the text is
+		 * set in refresh_from_engine, from what Master really got */
+		auto *fr_lbl = new QLabel(first_run_banner_);
+		first_run_text_ = fr_lbl;
 		fr_lbl->setObjectName(QStringLiteral("mfdFirstRunText"));
 		fr_lbl->setWordWrap(true);
 		fr_lbl->setStyleSheet(
 			QStringLiteral("color: #e0f2fe; font-weight: bold; background: transparent; border: none;"));
-		auto *btn_fr_yes = new QPushButton(mfdText("Dialog.FirstRun.Yes", "Yes"), first_run_banner_);
+		auto *btn_fr_yes = new QPushButton(mfdText("Dialog.FirstRun.Yes", "OK"), first_run_banner_);
 		btn_fr_yes->setObjectName(QStringLiteral("mfdFirstRunYesBtn"));
 		btn_fr_yes->setCursor(Qt::PointingHandCursor);
 		btn_fr_yes->setStyleSheet(QStringLiteral(
 			"QPushButton { background-color: #0284c7; color: #ffffff; font-weight: bold; padding: 6px 18px; border-radius: 5px; border: 1px solid #38bdf8; }"));
 		auto *btn_fr_custom =
-			new QPushButton(mfdText("Dialog.FirstRun.Custom", "I'll set it up"), first_run_banner_);
+			new QPushButton(mfdText("Dialog.FirstRun.Custom", "Start empty"), first_run_banner_);
 		btn_fr_custom->setObjectName(QStringLiteral("mfdFirstRunCustomBtn"));
 		btn_fr_custom->setCursor(Qt::PointingHandCursor);
+		/* small and quiet: it clears every strip, and asks first */
 		btn_fr_custom->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: #1e293b; color: #e2e8f0; font-weight: bold; padding: 6px 14px; border-radius: 5px; border: 1px solid #475569; }"));
+			"QPushButton { background-color: transparent; color: #93c5fd; font-size: 11px; padding: 4px 8px; border-radius: 5px; border: 1px solid #1e3a5f; } "
+			"QPushButton:hover { color: #e0f2fe; border-color: #38bdf8; }"));
 		fr_lay->addWidget(fr_lbl, 1);
 		fr_lay->addWidget(btn_fr_yes);
 		fr_lay->addWidget(btn_fr_custom);
@@ -460,10 +461,18 @@ public:
 		root->addWidget(first_run_banner_);
 
 		connect(btn_fr_yes, &QPushButton::clicked, this, [this]() {
-			mfd_engine_accept_first_run_usual_layout(eng_);
+			mfd_engine_acknowledge_first_run(eng_); /* no strip changes: only the notice goes */
 			refresh_from_engine();
 		});
 		connect(btn_fr_custom, &QPushButton::clicked, this, [this]() {
+			if (!confirm(mfdText("Dialog.FirstRun.Custom", "Start empty"),
+				     mfdText("Dialog.FirstRun.ConfirmText",
+					     "Clear all 18 strips? The crossfader, the faders, Master and the FX knobs "
+					     "lose their jobs, and the faders no longer fill themselves from the scene on "
+					     "air."),
+				     mfdText("Dialog.FirstRun.Custom", "Start empty"))) {
+				return;
+			}
 			mfd_engine_decline_first_run_usual_layout(eng_);
 			refresh_from_engine();
 		});
@@ -534,19 +543,20 @@ public:
 		stream_deck_companion_card_ = new QFrame(this);
 		stream_deck_companion_card_->setObjectName(QStringLiteral("mfdStreamDeckCompanionCard"));
 		stream_deck_companion_card_->setStyleSheet(QStringLiteral(
-			"QFrame#mfdStreamDeckCompanionCard { background-color: #172554; border: 1px solid #6366f1; "
-			"border-radius: 6px; }"));
+			"QFrame#mfdStreamDeckCompanionCard { background-color: transparent; border: none; }"));
+		/* one quiet line with a link and a cross: another product's notice must not be as loud as this one's own
+		 * (U1-10) */
 		auto *sd_lay = new QHBoxLayout(stream_deck_companion_card_);
-		sd_lay->setContentsMargins(12, 8, 12, 8);
-		sd_lay->setSpacing(10);
+		sd_lay->setContentsMargins(4, 0, 4, 0);
+		sd_lay->setSpacing(8);
 		auto *sd_copy = new QWidget(stream_deck_companion_card_);
-		auto *sd_copy_lay = new QVBoxLayout(sd_copy);
+		auto *sd_copy_lay = new QHBoxLayout(sd_copy);
 		sd_copy_lay->setContentsMargins(0, 0, 0, 0);
-		sd_copy_lay->setSpacing(2);
+		sd_copy_lay->setSpacing(8);
 		auto *sd_title = new QLabel(mfdText("Dialog.StreamDeck.Title", "Use a Stream Deck?"), sd_copy);
 		sd_title->setObjectName(QStringLiteral("mfdStreamDeckCompanionTitle"));
-		sd_title->setStyleSheet(
-			QStringLiteral("color: #eef2ff; font-weight: bold; background: transparent; border: none;"));
+		sd_title->setStyleSheet(QStringLiteral(
+			"color: #cbd5e1; font-weight: bold; background: transparent; border: none; font-size: 12px;"));
 		auto *sd_text =
 			new QLabel(mfdText("Dialog.StreamDeck.Text",
 					   "Fadester for OBS adds touch controls, live meters, crossfader control, and "
@@ -555,9 +565,9 @@ public:
 		sd_text->setObjectName(QStringLiteral("mfdStreamDeckCompanionText"));
 		sd_text->setWordWrap(true);
 		sd_text->setStyleSheet(
-			QStringLiteral("color: #c7d2fe; background: transparent; border: none; font-size: 12px;"));
+			QStringLiteral("color: #94a3b8; background: transparent; border: none; font-size: 12px;"));
 		sd_copy_lay->addWidget(sd_title);
-		sd_copy_lay->addWidget(sd_text);
+		sd_copy_lay->addWidget(sd_text, 1);
 		sd_lay->addWidget(sd_copy, 1);
 
 		auto *btn_sd_learn = new QPushButton(mfdText("Dialog.StreamDeck.Learn", "Learn about Fadester for OBS"),
@@ -566,19 +576,20 @@ public:
 		btn_sd_learn->setProperty("destinationUrl", stream_deck_companion_url());
 		btn_sd_learn->setCursor(Qt::PointingHandCursor);
 		btn_sd_learn->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: #4f46e5; color: #ffffff; font-weight: bold; border: 1px solid #818cf8; "
-			"border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background-color: #6366f1; }"));
+			"QPushButton { background-color: transparent; color: #93c5fd; border: none; text-decoration: underline; "
+			"font-size: 12px; padding: 2px 4px; } QPushButton:hover { color: #e0f2fe; }"));
 		sd_lay->addWidget(btn_sd_learn);
 
 		auto *btn_sd_dismiss =
-			new QPushButton(mfdText("Dialog.StreamDeck.Hide", "Hide"), stream_deck_companion_card_);
+			new QPushButton(QStringLiteral("\xC3\x97"), stream_deck_companion_card_); /* a cross */
 		btn_sd_dismiss->setObjectName(QStringLiteral("mfdBtnStreamDeckDismiss"));
+		btn_sd_dismiss->setAccessibleName(mfdText("Dialog.StreamDeck.Hide", "Hide"));
 		btn_sd_dismiss->setToolTip(mfdText("Dialog.StreamDeck.HideTip",
 						   "Hide this card. The Fadester for OBS link stays available below."));
 		btn_sd_dismiss->setCursor(Qt::PointingHandCursor);
 		btn_sd_dismiss->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: transparent; color: #c7d2fe; border: 1px solid #6366f1; "
-			"border-radius: 5px; padding: 5px 10px; } QPushButton:hover { color: #ffffff; border-color: #a5b4fc; }"));
+			"QPushButton { background-color: transparent; color: #94a3b8; border: none; font-size: 14px; "
+			"padding: 0px 6px; } QPushButton:hover { color: #ffffff; }"));
 		sd_lay->addWidget(btn_sd_dismiss);
 		stream_deck_companion_card_->hide();
 		root->addWidget(stream_deck_companion_card_);
@@ -663,9 +674,28 @@ public:
 		}
 
 		/* Top banners */
+		/* One bar at a time (U1-10): the first-run notice, else the no-layout notice, else Studio Mode, else the
+		 * Stream Deck line. Three at once were a question, a warning and an advert before any content. */
 		first_run_banner_->setVisible(snap_.first_run_offer_pending);
+		if (snap_.first_run_offer_pending) {
+			const struct mfd_fader_slot &master = snap_.slots[9];
+			const bool has_master = master.enabled && master.target_type == MFD_TARGET_AUDIO_VOLUME &&
+						master.source_a_name[0] != '\0';
+			const QString text =
+				has_master
+					? mfdFill(mfdText("Dialog.FirstRun.Text",
+							  "Set up for you: the crossfader switches scenes, faders 1 to "
+							  "8 follow the scene on air, and Master is the volume of %1. "
+							  "Click a strip to change it."),
+						  {QString::fromUtf8(master.source_a_name)})
+					: mfdText("Dialog.FirstRun.TextNoMaster",
+						  "Set up for you: the crossfader switches scenes, and faders 1 to 8 "
+						  "follow the scene on air. Click a strip to change it.");
+			if (first_run_text_->text() != text) {
+				first_run_text_->setText(text);
+			}
+		}
 		refresh_no_layout_banner();
-		stream_deck_companion_card_->setVisible(!snap_.stream_deck_companion_dismissed);
 
 		size_t active_tbar_slots = 0U;
 		bool can_finish_any_tbar = false;
@@ -678,8 +708,12 @@ public:
 				}
 			}
 		}
-		studio_note_widget_->setVisible(
-			mfd_should_show_studio_mode_note(snap_.studio_mode_active, active_tbar_slots));
+		const bool notice_showing = snap_.first_run_offer_pending || !no_layout_banner_->isHidden();
+		const bool studio_note = !notice_showing &&
+					 mfd_should_show_studio_mode_note(snap_.studio_mode_active, active_tbar_slots);
+		studio_note_widget_->setVisible(studio_note);
+		stream_deck_companion_card_->setVisible(!snap_.stream_deck_companion_dismissed && !notice_showing &&
+							!studio_note);
 
 		refresh_strips_tab();
 		refresh_advanced_tab(can_finish_any_tbar);
@@ -1540,6 +1574,26 @@ private:
 		controller_view_dlg_->refresh_from_snapshot(snap_);
 		controller_view_dlg_->show();
 		controller_view_dlg_->raise();
+	}
+
+	/* Asks before work is cleared: a question, the button that does it (named for what it does) and Cancel, which is
+	 * the default. The title shows the version, like every Midi Fadester window. */
+	bool confirm(const QString &window, const QString &question, const QString &do_it)
+	{
+		QMessageBox box(this);
+		box.setObjectName(QStringLiteral("mfdConfirmBox"));
+		box.setAttribute(Qt::WA_DontShowOnScreen, testAttribute(Qt::WA_DontShowOnScreen)); /* the UI test */
+		box.setIcon(QMessageBox::Warning);
+		box.setWindowTitle(mfdWindowTitle(window));
+		box.setText(question);
+		QPushButton *yes = box.addButton(do_it, QMessageBox::AcceptRole);
+		yes->setObjectName(QStringLiteral("mfdConfirmYes"));
+		QPushButton *no = box.addButton(mfdText("Setup.Cancel", "Cancel"), QMessageBox::RejectRole);
+		no->setObjectName(QStringLiteral("mfdConfirmCancel"));
+		box.setDefaultButton(no);
+		box.setEscapeButton(no);
+		box.exec();
+		return box.clickedButton() == yes;
 	}
 
 	/* Shown while the open desk's name matches no ready layout and a layout for another desk is in use (the
@@ -2595,6 +2649,7 @@ private:
 	QString adv_edit_error_;
 
 	QWidget *first_run_banner_ = nullptr;
+	QLabel *first_run_text_ = nullptr;
 	QWidget *no_layout_banner_ = nullptr;
 	QLabel *no_layout_text_ = nullptr;
 	QString no_layout_dismissed_for_;
@@ -2714,6 +2769,8 @@ static QPointer<MfdSettingsDialog> g_dialog;
  * dock layout is restored by then), on the UI thread. An installation that already has settings never gets it. */
 static void show_desk_the_first_time()
 {
+	/* the usual layout too, without a question (U1-02): the settings dialog then says what was set up */
+	mfd_engine_apply_first_run_layout(mfd_engine_get());
 	if (mfd_engine_take_desk_first_show(mfd_engine_get())) {
 		mfd_desk_dock_show();
 	}

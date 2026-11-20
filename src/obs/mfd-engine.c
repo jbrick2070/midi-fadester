@@ -4148,6 +4148,80 @@ static bool sg_get_source_volume(const struct mfd_engine *eng, const char *sourc
 	return true;
 }
 
+/* Master (slot 9) becomes the volume of OBS's Desktop Audio, when OBS has that source. Caller holds the engine lock.
+ * Returns true when Master was assigned. */
+static bool first_run_assign_master_locked(struct mfd_engine *eng)
+{
+	bool assigned = false;
+	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
+	if (!cat) {
+		return false;
+	}
+	mfd_engine_get_ui_catalog(eng, cat);
+	/* Output channels 1 and 2 are OBS's Desktop Audio and Desktop Audio 2. Injected scene-graph ops without
+	 * get_output_source_name (headless tests) find none, and Master stays unassigned. */
+	for (uint32_t channel = 1U; channel <= 2U && !assigned; ++channel) {
+		char desktop_name[MFD_SOURCE_NAME_MAX];
+		if (!sg_output_source_name(eng, channel, desktop_name, sizeof(desktop_name))) {
+			continue;
+		}
+		for (size_t i = 0U; i < cat->audio_count; ++i) {
+			if (strcmp(cat->audio_sources[i].name, desktop_name) == 0) {
+				struct mfd_fader_slot *master = &eng->fader_slots[9];
+				master->enabled = true;
+				snprintf(master->source_a_name, sizeof(master->source_a_name), "%s",
+					 cat->audio_sources[i].name);
+				master->source_b_name[0] = '\0';
+				master->scene_name[0] = '\0';
+				mfd_engine_reset_slot_mode_state(eng, master, MFD_TARGET_AUDIO_VOLUME);
+				assigned = true;
+				break;
+			}
+		}
+	}
+	mfd_ui_catalog_destroy(cat);
+	return assigned;
+}
+
+void mfd_engine_apply_first_run_layout(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	bool pending = eng->frontend_finished_loading && !eng->first_run_offer_dismissed &&
+		       !eng->first_run_layout_applied && eng->apc40_controller_detected &&
+		       strcmp(effective_profile_name(eng), MFD_DEFAULT_PROFILE_NAME) == 0;
+	if (!pending) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->first_run_layout_applied = true;
+	/* only a Master with no job: a strip the user (or an import) already set is theirs */
+	if (eng->fader_slots[9].target_type == MFD_TARGET_UNASSIGNED && first_run_assign_master_locked(eng)) {
+		mfd_engine_bump_slot_rev(eng, 9);
+		mfd_engine_reevaluate_slots(eng, false);
+		mfd_engine_notify_state_changed(eng);
+	}
+	mfd_engine_mark_ui_dirty(eng, false);
+	unlock_and_persist_global_config(eng);
+}
+
+void mfd_engine_acknowledge_first_run(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (eng->first_run_offer_dismissed) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->first_run_offer_dismissed = true;
+	mfd_engine_mark_ui_dirty(eng, false);
+	unlock_and_persist_global_config(eng);
+}
+
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -4156,36 +4230,10 @@ void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 	mfd_engine_lock(eng);
 	mfd_engine_cancel_setup_session(eng);
 	mfd_engine_load_apc40_defaults(eng);
-
-	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
-	if (cat) {
-		mfd_engine_get_ui_catalog(eng, cat);
-		/* Output channels 1 and 2 are OBS's Desktop Audio and Desktop Audio 2. Injected scene-graph ops without
-		 * get_output_source_name (headless tests) find none, and Master stays unassigned. */
-		bool assigned = false;
-		for (uint32_t channel = 1U; channel <= 2U && !assigned; ++channel) {
-			char desktop_name[MFD_SOURCE_NAME_MAX];
-			if (!sg_output_source_name(eng, channel, desktop_name, sizeof(desktop_name))) {
-				continue;
-			}
-			for (size_t i = 0U; i < cat->audio_count; ++i) {
-				if (strcmp(cat->audio_sources[i].name, desktop_name) == 0) {
-					struct mfd_fader_slot *master = &eng->fader_slots[9];
-					master->enabled = true;
-					snprintf(master->source_a_name, sizeof(master->source_a_name), "%s",
-						 cat->audio_sources[i].name);
-					master->source_b_name[0] = '\0';
-					master->scene_name[0] = '\0';
-					mfd_engine_reset_slot_mode_state(eng, master, MFD_TARGET_AUDIO_VOLUME);
-					assigned = true;
-					break;
-				}
-			}
-		}
-		mfd_ui_catalog_destroy(cat);
-	}
+	(void)first_run_assign_master_locked(eng);
 
 	eng->first_run_offer_dismissed = true;
+	eng->first_run_layout_applied = true;
 	/* The usual layout empties the eight strips: they fill from the scene on air again. */
 	eng->vj_autofill_done = false;
 	eng->vj_autofill_pending = true;
@@ -4220,6 +4268,7 @@ void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng)
 		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 	}
 	eng->first_run_offer_dismissed = true;
+	eng->first_run_layout_applied = true;
 	eng->vj_autofill_done = true; /* the user will set the strips up: never fill them from the scene */
 	eng->vj_autofill_pending = false;
 	mfd_engine_bump_slot_rev(eng, -1);
@@ -8848,6 +8897,7 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_double(data, "smooth_tau_ms", (double)eng->smooth_tau_ms);
 	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
 	obs_data_set_bool(data, "first_run_offer_dismissed", eng->first_run_offer_dismissed);
+	obs_data_set_bool(data, "first_run_layout_applied", eng->first_run_layout_applied);
 	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
 	obs_data_set_bool(data, "vj_buttons_enabled", !eng->vj_disabled);
 	obs_data_set_bool(data, "desk_video_controls", eng->desk_video_controls);
@@ -8920,6 +8970,9 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	} else if (!user_file) {
 		/* Upgrading from 0.1.x global.json without first_run_offer_dismissed: never prompt to reset */
 		eng->first_run_offer_dismissed = true;
+	}
+	if (obs_data_has_user_value(data, "first_run_layout_applied")) {
+		eng->first_run_layout_applied = obs_data_get_bool(data, "first_run_layout_applied");
 	}
 	if (obs_data_has_user_value(data, "stream_deck_companion_dismissed")) {
 		eng->stream_deck_companion_dismissed = obs_data_get_bool(data, "stream_deck_companion_dismissed");

@@ -6002,6 +6002,55 @@ int main(void)
 		REQUIRE(snap->slots[fi].target_type == MFD_TARGET_UNASSIGNED);
 	}
 
+	/* U1-02: the layout without a question. The first time the APC40 is seen, Master becomes Desktop Audio volume and
+	 * nothing else changes; once only; a Master that already has a job is left alone; OK changes no strip. */
+	{
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_offer_dismissed = false;
+		eng.first_run_layout_applied = false;
+		const uint64_t rev1 = eng.slot_config_rev[1];
+		mfd_engine_apply_first_run_layout(&eng);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(snap->first_run_offer_pending); /* the notice stays until OK */
+		REQUIRE(eng.first_run_layout_applied);
+		REQUIRE(snap->slots[0].target_type == MFD_TARGET_TBAR);
+		REQUIRE(snap->slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+		REQUIRE(strcmp(snap->slots[9].source_a_name, "desktop audio") == 0);
+		REQUIRE(eng.slot_config_rev[1] == rev1); /* the eight faders are not touched */
+		/* once: a Master the user cleared afterwards stays cleared */
+		mfd_engine_reset_slot_mode_state(&eng, &eng.fader_slots[9], MFD_TARGET_UNASSIGNED);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		/* a Master with a job of its own is never taken over */
+		eng.first_run_layout_applied = false;
+		mfd_engine_reset_slot_mode_state(&eng, &eng.fader_slots[9], MFD_TARGET_TBAR);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_TBAR);
+		REQUIRE(eng.first_run_layout_applied);
+		/* not before OBS has finished loading, not without the APC40, not once the notice is dismissed */
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_layout_applied = false;
+		mfd_engine_set_test_frontend_state(&eng, false, true, "alpha Scene", "Blue", true);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(!eng.first_run_layout_applied);
+		mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", false);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(!eng.first_run_layout_applied);
+		mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", true);
+		eng.first_run_offer_dismissed = true;
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(!eng.first_run_layout_applied && eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		/* OK: the notice goes, no strip changes */
+		eng.first_run_offer_dismissed = false;
+		mfd_engine_apply_first_run_layout(&eng);
+		const uint64_t rev9 = eng.slot_config_rev[9];
+		mfd_engine_acknowledge_first_run(&eng);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(!snap->first_run_offer_pending);
+		REQUIRE(eng.slot_config_rev[9] == rev9);
+		REQUIRE(snap->slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	}
+
 	/* [I'll set it up]: all 10 APC40 addresses stay bound & live, all 10 modes = MFD_TARGET_UNASSIGNED */
 	eng.first_run_offer_dismissed = false;
 	mfd_engine_decline_first_run_usual_layout(&eng);
