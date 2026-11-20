@@ -5363,6 +5363,11 @@ static void vj_take_locked(struct mfd_engine *eng)
 	if (!mfd_engine_is_studio_mode_active(eng) || preview[0] == '\0') {
 		return;
 	}
+	if (strcmp(preview, eng->cached_program_scene) == 0) {
+		obs_log(LOG_INFO, "APC40: \"%s\" is in Preview and on air already, so there is nothing to fade to",
+			preview);
+		return;
+	}
 	if (vj_tbar_busy_locked(eng)) {
 		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene buttons wait for it");
 	} else {
@@ -5379,6 +5384,11 @@ static void vj_scene_locked(struct mfd_engine *eng, int j, bool direct)
 		return;
 	}
 	const char *name = eng->cached_scenes[j];
+	if (strcmp(name, eng->cached_program_scene) == 0) {
+		/* already on air: putting it in Preview too would leave nothing to fade to */
+		obs_log(LOG_INFO, "APC40: \"%s\" is on air already, so its Scene Launch button does nothing", name);
+		return;
+	}
 	if (vj_tbar_busy_locked(eng)) {
 		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene buttons wait for it");
 	} else if (direct || !mfd_engine_is_studio_mode_active(eng)) {
@@ -6476,6 +6486,14 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 	switch (cmd->kind) {
 	case MFD_VJ_CMD_PREVIEW:
 	case MFD_VJ_CMD_PROGRAM: {
+		/* checked again here: by now OBS may have put this scene on air (a fast double press, a click in OBS) */
+		obs_source_t *on_air = obs_frontend_get_current_scene();
+		bool already = on_air && strcmp(obs_source_get_name(on_air), cmd->scene) == 0;
+		obs_source_release(on_air);
+		if (already) {
+			obs_log(LOG_INFO, "APC40: \"%s\" is on air already, so it is left as it is", cmd->scene);
+			break;
+		}
 		obs_source_t *src = obs_get_source_by_name(cmd->scene);
 		if (src) {
 			if (cmd->kind == MFD_VJ_CMD_PREVIEW) {
@@ -6490,6 +6508,14 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 	case MFD_VJ_CMD_TAKE: {
 		/* Only the scene the press meant goes on air: if Preview holds another by now, that scene goes to
 		 * Preview instead, and nothing unexpected reaches the audience. */
+		obs_source_t *on_air = obs_frontend_get_current_scene();
+		bool already = on_air && cmd->scene[0] != '\0' && strcmp(obs_source_get_name(on_air), cmd->scene) == 0;
+		obs_source_release(on_air);
+		if (already) { /* a second fast press: the first one has put it on air already */
+			obs_log(LOG_INFO, "APC40: \"%s\" is on air already, so there is nothing to fade to",
+				cmd->scene);
+			break;
+		}
 		obs_source_t *prev = obs_frontend_get_current_preview_scene();
 		bool meant = cmd->scene[0] == '\0' || (prev && strcmp(obs_source_get_name(prev), cmd->scene) == 0);
 		obs_source_release(prev);

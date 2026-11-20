@@ -2786,10 +2786,10 @@ static int test_vj_fill_follow_and_desk(void)
 	/* 6. Scene Launch: the scene in Preview takes; another goes to Preview; Shift sends a scene straight to Program.
 	 * Session takes; Shift + Session is a take too. */
 	g_vj_cmd_count = 0;
-	vj_tap(eng, 82); /* Scene A is in Preview: take */
-	vj_tap(eng, 84); /* Scene C: to Preview */
-	vj_shift_tap(eng, 83);
-	vj_tap(eng, 85); /* no fourth scene: nothing */
+	vj_tap(eng, 82);       /* Scene A is in Preview: take */
+	vj_tap(eng, 84);       /* Scene C: to Preview */
+	vj_shift_tap(eng, 84); /* Shift: Scene C straight to Program (Scene B is on air: its button does nothing) */
+	vj_tap(eng, 85);       /* no fourth scene: nothing */
 	vj_tap(eng, 102);
 	vj_shift_tap(eng, 102);
 	mfd_engine_flush_pending_ui_work(eng);
@@ -2797,7 +2797,7 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE);
 	REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_PREVIEW && strcmp(g_vj_cmds[1].scene, "Scene C") == 0);
 	REQUIRE(g_vj_cmds[0].arg == 0 && g_vj_cmds[1].arg == 0);
-	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene B") == 0 &&
+	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene C") == 0 &&
 		g_vj_cmds[2].arg == 0); /* Shift: straight to Program, with the current transition */
 	REQUIRE(g_vj_cmds[3].kind == MFD_VJ_CMD_TAKE);
 	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_TAKE); /* Shift + Session is a take too */
@@ -2811,6 +2811,25 @@ static int test_vj_fill_follow_and_desk(void)
 	vj_tap(eng, 102); /* Session outside Studio Mode: nothing to take */
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PROGRAM && g_vj_cmds[0].arg == 0);
+	mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", true);
+	/* The scene already on air: its Scene Launch button does nothing, with or without Shift (it never goes to Preview
+	 * too, which would leave nothing to fade to). Master fades Preview to Program like Session. */
+	g_vj_cmd_count = 0;
+	vj_tap(eng, 83);
+	vj_shift_tap(eng, 83);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 0);
+	vj_tap(eng, 80);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE);
+	/* Preview and Program the same scene: Session and Master have nothing to fade to. */
+	mfd_engine_set_test_frontend_state(eng, true, true, "Scene B", "Scene B", true);
+	g_vj_cmd_count = 0;
+	vj_tap(eng, 102);
+	vj_tap(eng, 80);
+	vj_tap(eng, 83);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 0);
 	mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", true);
 	/* While the crossfader is mid-throw, the scene buttons and Session do nothing. */
 	eng->fader_slots[0].tbar_state = MFD_TBAR_THROWING;
@@ -3330,7 +3349,7 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_flush_pending_ui_work(eng);
 		/* 14a. The view: pads on, names and follow from the strips, Program red on the scene row, 55 LEDs. */
 		mfd_engine_get_desk_view(eng, false, v);
-		REQUIRE(v->pads == MFD_DESK_PADS_ON && v->desk_connected && v->finished_loading && v->led_count == 55U);
+		REQUIRE(v->pads == MFD_DESK_PADS_ON && v->desk_connected && v->finished_loading && v->led_count == 56U);
 		REQUIRE(v->scene_count == 3 && strcmp(v->scenes[1], "Scene B") == 0 && v->studio_mode);
 		REQUIRE(v->leds[48 + 1].velocity == 5U); /* Scene B on air: red */
 		REQUIRE(strcmp(v->strips[1].source, "B1") == 0 && v->strips[1].single_layer && v->strips[1].follows &&

@@ -49,7 +49,7 @@ constexpr int kRows = 5; /* top to bottom: Restart, Show, Fade, Flash, Blend */
 constexpr uint8_t kChPulse = 10U;
 constexpr uint8_t kChBlink = 15U;
 constexpr double kPi = 3.14159265358979323846;
-constexpr size_t kLeds = 55U; /* 6 per strip, 5 scenes, Record, Session */
+constexpr size_t kLeds = 56U; /* 6 per strip, 5 scenes, Record, Session, Master */
 
 /* Row r (0 = top) is this cell of the strip (mfd_vj_pads_leds' order per strip) and this note base. */
 const int kRowCell[kRows] = {MFD_DESK_RESTART, MFD_DESK_SHOW, MFD_DESK_FADE, MFD_DESK_FLASH, MFD_DESK_BLEND};
@@ -501,8 +501,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	shift_ = makeButton(mfdText("Desk.Shift", "Shift for the next pad"), 60, 24);
 	shift_->setText(mfdText("Desk.ShiftShort", "Shift"));
 	shift_->setCheckable(true);
-	session_ = makeButton(mfdText("Desk.Session", "Session: take Preview to Program"), 70, 24);
-	session_->setText(mfdText("Desk.SessionShort", "Take"));
+	session_ =
+		makeButton(mfdText("Desk.Session", "Fade Preview to Program (Session or Master on the desk)"), 70, 24);
+	session_->setText(mfdText("Desk.SessionShort", "Fade"));
 	connect(session_, &QPushButton::pressed, this, [this]() {
 		if (physical(session_)) {
 			pressNote(0U, MFD_VJ_NOTE_SESSION, true, false);
@@ -882,7 +883,7 @@ void MfdDeskDock::refresh()
 			!view_.studio_mode
 				? mfdText("Desk.SceneTip.Program", "Click: put this scene on air.")
 				: mfdText("Desk.SceneTip.Studio",
-					  "Click: to Preview; click again: take it to Program. Ctrl-click: straight on air.");
+					  "Click: to Preview; click again: fade it to Program. Ctrl-click: straight on air.");
 		bool can = pads_on && exists && !view_.tbar_busy && !view_.scene_owned[j];
 		setTip(scenes_[j], !exists ? mfdText("Desk.Tip.NoScene", "No scene here.")
 				   : view_.tbar_busy
