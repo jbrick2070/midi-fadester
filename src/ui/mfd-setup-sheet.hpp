@@ -18,6 +18,7 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 class QStackedWidget;
+class QVBoxLayout;
 class QWidget;
 
 class MfdSetupSheetDialog final : public QDialog {
@@ -43,6 +44,15 @@ private:
 	void repopulate_layer_combos_for_scene();
 	void repopulate_filter_combos_for_host(bool preserve_range);
 	void disable_filter_range_controls();
+	/* the constructor's four parts (F-16) */
+	void build_step1_page();
+	void build_step2_page();
+	void build_step2_tbar_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step2_layer_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step2_volume_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step2_filter_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step3_page();
+	void build_footer(QVBoxLayout *root);
 	void repopulate_prop_combo_for_filter(bool preserve_range);
 	void configure_spinboxes_for_prop(bool preserve_range);
 	void update_step2_notes_and_validation();

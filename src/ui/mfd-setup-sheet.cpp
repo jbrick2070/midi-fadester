@@ -143,7 +143,16 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	stack_->setObjectName(QStringLiteral("mfdSetupStack"));
 	root->addWidget(stack_, 1);
 
-	/* --- Page 0: Step 1 ("What should this control do?") --- */
+	build_step1_page();
+	build_step2_page();
+	build_step3_page();
+	build_footer(root);
+	mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10) */
+}
+
+/* Page 0, step 1: "What should this control do?" */
+void MfdSetupSheetDialog::build_step1_page()
+{
 	auto *page1 = new QWidget(stack_);
 	auto *p1_lay = new QVBoxLayout(page1);
 	p1_lay->setContentsMargins(0, 0, 0, 0);
@@ -233,8 +242,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	});
 
 	stack_->addWidget(page1);
+}
 
-	/* --- Page 1: Step 2 ("Which?") --- */
+/* Page 1, step 2: "Which?", one box for each kind of job */
+void MfdSetupSheetDialog::build_step2_page()
+{
 	auto *page2 = new QWidget(stack_);
 	auto *p2_lay = new QVBoxLayout(page2);
 	p2_lay->setContentsMargins(0, 0, 0, 0);
@@ -251,7 +263,17 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	step2_master_mix_info_->setWordWrap(true);
 	p2_lay->addWidget(step2_master_mix_info_);
 
-	/* Step 2: Switch scenes box */
+	build_step2_tbar_box(page2, p2_lay);
+	build_step2_layer_box(page2, p2_lay);
+	build_step2_volume_box(page2, p2_lay);
+	build_step2_filter_box(page2, p2_lay);
+
+	stack_->addWidget(page2);
+}
+
+/* Step 2, Switch scenes: nothing to choose, only Studio Mode to turn on */
+void MfdSetupSheetDialog::build_step2_tbar_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_tbar_box_ = new QWidget(page2);
 	auto *tbar_box_lay = new QVBoxLayout(step2_tbar_box_);
 	tbar_box_lay->setContentsMargins(12, 12, 12, 12);
@@ -277,8 +299,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	});
 	tbar_box_lay->addWidget(step2_turn_on_studio_btn_);
 	p2_lay->addWidget(step2_tbar_box_);
+}
 
-	/* Step 2: Mix two layers / Show or hide a layer box */
+/* Step 2, Mix two layers and Show or hide a layer: the scene and its layers */
+void MfdSetupSheetDialog::build_step2_layer_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_scene_box_ = new QWidget(page2);
 	auto *sc_lay = new QVBoxLayout(step2_scene_box_);
 	sc_lay->setContentsMargins(0, 0, 0, 0);
@@ -349,8 +374,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	sc_lay->addWidget(shared_layer_note_);
 
 	p2_lay->addWidget(step2_scene_box_);
+}
 
-	/* Step 2: Volume box */
+/* Step 2, Volume: the audio source */
+void MfdSetupSheetDialog::build_step2_volume_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_audio_box_ = new QWidget(page2);
 	auto *aud_lay = new QVBoxLayout(step2_audio_box_);
 	aud_lay->setContentsMargins(0, 0, 0, 0);
@@ -374,8 +402,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	row_aud->addWidget(combo_audio_, 1);
 	aud_lay->addLayout(row_aud);
 	p2_lay->addWidget(step2_audio_box_);
+}
 
-	/* Step 2: Filter or effect setting box */
+/* Step 2, Filter or effect setting: where the filter is, which setting, and its range */
+void MfdSetupSheetDialog::build_step2_filter_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_filter_box_ = new QWidget(page2);
 	auto *flt_lay = new QVBoxLayout(step2_filter_box_);
 	flt_lay->setContentsMargins(0, 0, 0, 0);
@@ -589,10 +620,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 			update_step2_notes_and_validation();
 		}
 	});
+}
 
-	stack_->addWidget(page2);
-
-	/* --- Page 2: Step 3 (move the control; OBS waits for Done) --- */
+/* Page 2, step 3: move the control; OBS waits for Done */
+void MfdSetupSheetDialog::build_step3_page()
+{
 	auto *page3 = new QWidget(stack_);
 	auto *p3_lay = new QVBoxLayout(page3);
 	p3_lay->setContentsMargins(0, 0, 0, 0);
@@ -769,8 +801,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 
 	p3_lay->addStretch(1);
 	stack_->addWidget(page3);
+}
 
-	/* --- Footer --- */
+/* The line and the Cancel, Back, Next and Done buttons under the pages */
+void MfdSetupSheetDialog::build_footer(QVBoxLayout *root)
+{
 	auto *sep = new QFrame(this);
 	sep->setFrameShape(QFrame::HLine);
 	sep->setStyleSheet(QStringLiteral("color: #1e293b;"));
@@ -842,7 +877,6 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 		}
 	});
 	connect(btn_done_, &QPushButton::clicked, this, &MfdSetupSheetDialog::on_done_clicked);
-	mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10) */
 }
 
 MfdSetupSheetDialog::~MfdSetupSheetDialog()

@@ -2547,6 +2547,177 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 	}
 }
 
+/* What evaluate_slot_preconditions works out for one strip: its log label, whether it can act and why not, the
+ * scene it acts in, and which of a mix's two layers is on top. */
+struct slot_verdict {
+	char lbl[128];
+	bool avail;
+	struct mfd_msg rsn;
+	char res_scene[MFD_SOURCE_NAME_MAX];
+	bool a_above_b;
+};
+
+/* A Two-Source Mix strip: both layers named, different, and in one scene (its own, or the first that holds both). */
+static void verdict_two_source_mix(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, bool live,
+				   struct slot_verdict *v)
+{
+	if (slot->source_a_name[0] != '\0' && slot->source_b_name[0] != '\0') {
+		snprintf(v->lbl, sizeof(v->lbl), "%s -> %s", slot->source_a_name, slot->source_b_name);
+	} else {
+		snprintf(v->lbl, sizeof(v->lbl), "Crossfade A/B");
+	}
+	if (slot->source_a_name[0] == '\0' || slot->source_b_name[0] == '\0') {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
+	} else if (!live) {
+		v->avail = slot->cached_available;
+		v->rsn = slot->cached_reason_msg;
+	} else if (slot->scene_name[0] != '\0') {
+		if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL, NULL, NULL);
+		} else {
+			int idx_a = sg_scene_item_stack_index(eng, slot->scene_name, slot->source_a_name);
+			int idx_b = sg_scene_item_stack_index(eng, slot->scene_name, slot->source_b_name);
+			if (idx_a < 0) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name, slot->scene_name,
+					    NULL, NULL, NULL);
+			} else if (idx_b < 0) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_b_name, slot->scene_name,
+					    NULL, NULL, NULL);
+			} else {
+				v->avail = true;
+				mfd_msg_clear(&v->rsn);
+				v->a_above_b = (idx_a > idx_b);
+				snprintf(v->res_scene, sizeof(v->res_scene), "%s", slot->scene_name);
+			}
+		}
+	} else {
+		char found_sc[MFD_SOURCE_NAME_MAX] = {0};
+		int idx_a = -1;
+		int idx_b = -1;
+		if (sg_find_scene_with_pair(eng, slot->source_a_name, slot->source_b_name, found_sc, sizeof(found_sc),
+					    &idx_a, &idx_b)) {
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			v->a_above_b = (idx_a > idx_b);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", found_sc);
+		} else if (slot->resolved_scene_name[0] != '\0') {
+			if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->resolved_scene_name, NULL, NULL, NULL,
+					    NULL);
+			} else if (sg_scene_item_stack_index(eng, slot->resolved_scene_name, slot->source_a_name) < 0) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
+					    slot->resolved_scene_name, NULL, NULL, NULL);
+			} else {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_b_name,
+					    slot->resolved_scene_name, NULL, NULL, NULL);
+			}
+		} else {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_LAYERS_NOT_IN_SAME_SCENE, slot->source_a_name, slot->source_b_name,
+				    NULL, NULL, NULL);
+		}
+	}
+}
+
+/* A Layer strip: its source in its own scene, or else in the scene on air, or else in any scene. */
+static void verdict_single_layer(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, bool live,
+				 struct slot_verdict *v)
+{
+	if (slot->source_a_name[0] != '\0') {
+		snprintf(v->lbl, sizeof(v->lbl), "%s (Opacity)", slot->source_a_name);
+	} else {
+		snprintf(v->lbl, sizeof(v->lbl), "Layer Opacity");
+	}
+	if (slot->source_a_name[0] == '\0') {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	} else if (!live) {
+		v->avail = slot->cached_available;
+		v->rsn = slot->cached_reason_msg;
+	} else if (slot->scene_name[0] != '\0') {
+		if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL, NULL, NULL);
+		} else if (sg_scene_item_stack_index(eng, slot->scene_name, slot->source_a_name) < 0) {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name, slot->scene_name, NULL,
+				    NULL, NULL);
+		} else {
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", slot->scene_name);
+		}
+	} else {
+		char found_sc[MFD_SOURCE_NAME_MAX] = {0};
+		if (eng->cached_program_scene[0] != '\0' &&
+		    sg_scene_item_stack_index(eng, eng->cached_program_scene, slot->source_a_name) >= 0) {
+			/* A strip with no scene of its own acts on the scene on air when that scene
+			 * holds its source (B-05): a show/hide or blend pad must change what the
+			 * audience sees, not the first scene OBS happens to list. Re-checked on
+			 * every Program change. */
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", eng->cached_program_scene);
+		} else if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name, NULL, found_sc,
+								  sizeof(found_sc))) {
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", found_sc);
+		} else if (slot->resolved_scene_name[0] != '\0') {
+			if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->resolved_scene_name, NULL, NULL, NULL,
+					    NULL);
+			} else {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
+					    slot->resolved_scene_name, NULL, NULL, NULL);
+			}
+		} else {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_ANY_SCENE, slot->source_a_name, NULL, NULL, NULL,
+				    NULL);
+		}
+	}
+}
+
+/* An Audio Volume strip: its source exists and has audio. */
+static void verdict_audio_volume(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, bool live,
+				 struct slot_verdict *v)
+{
+	if (slot->source_a_name[0] != '\0') {
+		snprintf(v->lbl, sizeof(v->lbl), "%s (Audio)", slot->source_a_name);
+	} else {
+		snprintf(v->lbl, sizeof(v->lbl), "Audio Volume");
+	}
+	if (slot->source_a_name[0] == '\0') {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	} else if (!live) {
+		v->avail = slot->cached_available;
+		v->rsn = slot->cached_reason_msg;
+	} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL, NULL);
+	} else if (!mfd_engine_source_has_audio(eng, slot->source_a_name)) {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NO_AUDIO, slot->source_a_name, NULL, NULL, NULL, NULL);
+	} else {
+		v->avail = true;
+		mfd_msg_clear(&v->rsn);
+	}
+}
+
 /*
  * live == false is a status read: the in-process bridge that Visual Sidechain polls on the graphics thread every
  * frame, the vendor API, a refused fader write. These run often and from any thread, so they report what
@@ -2560,230 +2731,71 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 					struct mfd_msg *out_reason, char *out_resolved_scene, size_t resolved_size,
 					bool *out_a_above_b, bool live)
 {
-	char lbl[128] = "Unassigned";
-	bool avail = false;
-	struct mfd_msg rsn;
-	mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-	char res_scene[MFD_SOURCE_NAME_MAX] = {0};
-	bool a_above_b = slot ? slot->a_is_above_b : false;
+	struct slot_verdict v;
+	memset(&v, 0, sizeof(v));
+	snprintf(v.lbl, sizeof(v.lbl), "Unassigned");
+	mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	v.a_above_b = slot ? slot->a_is_above_b : false;
 
 	if (slot) {
 		if (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX || slot->target_type == MFD_TARGET_SINGLE_LAYER) {
-			snprintf(res_scene, sizeof(res_scene), "%s", slot->resolved_scene_name);
+			snprintf(v.res_scene, sizeof(v.res_scene), "%s", slot->resolved_scene_name);
 		}
 		if (!slot->enabled) {
-			snprintf(lbl, sizeof(lbl), "Disabled");
-			avail = false;
-			mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+			snprintf(v.lbl, sizeof(v.lbl), "Disabled");
+			v.avail = false;
+			mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 		} else {
 			switch (slot->target_type) {
 			case MFD_TARGET_UNASSIGNED:
-				snprintf(lbl, sizeof(lbl), "Unassigned");
-				avail = false;
-				mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+				snprintf(v.lbl, sizeof(v.lbl), "Unassigned");
+				v.avail = false;
+				mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				break;
 
 			case MFD_TARGET_MIX_MASTER:
-				snprintf(lbl, sizeof(lbl), "Whole mix");
-				avail = true; /* Can request; the external mix provider confirms application. */
-				mfd_msg_clear(&rsn);
+				snprintf(v.lbl, sizeof(v.lbl), "Whole mix");
+				v.avail = true; /* Can request; the external mix provider confirms application. */
+				mfd_msg_clear(&v.rsn);
 				break;
 
 			case MFD_TARGET_TBAR:
-				snprintf(lbl, sizeof(lbl), "Studio Mode T-Bar");
+				snprintf(v.lbl, sizeof(v.lbl), "Studio Mode T-Bar");
 				if (!mfd_engine_is_studio_mode_active(eng)) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_STUDIO_MODE_OFF, NULL, NULL, NULL, NULL, NULL);
+					v.avail = false;
+					mfd_msg_set(&v.rsn, MFD_MSG_STUDIO_MODE_OFF, NULL, NULL, NULL, NULL, NULL);
 				} else if (eng && eng->tbar_error[0] != '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_TBAR_SLIDER_MISSING, NULL, NULL, NULL, NULL, NULL);
+					v.avail = false;
+					mfd_msg_set(&v.rsn, MFD_MSG_TBAR_SLIDER_MISSING, NULL, NULL, NULL, NULL, NULL);
 				} else {
-					avail = true;
-					mfd_msg_clear(&rsn);
+					v.avail = true;
+					mfd_msg_clear(&v.rsn);
 				}
 				break;
 
-			case MFD_TARGET_TWO_SOURCE_MIX: {
-				if (slot->source_a_name[0] != '\0' && slot->source_b_name[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s -> %s", slot->source_a_name,
-						 slot->source_b_name);
-				} else {
-					snprintf(lbl, sizeof(lbl), "Crossfade A/B");
-				}
-				if (slot->source_a_name[0] == '\0' || slot->source_b_name[0] == '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-				} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
-				} else if (!live) {
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
-				} else if (slot->scene_name[0] != '\0') {
-					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL,
-							    NULL, NULL);
-					} else {
-						int idx_a = sg_scene_item_stack_index(eng, slot->scene_name,
-										      slot->source_a_name);
-						int idx_b = sg_scene_item_stack_index(eng, slot->scene_name,
-										      slot->source_b_name);
-						if (idx_a < 0) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_a_name, slot->scene_name, NULL, NULL,
-								    NULL);
-						} else if (idx_b < 0) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_b_name, slot->scene_name, NULL, NULL,
-								    NULL);
-						} else {
-							avail = true;
-							mfd_msg_clear(&rsn);
-							a_above_b = (idx_a > idx_b);
-							snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
-						}
-					}
-				} else {
-					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
-					int idx_a = -1;
-					int idx_b = -1;
-					if (sg_find_scene_with_pair(eng, slot->source_a_name, slot->source_b_name,
-								    found_sc, sizeof(found_sc), &idx_a, &idx_b)) {
-						avail = true;
-						mfd_msg_clear(&rsn);
-						a_above_b = (idx_a > idx_b);
-						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
-					} else if (slot->resolved_scene_name[0] != '\0') {
-						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED,
-								    slot->resolved_scene_name, NULL, NULL, NULL, NULL);
-						} else if (sg_scene_item_stack_index(eng, slot->resolved_scene_name,
-										     slot->source_a_name) < 0) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_a_name, slot->resolved_scene_name,
-								    NULL, NULL, NULL);
-						} else {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_b_name, slot->resolved_scene_name,
-								    NULL, NULL, NULL);
-						}
-					} else {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_LAYERS_NOT_IN_SAME_SCENE, slot->source_a_name,
-							    slot->source_b_name, NULL, NULL, NULL);
-					}
-				}
+			case MFD_TARGET_TWO_SOURCE_MIX:
+				verdict_two_source_mix(eng, slot, live, &v);
 				break;
-			}
 
-			case MFD_TARGET_SINGLE_LAYER: {
-				if (slot->source_a_name[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s (Opacity)", slot->source_a_name);
-				} else {
-					snprintf(lbl, sizeof(lbl), "Layer Opacity");
-				}
-				if (slot->source_a_name[0] == '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-				} else if (!live) {
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
-				} else if (slot->scene_name[0] != '\0') {
-					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL,
-							    NULL, NULL);
-					} else if (sg_scene_item_stack_index(eng, slot->scene_name,
-									     slot->source_a_name) < 0) {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
-							    slot->scene_name, NULL, NULL, NULL);
-					} else {
-						avail = true;
-						mfd_msg_clear(&rsn);
-						snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
-					}
-				} else {
-					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
-					if (eng->cached_program_scene[0] != '\0' &&
-					    sg_scene_item_stack_index(eng, eng->cached_program_scene,
-								      slot->source_a_name) >= 0) {
-						/* A strip with no scene of its own acts on the scene on air when that scene
-						 * holds its source (B-05): a show/hide or blend pad must change what the
-						 * audience sees, not the first scene OBS happens to list. Re-checked on
-						 * every Program change. */
-						avail = true;
-						mfd_msg_clear(&rsn);
-						snprintf(res_scene, sizeof(res_scene), "%s", eng->cached_program_scene);
-					} else if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name,
-											  NULL, found_sc,
-											  sizeof(found_sc))) {
-						avail = true;
-						mfd_msg_clear(&rsn);
-						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
-					} else if (slot->resolved_scene_name[0] != '\0') {
-						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED,
-								    slot->resolved_scene_name, NULL, NULL, NULL, NULL);
-						} else {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_a_name, slot->resolved_scene_name,
-								    NULL, NULL, NULL);
-						}
-					} else {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_ANY_SCENE, slot->source_a_name,
-							    NULL, NULL, NULL, NULL);
-					}
-				}
+			case MFD_TARGET_SINGLE_LAYER:
+				verdict_single_layer(eng, slot, live, &v);
 				break;
-			}
 
 			case MFD_TARGET_AUDIO_VOLUME:
-				if (slot->source_a_name[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s (Audio)", slot->source_a_name);
-				} else {
-					snprintf(lbl, sizeof(lbl), "Audio Volume");
-				}
-				if (slot->source_a_name[0] == '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-				} else if (!live) {
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
-				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL,
-						    NULL);
-				} else if (!mfd_engine_source_has_audio(eng, slot->source_a_name)) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NO_AUDIO, slot->source_a_name, NULL, NULL, NULL,
-						    NULL);
-				} else {
-					avail = true;
-					mfd_msg_clear(&rsn);
-				}
+				verdict_audio_volume(eng, slot, live, &v);
 				break;
 
 			case MFD_TARGET_FILTER_PARAM:
 				if (slot->source_a_name[0] != '\0' && slot->filter_name[0] != '\0' &&
 				    slot->filter_prop[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s: %s (%s)", slot->source_a_name,
+					snprintf(v.lbl, sizeof(v.lbl), "%s: %s (%s)", slot->source_a_name,
 						 slot->filter_name, slot->filter_prop);
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
+					v.avail = slot->cached_available;
+					v.rsn = slot->cached_reason_msg;
 				} else {
-					snprintf(lbl, sizeof(lbl), "Filter Setting");
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+					snprintf(v.lbl, sizeof(v.lbl), "Filter Setting");
+					v.avail = false;
+					mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				}
 				break;
 			}
@@ -2791,21 +2803,21 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 	}
 
 	if (out_label && label_size > 0U) {
-		/* lbl holds names cut to 127 bytes: a long non-ASCII name can end in half a character */
-		snprintf(out_label, label_size, "%s", lbl);
+		/* v.lbl holds names cut to 127 bytes: a long non-ASCII name can end in half a character */
+		snprintf(out_label, label_size, "%s", v.lbl);
 		mfd_utf8_make_valid(out_label);
 	}
 	if (out_available) {
-		*out_available = avail;
+		*out_available = v.avail;
 	}
 	if (out_reason) {
-		*out_reason = rsn;
+		*out_reason = v.rsn;
 	}
 	if (out_resolved_scene && resolved_size > 0U) {
-		snprintf(out_resolved_scene, resolved_size, "%s", res_scene);
+		snprintf(out_resolved_scene, resolved_size, "%s", v.res_scene);
 	}
 	if (out_a_above_b) {
-		*out_a_above_b = a_above_b;
+		*out_a_above_b = v.a_above_b;
 	}
 }
 
