@@ -84,9 +84,12 @@ static struct obs_source_info test_av_input = {
 	.get_height = test_input_get_size,
 };
 
+static int g_color_filter_properties_built;
+
 static obs_properties_t *test_color_filter_properties(void *unused)
 {
 	(void)unused;
+	g_color_filter_properties_built++;
 	obs_properties_t *p = obs_properties_create();
 	obs_properties_add_float_slider(p, "brightness", "Brightness", -1.0, 1.0, 0.01);
 	obs_properties_add_float_slider(p, "opacity", "Opacity", 0.0, 1.0, 0.01);
@@ -387,7 +390,65 @@ static void test_flash_guard_defaults_and_live_color_filter_cap(void)
 			found_flux_safe = true;
 	}
 	assert(found_kick_safe && found_snare_safe && found_flux_safe);
+	{
+		/* U1-16: the named signals come first, then the 32 bands and the 18 faders, each under a header row that
+		 * cannot be chosen. Every other row can be, and every signal keeps the value it is saved as. */
+		const size_t n = obs_property_list_item_count(sig_prop);
+		size_t headers = 0, band_header = n, fader_header = n, first_band = n, first_fader = n, kick = n;
+		for (size_t i = 0; i < n; i++) {
+			const long long v = obs_property_list_item_int(sig_prop, i);
+			if (obs_property_list_item_disabled(sig_prop, i)) {
+				headers++;
+				if (band_header == n)
+					band_header = i;
+				else
+					fader_header = i;
+				assert(v < 0);
+				continue;
+			}
+			if (v == (long long)VS_SIG_SPECTRUM_BAND_0)
+				first_band = i;
+			else if (v == (long long)VS_SIG_FADER_CROSSFADER)
+				first_fader = i;
+			else if (v == (long long)VS_SIG_KICK)
+				kick = i;
+		}
+		assert(headers == 2 && kick < band_header);
+		assert(first_band == band_header + 1 && first_fader == fader_header + 1 && band_header < fader_header);
+		assert(n == 14 + 1 + VS_SPECTRUM_BANDS + 1 + VS_FADER_SLOT_COUNT);
+	}
 	obs_properties_destroy(props);
+
+	obs_source_filter_remove(parent, mod);
+	obs_source_filter_remove(parent, cc);
+	obs_source_release(mod);
+	obs_source_release(cc);
+	obs_source_release(parent);
+}
+
+/* D-17: two slots that move settings of one filter build that filter's Properties once for both, and a second look
+ * within the reuse time builds none. */
+static void test_target_properties_built_once_for_slots_that_share_a_filter(void)
+{
+	obs_source_t *parent = obs_source_create("vs_test_video_input", "vs-d17-parent", NULL, NULL);
+	obs_source_t *cc = obs_source_create("color_filter", "Color Correction", NULL, NULL);
+	obs_data_t *s = obs_data_create();
+	obs_data_set_bool(s, "slot_1_enabled", true);
+	obs_data_set_string(s, "slot_1_target_filter", "Color Correction");
+	obs_data_set_string(s, "slot_1_target_setting", "brightness");
+	obs_data_set_bool(s, "slot_2_enabled", true);
+	obs_data_set_string(s, "slot_2_target_filter", "Color Correction");
+	obs_data_set_string(s, "slot_2_target_setting", "opacity");
+	obs_source_t *mod = obs_source_create("visual_sidechain_modulator_filter", "Mod", s, NULL);
+	obs_data_release(s);
+	assert(parent && cc && mod);
+	obs_source_filter_add(parent, cc);
+	int before = g_color_filter_properties_built;
+	obs_source_filter_add(parent, mod); /* once on its source, the modulator looks at its targets */
+	assert(g_color_filter_properties_built - before == 1);
+	before = g_color_filter_properties_built;
+	obs_source_load(mod);
+	assert(g_color_filter_properties_built == before);
 
 	obs_source_filter_remove(parent, mod);
 	obs_source_filter_remove(parent, cc);
@@ -442,6 +503,7 @@ int main(void)
 	test_deferred_named_configure_leaves_attach_to_retry();
 	test_audio_tap_live_status_property();
 	test_flash_guard_defaults_and_live_color_filter_cap();
+	test_target_properties_built_once_for_slots_that_share_a_filter();
 	obs_shutdown();
 	puts("test-modulator-properties: all assertions passed");
 	return 0;

@@ -512,15 +512,20 @@ static void inspect_properties_for_setting(obs_properties_t *props, struct prop_
 	}
 }
 
+static void prop_query_init(struct prop_query_ctx *q, const char *setting_name)
+{
+	memset(q, 0, sizeof(*q));
+	q->setting_name = setting_name;
+	q->prop_type = VS_PROP_FLOAT;
+	q->int_step = 1;
+}
+
 static bool query_target_setting_info(struct vs_modulator_filter *f, const char *filter_name, const char *setting_name,
 				      struct prop_query_ctx *out_q)
 {
 	if (!out_q)
 		return false;
-	memset(out_q, 0, sizeof(*out_q));
-	out_q->setting_name = setting_name;
-	out_q->prop_type = VS_PROP_FLOAT;
-	out_q->int_step = 1;
+	prop_query_init(out_q, setting_name);
 
 	if (!f || !filter_name || filter_name[0] == '\0' || !setting_name || setting_name[0] == '\0')
 		return false;
@@ -632,10 +637,21 @@ struct target_discovery {
  * the graphics thread. A drag sends many updates a second; what the target offered two seconds ago still holds. */
 #define VS_MOD_DISCOVERY_REUSE_NS 2000000000ULL
 
+/* A target filter whose Properties one discover_targets call has built: slots that move settings of the same filter
+ * share them, so the filter's Properties are built once a call and not once a slot (D-17). */
+struct discovery_target {
+	const char *name; /* points into the settings being read */
+	obs_source_t *target;
+	obs_properties_t *props;
+	char filter_id[64];
+};
+
 static void discover_targets(struct vs_modulator_filter *f, obs_data_t *settings, struct target_discovery *d)
 {
 	char key[64];
 	const uint64_t now = os_gettime_ns();
+	struct discovery_target built[VS_MOD_MAX_SLOTS];
+	uint32_t built_count = 0;
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
 		slot_key(key, sizeof(key), i, "target_filter");
 		const char *tf = obs_data_get_string(settings, key);
@@ -658,7 +674,31 @@ static void discover_targets(struct vs_modulator_filter *f, obs_data_t *settings
 		if (reused)
 			continue;
 
-		d->found[i] = query_target_setting_info(f, tf, ts, &d->info[i]);
+		prop_query_init(&d->info[i], ts);
+		if (tf && tf[0] != '\0' && ts && ts[0] != '\0') {
+			struct discovery_target *t = NULL;
+			for (uint32_t b = 0; b < built_count && !t; b++) {
+				if (strcmp(built[b].name, tf) == 0)
+					t = &built[b];
+			}
+			if (!t) {
+				t = &built[built_count++];
+				memset(t, 0, sizeof(*t));
+				t->name = tf;
+				t->target = acquire_sibling_filter(f, tf);
+				if (t->target) {
+					const char *unv_id = obs_source_get_unversioned_id(t->target);
+					if (unv_id)
+						snprintf(t->filter_id, sizeof(t->filter_id), "%s", unv_id);
+					t->props = target_properties_for_discovery(t->target);
+				}
+			}
+			if (t->target) {
+				memcpy(d->info[i].filter_id, t->filter_id, sizeof(d->info[i].filter_id));
+				inspect_properties_for_setting(t->props, &d->info[i]);
+			}
+		}
+		d->found[i] = d->info[i].found;
 		d->info[i].setting_name = NULL; /* pointed into settings; only the results are kept */
 
 		pthread_mutex_lock(&f->mutex);
@@ -670,6 +710,12 @@ static void discover_targets(struct vs_modulator_filter *f, obs_data_t *settings
 			c->at_ns = now;
 		}
 		pthread_mutex_unlock(&f->mutex);
+	}
+	for (uint32_t b = 0; b < built_count; b++) {
+		if (built[b].props)
+			obs_properties_destroy(built[b].props);
+		if (built[b].target)
+			obs_source_release(built[b].target);
 	}
 }
 
@@ -1659,6 +1705,17 @@ static void add_fader_slot_choices(obs_property_t *list, bool fadester_loaded, c
 	}
 }
 
+/* A row that only names the part of the list under it (U1-16): shown greyed, never chosen. Its value is no signal's,
+ * and nothing is saved for it. */
+#define VS_SIGNAL_LIST_HEADER_BANDS (-1001)
+#define VS_SIGNAL_LIST_HEADER_FADERS (-1002)
+
+static void add_signal_header(obs_property_t *list, const char *text, int value)
+{
+	const size_t idx = obs_property_list_add_int(list, text, value);
+	obs_property_list_item_disable(list, idx, true);
+}
+
 static void add_signal_choices(obs_property_t *list, bool fadester_loaded)
 {
 	obs_property_list_add_int(list, obs_module_text("Signal.Level"), (int)VS_SIG_LEVEL);
@@ -1676,12 +1733,15 @@ static void add_signal_choices(obs_property_t *list, bool fadester_loaded)
 	obs_property_list_add_int(list, obs_module_text("Signal.FluxSafe"), (int)VS_SIG_FLUX_SAFE);
 	obs_property_list_add_int(list, obs_module_text("Signal.CustomHz"), (int)VS_SIG_CUSTOM_HZ);
 
+	/* The named signals come first; the 32 bands and the 18 faders follow, each under its own header row. */
+	add_signal_header(list, obs_module_text("Signal.Header.Bands"), VS_SIGNAL_LIST_HEADER_BANDS);
 	char label[160];
 	for (uint32_t b = 0; b < VS_SPECTRUM_BANDS; b++) {
 		snprintf(label, sizeof(label), "%s %u", obs_module_text("Signal.SpectrumBandPrefix"), b + 1u);
 		obs_property_list_add_int(list, label, (int)(VS_SIG_SPECTRUM_BAND_0 + b));
 	}
 
+	add_signal_header(list, obs_module_text("Signal.Header.Faders"), VS_SIGNAL_LIST_HEADER_FADERS);
 	add_fader_slot_choices(list, fadester_loaded, NULL, (int)VS_SIG_FADER_CROSSFADER);
 }
 
