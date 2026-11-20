@@ -6589,8 +6589,13 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 			obs_source_t *tr = obs_frontend_get_current_transition();
 			bool running = tr && obs_transition_is_active(tr);
 			if (running) {
-				obs_transition_force_stop(tr);
-				obs_log(LOG_INFO, "APC40: cut: the scene fade under way jumps to its end");
+				/* finish on the scene it is fading to (force_stop only signals; set really ends it) */
+				obs_source_t *dest = obs_transition_get_source(tr, OBS_TRANSITION_SOURCE_B);
+				if (dest) {
+					obs_transition_set(tr, dest);
+					obs_source_release(dest);
+					obs_log(LOG_INFO, "APC40: cut: the scene fade under way jumps to its end");
+				}
 			}
 			obs_source_release(tr);
 			if (running) {
