@@ -123,10 +123,17 @@ struct vs_analyzer {
 	float mag_mid[VS_MAX_BINS_MID];
 	uint64_t last_written_samples;
 	float time_since_audio_sec;
+	/* G-01: how much audio the last arrival brought, in seconds, and whether the stream counts as stopped. A
+	 * source that hands over long blocks (FLAC and ALAC frames are 85 to 93 ms) is not starved between two of
+	 * them: it is starved after two block lengths without audio, never sooner than 50 ms, never later than 250 ms. */
+	float last_block_sec;
+	bool starved;
 	float silent_or_starved_sec;
 	bool has_seen_audio;
 	bool initialized;
 };
+
+#define VS_ANALYZER_STARVATION_MAX_SEC 0.250f
 
 void vs_analyzer_default_config(struct vs_analyzer_config *cfg);
 bool vs_analyzer_init(struct vs_analyzer *ana, const struct vs_analyzer_config *cfg);

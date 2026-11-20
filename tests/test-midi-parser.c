@@ -58,6 +58,14 @@ int main(void)
 
 	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
 	REQUIRE(!mfd_midi_parser_is_learning(&p));
+	/* G-02: one CC n followed by CC n+32 is not yet a 14-bit control; a run of MFD_MIDI_14BIT_PAIR_REPEATS is. */
+	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
+	REQUIRE(dec.addr.number == 47U && !dec.addr.is_14bit);
+	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
+	REQUIRE(dec.addr.number == 15U && !dec.addr.is_14bit);
+	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
+	REQUIRE(dec.addr.number == 47U && !dec.addr.is_14bit);
+	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 15U, 0x40U), &dec));
 	REQUIRE(mfd_midi_parser_feed(&p, pack_midi(0xB0U, 47U, 0x2AU), &dec));
 	REQUIRE(dec.addr.type == MFD_MIDI_CC);
 	REQUIRE(dec.addr.channel == 0U);
@@ -121,6 +129,11 @@ int main(void)
 	REQUIRE(dec.raw_value == 20U);
 	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 15U, 0x40U), 2000U, &dec));
 	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 47U, 0x2AU), 2001U, &dec));
+	REQUIRE(dec.addr.number == 47U && !dec.addr.is_14bit); /* the first pair of the run */
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 15U, 0x40U), 2010U, &dec));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 47U, 0x2AU), 2011U, &dec));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 15U, 0x40U), 2020U, &dec));
+	REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 47U, 0x2AU), 2021U, &dec));
 	REQUIRE(dec.addr.number == 15U);
 	REQUIRE(dec.addr.is_14bit);
 	REQUIRE(dec.raw_value == ((0x40U << 7U) | 0x2AU));
@@ -145,6 +158,25 @@ int main(void)
 	REQUIRE(learned.type == MFD_MIDI_CC);
 	REQUIRE(learned.number == 48U);
 	REQUIRE(!learned.is_14bit);
+
+	/* 9. G-02: two separate controls 32 numbers apart (a slider on CC 0, a button on CC 32) are never merged. The
+	 *    button lands right behind a slider message now and then, but never behind three slider messages in a row,
+	 *    which is what a real 14-bit control does on every step. */
+	mfd_midi_parser_init(&p);
+	for (uint32_t round = 0U; round < 20U; ++round) {
+		const uint32_t t0 = 1000U + round * 100U;
+		REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 0U, (uint8_t)(10U + round)), t0, &dec));
+		REQUIRE(dec.addr.number == 0U && !dec.addr.is_14bit);
+		REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 32U, 127U), t0 + 1U, &dec)); /* button down */
+		REQUIRE(dec.addr.number == 32U && !dec.addr.is_14bit);
+		REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 0U, (uint8_t)(11U + round)), t0 + 2U, &dec));
+		REQUIRE(dec.addr.number == 0U && !dec.addr.is_14bit);
+		REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 32U, 0U), t0 + 3U, &dec)); /* button up */
+		REQUIRE(dec.addr.number == 32U && !dec.addr.is_14bit);
+		REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 0U, (uint8_t)(12U + round)), t0 + 20U, &dec));
+		REQUIRE(mfd_midi_parser_feed_at(&p, pack_midi(0xB0U, 0U, (uint8_t)(13U + round)), t0 + 40U, &dec));
+		REQUIRE(dec.addr.number == 0U && !dec.addr.is_14bit && dec.raw_value == 13U + round);
+	}
 
 	printf("test-midi-parser: PASS\n");
 	return 0;

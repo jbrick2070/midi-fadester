@@ -321,6 +321,43 @@ static bool request_number_or_error(obs_data_t *request_data, obs_data_t *respon
 	return ok;
 }
 
+/* The same for a true / false parameter: "afv":"no" would read as false and switch the setting off. */
+static bool request_bool_or_error(obs_data_t *request_data, obs_data_t *response_data, const char *name)
+{
+	obs_data_item_t *item = obs_data_item_byname(request_data, name);
+	const bool ok = item && obs_data_item_gettype(item) == OBS_DATA_BOOLEAN;
+	obs_data_item_release(&item);
+	if (!ok) {
+		char sentence[128];
+		snprintf(sentence, sizeof(sentence), "Parameter '%s' must be a boolean.", name);
+		set_error_comment(response_data, "invalid_parameter", sentence);
+	}
+	return ok;
+}
+
+/* Optional parameters: each one that is present must have its type (C-05). False, with the error set, otherwise. */
+static bool request_optional_types_or_error(obs_data_t *request_data, obs_data_t *response_data,
+					    const char *const *numbers, size_t number_count, const char *const *bools,
+					    size_t bool_count)
+{
+	if (!request_data) {
+		return true;
+	}
+	for (size_t i = 0U; i < number_count; ++i) {
+		if (obs_data_has_user_value(request_data, numbers[i]) &&
+		    !request_number_or_error(request_data, response_data, numbers[i])) {
+			return false;
+		}
+	}
+	for (size_t i = 0U; i < bool_count; ++i) {
+		if (obs_data_has_user_value(request_data, bools[i]) &&
+		    !request_bool_or_error(request_data, response_data, bools[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void set_error_msg(obs_data_t *response_data, const struct mfd_msg *msg)
 {
 	char sentence[256];
@@ -635,7 +672,15 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		return;
 	}
 
-	float val = clamp01((float)calldata_float(cd, "value"));
+	double raw_val = 0.0;
+	if (!calldata_get_float(cd, "value", &raw_val) || !isfinite(raw_val)) {
+		/* no "value" would read as 0 and take the strip to 0 % (C-05) */
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		set_proc_reason(cd, "missing_parameter", "Missing required 'value' parameter (0.0 to 1.0).");
+		return;
+	}
+	float val = clamp01((float)raw_val);
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
 		mfd_engine_unlock(eng);
@@ -1322,6 +1367,16 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (idx < 0) {
 		return;
 	}
+	{
+		/* C-05: a number sent as a string or a bool would be read as 0, a bool sent as a string as false */
+		static const char *const numbers[] = {"cal_min", "cal_max", "from_val", "to_val"};
+		static const char *const bools[] = {"afv", "bypass_at_zero"}; /* "enabled" has its own check below */
+		if (!request_optional_types_or_error(request_data, response_data, numbers,
+						     sizeof(numbers) / sizeof(numbers[0]), bools,
+						     sizeof(bools) / sizeof(bools[0]))) {
+			return;
+		}
+	}
 
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
@@ -1671,6 +1726,10 @@ void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_d
 	}
 	sync_scene_graph_for_request(eng, request_data);
 
+	if (request_data && obs_data_has_user_value(request_data, "ms") &&
+	    !request_number_or_error(request_data, response_data, "ms")) {
+		return; /* "ms":"2000" would read as 0 and clear every FX strip at once (C-05) */
+	}
 	long long raw_ms = (request_data && obs_data_has_user_value(request_data, "ms"))
 				   ? obs_data_get_int(request_data, "ms")
 				   : 0LL;

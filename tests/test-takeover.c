@@ -423,6 +423,36 @@ int main(void)
 	REQUIRE(fabsf(out - 0.40f) < 1e-6f);
 	REQUIRE(mfd_takeover_step(&t_resync, 0.41f, &out)); /* real crossing picks up */
 
+	/*
+	 * 12. G-03: a fader that tops out at CC 125 (125/127 = 0.984) picks up a value that sits at 100 %, and one that
+	 *     bottoms out at CC 2 picks up a value at 0 %. Outside the 3 % rail zone nothing changes: no pick-up.
+	 */
+	struct mfd_takeover t_short;
+	mfd_takeover_init(&t_short, 1.0f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_short, true);
+	REQUIRE(!mfd_takeover_step(&t_short, 0.50f, &out));
+	REQUIRE(fabsf(out - 1.0f) < 1e-6f);
+	REQUIRE(!mfd_takeover_step(&t_short, 120.0f / 127.0f, &out)); /* 94.5 %: below the rail zone */
+	REQUIRE(t_short.state == MFD_TAKEOVER_WAITING);
+	(void)mfd_takeover_step(&t_short, 125.0f / 127.0f, &out);
+	REQUIRE(t_short.state != MFD_TAKEOVER_WAITING); /* picked up (and at the rail) */
+	REQUIRE(out >= 0.97f);
+
+	mfd_takeover_init(&t_short, 0.0f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_short, true);
+	REQUIRE(!mfd_takeover_step(&t_short, 0.50f, &out));
+	REQUIRE(!mfd_takeover_step(&t_short, 6.0f / 127.0f, &out)); /* 4.7 %: above the rail zone */
+	REQUIRE(t_short.state == MFD_TAKEOVER_WAITING);
+	(void)mfd_takeover_step(&t_short, 2.0f / 127.0f, &out);
+	REQUIRE(t_short.state != MFD_TAKEOVER_WAITING);
+	REQUIRE(out <= 0.03f);
+
+	/* A value in the rail zone is not met by a fader at the other end. */
+	mfd_takeover_init(&t_short, 0.98f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_short, true);
+	REQUIRE(!mfd_takeover_step(&t_short, 0.01f, &out));
+	REQUIRE(t_short.state == MFD_TAKEOVER_WAITING);
+
 	printf("test-takeover: PASS\n");
 	return 0;
 }

@@ -98,6 +98,9 @@ struct mfd_fader_slot {
 	 * never on the video thread: a re-check there asks the UI thread, which reads them with no engine lock held
 	 * (A-03, mfd_engine_flush_pending_ui_work).
 	 */
+	/* A Two-Source Mix strip that was just loaded or bound has not looked at OBS yet: at its first re-check as
+	 * available it starts where the picture is (B-06). */
+	bool mix_start_pending;
 	bool filter_meta_cached;    /* filter_meta_* describe the three names below */
 	bool filter_meta_stale;     /* the filter changed since: read again when a thread that may do so comes by */
 	uint8_t filter_meta_result; /* enum mfd_filter_meta_result */
@@ -435,6 +438,8 @@ struct mfd_scene_graph_ops {
 	bool (*get_item_visible)(const char *scene_name, const char *source_name, bool *out_visible, void *user_data);
 	/* Optional: carry out an APC40 desk command instead of calling OBS (headless tests). */
 	void (*run_vj_command)(const struct mfd_vj_command *cmd, void *user_data);
+	/* Optional: a source's level as the layer filter holds it now, 0..1 (headless tests). */
+	bool (*get_opacity)(const char *source_name, float *out_alpha_01, void *user_data);
 };
 
 /*
@@ -509,6 +514,9 @@ struct mfd_engine {
 	struct mfd_midi_parser midi_parser;
 	struct mfd_winmm_device midi_dev;
 	bool midi_io_busy; /* this plugin is closing or opening the port with no engine lock held (A-02) */
+	/* The settings file (per user) has been read or written with a strip list: it owns each strip's MIDI address,
+	 * 14-bit flag and learned range, and a scene collection load keeps them (B-04). */
+	bool user_midi_layout_known;
 	/* A-03: a re-check on the video thread found a Filter Setting strip whose filter properties must be read
 	 * again; the UI thread's flush does it. */
 	bool filter_meta_refresh_pending;

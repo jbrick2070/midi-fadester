@@ -195,6 +195,24 @@ int main(void)
 		assert(b.calls == 2 && b.last_seq == 9);
 	}
 
+	/* E-02: a client that connects and sends nothing is cut off fast, so a row of them cannot hold the one listener
+	 * thread for 1.5 s each and starve the decks past the 3 s link timeout. Six silent clients, then a report: it
+	 * goes through well within a second (6 x 1.5 s before). */
+	{
+		tub_socket_t silent[6];
+		uint64_t t0 = os_gettime_ns();
+		for (int i = 0; i < 6; i++)
+			silent[i] = connect_to(port);
+		const int calls_before = b.calls;
+		assert(post(port, "{\"deck\":\"deck-b\",\"inc\":\"p2\",\"seq\":10,\"ev\":\"tick\"}") == 204);
+		double secs = (double)(os_gettime_ns() - t0) / (double)SEC;
+		printf("  a report behind six silent clients took %.2f s\n", secs);
+		assert(secs < 2.5);
+		assert(b.calls == calls_before + 1 && b.last_seq == 10);
+		for (int i = 0; i < 6; i++)
+			tub_socket_close(silent[i]);
+	}
+
 	/* a body that never completes is refused at the deadline and reaches no deck */
 	{
 		uint64_t t0 = os_gettime_ns();
@@ -237,8 +255,8 @@ int main(void)
 	tub_listener_unregister(&a);
 	assert(post(port, "{\"deck\":\"deck-a\",\"inc\":\"p1\",\"seq\":3,\"ev\":\"tick\"}") == 204);
 	assert(a.calls == 2);
-	assert(post(port, "{\"deck\":\"deck-b\",\"inc\":\"p2\",\"seq\":10,\"ev\":\"tick\"}") == 204);
-	assert(b.calls == 3);
+	assert(post(port, "{\"deck\":\"deck-b\",\"inc\":\"p2\",\"seq\":11,\"ev\":\"tick\"}") == 204);
+	assert(b.calls == 4);
 	tub_listener_unregister(&a); /* twice is harmless */
 	tub_listener_unregister(NULL);
 
@@ -264,7 +282,7 @@ int main(void)
 	int port2 = tub_listener_port();
 	assert(port2 > 0);
 	assert(post(port2, "{\"deck\":\"deck-c\",\"inc\":\"p\",\"seq\":1,\"ev\":\"tick\"}") == 204);
-	assert(c.calls == 1 && b.calls == 3); /* deck-b was forgotten by stop */
+	assert(c.calls == 1 && b.calls == 4); /* deck-b was forgotten by stop */
 
 	/* a stop in the middle of a slow request returns at once instead of waiting for the client */
 	{

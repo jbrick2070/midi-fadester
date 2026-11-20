@@ -1274,6 +1274,12 @@ int main(int argc, char **argv)
 	}
 
 	/* Drive live MIDI into strips 0, 1, 2, 3, and 9 (crossing initial Soft Takeover targets first) */
+	/* Color 2 lies above Color, so the mix strip starts at 100 % (B-06). This walk-through starts it from 0 %. */
+	REQUIRE(std::fabs(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
+	mfd_smoother_reset(&eng.fader_slots[1].smoother, 0.0f);
+	mfd_takeover_init(&eng.fader_slots[1].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	mfd_takeover_set_two_rail_mode(&eng.fader_slots[1].takeover, true);
+	eng.fader_slots[1].last_applied_val = 0.0f;
 	push_midi_cc(&eng, 0, 7, 0);    /* Strip 1 pickup at 0% */
 	push_midi_cc(&eng, 0, 7, 61);   /* Strip 1 (Ch 1 CC 7): 48% */
 	push_midi_cc(&eng, 1, 7, 127);  /* Strip 2 pickup at 100% */

@@ -141,6 +141,8 @@ void vs_analyzer_reset(struct vs_analyzer *ana)
 		vs_envelope_channel_reset(&ana->env_spectrum[i]);
 	ana->last_written_samples = 0;
 	ana->time_since_audio_sec = 0.0f;
+	ana->last_block_sec = 0.0f;
+	ana->starved = false;
 	ana->silent_or_starved_sec = 0.0f;
 	ana->has_seen_audio = false;
 }
@@ -208,11 +210,21 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 	}
 
 	if (written > ana->last_written_samples) {
+		const uint64_t arrived = written - ana->last_written_samples;
+		ana->last_block_sec = (float)((double)arrived / (double)ana->cfg.sample_rate);
 		ana->last_written_samples = written;
 		ana->time_since_audio_sec = 0.0f;
 	} else {
 		ana->time_since_audio_sec += dt_sec;
 	}
+	/* Starved is judged against the length of the last block, not a fixed 50 ms (G-01): with 85 ms blocks, two or
+	 * three video frames of every five fall more than 50 ms after the last block, and every signal would pump. */
+	float starvation_after_sec = 2.0f * ana->last_block_sec;
+	if (starvation_after_sec < VS_ENV_STARVATION_THRESHOLD_SEC)
+		starvation_after_sec = VS_ENV_STARVATION_THRESHOLD_SEC;
+	if (starvation_after_sec > VS_ANALYZER_STARVATION_MAX_SEC)
+		starvation_after_sec = VS_ANALYZER_STARVATION_MAX_SEC;
+	ana->starved = ana->time_since_audio_sec > starvation_after_sec;
 
 	const uint64_t available = written > offset_samples ? written - offset_samples : 0u;
 	remove_dc_offset(ana->win_low, low_size, available);
@@ -228,7 +240,8 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 	struct vs_onset_result onset_res;
 	vs_onset_step(&ana->onset, ana->mag_low, ana->mag_mid, dt_sec, &onset_res);
 
-	const float starved = ana->time_since_audio_sec;
+	/* The envelope's own test is "more than 50 ms": it gets 0 while the stream is alive, the true gap once not. */
+	const float starved = ana->starved ? ana->time_since_audio_sec : 0.0f;
 	out_frame->level = vs_envelope_step(&ana->env_level, &ana->env_cfg, spec_frame.level, dt_sec, starved);
 	out_frame->sub_bass = vs_envelope_step(&ana->env_sub_bass, &ana->env_cfg, spec_frame.sub_bass, dt_sec, starved);
 	out_frame->bass = vs_envelope_step(&ana->env_bass, &ana->env_cfg, spec_frame.bass, dt_sec, starved);
@@ -331,7 +344,7 @@ float vs_analyzer_get_signal(const struct vs_analyzer *ana, const struct vs_audi
 			return 0.0f;
 		/* A stopped source leaves its last window in the ring, and every step reruns the FFT on it: cut the band
 		 * hard, like the FFT bins and flux, instead of holding its last level (R-ANA-7). */
-		if (ana->time_since_audio_sec > VS_ENV_STARVATION_THRESHOLD_SEC)
+		if (ana->starved)
 			return 0.0f;
 		return vs_spectrum_extract_hz_band(&ana->spectrum, ana->mag_low, ana->mag_mid, custom_low_hz,
 						   custom_high_hz, custom_mode);

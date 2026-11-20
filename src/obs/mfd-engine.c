@@ -900,6 +900,7 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	slot->last_applied_val = initial_val;
 	slot->last_alpha_a = 1.0f;
 	slot->last_alpha_b = 0.0f;
+	slot->mix_start_pending = (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	slot->last_audio_mul = mfd_deflection_to_mul(initial_val);
 	slot->last_audio_db = mfd_deflection_to_db(initial_val);
 	slot->output_write_count = 0U;
@@ -1032,6 +1033,7 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 	slot->last_applied_val = init_val;
 	slot->last_alpha_a = 1.0f;
 	slot->last_alpha_b = 0.0f;
+	slot->mix_start_pending = (new_target == MFD_TARGET_TWO_SOURCE_MIX);
 	slot->last_audio_mul = mfd_deflection_to_mul(init_val);
 	slot->last_audio_db = mfd_deflection_to_db(init_val);
 
@@ -2726,8 +2728,19 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 					}
 				} else {
 					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
-					if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name, NULL,
-										   found_sc, sizeof(found_sc))) {
+					if (eng->cached_program_scene[0] != '\0' &&
+					    sg_scene_item_stack_index(eng, eng->cached_program_scene,
+								      slot->source_a_name) >= 0) {
+						/* A strip with no scene of its own acts on the scene on air when that scene
+						 * holds its source (B-05): a show/hide or blend pad must change what the
+						 * audience sees, not the first scene OBS happens to list. Re-checked on
+						 * every Program change. */
+						avail = true;
+						mfd_msg_clear(&rsn);
+						snprintf(res_scene, sizeof(res_scene), "%s", eng->cached_program_scene);
+					} else if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name,
+											  NULL, found_sc,
+											  sizeof(found_sc))) {
 						avail = true;
 						mfd_msg_clear(&rsn);
 						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
@@ -2813,6 +2826,53 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 	}
 }
 
+static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *out);
+
+/*
+ * Engine lock held. The strip's output is at v and its fader has to pick it up again from where it is: the takeover
+ * starts over at v, and if the fader's position is known it is kept, with the hint pointing from it to v.
+ */
+static void restart_pickup_at_locked(const struct mfd_engine *eng, struct mfd_fader_slot *s, float v)
+{
+	bool had_raw = s->takeover.has_last_fader;
+	float raw = s->last_raw_norm;
+	mfd_takeover_init(&s->takeover, v, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	configure_slot_takeover_mode(eng, s);
+	if (had_raw) {
+		s->takeover.has_last_fader = true;
+		s->takeover.last_raw_fader = raw;
+		s->takeover.last_fader = raw;
+		float diff = raw - v;
+		s->takeover.hint = fabsf(diff) <= s->takeover.pickup_threshold ? MFD_HINT_NONE
+				   : diff < 0.0f                               ? MFD_HINT_MOVE_UP
+									       : MFD_HINT_MOVE_DOWN;
+	}
+}
+
+/*
+ * B-06: a Two-Source Mix strip that was just loaded or bound has written nothing yet, and OBS has both sources at the
+ * level their layer filters hold (100 % after a restart: the filter does not save its level). So the picture shows the
+ * upper source. The strip starts at the end that shows the same picture, with pick-up from where its fader is,
+ * instead of claiming 0 % (source A) while Program shows B. Nothing is written to OBS: the picture does not move.
+ */
+static void mix_start_where_obs_is_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot)
+{
+	slot->mix_start_pending = false;
+	float level_a = 1.0f;
+	float level_b = 1.0f;
+	(void)vj_live_opacity(eng, slot->source_a_name, &level_a);
+	(void)vj_live_opacity(eng, slot->source_b_name, &level_b);
+	const bool a_above = slot->a_is_above_b;
+	const bool upper_shown = (a_above ? level_a : level_b) >= 0.5f;
+	/* 0 % is source A, 100 % is source B */
+	const float t = (a_above == upper_shown) ? 0.0f : 1.0f;
+
+	mfd_smoother_reset(&slot->smoother, t);
+	restart_pickup_at_locked(eng, slot, t);
+	slot->last_applied_val = t;
+	mfd_crossfade_eval_stacked(slot->curve, t, a_above, &slot->last_alpha_a, &slot->last_alpha_b);
+}
+
 void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 {
 	if (!eng) {
@@ -2883,6 +2943,10 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 			mfd_engine_apply_slot_output_ex(eng, slot, 0.0f, false);
 			mfd_takeover_sync_external(&slot->takeover, 0.0f);
 			mfd_engine_notify_fader_changed(eng, i, "api");
+			any_changed = true;
+		} else if (new_avail && slot->target_type == MFD_TARGET_TWO_SOURCE_MIX && slot->mix_start_pending &&
+			   !(eng->setup_session.active && eng->setup_session.slot_index == i)) {
+			mix_start_where_obs_is_locked(eng, slot);
 			any_changed = true;
 		} else if (new_avail && slot->target_type == MFD_TARGET_TWO_SOURCE_MIX && prev_avail &&
 			   prev_a_above_b != new_a_above_b &&
@@ -4182,6 +4246,79 @@ void mfd_engine_cancel_setup_session(struct mfd_engine *eng)
 	mfd_engine_unlock(eng);
 }
 
+static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_slot *s, float v);
+static void apply_source_opacity_and_afv(const struct mfd_engine *eng, const char *source_name, float alpha_01,
+					 bool afv);
+
+/* What a strip showed or mixed before an edit: the sources it may leave behind (B-07). */
+struct mfd_layer_binding {
+	enum mfd_target_type target;
+	bool afv;
+	char source_a[MFD_SOURCE_NAME_MAX];
+	char source_b[MFD_SOURCE_NAME_MAX];
+};
+
+static void layer_binding_read(const struct mfd_fader_slot *s, struct mfd_layer_binding *out)
+{
+	out->target = s->enabled ? s->target_type : MFD_TARGET_UNASSIGNED;
+	out->afv = s->audio_follows_video;
+	snprintf(out->source_a, sizeof(out->source_a), "%s", s->source_a_name);
+	snprintf(out->source_b, sizeof(out->source_b), "%s", s->source_b_name);
+}
+
+static bool slot_drives_layer(const struct mfd_fader_slot *s, const char *source)
+{
+	if (!s->enabled) {
+		return false;
+	}
+	if (s->target_type == MFD_TARGET_SINGLE_LAYER) {
+		return strcmp(s->source_a_name, source) == 0;
+	}
+	if (s->target_type == MFD_TARGET_TWO_SOURCE_MIX) {
+		return strcmp(s->source_a_name, source) == 0 || strcmp(s->source_b_name, source) == 0;
+	}
+	return false;
+}
+
+/* A source no strip drives any more goes back to 100 %: left faded out, nothing could raise it again. */
+static void release_layer_if_undriven_locked(struct mfd_engine *eng, const char *source, bool afv)
+{
+	if (!source || source[0] == '\0') {
+		return;
+	}
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		if (slot_drives_layer(&eng->fader_slots[i], source)) {
+			return;
+		}
+	}
+	if (mfd_engine_source_exists(eng, source)) {
+		apply_source_opacity_and_afv(eng, source, 1.0f, afv);
+	}
+}
+
+/*
+ * B-07: a strip was given another source (or another job). Call after the strip has been written and reset. The
+ * sources it left go back to 100 % when no strip drives them, and a Layer Opacity strip starts at the level its new
+ * source has now, with pick-up from where its fader is: the picture does not jump at the first fader move.
+ */
+static void after_layer_binding_change_locked(struct mfd_engine *eng, struct mfd_fader_slot *s,
+					      const struct mfd_layer_binding *before)
+{
+	if (before->target == MFD_TARGET_SINGLE_LAYER || before->target == MFD_TARGET_TWO_SOURCE_MIX) {
+		release_layer_if_undriven_locked(eng, before->source_a, before->afv);
+	}
+	if (before->target == MFD_TARGET_TWO_SOURCE_MIX) {
+		release_layer_if_undriven_locked(eng, before->source_b, before->afv);
+	}
+	if (s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
+	    (before->target != MFD_TARGET_SINGLE_LAYER || strcmp(before->source_a, s->source_a_name) != 0)) {
+		float live = 1.0f;
+		if (vj_live_opacity(eng, s->source_a_name, &live)) {
+			vj_start_strip_at_locked(eng, s, live);
+		}
+	}
+}
+
 bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_index)
 {
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -4196,6 +4333,8 @@ bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_ind
 	}
 	mfd_engine_detach_filter_binding_locked(eng, slot_index);
 	struct mfd_fader_slot *s = &eng->fader_slots[slot_index];
+	struct mfd_layer_binding before;
+	layer_binding_read(s, &before);
 	s->enabled = true;
 	s->scene_name[0] = '\0';
 	s->resolved_scene_name[0] = '\0';
@@ -4211,6 +4350,7 @@ bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_ind
 	s->audio_follows_video = false;
 	s->auto_follow = false;
 	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
+	after_layer_binding_change_locked(eng, s, &before); /* the source it leaves is not left faded out (B-07) */
 	mfd_engine_bump_slot_rev(eng, slot_index);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
@@ -4388,6 +4528,8 @@ bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mf
 	mfd_engine_detach_filter_binding_locked(eng, cand->slot_index);
 
 	struct mfd_fader_slot *s = &eng->fader_slots[cand->slot_index];
+	struct mfd_layer_binding before;
+	layer_binding_read(s, &before);
 	mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 	s->enabled = cand->enabled;
 	s->addr = chosen_addr;
@@ -4429,6 +4571,7 @@ bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mf
 										       : MFD_TARGET_UNASSIGNED;
 	s->target_type = force_prev;
 	mfd_engine_reset_slot_mode_state(eng, s, cand->target_type);
+	after_layer_binding_change_locked(eng, s, &before);
 
 	memset(&eng->setup_session, 0, sizeof(eng->setup_session));
 	mfd_engine_bump_slot_rev(eng, cand->slot_index);
@@ -4723,6 +4866,8 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 	mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 	mfd_engine_detach_filter_binding_locked(eng, slot_index);
 
+	struct mfd_layer_binding before;
+	layer_binding_read(s, &before);
 	s->enabled = edit->enabled;
 	bool invert_changed = (s->invert != edit->invert);
 	s->invert = edit->invert;
@@ -4782,7 +4927,24 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 	if (edit->target_type == MFD_TARGET_FILTER_PARAM && filter_range_changed) {
 		s->target_type = MFD_TARGET_UNASSIGNED;
 	}
+	/* A layer or mix strip given another source starts afresh, as the Set up commit does (B-07): its level and
+	 * pick-up belonged to the source it had. */
+	const bool layer_sources_changed =
+		(edit->target_type == MFD_TARGET_SINGLE_LAYER || edit->target_type == MFD_TARGET_TWO_SOURCE_MIX) &&
+		before.target == edit->target_type &&
+		(strcmp(before.source_a, s->source_a_name) != 0 ||
+		 (edit->target_type == MFD_TARGET_TWO_SOURCE_MIX && strcmp(before.source_b, s->source_b_name) != 0));
+	if (layer_sources_changed) {
+		s->target_type = MFD_TARGET_UNASSIGNED;
+	}
 	mfd_engine_reset_slot_mode_state(eng, s, edit->target_type);
+	after_layer_binding_change_locked(eng, s, &before);
+	if (invert_changed && s->enabled && s->target_type != MFD_TARGET_TBAR &&
+	    s->target_type != MFD_TARGET_UNASSIGNED && s->takeover.has_last_fader) {
+		/* Reverse direction was switched: the fader now stands for the mirrored position. Its pick-up starts
+		 * over at the value the strip has, so the output does not jump to the mirror at the next message. */
+		restart_pickup_at_locked(eng, s, s->last_applied_val);
+	}
 	mfd_engine_bump_slot_rev(eng, slot_index);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
@@ -5420,9 +5582,14 @@ static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
 	mfd_midi_parser_clear_lsb_independent(&eng->midi_parser);
 	/* The APC40 mkII sends only 7-bit CCs, but its controls sit on 14-bit LSB numbers: Cue Level (CC 47) is the
 	 * crossfader's (CC 15) partner and the track knobs (CC 48..55) the Device knobs' (CC 16..23). Turning one within
-	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar. Another desk on
-	 * the default profile keeps 14-bit pairing. */
-	if (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) {
+	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar.
+	 *
+	 * The same holds for every desk this plugin has a layout for (G-02): none of them sends 14-bit CC pairs, and
+	 * on several a second control sits 32 numbers above a fader (the nanoKONTROL2's S buttons above its sliders,
+	 * the MIDImix's knob rows). Only the Generic layout, where the desk is unknown, pairs CC n with CC n+32, and
+	 * there the parser asks for a run of pairs first (MFD_MIDI_14BIT_PAIR_REPEATS). */
+	if ((eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) ||
+	    mfd_engine_get_active_profile(eng) != MFD_PROFILE_GENERIC) {
 		for (uint8_t ch = 0; ch < 16U; ++ch) {
 			for (uint8_t cc = 32U; cc < 64U; ++cc) {
 				mfd_midi_parser_set_lsb_independent(&eng->midi_parser, ch, cc, true);
@@ -6637,7 +6804,20 @@ static bool vj_collect_layers(struct mfd_engine *eng, const char *scene, struct 
 /* The level Midi Fadester's own opacity filter has on a source now, if it has one. */
 static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *out)
 {
-	if (eng->scene_graph_ops || !obs_initialized()) {
+	if (!source || source[0] == '\0') {
+		return false;
+	}
+	if (eng->scene_graph_ops) {
+		float v = 0.0f;
+		if (eng->scene_graph_ops->get_opacity &&
+		    eng->scene_graph_ops->get_opacity(source, &v, eng->scene_graph_user_data) && v >= 0.0f &&
+		    v <= 1.0f) {
+			*out = v;
+			return true;
+		}
+		return false;
+	}
+	if (!obs_initialized()) {
 		return false;
 	}
 	obs_source_t *src = obs_get_source_by_name(source);
@@ -6661,22 +6841,10 @@ static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *o
 /* A strip taking a layer that is at some level already starts there, with pick-up from where its fader is. */
 static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_slot *s, float v)
 {
-	bool had_raw = s->takeover.has_last_fader;
-	float raw = s->last_raw_norm;
 	mfd_smoother_reset(&s->smoother, v);
-	mfd_takeover_init(&s->takeover, v, MFD_DEFAULT_PICKUP_THRESHOLD, false);
-	configure_slot_takeover_mode(eng, s);
+	restart_pickup_at_locked(eng, s, v);
 	s->last_applied_val = v;
 	s->last_alpha_a = v;
-	if (had_raw) {
-		s->takeover.has_last_fader = true;
-		s->takeover.last_raw_fader = raw;
-		s->takeover.last_fader = raw;
-		float diff = raw - v;
-		s->takeover.hint = fabsf(diff) <= s->takeover.pickup_threshold ? MFD_HINT_NONE
-				   : diff < 0.0f                               ? MFD_HINT_MOVE_UP
-									       : MFD_HINT_MOVE_DOWN;
-	}
 }
 
 /* Points strip k (1..8) at a source in a scene, or at nothing, as a strip that follows the scene. What the pads held
@@ -8881,7 +9049,7 @@ void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event)
 }
 
 static void serialize_slots(struct mfd_engine *eng, obs_data_t *root);
-static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root);
+static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root, bool keep_user_midi);
 
 void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root)
 {
@@ -8893,7 +9061,7 @@ void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *roo
 void mfd_engine_deserialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root)
 {
 	mfd_engine_lock(eng);
-	deserialize_slots(eng, root);
+	deserialize_slots(eng, root, false);
 	mfd_engine_unlock(eng);
 }
 
@@ -9007,15 +9175,34 @@ static void clear_slot_filter_fields(struct mfd_fader_slot *s)
 	s->filter_prop_valid = false;
 }
 
-static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
+/*
+ * keep_user_midi (B-04): a scene collection is loading and this installation has its own settings file. Which control
+ * drives each strip, its 14-bit flag and its learned range belong to the user (README: "kept per user"), so they stay
+ * as they are; the collection gives only each strip's job. Without it (the settings file itself, Import, or a
+ * collection read before any settings file exists) the addresses in the data are taken.
+ */
+static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root, bool keep_user_midi)
 {
 	obs_data_array_t *arr = obs_data_get_array(root, "slots");
 	if (!arr) {
 		return;
 	}
 
+	struct mfd_midi_addr user_addr[MFD_MAX_FADER_SLOTS];
+	struct mfd_control_calibration user_cal[MFD_MAX_FADER_SLOTS];
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		user_addr[i] = eng->fader_slots[i].addr;
+		user_cal[i] = eng->fader_slots[i].cal;
+	}
+
 	/* Pre-seed 0..17 from active profile defaults (detaching any active filter bypass leases first) */
 	mfd_engine_load_profile_defaults(eng, mfd_engine_get_active_profile(eng));
+	if (keep_user_midi) {
+		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+			eng->fader_slots[i].addr = user_addr[i];
+			eng->fader_slots[i].cal = user_cal[i];
+		}
+	}
 
 	bool seen_slot[MFD_MAX_FADER_SLOTS];
 	memset(seen_slot, 0, sizeof(seen_slot));
@@ -9068,7 +9255,9 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			}
 		}
 
-		if (obs_data_has_user_value(item, "midi_type")) {
+		if (keep_user_midi) {
+			/* the address and range restored above stay; the data's own are not read */
+		} else if (obs_data_has_user_value(item, "midi_type")) {
 			long long raw_mtype = obs_data_get_int(item, "midi_type");
 			if (raw_mtype < (long long)MFD_MIDI_NONE || raw_mtype > (long long)MFD_MIDI_PITCH_BEND) {
 				obs_log(LOG_WARNING, "Slot '%s' had invalid midi_type %lld; resetting MIDI binding",
@@ -9081,7 +9270,9 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			s->addr.number = (uint8_t)(obs_data_get_int(item, "midi_number") & 0x7F);
 			s->addr.is_14bit = obs_data_get_bool(item, "midi_14bit");
 		}
-		if (obs_data_has_user_value(item, "cal_min") && obs_data_has_user_value(item, "cal_max")) {
+		if (keep_user_midi) {
+			/* kept */
+		} else if (obs_data_has_user_value(item, "cal_min") && obs_data_has_user_value(item, "cal_max")) {
 			mfd_calibration_set(&s->cal, slot_addr_is_14bit(&s->addr),
 					    (int)obs_data_get_int(item, "cal_min"),
 					    (int)obs_data_get_int(item, "cal_max"));
@@ -9257,7 +9448,7 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 		}
 		obs_data_array_release(punches);
 		if (obj) {
-			deserialize_slots(eng, obj);
+			deserialize_slots(eng, obj, eng->user_midi_layout_known);
 			if (slots_differ_from_apc40_defaults(eng)) {
 				eng->first_run_offer_dismissed = true;
 			}
@@ -9425,7 +9616,11 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		obs_data_array_release(punch);
 	}
 	deserialize_calibrations(eng, data);
-	deserialize_slots(eng, data);
+	deserialize_slots(eng, data, false);
+	if (obs_data_has_user_value(data, "slots")) {
+		eng->user_midi_layout_known =
+			true; /* from here a scene collection no longer changes addresses (B-04) */
+	}
 	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
@@ -9477,6 +9672,15 @@ bool mfd_engine_save_global_config(struct mfd_engine *eng)
 	}
 	bool ok = mfd_engine_export_config_file(eng, cfg_path);
 	bfree(cfg_path);
+	if (ok) {
+		mfd_engine_lock(eng);
+		if (eng->frontend_finished_loading) {
+			/* The settings file now holds this session's addresses. Only once OBS has loaded: an installation
+			 * with no settings file yet first reads its addresses from the scene collection (B-04). */
+			eng->user_midi_layout_known = true;
+		}
+		mfd_engine_unlock(eng);
+	}
 	return ok;
 }
 

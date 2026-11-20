@@ -207,6 +207,19 @@ static void refresh_studio_mode_state_on_ui_thread(void)
 
 static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release, uint64_t epoch);
 
+/* Whether the transition on output 0 is running and has not reached its end: a manual (T-bar) throw under way. */
+static bool output0_transition_is_midway(void)
+{
+	obs_source_t *tr = obs_get_output_source(0);
+	if (!tr) {
+		return false;
+	}
+	const bool midway = obs_source_get_type(tr) == OBS_SOURCE_TYPE_TRANSITION && obs_transition_is_active(tr) &&
+			    obs_transition_get_time(tr) < 1.0f;
+	obs_source_release(tr);
+	return midway;
+}
+
 /*
  * OBS 33 raises TRANSITION_STOPPED when the video side of a transition stops; the audio side stops later, and until
  * then obs_transition_is_active() stays true. A command parked in that gap has no later event to flush it, so it is
@@ -2866,6 +2879,16 @@ static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 		break;
 	}
 	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED: {
+		if (g_tbar_ui_throw_active && !g_tbar_awaiting_transition_stop && output0_transition_is_midway()) {
+			/*
+			 * C-03: OBS sends this for any transition whose video side ends, and it can arrive late: the
+			 * transition before this throw ended, the throw's first move ran, and only now does the event
+			 * come. Output 0's transition is still running part-way, which is this throw. Ending it in the
+			 * engine here would leave OBS's manual transition stuck half-way with nothing to release it.
+			 */
+			obs_log(LOG_INFO, "T-bar: a transition-stopped event from an earlier transition was ignored");
+			break;
+		}
 		const bool external_reset = g_tbar_ui_throw_active && !g_tbar_awaiting_transition_stop;
 		g_tbar_ui_throw_active = false;
 		g_tbar_awaiting_transition_stop = false;

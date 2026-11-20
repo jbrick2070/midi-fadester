@@ -328,6 +328,16 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		bool within = (fabsf(effective - t->target_obs) <= t->pickup_threshold) ||
 			      (!t->two_rail_mode && t->target_obs <= 1e-5f &&
 			       effective <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f));
+		if (t->two_rail_mode) {
+			/* A fader that stops a step or two short of its end (CC 125 of 127, or CC 2) can neither come
+			 * within the pick-up window of a value that sits on that rail nor cross it (G-03). The fader
+			 * and the value in the same 3 % rail zone count as met: the zones the park logic uses. */
+			const bool both_at_top = effective >= (MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) &&
+						 t->target_obs >= (MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f);
+			const bool both_at_bottom = effective <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) &&
+						    t->target_obs <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f);
+			within = within || both_at_top || both_at_bottom;
+		}
 		bool crossed = false;
 		if (t->has_last_fader) {
 			crossed = ((t->last_fader <= t->target_obs && effective >= t->target_obs) ||
