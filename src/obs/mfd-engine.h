@@ -333,7 +333,6 @@ enum mfd_vj_command_kind {
 	MFD_VJ_CMD_PROGRAM,     /* scene straight to Program, with the current transition */
 	MFD_VJ_CMD_TAKE,        /* Preview to Program with the transition */
 	MFD_VJ_CMD_SET_VISIBLE, /* scene, source, arg 1 shown / 0 hidden */
-	MFD_VJ_CMD_RESTART,     /* source: restart its video */
 	MFD_VJ_CMD_VS_PANIC,    /* Visual Sidechain panic, or restore when panicked */
 	MFD_VJ_CMD_VS_TAP,      /* Visual Sidechain tap tempo */
 	MFD_VJ_CMD_VS_LOCK,     /* Visual Sidechain BPM lock toggled */

@@ -1179,8 +1179,9 @@ private:
 				"Columns 1–8 are the sources of the scene on air, bottom layer first: empty faders fill "
 				"themselves and follow the scene; a fader you set yourself stays. Bottom pad row: blend punch "
 				"(Shift + pad: next punch mode). Row 2: flash while held (Shift: blackout). Row 3: fade out and "
-				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: scene fades, Preview "
-				"to Program over 8 bars on the left down to 1/4 beat on the right (Shift: cut). Clip Stop: that "
+				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: pad 1 (yellow) cuts "
+				"Preview to Program; pads 2–8 fade it in time with the beat, from 8 bars down to 1/2 beat. Clip "
+				"Stop: that "
 				"column back to its own blend (Shift: pin the column to its source). Stop All "
 				"Clips: Clean, every effect off and every source back to its own blend (Shift: fade every layer "
 				"out)."),

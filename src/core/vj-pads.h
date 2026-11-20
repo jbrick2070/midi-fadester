@@ -119,7 +119,6 @@ enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_SNAP,            /* strip: straight to 0 % when it shows, else back up (Shift + row 3) */
 	MFD_VJ_ACTION_SHOW_TOGGLE,     /* strip: the source's eye on or off (row 4) */
 	MFD_VJ_ACTION_WAKE,            /* strip: shown, 100 %, blend Normal (Shift + row 4) */
-	MFD_VJ_ACTION_RESTART,         /* strip: restart the source's video (no desk button since 0.9.1) */
 	MFD_VJ_ACTION_PIN_TOGGLE,      /* strip: pin the column to its source, or let it follow the scene again */
 	MFD_VJ_ACTION_COLUMN_CLEAN,    /* strip: blend Normal, flash and blackout let go (Clip Stop) */
 	MFD_VJ_ACTION_SCENE_PICK,      /* strip = scene 0..4: to Preview, or take it when it is in Preview */
