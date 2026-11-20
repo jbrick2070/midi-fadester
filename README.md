@@ -8,9 +8,9 @@
 
 Midi Fadester turns the faders and knobs on a MIDI controller into live controls for OBS Studio. Fade from one scene to the next with a real crossfader. Mix two layers. Fade a camera in and out. Ride a volume. Sweep any filter setting. It is made for the Akai APC40 mkII and works with other controllers through MIDI Learn.
 
-[![Demo: the APC40 crossfader throws OBS's Studio Mode T-bar between two VJ scenes while the Fadester Desk dock follows](docs/demo/Midi-Fadester-0.9.0-demo-preview.webp)](docs/demo/Midi-Fadester-0.9.0-demo.mp4)
+[![Demo: the APC40's top row fades and cuts between VJ scenes in time with the beat, Session blacks Program out, and the Fadester Desk dock follows](docs/demo/Midi-Fadester-0.9.1-demo-preview.webp)](docs/demo/Midi-Fadester-0.9.1-demo.mp4)
 
-**[Watch the one-minute demo](docs/demo/Midi-Fadester-0.9.0-demo.mp4)** (MP4, 9 MB): the crossfader throws the Studio Mode T-bar, channel faders fade the layers of the scene on air, Visual Sidechain's Beat Zoom moves with the music, Panic and Restore visuals, tap and lock the tempo, and the Fadester Desk dock follows all of it. The "Your controller" APC40 in the corner is a drawing of the desk moves; OBS was driven by a script for the recording.
+**[Watch the one-minute demo](docs/demo/Midi-Fadester-0.9.1-demo.mp4)** (MP4, 7 MB): the crossfader throws the Studio Mode T-bar, the top row fades Preview to Program in time with the beat (1 bar, then 2 bars) and its yellow pad cuts, Session fades Program to black and back, channel faders fade the layers of the scene on air, Visual Sidechain's Beat Zoom moves with the music, and Panic turns every effect off; the Fadester Desk dock follows all of it. The "Your controller" APC40 in the corner is a drawing of the desk moves; OBS was driven by a script for the recording.
 
 ![The Strips screen: a throw in progress on the crossfader, a two-layer mix, a layer fade, a volume and the master](docs/screenshots/03-strips-throwing-and-active.png)
 
@@ -300,11 +300,11 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 | Row 2 | **Flash** the source to 100 % while you hold the pad; the fader keeps its place underneath. With Shift: **blackout**, 0 % while held. |
 | Row 3 | **Fade** the source out over the pad fade time; press again to fade it back. With Shift: **snap** to 0 % and back, at once. |
 | Row 4 | **Show or hide** the source (its eye in OBS). With Shift: **wake** it: shown, 100 %, its own blend. |
-| Row 5 (top) | **Restart** the source's video. With Shift: **pin** the column to its source (it stays when the scene changes); again, it follows the scene again. |
-| Clip Stop *k* | **Column clean:** that source back to its own blend, a held flash or blackout let go. |
+| Row 5 (top) | Pad 1 (yellow): **cut** the scene in Preview to Program at once. Pads 2 to 8: **scene fades**, long to short: Preview fades to Program over 8 bars, 4 bars, 2 bars, 1 bar, 2 beats, 1 beat or ½ beat (16 s down to 0.25 s at 120 BPM). The tempo is Visual Sidechain's, 120 BPM when it has none. Pad 2 is a slow roll for a big change. Shift changes nothing on this row. Your own transition length is put back straight after; Cut and Stinger keep their own timing. Studio Mode only. |
+| Clip Stop *k* | **Column clean:** that source back to its own blend, a held flash or blackout let go. With Shift: **pin** the column to its source (it stays when the scene changes); again, it follows the scene again. Pinning works on a column with no source yet. |
 | Stop All Clips | **Clean:** every effect off (Clean / All FX Off) and every source back to its own blend. With Shift: **fade every source out**. |
-| Scene Launch 1–5 | The first five scenes in OBS's Scenes list, top first. Press once: the scene goes to **Preview**. Press the scene in Preview again: it is **taken** to Program with the transition. With Shift (or outside Studio Mode): **straight to Program**, skipping Preview. Both use your OBS transition; Midi Fadester never changes it. |
-| Session | **Take** Preview to Program with the transition. |
+| Scene Launch 1–5 | The first five scenes in OBS's Scenes list, top first. Press once: the scene goes to **Preview**. Press the scene in Preview again: it **fades** to Program with the transition. The scene already on air does nothing, so there is always something to fade to. With Shift (or outside Studio Mode): **straight to Program**, skipping Preview. Both use your OBS transition and its length. |
+| Session | **Blackout:** Program fades to black over the transition length (at least 0.3 s), on top of everything, whatever is on air; press again to fade it back. Nothing is added to your scenes. Blinks while black. |
 | Cue Level knob | **Transition length**, 50 ms per click. With Shift: the **pad fade time**. |
 | Tempo knob | **Video speed** 0.05x faster or slower per click; with Shift held, 0.25x. |
 | Nudge − / Nudge + | **Video speed** 0.25x slower / faster. |
@@ -316,8 +316,9 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 **Lights.** Scenes: Program red, Preview pulsing from dim to bright green, other scenes dim blue, no scene dark. Sources:
 dim white at their own blend, the blend colour when punched (Lighten azure, Screen yellow, Additive orange, Multiply violet, Subtract magenta),
 bright white while flashing, amber when faded out, blacked out or at 0 %, row 4 blinking dim / bright red when the source is hidden
-(pressing its pads would change nothing you can see), row 5 azure when the column is pinned, all dark when the column
-has no source. Clip Stop lights while its column has a blend punched; Session lights when a take is ready; Record
+(pressing its pads would change nothing you can see), rows 1 to 4 dark when the column has no source. Row 5 is always
+lit: the cut yellow on the left, then seven greens from dark (the longest fade) to light (the shortest, on the right). Clip Stop lights while its column has a blend punched, and while Shift is held it shows the pinned columns
+instead; Session blinks while Program is blacked out; Record
 blinks while Visual Sidechain is panicked. Pulses and blinks use the desk's slowest rate, and start from the dim colour, so a pad stays lit even if the desk does
 not animate it. A source's own blend is the one it had in the scene when its column took it: Clean never turns a shape on
 black into a black wall by forcing Normal. When a column moves to another source (a scene change, a layer added),
@@ -333,17 +334,18 @@ Record, Metronome and Shift + Tap Tempo call Visual Sidechain through obs-websoc
 `lock_bpm`, `resync_downbeat`); without it they do nothing and the log says so.
 
 Only controls that are momentary in the desk's default mode are used. Solo, Activator, Record Arm and Crossfade A|B
-latch inside the desk, and Track Select moves the Device knobs onto other MIDI channels, so they are left alone. MIDI
+latch inside the desk, and Track Select and Master move the Device knobs onto other MIDI channels, so they are left
+alone; so are the Bank buttons. The log names a button with no job the first time it is pressed. MIDI
 Learn skips the endless Tempo and Cue Level knobs, which send clicks rather than a position. Darken is not a punch mode,
 because fading a Darken layer down turns its rectangle black. A strip learned onto a pad keeps that pad. The lights need
 the desk's MIDI Out; the pads work without them. The Advanced tab turns the pads off and sets the fade time; the
 obs-websocket `get_state` reply lists them under `vj_pads`, with the five scenes and which strips follow the scene.
 
-**Fadester Desk dock.** Turn it on in OBS under **Docks → Fadester Desk** (it starts hidden; OBS remembers where you put it). It shows what the desk shows: the five scene buttons (Program red, Preview pulsing green), the 8 × 5 pad grid in the desk's own colours with each column's source name above it, Clip Stop, Stop All, Session (Take), the eight faders and the crossfader, and Visual Sidechain's BPM, tempo lock, beat (four dots for the bar) and a red banner while it is panicked. Click a button and it does what the desk button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Shift** on the dock is for the next pad only; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air. A greyed button says why in its tooltip (no source on the column, a fader learned that button, a crossfader throw under way). Without the desk the dock still shows the scenes, faders and Visual Sidechain, and its Panic, Tap, Lock and Downbeat buttons still work (they need obs-websocket, like the desk's). A dock press never cancels a pad or Shift you are holding on the desk, and a Shift held on the desk shifts a dock click too (the row names show it).
+**Fadester Desk dock.** Turn it on in OBS under **Docks → Fadester Desk** (it starts hidden; OBS remembers where you put it). It shows what the desk shows: the five scene buttons (Program red, Preview pulsing green), the 8 × 5 pad grid in the desk's own colours with each column's source name above it, Clip Stop, Stop All, **Fade** (Preview to Program with your transition) and **Blackout** (it works with or without the desk, so a blackout can always be ended; a banner says when Program is black), the eight faders and the crossfader, and Visual Sidechain's BPM, tempo lock, beat (four dots for the bar) and a red banner while it is panicked. Click a button and it does what the desk button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Shift** on the dock is for the next pad only; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air. A greyed button says why in its tooltip (no source on the column, a fader learned that button, a crossfader throw under way). Without the desk the dock still shows the scenes, faders and Visual Sidechain, and its Panic, Tap, Lock and Downbeat buttons still work (they need obs-websocket, like the desk's). A dock press never cancels a pad or Shift you are holding on the desk, and a Shift held on the desk shifts a dock click too (the row names show it).
 
 Also on the dock: a red Panic banner at the very top while Visual Sidechain is panicked; **On air** and **Preview** scene
 names; the transition length and pad fade time (what the Cue Level knob just changed); a **Reconnect** button when the
-APC40 drops; row names that switch to Pin, Wake, Snap, Blackout and Punch mode while Shift is armed; beat 1 in amber;
+APC40 drops; row names that switch to Cut, Wake, Snap, Blackout and Punch mode while Shift is armed; beat 1 in amber;
 **Escape** lets go of anything held from the dock. The **VJster video** row drives the video speed through
 [Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester): an endless speed dial (0.05x per notch, like the
 Tempo knob; click it first to use the scroll wheel or arrow keys), preset speeds 0.5x, 0.75x, **1x**, 1.25x, 1.5x and 2x

@@ -2658,6 +2658,19 @@ static void vj_shift_tap(struct mfd_engine *eng, uint8_t note)
 	mfd_engine_tick(eng, 0.016f);
 }
 
+/* Shift + Clip Stop of column `strip` (0..7): Clip Stop sends note 52 on the column's own channel. */
+static void vj_shift_clip_stop(struct mfd_engine *eng, uint8_t strip)
+{
+	push_midi_note(eng, true, 0, 98);
+	mfd_engine_tick(eng, 0.016f);
+	push_midi_note(eng, true, strip, 52);
+	mfd_engine_tick(eng, 0.016f);
+	push_midi_note(eng, false, strip, 52);
+	mfd_engine_tick(eng, 0.016f);
+	push_midi_note(eng, false, 0, 98);
+	mfd_engine_tick(eng, 0.016f);
+}
+
 static int test_vj_fill_follow_and_desk(void)
 {
 	struct fake_scene_graph sg;
@@ -2726,14 +2739,14 @@ static int test_vj_fill_follow_and_desk(void)
 		vj_strip_is(eng, 3, NULL, NULL) && eng->fader_slots[3].auto_follow);
 	REQUIRE(eng->vj.has_layer == 0x03U);
 
-	/* 3. Shift + top pad pins a column: it keeps its source; the others move on and skip that source. */
-	vj_shift_tap(eng, 32);
+	/* 3. Shift + Clip Stop pins a column: it keeps its source; the others move on and skip that source. */
+	vj_shift_clip_stop(eng, 0);
 	REQUIRE(!eng->fader_slots[1].auto_follow && (eng->vj.pinned & 0x01U));
 	vj_program(eng, "Scene B", "Scene A");
 	REQUIRE(vj_strip_is(eng, 1, "Scene B", "B1") && vj_strip_is(eng, 2, "Scene A", "A1") &&
 		vj_strip_is(eng, 3, "Scene A", "A2") && vj_strip_is(eng, 4, "Scene A", "A3"));
 	/* Unpinned, it follows again (on the UI thread's next pass). */
-	vj_shift_tap(eng, 32);
+	vj_shift_clip_stop(eng, 0);
 	REQUIRE(eng->fader_slots[1].auto_follow && eng->vj_follow_pending);
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(vj_strip_is(eng, 1, "Scene A", "A1") && vj_strip_is(eng, 4, NULL, NULL));
@@ -2784,41 +2797,64 @@ static int test_vj_fill_follow_and_desk(void)
 	mfd_engine_tick(eng, 0.016f);
 
 	/* 6. Scene Launch: the scene in Preview takes; another goes to Preview; Shift sends a scene straight to Program.
-	 * Session takes; Shift + Session is a take too. */
+	 * The dock's Fade fades Preview to Program (Session on the desk is Blackout now). */
 	g_vj_cmd_count = 0;
-	vj_tap(eng, 82); /* Scene A is in Preview: take */
-	vj_tap(eng, 84); /* Scene C: to Preview */
-	vj_shift_tap(eng, 83);
-	vj_tap(eng, 85); /* no fourth scene: nothing */
-	vj_tap(eng, 102);
-	vj_shift_tap(eng, 102);
+	vj_tap(eng, 82);       /* Scene A is in Preview: take */
+	vj_tap(eng, 84);       /* Scene C: to Preview */
+	vj_shift_tap(eng, 84); /* Shift: Scene C straight to Program (Scene B is on air: its button does nothing) */
+	vj_tap(eng, 85);       /* no fourth scene: nothing */
+	mfd_engine_desk_fade(eng);
+	mfd_engine_desk_fade(eng);
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 5);
 	REQUIRE(g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE);
 	REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_PREVIEW && strcmp(g_vj_cmds[1].scene, "Scene C") == 0);
 	REQUIRE(g_vj_cmds[0].arg == 0 && g_vj_cmds[1].arg == 0);
-	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene B") == 0 &&
+	REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene C") == 0 &&
 		g_vj_cmds[2].arg == 0); /* Shift: straight to Program, with the current transition */
 	REQUIRE(g_vj_cmds[3].kind == MFD_VJ_CMD_TAKE);
-	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_TAKE); /* Shift + Session is a take too */
+	REQUIRE(g_vj_cmds[4].kind == MFD_VJ_CMD_TAKE);
 	/* Lights: Program red, Preview pulsing, the third scene idle, no scene off; Session lit (a take is ready). */
 	REQUIRE(eng->vj.scene[0] == MFD_VJ_SCENE_PREVIEW && eng->vj.scene[1] == MFD_VJ_SCENE_PROGRAM &&
 		eng->vj.scene[2] == MFD_VJ_SCENE_IDLE && eng->vj.scene[3] == MFD_VJ_SCENE_NONE && eng->vj.take_ready);
+	/* Session is Blackout now: no scene command (the Blackout fade itself is the blackout module's). */
+	g_vj_cmd_count = 0;
+	vj_tap(eng, 102);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 0);
 	/* Outside Studio Mode a Scene Launch press switches straight to that scene. */
 	mfd_engine_set_test_frontend_state(eng, true, false, "", "Scene B", true);
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 84);
-	vj_tap(eng, 102); /* Session outside Studio Mode: nothing to take */
+	mfd_engine_desk_fade(eng); /* outside Studio Mode: nothing to fade */
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PROGRAM && g_vj_cmds[0].arg == 0);
+	mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", true);
+	/* The scene already on air: its Scene Launch button does nothing, with or without Shift (it never goes to Preview
+	 * too, which would leave nothing to fade to). */
+	g_vj_cmd_count = 0;
+	vj_tap(eng, 83);
+	vj_shift_tap(eng, 83);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 0);
+	mfd_engine_desk_fade(eng);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE); /* another scene in Preview fades */
+	/* Preview and Program the same scene: Session has nothing to fade to. */
+	mfd_engine_set_test_frontend_state(eng, true, true, "Scene B", "Scene B", true);
+	g_vj_cmd_count = 0;
+	mfd_engine_desk_fade(eng);
+	vj_tap(eng, 83);
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(g_vj_cmd_count == 0);
 	mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", true);
 	/* While the crossfader is mid-throw, the scene buttons and Session do nothing. */
 	eng->fader_slots[0].tbar_state = MFD_TBAR_THROWING;
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 82);
 	vj_tap(eng, 84);
-	vj_tap(eng, 102);
-	vj_shift_tap(eng, 102);
+	mfd_engine_desk_fade(eng);
+	mfd_engine_desk_fade(eng);
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 0);
 	/* A T-bar resting at its end after a throw (parked) does not hold them back. */
@@ -2844,7 +2880,7 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(g_vj_cmd_count == 2 && g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW &&
 		g_vj_cmds[1].kind == MFD_VJ_CMD_TAKE && strcmp(g_vj_cmds[1].scene, "Scene C") == 0);
 	g_vj_cmd_count = 0;
-	vj_tap(eng, 102); /* Session takes the scene OBS shows in Preview, by name */
+	mfd_engine_desk_fade(eng); /* the dock's Fade fades the scene OBS shows in Preview, by name */
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE &&
 		strcmp(g_vj_cmds[0].scene, "Scene A") == 0);
@@ -2876,12 +2912,19 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(!(eng->vj.hidden & 0x01U));
 	fake_sg_find_source(&sg, "B1")->hidden = false;
 
-	/* 8. Row 5 restarts the video. */
+	/* 8. The top row fades the scene in Preview to Program at each pad's length (pad 2 = 8 bars); pad 1 cuts. */
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 33);
+	vj_tap(eng, 32);
 	mfd_engine_flush_pending_ui_work(eng);
-	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_RESTART &&
-		strcmp(g_vj_cmds[0].source, "B2") == 0);
+	if (eng->cached_studio_mode && eng->cached_preview_scene[0] &&
+	    strcmp(eng->cached_preview_scene, eng->cached_program_scene) != 0) {
+		REQUIRE(g_vj_cmd_count == 2 && g_vj_cmds[0].kind == MFD_VJ_CMD_SCENE_FADE && g_vj_cmds[0].arg == 1 &&
+			strcmp(g_vj_cmds[0].scene, eng->cached_preview_scene) == 0);
+		REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_SCENE_FADE && g_vj_cmds[1].arg == -1);
+	} else {
+		REQUIRE(g_vj_cmd_count == 0); /* nothing in Preview to fade to */
+	}
 
 	/* 9. Blackout (Shift + row 2): 0 % while held, back to the fader's level after. Snap (Shift + row 3). */
 	mfd_engine_apply_slot_output(eng, &eng->fader_slots[1], 0.6f);
@@ -3299,7 +3342,7 @@ static int test_vj_fill_follow_and_desk(void)
 		REQUIRE(b3);
 	}
 	REQUIRE(eng->fader_slots[8].auto_follow && !(eng->vj.has_layer & 0x80U));
-	vj_shift_tap(eng, 39);
+	vj_shift_clip_stop(eng, 7);
 	REQUIRE(eng->fader_slots[8].auto_follow); /* nothing to pin */
 	fake_sg_scene_remove_item(&sg, "Scene B", "B3");
 	mfd_engine_reevaluate_slots(eng, false);
@@ -3375,19 +3418,23 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_get_desk_view(eng, false, v);
 		REQUIRE(v->desk_shift);
 		REQUIRE(mfd_engine_desk_press(eng, 1, 52, true, false, NULL) ==
-			MFD_DESK_ACCEPTED); /* Clip Stop, column 2 */
+			MFD_DESK_ACCEPTED); /* Shift + Clip Stop, column 2: pinned */
 		mfd_engine_desk_press(eng, 1, 52, false, false, NULL);
-		REQUIRE(eng->vj.shift);
+		REQUIRE(eng->vj.shift && !eng->fader_slots[2].auto_follow);
+		mfd_engine_desk_press(eng, 1, 52, true, false, NULL); /* again: it follows the scene on air again */
+		mfd_engine_desk_press(eng, 1, 52, false, false, NULL);
+		REQUIRE(eng->vj.shift && eng->fader_slots[2].auto_follow);
 		REQUIRE(mfd_engine_desk_press(eng, 0, 98, false, false, NULL) == MFD_DESK_REJECTED && eng->vj.shift);
 		push_midi_note(eng, false, 0, 98);
 		mfd_engine_tick(eng, 0.016f);
 		REQUIRE(!eng->vj.shift);
 		g_vj_cmd_count = 0;
-		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_ACCEPTED); /* restart B1 */
+		REQUIRE(mfd_engine_desk_press(eng, 0, 33, true, false, NULL) == MFD_DESK_ACCEPTED); /* a scene fade */
 		mfd_engine_desk_press(eng, 0, 33, false, false, NULL);
 		mfd_engine_flush_pending_ui_work(eng);
-		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_RESTART &&
-			eng->fader_slots[2].auto_follow);
+		REQUIRE(eng->fader_slots[2].auto_follow);
+		REQUIRE(g_vj_cmd_count == 0 || (g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_SCENE_FADE &&
+						g_vj_cmds[0].arg == 1)); /* a fade only when a scene waits in Preview */
 
 		/* 14j. Program / Preview names and the pad fade time are in the view; a renamed scene keeps its button. */
 		mfd_engine_get_desk_view(eng, false, v);

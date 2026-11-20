@@ -1179,8 +1179,9 @@ private:
 				"Columns 1–8 are the sources of the scene on air, bottom layer first: empty faders fill "
 				"themselves and follow the scene; a fader you set yourself stays. Bottom pad row: blend punch "
 				"(Shift + pad: next punch mode). Row 2: flash while held (Shift: blackout). Row 3: fade out and "
-				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: restart its video "
-				"(Shift: pin the column to its source). Clip Stop: that column back to its own blend. Stop All "
+				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: scene fades, Preview "
+				"to Program over 8 bars on the left down to 1/4 beat on the right (Shift: cut). Clip Stop: that "
+				"column back to its own blend (Shift: pin the column to its source). Stop All "
 				"Clips: Clean, every effect off and every source back to its own blend (Shift: fade every layer "
 				"out)."),
 			adv_tab);
@@ -1201,9 +1202,9 @@ private:
 		root->addWidget(vj_speed_legend);
 		auto *vj_scene_legend = new QLabel(
 			mfdText("Dialog.VjScenesLegend",
-				"Scene Launch 1–5: the first five scenes in the Scenes list. Press once for Preview, again (or "
-				"Session) to take it; Shift + button sends it straight to Program. Program red, Preview green. Cue "
-				"Level: transition "
+				"Scene Launch 1–5: the first five scenes in the Scenes list. Press once for Preview, again to "
+				"fade it to Program; Shift + button sends it straight to Program. Program red, Preview green. "
+				"Session: Program fades to black, and back on the next press. Cue Level: transition "
 				"length (Shift: pad fade time). Record: Visual Sidechain panic or restore. Metronome: its tap "
 				"tempo (Shift: lock the BPM). Shift + Tap Tempo: back to its downbeat."),
 			adv_tab);

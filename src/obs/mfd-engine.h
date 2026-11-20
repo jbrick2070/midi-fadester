@@ -339,6 +339,7 @@ enum mfd_vj_command_kind {
 	MFD_VJ_CMD_VS_LOCK,     /* Visual Sidechain BPM lock toggled */
 	MFD_VJ_CMD_VS_RESYNC,   /* Visual Sidechain downbeat resync */
 	MFD_VJ_CMD_TRANSITION,  /* arg: transition length change in ms */
+	MFD_VJ_CMD_SCENE_FADE,  /* scene (in Preview), arg: top-row pad 1..7 (32 / 2^(arg-1) beats), -1 a cut */
 };
 
 #define MFD_VJ_CMD_MAX 16
@@ -535,6 +536,7 @@ struct mfd_engine {
 	bool vj_state_dirty;                   /* a pad changed something: tell obs-websocket clients once */
 	char vj_said[MFD_VJ_STRIPS][96];       /* the last "why not" line per strip, said once */
 	float vj_blink_sec;                    /* Record blinks in software: the desk's Record lamp is on or off only */
+	int cached_transition_ms;              /* OBS's transition length, read on the UI thread (Blackout's fade) */
 	char vj_home_key[MFD_VJ_STRIPS][2 * MFD_SOURCE_NAME_MAX + 2]; /* scene + source the home blend was read for */
 	/* Punched sources saved with the scene collection (home blend per scene + source), put back once it has loaded:
 	 * OBS saves the scenes before Midi Fadester hears that it is closing, and an autosave or a crash keeps a punch. */
@@ -727,6 +729,7 @@ struct mfd_desk_view {
 	bool vs_panic;
 	bool vs_panic_known;
 	bool vs_last_failed;
+	bool blackout; /* Program black or fading to or from black */
 };
 
 /* A snapshot for the dock, copied under the engine lock (no OBS calls). The LEDs are worked out with Shift held when
@@ -741,6 +744,13 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
  */
 enum mfd_desk_press_result mfd_engine_desk_press(struct mfd_engine *eng, uint8_t channel, uint8_t note, bool on,
 						 bool shift, uint32_t *hold_epoch);
+
+/* The dock's Fade button: Preview to Program with OBS's transition (Studio Mode), with or without an APC40. */
+void mfd_engine_desk_fade(struct mfd_engine *eng);
+
+/* The dock's Blackout button: Program to black, or back, with or without an APC40 (always reachable, so a
+ * blackout can always be ended). */
+void mfd_engine_desk_blackout(struct mfd_engine *eng);
 
 /* A Visual Sidechain button on the dock (MFD_VJ_CMD_VS_PANIC, _TAP, _LOCK or _RESYNC): queued for the UI thread, with
  * or without an APC40. Returns false when the command queue is full or the kind is not one of those. */
