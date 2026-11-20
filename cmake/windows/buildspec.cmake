@@ -29,7 +29,8 @@ function(_check_dependencies_windows)
   )
     message(WARNING "Building against the shared dependency folder ${_shared_deps} (MIDI_FADESTER_SHARED_DEPS)")
     list(
-      APPEND CMAKE_PREFIX_PATH
+      APPEND
+      CMAKE_PREFIX_PATH
       "${_shared_deps}/obs-deps-2026-10-23-${arch}"
       "${_shared_deps}/obs-deps-qt6-2026-10-23-${arch}"
       "${_shared_deps}"
