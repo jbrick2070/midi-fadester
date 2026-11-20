@@ -179,13 +179,23 @@ size_t vs_baseline_rename_filter(struct vs_baseline_table *table, const char *ol
 	return moved;
 }
 
-enum vs_target_claim vs_baseline_claim(bool has_record, bool owner_is_self, bool owner_on_this_source)
+enum vs_target_claim vs_baseline_claim(bool has_record, bool owner_is_self, bool owner_on_this_source,
+				       bool self_holds_baseline)
 {
 	if (!has_record)
 		return VS_CLAIM_FREE;
 	if (owner_is_self)
-		return VS_CLAIM_MINE;
+		return self_holds_baseline ? VS_CLAIM_MINE : VS_CLAIM_ORPHAN;
 	return owner_on_this_source ? VS_CLAIM_TAKEN : VS_CLAIM_ORPHAN;
+}
+
+bool vs_baseline_forget_entry(struct vs_baseline_table *table, const char *filter_name, const char *setting_name)
+{
+	struct vs_baseline_entry *e = find_mutable(table, filter_name, setting_name);
+	if (!e)
+		return false;
+	memset(e, 0, sizeof(*e));
+	return true;
 }
 
 bool vs_baseline_restore_entry(struct vs_baseline_table *table, const char *filter_name, const char *setting_name,

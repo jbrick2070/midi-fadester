@@ -60,6 +60,9 @@ struct vs_modulator_filter {
 	/* Another Audio Modulator on this source already moves this slot's setting: the slot writes nothing (D-08).
 	 * Set by the tick, shown in the slot's status line. */
 	bool slot_taken[VS_MOD_MAX_SLOTS];
+	/* Graphics thread only. Whether the source this modulator sits on is being drawn: one that is not takes no
+	 * flash from the shared budget (D-05, QA-B04), as a Shader Filter that is not drawn takes none. */
+	struct vs_render_watch render_watch;
 	signal_handler_t *parent_signals;
 	/* After a save: the UI task that resumes writes is queued, and since when writes have waited */
 	bool resume_queued;
@@ -91,15 +94,21 @@ static obs_source_t *acquire_sibling_filter(struct vs_modulator_filter *f, const
 
 /*
  * The record a modulator leaves on a target filter while it moves one of its settings (D-07, D-08, D-09): in the
- * target's private settings, under VS_MOD_RECORD_KEY, one object per setting with the modulator's id and the setting's
- * real value. Private settings travel with the filter: a copy carries the record, a rename keeps it. It is removed
- * whenever the real value is put back (slot off, modulator off or removed, Panic, and before a save, so no record is
- * ever written into the scene collection).
+ * target's private settings, under VS_MOD_RECORD_KEY, one object per setting with the modulator's id, the name the
+ * filter had when the record was written, and the setting's real value. Private settings travel with the filter: a
+ * copy carries the record, a rename keeps it. It is removed whenever the real value is put back (slot off, modulator
+ * off or removed, Panic, and before a save), so this modulator writes no record into the scene collection.
+ *
+ * The limit: a copy of a filter made while it was being modulated carries the record. Pasted on the modulator's own
+ * source it is cleaned when the modulator is removed, and put right if a slot is pointed at it (QA-B03). Pasted on a
+ * source with no Audio Modulator, nothing reads the record: it stays in that copy's private settings, and the copy
+ * keeps the modulated value it was copied with.
  */
 #define VS_MOD_RECORD_KEY "visual_sidechain_modulated"
 
 struct vs_mod_record {
 	char owner[64];
+	char filter[128]; /* the target's name when the record was written; empty in a record that has none */
 	enum vs_prop_type prop_type;
 	double original_float;
 	int64_t original_int;
@@ -121,6 +130,7 @@ static bool record_read(obs_source_t *target, const char *setting_name, struct v
 		const char *owner = obs_data_get_string(rec, "owner");
 		if (owner && owner[0] != '\0') {
 			snprintf(out->owner, sizeof(out->owner), "%s", owner);
+			snprintf(out->filter, sizeof(out->filter), "%s", obs_data_get_string(rec, "filter"));
 			out->prop_type = obs_data_get_int(rec, "type") == (long long)VS_PROP_INT ? VS_PROP_INT
 												 : VS_PROP_FLOAT;
 			out->original_float = obs_data_get_double(rec, "float");
@@ -134,8 +144,8 @@ static bool record_read(obs_source_t *target, const char *setting_name, struct v
 	return found;
 }
 
-static void record_write(obs_source_t *target, const char *setting_name, const char *owner, enum vs_prop_type prop_type,
-			 double original_float, int64_t original_int)
+static void record_write(obs_source_t *target, const char *setting_name, const char *owner, const char *filter_name,
+			 enum vs_prop_type prop_type, double original_float, int64_t original_int)
 {
 	obs_data_t *priv = obs_source_get_private_settings(target);
 	if (!priv)
@@ -147,6 +157,7 @@ static void record_write(obs_source_t *target, const char *setting_name, const c
 	}
 	obs_data_t *rec = obs_data_create();
 	obs_data_set_string(rec, "owner", owner);
+	obs_data_set_string(rec, "filter", filter_name ? filter_name : "");
 	obs_data_set_int(rec, "type", (long long)prop_type);
 	obs_data_set_double(rec, "float", original_float);
 	obs_data_set_int(rec, "int", (long long)original_int);
@@ -178,10 +189,27 @@ static void record_clear_own(const struct vs_modulator_filter *f, obs_source_t *
 
 struct sibling_search {
 	const struct vs_modulator_filter *f;
-	const char *uuid;         /* find a sibling with this id, or */
-	const char *record_owner; /* find a sibling that carries a record of this owner */
-	obs_source_t *found;      /* referenced */
+	const char *uuid;          /* find a sibling with this id, or */
+	const char *record_owner;  /* find the sibling that carries a record of this owner, written when it was */
+	const char *record_filter; /* called this */
+	obs_source_t *found;       /* referenced */
 };
+
+/* Whether this modulator already knows a filter by this name, as a slot's target or in its baselines. */
+static bool modulator_knows_filter_name(const struct vs_modulator_filter *f, const char *name)
+{
+	if (!name || name[0] == '\0')
+		return false;
+	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		if (strcmp(f->slot_cfg[i].target_filter, name) == 0)
+			return true;
+	}
+	for (size_t i = 0; i < VS_MAX_BASELINE_ENTRIES; i++) {
+		if (f->baselines.entries[i].in_use && strcmp(f->baselines.entries[i].filter_name, name) == 0)
+			return true;
+	}
+	return false;
+}
 
 static void sibling_search_cb(obs_source_t *parent, obs_source_t *child, void *param)
 {
@@ -195,15 +223,78 @@ static void sibling_search_cb(obs_source_t *parent, obs_source_t *child, void *p
 			q->found = obs_source_get_ref(child);
 		return;
 	}
+	/* The renamed target (D-07) is the sibling whose record says this modulator moved it under the name that is
+	 * now missing. The owner alone is not enough: every filter this modulator moves carries its id, and so does a
+	 * copy of one (QA-B02). A filter the modulator already knows by its present name is some other target. */
+	if (modulator_knows_filter_name(q->f, obs_source_get_name(child)))
+		return;
 	obs_data_t *priv = obs_source_get_private_settings(child);
 	obs_data_t *all = priv ? obs_data_get_obj(priv, VS_MOD_RECORD_KEY) : NULL;
-	for (obs_data_item_t *item = all ? obs_data_first(all) : NULL; item && !q->found; obs_data_item_next(&item)) {
+	bool match = false;
+	/* obs_data_item_next lets go of the item it is given, so the loop runs to its end and nothing else releases an
+	 * item: a release inside the loop followed by the loop's own step freed one item twice (QA-B01). */
+	for (obs_data_item_t *item = all ? obs_data_first(all) : NULL; item; obs_data_item_next(&item)) {
 		obs_data_t *rec = obs_data_item_get_obj(item);
-		if (rec && strcmp(obs_data_get_string(rec, "owner"), q->record_owner) == 0)
-			q->found = obs_source_get_ref(child);
+		if (rec && strcmp(obs_data_get_string(rec, "owner"), q->record_owner) == 0 &&
+		    strcmp(obs_data_get_string(rec, "filter"), q->record_filter) == 0)
+			match = true;
 		obs_data_release(rec);
-		if (q->found)
-			obs_data_item_release(&item);
+	}
+	obs_data_release(all);
+	obs_data_release(priv);
+	if (match)
+		q->found = obs_source_get_ref(child);
+}
+
+/* This modulator's records on a filter now say the filter's present name, so a second rename is followed too. */
+static void records_set_filter_name(const struct vs_modulator_filter *f, obs_source_t *target, const char *name)
+{
+	const char *me = modulator_uuid(f);
+	obs_data_t *priv = obs_source_get_private_settings(target);
+	obs_data_t *all = priv ? obs_data_get_obj(priv, VS_MOD_RECORD_KEY) : NULL;
+	for (obs_data_item_t *item = all ? obs_data_first(all) : NULL; item; obs_data_item_next(&item)) {
+		obs_data_t *rec = obs_data_item_get_obj(item);
+		if (rec && strcmp(obs_data_get_string(rec, "owner"), me) == 0)
+			obs_data_set_string(rec, "filter", name);
+		obs_data_release(rec);
+	}
+	obs_data_release(all);
+	obs_data_release(priv);
+}
+
+struct record_sweep {
+	const struct vs_modulator_filter *f;
+};
+
+/* Removes every record of this modulator from one sibling (another modulator's records stay). */
+static void record_sweep_cb(obs_source_t *parent, obs_source_t *child, void *param)
+{
+	UNUSED_PARAMETER(parent);
+	const struct record_sweep *sweep = param;
+	if (!child || child == sweep->f->context)
+		return;
+	const char *me = modulator_uuid(sweep->f);
+	obs_data_t *priv = obs_source_get_private_settings(child);
+	obs_data_t *all = priv ? obs_data_get_obj(priv, VS_MOD_RECORD_KEY) : NULL;
+	if (all && me[0] != '\0') {
+		char mine[VS_MAX_BASELINE_ENTRIES][128];
+		size_t mine_count = 0;
+		size_t total = 0;
+		for (obs_data_item_t *item = obs_data_first(all); item; obs_data_item_next(&item)) {
+			obs_data_t *rec = obs_data_item_get_obj(item);
+			total++;
+			if (rec && strcmp(obs_data_get_string(rec, "owner"), me) == 0 &&
+			    mine_count < VS_MAX_BASELINE_ENTRIES) {
+				snprintf(mine[mine_count], sizeof(mine[mine_count]), "%s",
+					 obs_data_item_get_name(item));
+				mine_count++;
+			}
+			obs_data_release(rec);
+		}
+		for (size_t i = 0; i < mine_count; i++)
+			obs_data_erase(all, mine[i]);
+		if (mine_count == total) /* none left: no empty object stays on the filter */
+			obs_data_erase(priv, VS_MOD_RECORD_KEY);
 	}
 	obs_data_release(all);
 	obs_data_release(priv);
@@ -215,7 +306,7 @@ static bool sibling_with_uuid_exists(struct vs_modulator_filter *f, const char *
 	obs_source_t *parent = (f && f->context) ? obs_filter_get_parent(f->context) : NULL;
 	if (!parent || !uuid || uuid[0] == '\0')
 		return false;
-	struct sibling_search q = {f, uuid, NULL, NULL};
+	struct sibling_search q = {f, uuid, NULL, NULL, NULL};
 	obs_source_enum_filters(parent, sibling_search_cb, &q);
 	if (q.found)
 		obs_source_release(q.found);
@@ -244,7 +335,7 @@ static obs_source_t *acquire_target_filter(struct vs_modulator_filter *f, const 
 	if (!holds_baseline || !parent)
 		return NULL;
 
-	struct sibling_search q = {f, NULL, modulator_uuid(f), NULL};
+	struct sibling_search q = {f, NULL, modulator_uuid(f), filter_name, NULL};
 	if (q.record_owner[0] == '\0')
 		return NULL;
 	obs_source_enum_filters(parent, sibling_search_cb, &q);
@@ -270,6 +361,7 @@ static obs_source_t *acquire_target_filter(struct vs_modulator_filter *f, const 
 		}
 	}
 	obs_data_release(settings);
+	records_set_filter_name(f, q.found, new_name);
 	return q.found;
 }
 
@@ -855,8 +947,18 @@ static void apply_settings(struct vs_modulator_filter *f, obs_data_t *settings, 
 			}
 			if (!still_owned) {
 				reconcile_target_locked(f, prev.target_filter, NULL);
-				vs_baseline_restore_entry(&f->baselines, prev.target_filter, prev.target_setting,
+				/* The look-up above may have found the old target under a new name (D-07): its baseline
+				 * is then kept under that name, which slot_cfg[i] (still the old configuration) now
+				 * holds, and the saved choice of this slot was rewritten with it. Restore under the
+				 * present name, and put the user's choice back into the settings (QA-B06). */
+				char restore_name[sizeof(prev.target_filter)];
+				snprintf(restore_name, sizeof(restore_name), "%s", f->slot_cfg[i].target_filter);
+				vs_baseline_restore_entry(&f->baselines, restore_name, prev.target_setting,
 							  apply_baseline_to_obs_filter, f);
+				if (strcmp(restore_name, prev.target_filter) != 0) {
+					slot_key(key, sizeof(key), i, "target_filter");
+					obs_data_set_string(settings, key, next.target_filter);
+				}
 			}
 			vs_mod_slot_reset_state(&f->slot_state[i]);
 		}
@@ -1037,7 +1139,6 @@ static void modulator_filter_add(void *data, obs_source_t *parent)
 
 static void modulator_filter_remove(void *data, obs_source_t *parent)
 {
-	UNUSED_PARAMETER(parent);
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	if (!f)
 		return;
@@ -1046,6 +1147,12 @@ static void modulator_filter_remove(void *data, obs_source_t *parent)
 	/* Siblings are still reachable: libobs clears filter_parent only after filter_remove returns. */
 	reconcile_all_locked(f);
 	vs_baseline_restore_all(&f->baselines, apply_baseline_to_obs_filter, f);
+	/* a copy of a target, pasted on this source while it was being moved, carries a record that no restore
+	 * reaches: with the modulator gone nothing would ever clear it (QA-B03) */
+	if (parent) {
+		struct record_sweep sweep = {f};
+		obs_source_enum_filters(parent, record_sweep_cb, &sweep);
+	}
 	vs_audio_tap_detach_parent(&f->tap);
 	pthread_mutex_unlock(&f->mutex);
 }
@@ -1189,6 +1296,9 @@ static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seco
 		}
 	}
 
+	/* Not drawn: the flash limiters still step, with nothing over the threshold, so their envelopes fall and no
+	 * hit is asked of the shared clock (the same call the Panic path makes). */
+	const bool on_screen = vs_render_watch_tick(&f->render_watch);
 	float signals[VS_MOD_MAX_SLOTS];
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
 		struct vs_mod_slot_config *cfg = &f->slot_cfg[i];
@@ -1199,8 +1309,8 @@ static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seco
 		cfg->depth_scale = (double)vs_fader_bridge_resolve_scale(cfg->depth_fader_slot);
 		const float raw_sig = vs_analyzer_get_signal(&f->tap.analyzer, &f->tap.current_frame, cfg->signal_id,
 							     cfg->custom_low_hz, cfg->custom_high_hz, cfg->custom_mode);
-		signals[i] =
-			vs_mod_slot_filter_signal(cfg, &f->slot_state[i], NULL, frame_token, raw_sig, seconds, false);
+		signals[i] = vs_mod_slot_filter_signal(cfg, &f->slot_state[i], NULL, frame_token,
+						       on_screen ? raw_sig : 0.0f, seconds, false);
 	}
 
 	/* Evaluate all 8 slots and batch dirty writes by distinct target_filter so each target filter
@@ -1230,12 +1340,24 @@ static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seco
 				struct vs_mod_record rec;
 				const bool has_rec = record_read(target, wr->target_setting, &rec);
 				const bool rec_mine = has_rec && strcmp(rec.owner, self_uuid) == 0;
+				/* A record with this modulator's id on a setting it holds no baseline for was not
+				 * written for this filter: the filter is a copy, pasted on this same source, of one
+				 * being moved (QA-B03). vs_baseline_claim reads that as a copy too. */
+				const bool holds_entry =
+					vs_baseline_find(&f->baselines, target_name, wr->target_setting) != NULL;
 				const enum vs_target_claim claim = vs_baseline_claim(
 					has_rec, rec_mine,
-					has_rec && !rec_mine && sibling_with_uuid_exists(f, rec.owner));
+					has_rec && !rec_mine && sibling_with_uuid_exists(f, rec.owner), holds_entry);
 				if (claim == VS_CLAIM_TAKEN) {
 					/* D-08: two modulators on one setting would each take the other's value for the
-					 * user's own and lose the real one. The second one writes nothing. */
+					 * user's own and lose the real one. The second one writes nothing. Which of the two
+					 * is "second" is settled again after each save: a save puts every real value back
+					 * and clears the records, and the first to write afterwards holds the setting.
+					 * A baseline this modulator still held for it (it had the setting before that
+					 * save) is dropped unwritten: the value there is the other modulator's now, and
+					 * kept, the entry would read it as the user's edit and write it back as the real
+					 * value when this modulator is switched off (QA-B05). */
+					vs_baseline_forget_entry(&f->baselines, target_name, wr->target_setting);
 					f->slot_taken[wr->slot_index] = true;
 					f->slot_state[wr->slot_index].has_last_written = false;
 					continue;
@@ -1266,9 +1388,10 @@ static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seco
 				const struct vs_baseline_entry *e =
 					vs_baseline_find(&f->baselines, target_name, wr->target_setting);
 				if (e && self_uuid[0] != '\0' &&
-				    (!rec_mine || rec.prop_type != e->prop_type ||
-				     rec.original_float != e->original_float || rec.original_int != e->original_int)) {
-					record_write(target, wr->target_setting, self_uuid, e->prop_type,
+				    (!rec_mine || strcmp(rec.filter, target_name) != 0 ||
+				     rec.prop_type != e->prop_type || rec.original_float != e->original_float ||
+				     rec.original_int != e->original_int)) {
+					record_write(target, wr->target_setting, self_uuid, target_name, e->prop_type,
 						     e->original_float, e->original_int);
 				}
 			}
@@ -1316,6 +1439,7 @@ static void modulator_video_render(void *data, gs_effect_t *effect)
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	if (!f || !f->context)
 		return;
+	vs_render_watch_mark_rendered(&f->render_watch);
 	obs_source_skip_video_filter(f->context);
 }
 

@@ -102,12 +102,18 @@ size_t vs_baseline_rename_filter(struct vs_baseline_table *table, const char *ol
  */
 enum vs_target_claim {
 	VS_CLAIM_FREE = 0, /* no record: take it */
-	VS_CLAIM_MINE,     /* this modulator's own record */
-	VS_CLAIM_ORPHAN,   /* a record whose modulator is not on this source: a copied filter. Put the real value back,
-			      then take it */
+	VS_CLAIM_MINE,     /* this modulator's own record, for a setting it holds a baseline for */
+	VS_CLAIM_ORPHAN,   /* a record that was not written for this filter: its modulator is not on this source, or it
+			      is this modulator's but for a setting it holds no baseline for. Either way a copied
+			      filter. Put the real value back, then take it */
 	VS_CLAIM_TAKEN,    /* another modulator on this source moves it: leave it alone */
 };
-enum vs_target_claim vs_baseline_claim(bool has_record, bool owner_is_self, bool owner_on_this_source);
+enum vs_target_claim vs_baseline_claim(bool has_record, bool owner_is_self, bool owner_on_this_source,
+				       bool self_holds_baseline);
+
+/* Forgets one entry without writing anything to the target (the setting is another modulator's now). Returns true
+ * when there was one. */
+bool vs_baseline_forget_entry(struct vs_baseline_table *table, const char *filter_name, const char *setting_name);
 
 /*
  * Pre-save hook (R-MOD-6): restores all active targets to their original
