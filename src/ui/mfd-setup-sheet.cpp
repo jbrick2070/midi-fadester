@@ -123,7 +123,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	  filter_cat_(mfd_source_filter_catalog_create())
 {
 	setObjectName(QStringLiteral("mfdSetupSheet"));
-	setWindowTitle(mfdText("Setup.WindowTitle", "Midi Fadester \xE2\x80\x94 Set up strip"));
+	setWindowTitle(mfdWindowTitle(mfdText("Setup.WindowTitle", "Set up strip")));
 	resize(640, 560);
 	setStyleSheet(QStringLiteral(
 		"QDialog { background-color: #0b1120; color: #f8fafc; } "

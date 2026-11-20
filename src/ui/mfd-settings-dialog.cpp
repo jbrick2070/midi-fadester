@@ -398,9 +398,9 @@ public:
 		  adv_catalog_(mfd_ui_catalog_create())
 	{
 		setObjectName(QStringLiteral("mfdSettingsDialog"));
-		setWindowTitle(mfdFill(mfdText("Dialog.WindowTitle", "Midi Fadester %1 (commit %2, built %3)"),
-				       {QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
-					QString::fromUtf8(PLUGIN_BUILT_AT)}));
+		/* the version only: the commit and the build time are on the Advanced tab's last line (mfdAdvAbout) */
+		setWindowTitle(mfdFill(mfdText("Dialog.WindowTitle", "Midi Fadester %1"),
+				       {QString::fromUtf8(PLUGIN_VERSION)}));
 		/* 1380 x 660 where it fits; on a 1080p laptop at 150 % (1280 x 720 points) or smaller the dialog is cut to
 		 * the screen, and the strips scroll sideways (F-12). */
 		QScreen *scr = parent ? parent->screen() : QGuiApplication::primaryScreen();
@@ -1323,6 +1323,17 @@ private:
 		btn_close->setObjectName(QStringLiteral("mfdBtnClose"));
 		footer->addWidget(btn_close);
 		root->addLayout(footer);
+
+		/* for support: which build this is (the title bar shows the version only) */
+		auto *about =
+			new QLabel(mfdFill(mfdText("Dialog.About", "Midi Fadester %1 (commit %2, built %3)"),
+					   {QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
+					    QString::fromUtf8(PLUGIN_BUILT_AT)}),
+				   adv_tab);
+		about->setObjectName(QStringLiteral("mfdAdvAbout"));
+		about->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		about->setStyleSheet(QStringLiteral("QLabel#mfdAdvAbout { color: #64748b; font-size: 11px; }"));
+		root->addWidget(about);
 
 		connect(btn_import, &QPushButton::clicked, this, [this]() {
 			const QString path = QFileDialog::getOpenFileName(

@@ -1831,6 +1831,7 @@ static obs_properties_t *deck_get_properties(void *data)
 	obs_property_set_long_description(p_start, obs_module_text("Tubester.StartSeconds.Tooltip"));
 
 	add_speed_fader_group(props, f);
+	vs_properties_add_version(props);
 	return props;
 }
 

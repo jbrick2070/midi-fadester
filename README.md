@@ -79,7 +79,7 @@ On Windows you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 > **Mac users, please read.** The macOS build is new. On 2026-11-17 it was installed in OBS 33.0.1 on an Apple Silicon Mac (M6, macOS 27.3) and checked: it loads, its vendor requests answer, and OBS quits with 0 memory leaks. The full hands-on test with a controller is still to come, so please report what you find. The `.pkg` is not signed or notarized by Apple, so macOS will refuse to open it the first time. To allow it, right-click (or Control-click) the `.pkg` and choose **Open**, then **Open** again; or try to open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
 - The builds are not code-signed, so Windows SmartScreen may warn before the installer runs. Choose **More info**, then **Run anyway**. Every release page lists the SHA-256 checksum of each file.
-- To check that it loaded: the **Tools** menu has a **Midi Fadester** entry, and **Tools → Plugin Manager** lists it without a *Legacy* badge (that badge marks plugins installed in the old folder layout). The dialog's title bar shows the version and the commit it was built from.
+- To check that it loaded: the **Tools** menu has a **Midi Fadester** entry, and **Tools → Plugin Manager** lists it without a *Legacy* badge (that badge marks plugins installed in the old folder layout). Every Midi Fadester window shows the version in its title bar; the commit it was built from is on the last line of the dialog's **Advanced** tab.
 - To update, install the new version over the old one. To remove it, delete the `midi-fadester` folder.
 
 ## The first five minutes

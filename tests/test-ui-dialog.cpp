@@ -14,6 +14,7 @@
 #include "core/tbar-logic.h"
 #include "core/mfd-text.h"
 #include "ui/mfd-text-qt.hpp"
+#include <plugin-support.h>
 #include <obs-module.h>
 #include <util/text-lookup.h>
 
@@ -1327,6 +1328,8 @@ int main(int argc, char **argv)
 	pump_ui();
 
 	auto *sheet = must_find<QDialog>(dlg.get(), QStringLiteral("mfdSetupSheet"));
+	REQUIRE(sheet->windowTitle() == QStringLiteral("Midi Fadester ") + QString::fromUtf8(PLUGIN_VERSION) +
+						QString::fromUtf8(" \xE2\x80\x94 Set up strip"));
 	auto *stack = must_find<QStackedWidget>(sheet, QStringLiteral("mfdSetupStack"));
 	REQUIRE(!sheet->isHidden());
 	REQUIRE(stack->currentIndex() == 0);
@@ -1465,8 +1468,20 @@ int main(int argc, char **argv)
 		struct mfd_ui_snapshot svg_snap {};
 		mfd_engine_get_ui_snapshot(&eng, &svg_snap);
 		const QByteArray desk_xml = mfd_make_apc40_desk_svg(svg_snap);
-		REQUIRE(desk_xml.contains("Clip launch pads"));
+		REQUIRE(desk_xml.contains("Pads: see the Fadester Desk dock."));
+		REQUIRE(!desk_xml.contains("for desk orientation")); /* U1-22: the pads do a great deal */
 		REQUIRE(desk_xml.contains("Scene pads"));
+	}
+
+	/* U1-23: every window shows the version; the main dialog's title holds no commit or build time */
+	{
+		const QString version = QString::fromUtf8(PLUGIN_VERSION);
+		REQUIRE(dlg->windowTitle() == QStringLiteral("Midi Fadester ") + version);
+		REQUIRE(svg_dlg->windowTitle() ==
+			QStringLiteral("Midi Fadester ") + version + QString::fromUtf8(" \xE2\x80\x94 Controller"));
+		auto *about = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvAbout"));
+		REQUIRE(about->text().contains(version));
+		REQUIRE(about->text().contains(QString::fromUtf8(PLUGIN_GIT_COMMIT)));
 	}
 
 	capture_and_verify_png(svg_dlg, screenshot_dir, QStringLiteral("08-show-controller-svg.png"));

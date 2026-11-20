@@ -19,3 +19,6 @@ QString mfdText(const char *key, const char *english);
 /* text with "%1".."%9" replaced by values[0..8] in one pass; a placeholder with no value is left out, any other "%"
  * stays. */
 QString mfdFill(const QString &text, const QStringList &values);
+
+/* The title of every Midi Fadester window: "Midi Fadester <version>, a dash, <window>" (the suite's rule). */
+QString mfdWindowTitle(const QString &window);

@@ -2241,6 +2241,7 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	dstr_free(&shader_filter);
 	dstr_free(&image_filter);
 
+	vs_properties_add_version(props);
 	return props;
 }
 

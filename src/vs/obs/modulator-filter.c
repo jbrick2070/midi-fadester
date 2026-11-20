@@ -1492,6 +1492,7 @@ static obs_properties_t *modulator_get_properties(void *data)
 		obs_data_release(cur_settings);
 	}
 
+	vs_properties_add_version(props);
 	return props;
 }
 

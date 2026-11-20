@@ -8,6 +8,8 @@
 
 #include "core/mfd-text.h"
 
+#include <plugin-support.h>
+
 QString mfdText(const char *key, const char *english)
 {
 	return QString::fromUtf8(mfd_text(key, english));
@@ -32,4 +34,10 @@ QString mfdFill(const QString &text, const QStringList &values)
 		out.append(c);
 	}
 	return out;
+}
+
+QString mfdWindowTitle(const QString &window)
+{
+	return mfdFill(mfdText("Window.Title", "Midi Fadester %1 \xE2\x80\x94 %2"),
+		       {QString::fromUtf8(PLUGIN_VERSION), window});
 }
