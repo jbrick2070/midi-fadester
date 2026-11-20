@@ -24,9 +24,30 @@
 #include <stdio.h>
 #include <string.h>
 
+/* What a target filter's properties say about one setting. */
+struct prop_query_ctx {
+	const char *setting_name;
+	char filter_id[64];
+	bool found;
+	enum vs_prop_type prop_type;
+	double min_val;
+	double max_val;
+	int64_t int_step;
+};
+
+/* One slot's target as discover_targets last found it (D-17). */
+struct target_discovery_cache {
+	bool valid;
+	uint64_t at_ns;
+	char filter[128];
+	char setting[128];
+	struct prop_query_ctx info;
+};
+
 struct vs_modulator_filter {
 	obs_source_t *context;
 	pthread_mutex_t mutex;
+	struct target_discovery_cache discovery_cache[VS_MOD_MAX_SLOTS];
 	struct vs_audio_tap tap;
 	struct vs_mod_slot_config slot_cfg[VS_MOD_MAX_SLOTS];
 	struct vs_mod_slot_state slot_state[VS_MOD_MAX_SLOTS];
@@ -349,6 +370,7 @@ static void on_parent_filter_added(void *data, calldata_t *cd)
 	const char *name = obs_source_get_name(filter);
 	pthread_mutex_lock(&f->mutex);
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		f->discovery_cache[i].valid = false;
 		if (name && strcmp(f->slot_cfg[i].target_filter, name) == 0) {
 			vs_mod_slot_reset_state(&f->slot_state[i]);
 			f->pending_target_refresh = true;
@@ -366,6 +388,7 @@ static void on_parent_filter_removed(void *data, calldata_t *cd)
 	const char *name = obs_source_get_name(filter);
 	pthread_mutex_lock(&f->mutex);
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
+		f->discovery_cache[i].valid = false;
 		if (name && strcmp(f->slot_cfg[i].target_filter, name) == 0)
 			vs_mod_slot_reset_state(&f->slot_state[i]);
 	}
@@ -427,16 +450,6 @@ static obs_properties_t *target_properties_for_discovery(obs_source_t *target)
 	g_target_discovery_depth--;
 	return props;
 }
-
-struct prop_query_ctx {
-	const char *setting_name;
-	char filter_id[64];
-	bool found;
-	enum vs_prop_type prop_type;
-	double min_val;
-	double max_val;
-	int64_t int_step;
-};
 
 static void inspect_properties_for_setting(obs_properties_t *props, struct prop_query_ctx *q)
 {
@@ -614,16 +627,49 @@ struct target_discovery {
 	bool found[VS_MOD_MAX_SLOTS];
 };
 
+/* How long a slot's discovered target description is reused (D-17). Every step of a slider drag in the modulator's
+ * Properties is a settings update, and each one used to build the whole Properties of every slot's target filter on
+ * the graphics thread. A drag sends many updates a second; what the target offered two seconds ago still holds. */
+#define VS_MOD_DISCOVERY_REUSE_NS 2000000000ULL
+
 static void discover_targets(struct vs_modulator_filter *f, obs_data_t *settings, struct target_discovery *d)
 {
 	char key[64];
+	const uint64_t now = os_gettime_ns();
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
 		slot_key(key, sizeof(key), i, "target_filter");
 		const char *tf = obs_data_get_string(settings, key);
 		slot_key(key, sizeof(key), i, "target_setting");
 		const char *ts = obs_data_get_string(settings, key);
+
+		/* Only a found target is reused, for the same filter and setting, and only for a short while: a target
+		 * that was not there yet, or one whose shader was reloaded, is looked at again. The parent's filter_add
+		 * and filter_remove drop it at once. f->mutex is held for the copy only, never across the query. */
+		bool reused = false;
+		pthread_mutex_lock(&f->mutex);
+		struct target_discovery_cache *c = &f->discovery_cache[i];
+		if (c->valid && now - c->at_ns < VS_MOD_DISCOVERY_REUSE_NS && tf && ts && strcmp(c->filter, tf) == 0 &&
+		    strcmp(c->setting, ts) == 0) {
+			d->info[i] = c->info;
+			d->found[i] = true;
+			reused = true;
+		}
+		pthread_mutex_unlock(&f->mutex);
+		if (reused)
+			continue;
+
 		d->found[i] = query_target_setting_info(f, tf, ts, &d->info[i]);
 		d->info[i].setting_name = NULL; /* pointed into settings; only the results are kept */
+
+		pthread_mutex_lock(&f->mutex);
+		c->valid = d->found[i] && tf && ts && strlen(tf) < sizeof(c->filter) && strlen(ts) < sizeof(c->setting);
+		if (c->valid) {
+			snprintf(c->filter, sizeof(c->filter), "%s", tf);
+			snprintf(c->setting, sizeof(c->setting), "%s", ts);
+			c->info = d->info[i];
+			c->at_ns = now;
+		}
+		pthread_mutex_unlock(&f->mutex);
 	}
 }
 

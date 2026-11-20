@@ -18,6 +18,11 @@
 extern "C" {
 #endif
 
+/* Limits several Tape Deck files must agree on, in one place (E-07): the longest deck id, and how many decks the
+ * listener and the deck filter each keep room for. The body limit TUB_HTTP_BODY_MAX is below. */
+#define TUB_DECK_ID_MAX 64
+#define TUB_DECKS_MAX 64
+
 /* The most a report body may hold; tub_link_parse_body refuses more as well (R-LNK-2). */
 #define TUB_HTTP_BODY_MAX 65536
 

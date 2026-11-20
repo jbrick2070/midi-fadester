@@ -169,6 +169,25 @@ static void test_report_read(void)
 	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"gen\":-4,\"ev\":\"tick\"}");
 	assert(!tub_report_read(d, &r));
 	obs_data_release(d);
+	/* E-06: a generation or sequence number that is not a whole number is refused (1e99 converts differently on
+	 * each kind of processor); a position below 0, a huge position and a huge rate are brought into range */
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"gen\":1e99,\"ev\":\"tick\"}");
+	assert(!tub_report_read(d, &r));
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1.5,\"ev\":\"tick\"}");
+	assert(!tub_report_read(d, &r));
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":\"1\",\"ev\":\"tick\"}");
+	assert(!tub_report_read(d, &r));
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"ev\":\"tick\",\"ct\":-1,\"rate\":1e30,\"dur\":1e30}");
+	assert(tub_report_read(d, &r));
+	assert(r.current_time == 0.0 && r.rate == TUB_REPORT_MAX_RATE && r.duration == TUB_REPORT_MAX_SECONDS);
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"ev\":\"tick\",\"ct\":1e30,\"rate\":-2}");
+	assert(tub_report_read(d, &r));
+	assert(r.current_time == TUB_REPORT_MAX_SECONDS && r.rate == 0.0);
+	obs_data_release(d);
 	char body[2048];
 	snprintf(body, sizeof(body), "{\"inc\":\"%0400d\",\"seq\":1,\"ev\":\"%0100d\",\"src\":\"%0600d\"}", 1, 2, 3);
 	d = obs_data_create_from_json(body);

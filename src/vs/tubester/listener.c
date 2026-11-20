@@ -26,8 +26,6 @@
 #include <util/base.h>
 #define LISTENER_LOG(level, ...) blog(level, "[visual-sidechain] tape deck " __VA_ARGS__)
 
-#define TUB_DECK_ID_MAX 64
-#define TUB_DECKS_MAX 64
 #define TUB_HEADERS_MAX 8192
 /* A whole request, headers and body, must arrive within this time; a page posts a few hundred bytes at once. */
 #define TUB_CONNECTION_DEADLINE_NS 1500000000ULL

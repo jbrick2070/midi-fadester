@@ -20,6 +20,11 @@
 extern "C" {
 #endif
 
+/* The largest position or length, in seconds, and the largest playback rate a report may carry (E-06): ten days and
+ * 16x, far beyond any tape and any speed the deck sets, small enough for every later conversion. */
+#define TUB_REPORT_MAX_SECONDS 864000.0
+#define TUB_REPORT_MAX_RATE 16.0
+
 #define TUB_TOKEN_LEN 32
 #define TUB_INCARNATION_MAX 32
 #define TUB_SRC_MAX 260

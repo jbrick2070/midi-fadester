@@ -87,6 +87,11 @@ struct vs_user_uniform_binding {
 	bool image_loaded;
 };
 
+/* Shader time starts over after this many seconds (9.1 hours; a power of two, so whole seconds stay exact). A float
+ * resolves 2 ms there: 8 steps per frame at 60 fps. The one phase jump at the wrap is the price of a clock that
+ * runs at the right speed for as long as OBS is up. */
+#define VS_SHADER_TIME_WRAP_SEC 32768.0
+
 struct vs_shader_filter {
 	obs_source_t *context;
 	struct vs_audio_tap tap;
@@ -201,7 +206,10 @@ struct vs_shader_filter {
 	uint32_t feedback_height;
 	enum gs_color_space feedback_space;
 
-	float elapsed_time;
+	/* Seconds since the filter was made, kept in a double and wrapped (D-13). As a float that only grows, the 1/60 s
+	 * added per frame is rounded to the float's step: after 18 hours the clock ran 6 % slow, and after six days it
+	 * stopped. The shaders get a float below VS_SHADER_TIME_WRAP_SEC, where a frame is always many steps. */
+	double elapsed_time;
 	float rand_f;
 	float rand_instance_f;
 	float rand_activation_f;
@@ -657,6 +665,16 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		dstr_replace(&err_text, "(null) (", "(");
 		bfree(gs_err);
 		gs_err = err_text.array;
+	}
+	if (sf->effect &&
+	    (!gs_effect_get_technique(sf->effect, "Draw") || !gs_effect_get_param_by_name(sf->effect, "image"))) {
+		/* D-15: an effect that compiles but has no "Draw" technique or no "image" texture (a full effect that
+		 * names them differently) draws nothing, and libobs logs an error for it on every frame. It counts as
+		 * not compiled, with a line that says what is missing. */
+		gs_effect_destroy(sf->effect);
+		sf->effect = NULL;
+		bfree(gs_err);
+		gs_err = bstrdup(obs_module_text("Shader.Error.NoDrawOrImage"));
 	}
 	if (sf->effect) {
 		/* Resolve the host percent controls against the new shader's parameters before their values are read;
@@ -1148,7 +1166,9 @@ static void shader_filter_video_tick(void *data, float seconds)
 		sf->custom_band_stale = true;
 	}
 
-	sf->elapsed_time += seconds;
+	sf->elapsed_time += (double)seconds;
+	if (sf->elapsed_time >= VS_SHADER_TIME_WRAP_SEC)
+		sf->elapsed_time -= VS_SHADER_TIME_WRAP_SEC;
 	sf->rand_f = next_unit_rand();
 
 	const uint64_t elapsed_ns = (uint64_t)(seconds * 1e9f);
@@ -1259,11 +1279,11 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 		gs_effect_set_vec2(sf->p_uv_pixel_interval, &uv_pixel_interval);
 
 	if (sf->p_elapsed_time)
-		gs_effect_set_float(sf->p_elapsed_time, sf->elapsed_time);
+		gs_effect_set_float(sf->p_elapsed_time, (float)sf->elapsed_time);
 	if (sf->p_loops)
-		gs_effect_set_float(sf->p_loops, floorf(sf->elapsed_time));
+		gs_effect_set_float(sf->p_loops, (float)floor(sf->elapsed_time));
 	if (sf->p_loop_second)
-		gs_effect_set_float(sf->p_loop_second, fmodf(sf->elapsed_time, 1.0f));
+		gs_effect_set_float(sf->p_loop_second, (float)fmod(sf->elapsed_time, 1.0));
 	if (sf->p_rand_f)
 		gs_effect_set_float(sf->p_rand_f, sf->rand_f);
 	if (sf->p_rand_instance_f)

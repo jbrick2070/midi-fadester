@@ -285,6 +285,8 @@ static void test_long_audio_blocks_do_not_pump(void)
 	}
 	assert(min_band > 0.0f);
 	assert(min_level > 0.5f * frame.level); /* no dip toward 0 between blocks */
+	/* G-06: 40 blocks over 200 video frames: the FFTs ran once per block, not once per frame */
+	assert(ana.fft_runs == 40u);
 	/* the stream stops: starved after two block lengths (170 ms), not at once and not never */
 	for (int f = 0; f < 6; f++)
 		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame); /* 183 ms since the last block's first frame */

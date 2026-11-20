@@ -128,6 +128,13 @@ struct vs_analyzer {
 	 * them: it is starved after two block lengths without audio, never sooner than 50 ms, never later than 250 ms. */
 	float last_block_sec;
 	bool starved;
+	/* G-06: the audio the magnitudes in mag_low and mag_mid were computed from. A video frame that brings no new
+	 * audio (two of three at 60 fps with 21 ms blocks, all of them on a stopped source) reads the same window, so
+	 * the two FFTs are not run again. */
+	uint64_t fft_written_samples;
+	size_t fft_offset_samples;
+	bool fft_valid;
+	uint64_t fft_runs; /* how often the FFTs ran (tests) */
 	float silent_or_starved_sec;
 	bool has_seen_audio;
 	bool initialized;

@@ -10,6 +10,7 @@
  */
 
 #include "tubester/deck-link.h"
+#include "tubester/http-parse.h"
 
 #include <util/bmem.h>
 #include <math.h>
@@ -240,7 +241,7 @@ static bool json_is_report_object(const char *body, size_t len)
 bool tub_link_parse_body(const char *body, size_t len, obs_data_t **out)
 {
 	*out = NULL;
-	if (!body || len == 0 || len > 65536)
+	if (!body || len == 0 || len > TUB_HTTP_BODY_MAX)
 		return false;
 	if (!json_is_report_object(body, len))
 		return false;
@@ -271,6 +272,15 @@ static void copy_string(char *dst, size_t size, const char *src)
 	dst[n] = '\0';
 }
 
+static bool report_field_is_whole_number(obs_data_t *data, const char *name)
+{
+	obs_data_item_t *item = obs_data_item_byname(data, name);
+	const bool ok = item && obs_data_item_gettype(item) == OBS_DATA_NUMBER &&
+			obs_data_item_numtype(item) == OBS_DATA_NUM_INT;
+	obs_data_item_release(&item);
+	return ok;
+}
+
 bool tub_report_read(obs_data_t *data, struct tub_report *r)
 {
 	memset(r, 0, sizeof(*r));
@@ -282,16 +292,29 @@ bool tub_report_read(obs_data_t *data, struct tub_report *r)
 	copy_string(r->event, sizeof(r->event), obs_data_get_string(data, "ev"));
 	if (r->incarnation[0] == '\0' || r->event[0] == '\0')
 		return false;
+	/* E-06: the numbers of a report are checked before they are used. A generation or sequence number written as
+	 * a fraction or with an exponent ("gen": 1e99) is not a whole number the page ever sends: converting it is
+	 * undefined and gives a different link generation on each kind of processor. */
+	if (!report_field_is_whole_number(data, "seq") ||
+	    (obs_data_has_user_value(data, "gen") && !report_field_is_whole_number(data, "gen")))
+		return false;
 	long long gen = obs_data_get_int(data, "gen");
 	long long seq = obs_data_get_int(data, "seq");
 	if (gen < 0 || seq < 0)
 		return false;
 	r->gen = (uint64_t)gen;
 	r->seq = (uint64_t)seq;
-	r->current_time = obs_data_get_double(data, "ct");
+	/* a position is 0 or more and no longer than TUB_REPORT_MAX_SECONDS; a rate is within the deck's own range */
+	double current_time = obs_data_get_double(data, "ct");
+	r->current_time = (isfinite(current_time) && current_time > 0.0)
+				  ? (current_time < TUB_REPORT_MAX_SECONDS ? current_time : TUB_REPORT_MAX_SECONDS)
+				  : 0.0;
 	double duration = obs_data_get_double(data, "dur");
-	r->duration = (isfinite(duration) && duration > 0.0) ? duration : 0.0;
-	r->rate = obs_data_get_double(data, "rate");
+	r->duration = (isfinite(duration) && duration > 0.0)
+			      ? (duration < TUB_REPORT_MAX_SECONDS ? duration : TUB_REPORT_MAX_SECONDS)
+			      : 0.0;
+	double rate = obs_data_get_double(data, "rate");
+	r->rate = (isfinite(rate) && rate > 0.0) ? (rate < TUB_REPORT_MAX_RATE ? rate : TUB_REPORT_MAX_RATE) : 0.0;
 	r->ready_state = (int)obs_data_get_int(data, "rs");
 	r->video_width = (int)obs_data_get_int(data, "vw");
 	r->video_height = (int)obs_data_get_int(data, "vh");

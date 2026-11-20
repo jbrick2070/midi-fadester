@@ -143,6 +143,7 @@ void vs_analyzer_reset(struct vs_analyzer *ana)
 	ana->time_since_audio_sec = 0.0f;
 	ana->last_block_sec = 0.0f;
 	ana->starved = false;
+	ana->fft_valid = false;
 	ana->silent_or_starved_sec = 0.0f;
 	ana->has_seen_audio = false;
 }
@@ -230,8 +231,15 @@ void vs_analyzer_step(struct vs_analyzer *ana, float dt_sec, struct vs_audio_fra
 	remove_dc_offset(ana->win_low, low_size, available);
 	remove_dc_offset(ana->win_mid, mid_size, available);
 
-	vs_fft_compute(&ana->fft_low, ana->win_low, ana->mag_low);
-	vs_fft_compute(&ana->fft_mid, ana->win_mid, ana->mag_mid);
+	/* The same samples give the same magnitudes: only a window that changed is transformed again (G-06). */
+	if (!ana->fft_valid || ana->fft_written_samples != written || ana->fft_offset_samples != offset_samples) {
+		vs_fft_compute(&ana->fft_low, ana->win_low, ana->mag_low);
+		vs_fft_compute(&ana->fft_mid, ana->win_mid, ana->mag_mid);
+		ana->fft_written_samples = written;
+		ana->fft_offset_samples = offset_samples;
+		ana->fft_valid = true;
+		ana->fft_runs++;
+	}
 
 	struct vs_spectrum_frame spec_frame;
 	vs_spectrum_compute(&ana->spectrum, ana->win_mid, ana->mag_low, ana->mag_mid, &spec_frame);

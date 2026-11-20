@@ -114,7 +114,51 @@ void vs_vendor_handle_get_decks(obs_data_t *request_data, obs_data_t *response_d
 		tub_decks_describe(response_data);
 }
 
+/*
+ * Events are built and handed to obs-websocket on the UI thread (D-12, E-04). The callers are the video tick (up to
+ * 30 times a second while sound plays or a fader moves) and request threads; building an event allocates a hundred or
+ * so small objects, and obs-websocket turns it into JSON on the calling thread. A caller on another thread only
+ * queues one task per event kind: while one is waiting, further calls add nothing, and the task reads the state as it
+ * is when it runs, so the newest values go out. Before OBS is up (tests) and on the UI thread itself the event goes
+ * out at once.
+ */
+static volatile bool g_decks_emit_queued;
+static volatile bool g_signals_emit_queued;
+
+static bool emit_from_this_thread(void)
+{
+	return !obs_initialized() || obs_in_task_thread(OBS_TASK_UI);
+}
+
+static void emit_decks_changed_now(void);
+static void emit_signals_changed_now(void);
+
+static void decks_emit_task(void *param)
+{
+	UNUSED_PARAMETER(param);
+	os_atomic_set_bool(&g_decks_emit_queued, false);
+	emit_decks_changed_now();
+}
+
+static void signals_emit_task(void *param)
+{
+	UNUSED_PARAMETER(param);
+	os_atomic_set_bool(&g_signals_emit_queued, false);
+	emit_signals_changed_now();
+}
+
 void vs_vendor_api_emit_decks_changed(void)
+{
+	if (!g_ws_ph || !g_vendor)
+		return;
+	if (emit_from_this_thread()) {
+		emit_decks_changed_now();
+	} else if (!os_atomic_set_bool(&g_decks_emit_queued, true)) {
+		obs_queue_task(OBS_TASK_UI, decks_emit_task, NULL, false);
+	}
+}
+
+static void emit_decks_changed_now(void)
 {
 	if (!g_ws_ph || !g_vendor)
 		return;
@@ -241,6 +285,17 @@ static void fill_vendor_error(obs_data_t *data, const char *sentence)
 }
 
 void vs_vendor_api_emit_signals_changed(void)
+{
+	if (!g_ws_ph || !g_vendor)
+		return;
+	if (emit_from_this_thread()) {
+		emit_signals_changed_now();
+	} else if (!os_atomic_set_bool(&g_signals_emit_queued, true)) {
+		obs_queue_task(OBS_TASK_UI, signals_emit_task, NULL, false);
+	}
+}
+
+static void emit_signals_changed_now(void)
 {
 	if (!g_ws_ph || !g_vendor)
 		return;

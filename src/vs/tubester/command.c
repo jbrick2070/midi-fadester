@@ -11,6 +11,7 @@
 
 #include "tubester/command.h"
 #include "tubester/deck-link.h"
+#include "tubester/http-parse.h"
 #include "tubester/speed.h"
 
 #include <obs-data.h>
@@ -49,7 +50,7 @@ static char *finish(obs_data_t *data)
 
 static bool is_plain_id(const char *s)
 {
-	if (!s || !*s || strlen(s) > 64)
+	if (!s || !*s || strlen(s) > TUB_DECK_ID_MAX)
 		return false;
 	for (; *s; s++) {
 		char c = *s;

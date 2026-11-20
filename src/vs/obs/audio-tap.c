@@ -373,6 +373,30 @@ static void tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, floa
 		}
 	}
 
+	/* D-16: the tap holds its Named Source by reference and goes on hearing it after a rename, but the filter's
+	 * settings still held the old name, so after the next start the lookup by name failed and the effect was
+	 * silent. Once a second the attached source's name is compared with the stored one; a new name is written to
+	 * the filter's settings. This takes no libobs list lock (a weak reference and a name read). */
+	if (tap->mode == VS_TAP_NAMED_SOURCE && tap->source_cb_active && tap->weak_capture_source) {
+		tap->rename_check_accum_sec += seconds;
+		if (tap->rename_check_accum_sec >= 1.0f) {
+			tap->rename_check_accum_sec = 0.0f;
+			obs_source_t *src = obs_weak_source_get_source(tap->weak_capture_source);
+			const char *live_name = src ? obs_source_get_name(src) : NULL;
+			if (live_name && live_name[0] != '\0' && strcmp(live_name, tap->source_name) != 0) {
+				obs_log(LOG_INFO, "Named audio source '%s' is now called '%s'", tap->source_name,
+					live_name);
+				snprintf(tap->source_name, sizeof(tap->source_name), "%s", live_name);
+				obs_data_t *settings = filter_source ? obs_source_get_settings(filter_source) : NULL;
+				if (settings) {
+					obs_data_set_string(settings, "tap_source_name", tap->source_name);
+					obs_data_release(settings);
+				}
+			}
+			obs_source_release(src);
+		}
+	}
+
 	const uint64_t video_ts = obs_get_video_frame_time();
 	if (video_ts != 0 && video_ts == tap->last_video_frame_ts)
 		return;

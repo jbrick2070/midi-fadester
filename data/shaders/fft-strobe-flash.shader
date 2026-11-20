@@ -51,9 +51,11 @@ float4 mainImage(VertData v_in) : TARGET
 	 * max_flash_rate_hz and triggers on max(audio_kick, audio_snare * 0.85, audio_spectral_flux). */
 	float flash_amt = saturate(vs_flash_envelope) * flash_intensity;
 
-	float3 tinted = lerp(base.rgb, flash_tint.rgb, flash_amt);
+	/* The picture is premultiplied: where the source is transparent (a keyed camera, a logo) the tint and the
+	 * inverted colour are scaled by its alpha too, so the flash stays inside the source's shape (D-14). */
+	float3 tinted = lerp(base.rgb, flash_tint.rgb * base.a, flash_amt);
 	if (allow_invert && vs_flash_envelope > 0.65) {
-		float3 inv = 1.0 - base.rgb;
+		float3 inv = base.a - base.rgb;
 		tinted = lerp(tinted, inv, flash_amt * 0.75);
 	}
 

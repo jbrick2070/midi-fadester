@@ -48,6 +48,7 @@ struct vs_audio_tap {
 	bool source_cb_active;
 	bool warned_attachment_failure;
 	float retry_accum_sec;
+	float rename_check_accum_sec; /* a Named Source is asked for its name once a second (D-16) */
 	/* Set by a caller holding a lock that the frontend's save takes after the sources lock: configure then records a
 	 * Named Source target without looking it up, and the 1 s retry attaches it (see vs_audio_tap_named_lookup). */
 	bool defer_named_attach;
