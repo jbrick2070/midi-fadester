@@ -49,6 +49,9 @@ bool mfdConfirm(QWidget *parent, const QString &window, const QString &question,
 {
 	QMessageBox box(parent);
 	box.setObjectName(QStringLiteral("mfdConfirmBox"));
+	/* Qt's own box on every system: macOS would otherwise show a native alert, where Cancel may not be the default
+	 * button and the same box looks and acts differently from Windows */
+	box.setOption(QMessageBox::Option::DontUseNativeDialog, true);
 	/* off screen when its window is (the UI test) */
 	box.setAttribute(Qt::WA_DontShowOnScreen, parent && parent->testAttribute(Qt::WA_DontShowOnScreen));
 	box.setIcon(QMessageBox::Warning);
