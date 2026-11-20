@@ -55,7 +55,8 @@ bool mfdConfirm(QWidget *parent, const QString &window, const QString &question,
 	/* off screen when its window is (the UI test) */
 	box.setAttribute(Qt::WA_DontShowOnScreen, parent && parent->testAttribute(Qt::WA_DontShowOnScreen));
 	box.setIcon(QMessageBox::Warning);
-	box.setWindowTitle(mfdWindowTitle(window));
+	box.setWindowTitle(mfdWindowTitle(window)); /* ignored by Qt on macOS, where alerts have no title */
+	box.setProperty("mfdTitle", mfdWindowTitle(window));
 	box.setText(question);
 	QPushButton *yes = box.addButton(do_it, QMessageBox::AcceptRole);
 	yes->setObjectName(QStringLiteral("mfdConfirmYes"));

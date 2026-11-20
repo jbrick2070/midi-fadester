@@ -192,7 +192,13 @@ static void answer_next_confirm(bool yes, int tries_left = 200)
 			REQUIRE(box != nullptr);
 			++g_confirm_seen;
 			g_confirm_text = box->text();
+		/* QMessageBox ignores a window title on macOS (Apple's rule for alerts), so the test reads the title the
+			 * box was given there and the one it shows elsewhere */
+#ifdef __APPLE__
+			g_confirm_title = box->property("mfdTitle").toString();
+#else
 			g_confirm_title = box->windowTitle();
+#endif
 			auto *btn = box->findChild<QPushButton *>(yes ? QStringLiteral("mfdConfirmYes")
 								      : QStringLiteral("mfdConfirmCancel"));
 			REQUIRE(btn != nullptr);
