@@ -24,6 +24,7 @@
 #include <QWheelEvent>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -434,23 +435,38 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	}
 	root->addLayout(scene_row);
 
-	/* the pad grid with the strips' source names over it and the row names beside it */
+	/* the pad grid: the scene fades on top in their own green frame (they work on the whole scene, not on a column),
+	 * then the strips' source names over the per-column rows, with the row names beside them */
 	auto *grid = new QGridLayout();
 	grid->setHorizontalSpacing(3);
 	grid->setVerticalSpacing(3);
+	auto *fade_frame = new QFrame(this); /* made before the pads, so it draws under them */
+	fade_frame->setObjectName(QStringLiteral("mfdDeskFadeFrame"));
+	fade_frame->setStyleSheet(QStringLiteral(
+		"#mfdDeskFadeFrame { border: 1px solid #22c55e; border-radius: 4px; background: transparent; }"));
+	fade_frame->setAttribute(Qt::WA_TransparentForMouseEvents);
+	grid->addWidget(fade_frame, 0, 0, 1, kStrips + 2);
+	grid->setRowMinimumHeight(0, 32);            /* room for the frame above and below the pads */
+	grid->setColumnMinimumWidth(kStrips + 1, 4); /* and on the right */
+	grid->setRowMinimumHeight(1, 4);             /* a gap between the scene fades and the columns */
 	for (int i = 0; i < kStrips; ++i) {
 		col_names_[i] = new QLabel(this);
 		col_names_[i]->setAlignment(Qt::AlignCenter);
 		col_names_[i]->setMinimumWidth(30);
 		col_names_[i]->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-		grid->addWidget(col_names_[i], 0, i + 1);
+		grid->addWidget(col_names_[i], 2, i + 1);
 	}
 	for (int r = 0; r < kRows; ++r) {
 		auto *name = new QLabel(rowShortName(r), this);
 		name->setToolTip(rowName(r));
 		name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
 		row_names_[r] = name;
-		grid->addWidget(name, r + 1, 0);
+		const int grid_row = r == 0 ? 0
+					    : r + 2; /* the scene fades on top, the columns' rows under their names */
+		if (r == 0) {
+			name->setIndent(6); /* inside the frame */
+		}
+		grid->addWidget(name, grid_row, 0);
 		for (int i = 0; i < kStrips; ++i) {
 			QPushButton *b = makeButton(mfdFill(mfdText("Desk.PadName", "%1, column %2"),
 							    {rowName(r), QString::number(i + 1)}),
@@ -463,14 +479,14 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 				}
 			});
 			connect(b, &QPushButton::released, this, [this, r, i]() { pressPad(r, i, false); });
-			grid->addWidget(b, r + 1, i + 1);
+			grid->addWidget(b, grid_row, i + 1, Qt::AlignVCenter);
 		}
 	}
 	auto *clip_name = new QLabel(mfdText("Desk.RowClipStopShort", "Clip Stop"), this);
 	clip_name->setToolTip(
 		mfdText("Desk.RowClipStopTip", "Clip Stop: back to its own blend (Shift: pin the column)"));
 	clip_name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
-	grid->addWidget(clip_name, kRows + 1, 0);
+	grid->addWidget(clip_name, kRows + 2, 0);
 	for (int i = 0; i < kStrips; ++i) {
 		QPushButton *b = makeButton(mfdFill(mfdText("Desk.ClipStopName", "Clip Stop, column %1"),
 						    {QString::number(i + 1)}),
@@ -483,7 +499,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		});
 		connect(b, &QPushButton::released, this,
 			[this, i]() { pressNote((uint8_t)i, MFD_VJ_NOTE_CLIP_STOP, false, false); });
-		grid->addWidget(b, kRows + 1, i + 1);
+		grid->addWidget(b, kRows + 2, i + 1);
 	}
 
 	/* Stop All, Shift (latched for the next pad), Session: added after the grid below */
@@ -530,7 +546,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 
 	/* fader levels (read-only), under their columns */
 	auto *fader_name = new QLabel(mfdText("Desk.Faders", "Faders"), this);
-	grid->addWidget(fader_name, kRows + 2, 0);
+	grid->addWidget(fader_name, kRows + 3, 0);
 	for (int i = 0; i < kStrips; ++i) {
 		auto *bar = new QProgressBar(this);
 		bar->setOrientation(Qt::Vertical);
@@ -539,7 +555,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		bar->setFixedHeight(46);
 		bar->setMinimumWidth(10);
 		faders_[i] = bar;
-		grid->addWidget(bar, kRows + 2, i + 1, Qt::AlignHCenter);
+		grid->addWidget(bar, kRows + 3, i + 1, Qt::AlignHCenter);
 	}
 	root->addLayout(grid);
 	root->addLayout(transport);
