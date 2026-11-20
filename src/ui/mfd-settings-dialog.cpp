@@ -2967,7 +2967,12 @@ void mfd_ui_init(void)
 	mfd_desk_dock_init(); /* before OBS restores the dock layout */
 	mfd_desk_dock_set_settings_opener(open_settings_from_dock);
 
-	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
+#ifdef MFD_ENABLE_SELF_TEST
+	const bool self_test = qgetenv("MFD_SELF_TEST") == "1"; /* a build with the harness, asked to run it (H-02) */
+#else
+	const bool self_test = false;
+#endif
+	if (!self_test) {
 #ifdef _WIN32
 		if (QCoreApplication::instance() && !g_dev_change_filter) {
 			g_dev_change_filter = new MfdDeviceChangeFilter();

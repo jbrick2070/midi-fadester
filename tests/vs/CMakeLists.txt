@@ -2,6 +2,11 @@
 # Copyright (C) 2026 Jeffrey A. Brick
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# The analyzer test makes its own WAV files (sine, kick and snare patterns) and reads them back. They are written
+# into the build tree (H-12): in the source tree a run rewrote tracked files, and on a platform whose math library
+# rounds one sample differently that made the checkout "dirty".
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wav-fixtures")
+
 if(OS_MACOS)
   # Test executables live outside OBS.app and find libobs.framework and the obs-deps dylibs in .deps at run time.
   set(CMAKE_SKIP_RPATH FALSE)
@@ -44,7 +49,7 @@ function(visual_sidechain_add_test short_name)
   target_compile_definitions(
     ${name}
     PRIVATE
-      "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\""
+      "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/wav-fixtures\""
       "VS_SHADERS_DIR=\"${CMAKE_SOURCE_DIR}/data/shaders\""
   )
   target_link_libraries(${name} PRIVATE OBS::libobs)

@@ -17,6 +17,46 @@
 		}                                                                       \
 	} while (0)
 
+/* Overwrites with spaces every "#ifdef MFD_ENABLE_SELF_TEST" block up to its own #endif (nested #if blocks counted),
+ * keeping the line breaks. */
+static void blank_self_test_blocks(char *buf)
+{
+	char *p = buf;
+	while ((p = strstr(p, "#ifdef MFD_ENABLE_SELF_TEST")) != NULL) {
+		int depth = 0;
+		char *line = p;
+		for (;;) {
+			char *eol = strchr(line, '\n');
+			const char *t = line;
+			while (*t == ' ' || *t == '\t') {
+				++t;
+			}
+			if (*t == '#') {
+				++t;
+				while (*t == ' ' || *t == '\t') {
+					++t;
+				}
+				if (strncmp(t, "if", 2U) == 0) {
+					++depth; /* #if, #ifdef, #ifndef */
+				} else if (strncmp(t, "endif", 5U) == 0) {
+					--depth;
+				}
+			}
+			const size_t n = eol ? (size_t)(eol - line) : strlen(line);
+			memset(line, ' ', n);
+			line += n;
+			if (!eol) {
+				break;
+			}
+			++line; /* past the line break, which stays */
+			if (depth <= 0) {
+				break;
+			}
+		}
+		p = line;
+	}
+}
+
 static bool check_production_source_file(const char *src_path)
 {
 	FILE *fp = fopen(src_path, "rb");
@@ -50,6 +90,10 @@ static bool check_production_source_file(const char *src_path)
 		free(buf);
 		return false;
 	}
+
+	/* The live self-test harness (#ifdef MFD_ENABLE_SELF_TEST ... #endif, only in a build that asks for it) is the
+	 * one place that may wait and sleep: its text is not looked at. Everything else in the file is (H-11). */
+	blank_self_test_blocks(buf);
 
 	const char *forbidden_tokens[] = {
 		"150 ms", "QTimer", "QBasicTimer", "startTimer", "SetTimer", "sleep_for", "Sleep(",

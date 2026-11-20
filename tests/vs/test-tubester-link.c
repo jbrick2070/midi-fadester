@@ -480,6 +480,31 @@ static void test_command_safety(void)
 	printf("  test_command_safety: PASS\n");
 }
 
+/* H-07: which deck a command goes to, on the code that ships (tub_deck_choose is what deck-filter.c calls). */
+static void test_deck_choice(void)
+{
+	const struct tub_deck_candidate decks[] = {
+		{"Screen A", "deck-aaaa", false}, /* 0: a second filter on Screen A */
+		{"Screen A", "deck-bbbb", true},  /* 1: the owner on Screen A */
+		{"Screen B", "deck-cccc", true},  /* 2 */
+		{"", "deck-dddd", true},          /* 3: its source is not known yet */
+		{"deck-cccc", "deck-eeee", false} /* 4: a source that is named like another deck's id */
+	};
+	const size_t n = sizeof(decks) / sizeof(decks[0]);
+	assert(tub_deck_choose("Screen A", decks, n) == 1); /* the owner, though it comes second */
+	assert(tub_deck_choose("Screen B", decks, n) == 2);
+	assert(tub_deck_choose("deck-aaaa", decks, n) == 0); /* by deck id */
+	assert(tub_deck_choose("deck-dddd", decks, n) == 3);
+	assert(tub_deck_choose("deck-cccc", decks, n) == 4); /* a source name wins over a deck id */
+	assert(tub_deck_choose("Screen C", decks, n) == n);  /* nobody */
+	assert(tub_deck_choose("", decks, n) == n);          /* an empty name never means the deck without a source */
+	assert(tub_deck_choose(NULL, decks, n) == n);
+	assert(tub_deck_choose("Screen A", decks, 1) == 0); /* a non-owner is taken when it is the only one there */
+	assert(tub_deck_choose("Screen A", NULL, 0) == 0);
+	const struct tub_deck_candidate twins[] = {{"Cam", "deck-1", false}, {"Cam", "deck-2", false}};
+	assert(tub_deck_choose("Cam", twins, 2) == 0); /* of equals, the first */
+}
+
 int main(void)
 {
 	printf("test-tubester-link\n");
@@ -492,6 +517,7 @@ int main(void)
 	test_states();
 	test_commands();
 	test_command_safety();
+	test_deck_choice();
 	printf("test-tubester-link: ALL PASS\n");
 	return 0;
 }

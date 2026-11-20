@@ -2836,7 +2836,7 @@ static void run_live_selftest_entry(void)
 
 static void run_live_selftest_if_requested(void)
 {
-	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
+	if (qgetenv("MFD_SELF_TEST") != "1") { /* "1" and nothing else, as in the engine and the dialog (H-02) */
 		return;
 	}
 	if (g_selftest_running.exchange(true, std::memory_order_acq_rel)) {

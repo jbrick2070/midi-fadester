@@ -2,7 +2,7 @@
 param(
     [string]$RepoDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$ObsRoot = "C:\Users\jeffr\OBS-Studio-33-Portable",
-    [string]$SharedObsRoot = ""
+    [string]$SharedObsRoot = "" # no longer used: the run changes no plugin folder for good (H-01)
 )
 $ErrorActionPreference = "Stop"
 
@@ -81,15 +81,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "midi-send --self-test failed"
 }
 
-# 4. Deploy RelWithDebInfo plugin (with MFD_ENABLE_SELF_TEST) + manifest + data to dedicated $ObsRoot
+# 4. The plugin folder. The test OBS's plugins\midi-fadester is a link into the one plugin folder the operator's own
+#    OBS loads, so what is in it now is copied aside before anything is put there, and put back when the run ends,
+#    pass or fail (H-01). The operator's OBS is left with exactly the files it had: never the self-test build, and
+#    never some other build that happens to lie in build_x64.
+$selfTestCache = Join-Path $RepoDir "build_x64\CMakeCache.txt"
+if (-not (Test-Path $selfTestCache) -or
+    -not (Select-String -Path $selfTestCache -Pattern '^MIDI_FADESTER_SELF_TEST:BOOL=(ON|TRUE|1)\s*$' -Quiet)) {
+    throw "build_x64 was not configured with the self-test harness (H-02). Run: cmake --preset windows-x64 -DMIDI_FADESTER_SELF_TEST=ON, then cmake --build --preset windows-x64 --config RelWithDebInfo. Configure with -DMIDI_FADESTER_SELF_TEST=OFF again afterwards."
+}
 $destPluginDir = Join-Path $resolvedObsRoot "plugins\midi-fadester"
-New-Item -ItemType Directory -Force -Path (Join-Path $destPluginDir "data\effects") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $destPluginDir "data\locale") | Out-Null
-Copy-Item (Join-Path $RepoDir "build_x64\RelWithDebInfo\midi-fadester.dll") (Join-Path $destPluginDir "midi-fadester.dll") -Force
-Copy-Item (Join-Path $RepoDir "build_x64\manifest.json") (Join-Path $destPluginDir "data\manifest.json") -Force
-Copy-Item (Join-Path $RepoDir "data\effects\mfd_layer_mixer.effect") (Join-Path $destPluginDir "data\effects\mfd_layer_mixer.effect") -Force
-# every language file, so a run with OBS in another language (user.ini [General] Language) tests that language
-Copy-Item (Join-Path $RepoDir "data\locale\*.ini") (Join-Path $destPluginDir "data\locale") -Force
+$pluginDirExisted = Test-Path $destPluginDir
+$pluginBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mfd-selftest-plugin-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $pluginBackupDir | Out-Null
+if ($pluginDirExisted) {
+    Copy-Item (Join-Path $destPluginDir "*") $pluginBackupDir -Recurse -Force
+}
+$pluginDeployed = $false
 
 # 5. Start loopMIDI only if not already running; remember ownership so we only stop what we started
 $loopMidiAlreadyRunning = (@(Get-Process loopMIDI -ErrorAction SilentlyContinue).Count -gt 0)
@@ -112,6 +120,14 @@ $watcher.EnableRaisingEvents = $true
 
 $obsProc = $null
 try {
+    # Deploy the build under test with all of its data (shaders and the Tape Deck page too), so the run tests one
+    # consistent set of files (H-01).
+    $pluginDeployed = $true
+    New-Item -ItemType Directory -Force -Path (Join-Path $destPluginDir "data") | Out-Null
+    Copy-Item (Join-Path $RepoDir "build_x64\RelWithDebInfo\midi-fadester.dll") (Join-Path $destPluginDir "midi-fadester.dll") -Force
+    Copy-Item (Join-Path $RepoDir "data\*") (Join-Path $destPluginDir "data") -Recurse -Force
+    Copy-Item (Join-Path $RepoDir "build_x64\manifest.json") (Join-Path $destPluginDir "data\manifest.json") -Force
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $targetObsExe
     # OBS 33.0.1 shipped on 2026-10-29; its "New update available" dialog blocked the window close and the run was
@@ -215,24 +231,20 @@ try {
         }
     }
 
-    # Deploy Release DLL to dedicated $ObsRoot
-    $releaseDll = Join-Path $RepoDir "build_x64\Release\midi-fadester.dll"
-    if (Test-Path $releaseDll) {
-        Copy-Item $releaseDll (Join-Path $destPluginDir "midi-fadester.dll") -Force
-    }
-
-    # Optionally update shared OBS plugin binary ONLY when no obs64 or sibling harness is active there
-    if (-not [string]::IsNullOrWhiteSpace($SharedObsRoot) -and (Test-Path $SharedObsRoot) -and (Test-Path $releaseDll)) {
-        $sharedResolved = (Resolve-Path $SharedObsRoot).Path.TrimEnd('\')
-        $sharedExe = Join-Path $sharedResolved "bin\64bit\obs64.exe"
-        $sharedBusy = @(Get-CimInstance Win32_Process -Filter "Name='obs64.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $sharedExe) }).Count -gt 0
-        if (-not $sharedBusy) {
-            $sharedPluginDir = Join-Path $sharedResolved "plugins\midi-fadester"
-            if (Test-Path $sharedPluginDir) {
-                Copy-Item $releaseDll (Join-Path $sharedPluginDir "midi-fadester.dll") -Force
-                Copy-Item (Join-Path $RepoDir "build_x64\manifest.json") (Join-Path $sharedPluginDir "data\manifest.json") -Force
+    # Put the plugin folder back as it was before the run (H-01), now that obs64 has exited.
+    if ($pluginDeployed) {
+        try {
+            if (Test-Path $destPluginDir) {
+                Get-ChildItem -LiteralPath $destPluginDir -Force | Remove-Item -Recurse -Force
             }
+            if ($pluginDirExisted) {
+                Copy-Item (Join-Path $pluginBackupDir "*") $destPluginDir -Recurse -Force
+            }
+            Remove-Item -LiteralPath $pluginBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Warning "The plugin folder '$destPluginDir' could not be put back: $($_.Exception.Message). Its files from before the run are in '$pluginBackupDir'."
         }
+    } else {
+        Remove-Item -LiteralPath $pluginBackupDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

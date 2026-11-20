@@ -1235,7 +1235,11 @@ int main(int argc, char **argv)
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("02-studio-mode-off.png"));
 
 	/* Click Crossfader's [Turn on Studio Mode] button */
+	REQUIRE(!eng.studio_mode_override); /* off until the button is pressed */
 	strip0_action->click();
+	/* H-10: the click itself must have asked OBS for Studio Mode (the stand-in records the request in the engine),
+	 * before the test plays OBS's answer below */
+	REQUIRE(eng.studio_mode_override_set && eng.studio_mode_override);
 	mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
 	pump_ui();
 	REQUIRE(studio_banner->isHidden());

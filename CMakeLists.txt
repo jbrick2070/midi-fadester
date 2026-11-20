@@ -9,6 +9,9 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCO
 project(${_name} VERSION ${_version})
 
 option(MIDI_FADESTER_BUILD_TESTS "Build the CTest suite" ON)
+# The live self-test harness (scripts/run-live-selftest.ps1): a worker inside the plugin that drives a real OBS when
+# MFD_SELF_TEST=1 is set. It is only in a build that asks for it (H-02): no installer and no ordinary build carries it.
+option(MIDI_FADESTER_SELF_TEST "Compile the live OBS self-test harness into the plugin" OFF)
 
 include(compilerconfig)
 include(defaults)
@@ -170,8 +173,11 @@ endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
+if(MIDI_FADESTER_SELF_TEST)
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE MFD_ENABLE_SELF_TEST=1)
+endif()
+
 if(MIDI_FADESTER_BUILD_TESTS)
-  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE "$<$<NOT:$<CONFIG:Release>>:MFD_ENABLE_SELF_TEST=1>")
   enable_testing()
   add_subdirectory(tests)
 endif()

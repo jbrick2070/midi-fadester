@@ -134,7 +134,7 @@ Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's 
 
 ## 3. Live Portable OBS 33 + `loopMIDI` Self-Test (`MFD_SELF_TEST=1`)
 
-Run the live hardware-loopback and GPU pixel suite via `scripts/run-live-selftest.ps1`, which targets the machine's one test OBS, `C:\Users\jeffr\OBS-Studio-33-Portable`. That folder holds only settings: its `bin`, `core` and `data` are directory links to the installed OBS 33, and its `plugins\midi-fadester` is a link into the one plugin folder, `C:\ProgramData\obs-studio\plugins`, which the operator's OBS loads too. So the run tests the very build it deploys, and leaves the Release DLL installed:
+Run the live hardware-loopback and GPU pixel suite via `scripts/run-live-selftest.ps1`, which targets the machine's one test OBS, `C:\Users\jeffr\OBS-Studio-33-Portable`. That folder holds only settings: its `bin`, `core` and `data` are directory links to the installed OBS 33, and its `plugins\midi-fadester` is a link into the one plugin folder, `C:\ProgramData\obs-studio\plugins`, which the operator's OBS loads too. So the run copies what is in that plugin folder aside first, deploys the build under test with all of its `data` (shaders and the Tape Deck page too), and puts the folder back exactly as it was when it ends, pass or fail: the operator's OBS is left as it was found. The harness is only in a build configured with `-DMIDI_FADESTER_SELF_TEST=ON` (off by default, so no ordinary build or installer carries it); the script stops with the two commands to run if `build_x64` was configured without it:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-live-selftest.ps1

@@ -268,11 +268,14 @@ int main(void)
 		REQUIRE(seen_preview);
 		mfd_vj_pads_set_hidden(&q, 1, true);
 		ac = mfd_vj_pads_leds(&q, al, MFD_VJ_MAX_LEDS);
+		bool seen_hidden_pad = false; /* H-10: the loop must have met the pad it checks */
 		for (size_t i = 0; i < ac; ++i) {
 			if (al[i].note == 25U) {
 				REQUIRE(al[i].channel == 15U && al[i].velocity == 5U && al[i].primary == 6U);
+				seen_hidden_pad = true;
 			}
 		}
+		REQUIRE(seen_hidden_pad);
 		mfd_vj_pads_set_hidden(&q, 1, false);
 	}
 

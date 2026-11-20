@@ -7858,6 +7858,10 @@ int main(void)
 			disc_eng->studio_mode_override_set = true;
 			disc_eng->studio_mode_override = true;
 			mfd_engine_load_apc40_defaults(disc_eng);
+			/* H-13: a port name no machine has. With no name the hot-plug rescan below would open the first real
+			 * MIDI input of the machine the test runs on, and its callback would outlive this engine. */
+			snprintf(disc_eng->configured_device_name, sizeof(disc_eng->configured_device_name), "%s",
+				 "__mfd_test_no_such_port__");
 
 			g_mock_tbar_aborts = 0;
 			g_mock_tbar_completions = 0;
@@ -7939,6 +7943,8 @@ int main(void)
 				REQUIRE(!strict_contract);
 			}
 
+			REQUIRE(disc_eng->midi_dev.handle == NULL); /* no real port was opened */
+			mfd_winmm_close(&disc_eng->midi_dev);
 			mfd_engine_destroy_mutex(disc_eng);
 			free(disc_eng);
 			if (mf_div) {

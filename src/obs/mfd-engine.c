@@ -9407,11 +9407,14 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 
 	mfd_engine_lock(eng);
 	if (saving) {
+#ifdef MFD_ENABLE_SELF_TEST
+		/* only a build with the self-test harness looks at this (H-02): an ordinary build always saves */
 		const char *self_test_env = getenv("MFD_SELF_TEST");
 		if (self_test_env && strcmp(self_test_env, "1") == 0) {
 			mfd_engine_unlock(eng);
 			return;
 		}
+#endif
 		obs_data_t *obj = obs_data_create();
 		serialize_slots(eng, obj);
 		/* Sources punched by the desk right now: the scene saved with them holds the punch, so the source's own

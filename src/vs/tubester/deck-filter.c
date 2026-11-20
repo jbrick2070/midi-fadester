@@ -1996,6 +1996,7 @@ enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tu
 		obs_weak_source_t *filter;
 		obs_weak_source_t *parent;
 		char deck_id[TUB_DECK_ID_CHARS + 2];
+		char source_name[256];
 		enum deck_role role;
 	} candidates[TUB_OWNERS_MAX];
 	size_t count = 0;
@@ -2019,31 +2020,26 @@ enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tu
 	}
 	pthread_mutex_unlock(&g_decks_mutex);
 
-	size_t chosen = TUB_OWNERS_MAX;
-	int best_rank = 0; /* 3: source + owner, 2: source + non-owner, 1: deck_id */
-	char chosen_source[256] = "";
-
+	/* The names are read here; which deck the name means is decided by tub_deck_choose (command.c), which the
+	 * tests run (H-07). */
+	struct tub_deck_candidate named[TUB_OWNERS_MAX];
 	for (size_t i = 0; i < count; i++) {
-		const char *source_name = "";
+		candidates[i].source_name[0] = '\0';
 		obs_source_t *parent_src = candidates[i].parent ? obs_weak_source_get_source(candidates[i].parent)
 								: NULL;
 		if (parent_src && obs_source_get_name(parent_src))
-			source_name = obs_source_get_name(parent_src);
-
-		int rank = 0;
-		if (source_name[0] != '\0' && strcmp(source_name, deck_target) == 0)
-			rank = (candidates[i].role == ROLE_OWNER) ? 3 : 2;
-		else if (strcmp(candidates[i].deck_id, deck_target) == 0)
-			rank = 1;
-
-		if (rank > best_rank) {
-			best_rank = rank;
-			chosen = i;
-			snprintf(chosen_source, sizeof(chosen_source), "%s", source_name);
-		}
+			snprintf(candidates[i].source_name, sizeof(candidates[i].source_name), "%s",
+				 obs_source_get_name(parent_src));
 		if (parent_src)
 			obs_source_release(parent_src);
+		named[i].source_name = candidates[i].source_name;
+		named[i].deck_id = candidates[i].deck_id;
+		named[i].owner = (candidates[i].role == ROLE_OWNER);
 	}
+	const size_t chosen = tub_deck_choose(deck_target, named, count);
+	char chosen_source[256] = "";
+	if (chosen < count)
+		snprintf(chosen_source, sizeof(chosen_source), "%s", candidates[chosen].source_name);
 
 	obs_source_t *filter_source = NULL;
 	if (chosen < count && candidates[chosen].filter)
