@@ -703,6 +703,9 @@ struct mfd_desk_strip {
 	char source[MFD_SOURCE_NAME_MAX]; /* the strip's layer, "" when it has none */
 	char label[MFD_SOURCE_NAME_MAX];  /* what its fader drives when it is not a layer (audio, a filter), else "" */
 	float level;                      /* the fader's value, 0..1 */
+	bool pickup;                      /* the fader waits: it must travel to pickup_target before it acts */
+	bool pickup_up;                   /* ... by moving up (else down) */
+	float pickup_target;              /* where the physical fader picks up, 0..1 */
 	bool has_layer;                   /* a Layer Opacity or Two-Source Mix layer the pads act on */
 	bool single_layer;                /* a Layer Opacity strip: flash, blackout, fade and snap work */
 	bool source_missing;              /* a Layer Opacity strip whose source is not available now */

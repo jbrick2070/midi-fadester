@@ -428,14 +428,14 @@ static void format_pickup_sentence(const struct mfd_ui_strip_input *in, bool phy
 	const bool is_knob = (in->slot_index >= 10 && in->slot_index < 18);
 	const char *text;
 	if (is_knob) {
-		text = phys_move_up ? mfd_text("Pickup.KnobRight", "Turn the knob right to %1% to pick up.")
-				    : mfd_text("Pickup.KnobLeft", "Turn the knob left to %1% to pick up.");
+		text = phys_move_up ? mfd_text("Pickup.KnobRight", "Turn the knob right to %1% to start.")
+				    : mfd_text("Pickup.KnobLeft", "Turn the knob left to %1% to start.");
 	} else if (in->is_horizontal) {
-		text = phys_move_up ? mfd_text("Pickup.CrossfaderRight", "Move the crossfader right to %1% to pick up.")
-				    : mfd_text("Pickup.CrossfaderLeft", "Move the crossfader left to %1% to pick up.");
+		text = phys_move_up ? mfd_text("Pickup.CrossfaderRight", "Move the crossfader right to %1% to start.")
+				    : mfd_text("Pickup.CrossfaderLeft", "Move the crossfader left to %1% to start.");
 	} else {
-		text = phys_move_up ? mfd_text("Pickup.FaderUp", "Move the fader up to %1% to pick up.")
-				    : mfd_text("Pickup.FaderDown", "Move the fader down to %1% to pick up.");
+		text = phys_move_up ? mfd_text("Pickup.FaderUp", "Move the fader up to %1% to start.")
+				    : mfd_text("Pickup.FaderDown", "Move the fader down to %1% to start.");
 	}
 	say(out, out_size, text, pct, NULL, NULL, NULL);
 }

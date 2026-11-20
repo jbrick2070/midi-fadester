@@ -7,6 +7,7 @@
 #include "ui/mfd-desk-dock.hpp"
 
 #include "core/apc40-palette.h"
+#include "core/takeover.h"
 #include "core/vj-pads.h"
 #include "obs/mfd-engine.h"
 #include "ui/mfd-text-qt.hpp"
@@ -30,6 +31,7 @@
 #include <QLabel>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPointer>
 #include <QScrollArea>
 #include <QProgressBar>
@@ -320,6 +322,62 @@ private:
 	int wheel_ = 0;
 };
 
+/* A column's fader on the dock: its level, and while the fader waits to pick up, the bar in amber with a marker line
+ * where the physical fader starts to act (the marker the settings dialog's strip card draws). Without it a fader that
+ * waits looks dead in the middle of a show (U1-14). */
+class MfdFaderBar final : public QWidget {
+public:
+	explicit MfdFaderBar(QWidget *parent = nullptr) : QWidget(parent)
+	{
+		setFixedHeight(46);
+		setMinimumWidth(14);
+		setMaximumWidth(22);
+	}
+	void setState(float level, bool pickup, float target)
+	{
+		const int l = (int)std::lround(std::clamp(level, 0.0f, 1.0f) * 1000.0f);
+		const int t = (int)std::lround(std::clamp(target, 0.0f, 1.0f) * 1000.0f);
+		if (l == level_ && pickup == pickup_ && (!pickup || t == target_)) {
+			return;
+		}
+		level_ = l;
+		pickup_ = pickup;
+		target_ = t;
+		setProperty("showingPickup", pickup_);
+		setProperty("pickupPermille", pickup_ ? target_ : -1);
+		update();
+	}
+	bool showingPickup() const { return pickup_; }
+
+protected:
+	void paintEvent(QPaintEvent *) override
+	{
+		QPainter p(this);
+		const QRectF box(0.5, 0.5, (qreal)width() - 1.0, (qreal)height() - 1.0);
+		p.setPen(QPen(QColor(0x33, 0x41, 0x55), 1.0));
+		p.setBrush(QColor(0x11, 0x18, 0x27));
+		p.drawRect(box);
+		const qreal inner_h = box.height() - 2.0;
+		const qreal fill_h = inner_h * (qreal)level_ / 1000.0;
+		if (fill_h > 0.5) {
+			p.setPen(Qt::NoPen);
+			p.setBrush(pickup_ ? QColor(0xf5, 0x9e, 0x0b) : QColor(0x94, 0xa3, 0xb8));
+			p.drawRect(QRectF(box.left() + 1.0, box.bottom() - 1.0 - fill_h, box.width() - 2.0, fill_h));
+		}
+		if (pickup_) {
+			const qreal y = box.bottom() - 1.0 - inner_h * (qreal)target_ / 1000.0;
+			p.setPen(QPen(QColor(0xfb, 0xbf, 0x24), 2.5));
+			p.drawLine(QPointF(0.0, std::clamp(y, 1.5, (qreal)height() - 1.5)),
+				   QPointF((qreal)width(), std::clamp(y, 1.5, (qreal)height() - 1.5)));
+		}
+	}
+
+private:
+	int level_ = -1;
+	int target_ = 0;
+	bool pickup_ = false;
+};
+
 class MfdDeskDock final : public QWidget {
 public:
 	explicit MfdDeskDock(struct mfd_engine *eng, QWidget *parent = nullptr);
@@ -370,7 +428,7 @@ private:
 	QPushButton *session_ = nullptr; /* the dock's Fade */
 	QPushButton *blackout_btn_ = nullptr;
 	QLabel *blackout_ = nullptr;
-	QProgressBar *faders_[kStrips] = {};
+	MfdFaderBar *faders_[kStrips] = {};
 	QProgressBar *xfader_ = nullptr;
 	QLabel *bpm_ = nullptr;
 	QLabel *lock_ = nullptr;
@@ -674,12 +732,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	auto *fader_name = new QLabel(mfdText("Desk.Faders", "Faders"), this);
 	grid->addWidget(fader_name, kRows + 3, 0);
 	for (int i = 0; i < kStrips; ++i) {
-		auto *bar = new QProgressBar(this);
-		bar->setOrientation(Qt::Vertical);
-		bar->setRange(0, 1000);
-		bar->setTextVisible(false);
-		bar->setFixedHeight(46);
-		bar->setMinimumWidth(10);
+		auto *bar = new MfdFaderBar(this);
+		bar->setObjectName(QStringLiteral("mfdDeskFader_%1").arg(i));
 		faders_[i] = bar;
 		grid->addWidget(bar, kRows + 3, i + 1, Qt::AlignHCenter);
 	}
@@ -1176,12 +1230,24 @@ void MfdDeskDock::refresh()
 		const struct mfd_vj_led &stop = view_.leds[i * MFD_DESK_CELLS + MFD_DESK_CLIP_STOP];
 		paintButton(clip_stops_[i], ledColor(stop, beat_pos, 0x22C55EU),
 			    pads_on && !st.owned[MFD_DESK_CLIP_STOP] && (shift ? st.can_pin_toggle : st.has_layer));
-		faders_[i]->setValue((int)std::lround(std::clamp(st.level, 0.0f, 1.0f) * 1000.0f));
-		setTip(faders_[i], src.isEmpty()
-					   ? mfdFill(mfdText("Desk.FaderEmpty", "Fader %1"), {QString::number(i + 1)})
-					   : mfdFill(mfdText("Desk.FaderTip", "Fader %1: %2, %3 %"),
-						     {QString::number(i + 1), src,
-						      QString::number((int)std::lround(st.level * 100.0f))}));
+		faders_[i]->setState(st.level, st.pickup, st.pickup_target);
+		QString fader_tip = src.isEmpty()
+					    ? mfdFill(mfdText("Desk.FaderEmpty", "Fader %1"), {QString::number(i + 1)})
+					    : mfdFill(mfdText("Desk.FaderTip", "Fader %1: %2, %3 %"),
+						      {QString::number(i + 1), src,
+						       QString::number((int)std::lround(st.level * 100.0f))});
+		if (st.pickup) {
+			/* the sentence of the settings dialog's strip card */
+			const QString pct = QString::number(mfd_calibrated_percent(st.pickup_target));
+			fader_tip +=
+				QStringLiteral("\n") +
+				(st.pickup_up
+					 ? mfdFill(mfdText("Pickup.FaderUp", "Move the fader up to %1% to start."),
+						   {pct})
+					 : mfdFill(mfdText("Pickup.FaderDown", "Move the fader down to %1% to start."),
+						   {pct}));
+		}
+		setTip(faders_[i], fader_tip);
 	}
 	xfader_->setValue((int)std::lround(std::clamp(view_.crossfader, 0.0f, 1.0f) * 1000.0f));
 	paintButton(stop_all_, 0x475569U, pads_on && !view_.stop_all_owned);

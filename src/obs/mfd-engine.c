@@ -6862,6 +6862,16 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 		st->single_layer = layer_fader && mfd_engine_is_slot_writable(eng, sl); /* as vj_fadeable */
 		st->source_missing = layer_fader && !st->single_layer;
 		st->level = sl->last_applied_val;
+		/* as the settings dialog's strip card (mfd_ui_format_strip_presentation): only once the fader's position
+		 * has been seen */
+		st->pickup = sl->enabled && sl->target_type != MFD_TARGET_UNASSIGNED && sl->takeover.has_last_fader &&
+			     sl->takeover.state == MFD_TAKEOVER_WAITING && sl->takeover.hint != MFD_HINT_NONE;
+		if (st->pickup) {
+			bool rev = sl->takeover.polarity_reversed;
+			st->pickup_target = rev ? 1.0f - sl->takeover.target_obs : sl->takeover.target_obs;
+			st->pickup_up = rev ? sl->takeover.hint == MFD_HINT_MOVE_DOWN
+					    : sl->takeover.hint == MFD_HINT_MOVE_UP;
+		}
 		st->follows = sl->auto_follow;
 		/* Shift + top pad: pins a strip on a single layer, unpins a pinned one (even empty) (vj_run_locked). */
 		st->can_pin_toggle = (sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER &&

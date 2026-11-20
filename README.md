@@ -263,7 +263,7 @@ The dialog says what is wrong in a sentence, next to the strip it concerns, and 
 | *Scene Red was deleted.* / *Cam is no longer in scene Blue.* / *Color and Color 2 are not in the same scene.* | The scene or layer the job named is gone or moved. | **Set up** on the strip and pick again. Renames follow by themselves; only removals break a job. |
 | *Mic/Aux has no audio.* | A Volume job points at a source without sound. | Pick a source with audio. |
 | *Filter 'Blur' was removed from Cam. Re-add it in OBS Filters or click Set up.* / *Setting 'radius' is no longer available on 'Blur'.* | The filter or its setting is gone. | Re-add the filter in OBS, or **Set up** and pick another. |
-| *Move the fader up to 40 % to pick up.* | Not an error: the value moved without the fader. | Move the fader past the marker. |
+| *Move the fader up to 40% to start.* | Not an error: the value moved without the fader. | Move the fader past the marker. |
 | *At end.* | Not an error: the control is parked on a rail. | Move it 8 % back to pick up again. |
 | The crossfader moves but nothing happens | A throw starts only past the first 6 % of the travel. | Throw further. If the strip is amber, Studio Mode is off. |
 | The transition is a Fade although Cut or Stinger is selected | OBS uses Fade for any T-bar move with those two. | Pick another transition for throws, or use OBS's Transition button for cuts. |

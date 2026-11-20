@@ -528,7 +528,7 @@ int main(void)
 	REQUIRE(strcmp(sp.state_readout, "0.0 dB") == 0);
 	REQUIRE(strcmp(sp.assignment_sentence, "Volume: Desktop Audio") == 0);
 
-	/* Row 5b: Pickup pending on vertical fader ("Move the fader down to 12% to pick up." + ↓) */
+	/* Row 5b: Pickup pending on vertical fader ("Move the fader down to 12% to start." + ↓) */
 	in.has_last_fader = true;
 	in.raw_norm = 0.80f;
 	in.target_obs = 0.12f;
@@ -539,7 +539,7 @@ int main(void)
 	REQUIRE(sp.pickup_target_percent == 12);
 	REQUIRE(sp.arrow == MFD_UI_ARROW_DOWN);
 	REQUIRE(strcmp(sp.arrow_glyph, "\xE2\x86\x93") == 0);
-	REQUIRE(strcmp(sp.status_sentence, "Move the fader down to 12% to pick up.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "Move the fader down to 12% to start.") == 0);
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_AMBER);
 	REQUIRE(strcmp(sp.state_readout, "-12.0 dB") == 0);
 
@@ -564,7 +564,7 @@ int main(void)
 	REQUIRE(sp.pickup_target_percent == 60);
 	REQUIRE(sp.arrow == MFD_UI_ARROW_LEFT);
 	REQUIRE(strcmp(sp.arrow_glyph, "\xE2\x86\x90") == 0);
-	REQUIRE(strcmp(sp.status_sentence, "Move the crossfader left to 60% to pick up.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "Move the crossfader left to 60% to start.") == 0);
 
 	/* Row 6: Throwing 63% + Finish now mini-button (and Fading 63% during auto_fade) */
 	in.takeover_state = MFD_TAKEOVER_ENGAGED;

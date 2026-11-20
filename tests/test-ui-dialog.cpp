@@ -1273,7 +1273,7 @@ int main(int argc, char **argv)
 	mfd_engine_reevaluate_slots(&eng, true);
 	pump_ui();
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_1"))->text() ==
-		QStringLiteral("Move the fader down to 12% to pick up."));
+		QStringLiteral("Move the fader down to 12% to start."));
 	REQUIRE(bar1->property("showingPickup").toBool());
 	REQUIRE(bar1->property("arrowGlyph").toString() == QStringLiteral("\u2193"));
 
@@ -1298,7 +1298,7 @@ int main(int argc, char **argv)
 	}
 
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_1"))->text() ==
-		QStringLiteral("Move the fader down to 12% to pick up."));
+		QStringLiteral("Move the fader down to 12% to start."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_4"))->text() ==
 		QStringLiteral("Color 2 is no longer in scene Red."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_5"))->text() ==
@@ -2262,6 +2262,33 @@ int main(int argc, char **argv)
 			turn_on->click();
 			pump_ui();
 			REQUIRE(!eng.vj_disabled && grid->isVisible() && !turn_on->isVisible());
+
+			/* U1-14: a fader that waits to pick up shows it on its bar: amber, with the marker where it starts to
+			 * act, and the sentence in its tooltip */
+			{
+				struct mfd_fader_slot &s1 = eng.fader_slots[1];
+				const struct mfd_takeover was_takeover = s1.takeover;
+				auto *f0 = sd->findChild<QWidget *>(QStringLiteral("mfdDeskFader_0"));
+				auto *f1 = sd->findChild<QWidget *>(QStringLiteral("mfdDeskFader_1"));
+				REQUIRE(f0 && f1 && s1.enabled && s1.target_type != MFD_TARGET_UNASSIGNED);
+				s1.takeover.has_last_fader = true;
+				s1.takeover.state = MFD_TAKEOVER_WAITING;
+				s1.takeover.hint = MFD_HINT_MOVE_UP;
+				s1.takeover.polarity_reversed = false;
+				s1.takeover.target_obs = 1.0f;
+				again();
+				REQUIRE(f0->property("showingPickup").toBool());
+				REQUIRE(f0->property("pickupPermille").toInt() == 1000);
+				REQUIRE(f0->toolTip().endsWith(QStringLiteral("Move the fader up to 100% to start.")));
+				s1.takeover.has_last_fader = false; /* its position not seen yet: nothing to say */
+				again();
+				REQUIRE(!f0->property("showingPickup").toBool());
+				s1.takeover = was_takeover;
+				again();
+				REQUIRE(f0->property("showingPickup").toBool() ==
+					(was_takeover.has_last_fader && was_takeover.state == MFD_TAKEOVER_WAITING &&
+					 was_takeover.hint != MFD_HINT_NONE));
+			}
 
 			/* U1-13: the video speed rows show only when switched on, on the Advanced tab */
 			{
