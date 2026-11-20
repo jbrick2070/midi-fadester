@@ -123,7 +123,7 @@ QString sceneFadePadText(int column, bool capped)
 {
 	static const char *const k_beats[] = {"32", "16", "8", "4", "2", "1", "\xC2\xBD"};
 	if (column <= 0) {
-		return QStringLiteral("\xE2\x9C\x82"); /* scissors */
+		return QString::fromUtf8("\xE2\x9C\x82"); /* scissors */
 	}
 	if (column == 1 && capped) {
 		return QStringLiteral("20s");
@@ -520,7 +520,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	/* the way from the show screen to the settings (it used to be the Tools menu only) */
 	gear_btn_ = makeButton(mfdText("Desk.Settings", "Midi Fadester settings"), kButtonHeight, kButtonHeight);
 	gear_btn_->setObjectName(QStringLiteral("mfdDeskGearBtn"));
-	gear_btn_->setText(QStringLiteral("\xE2\x9A\x99"));
+	gear_btn_->setText(QString::fromUtf8("\xE2\x9A\x99"));
 	gear_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	connect(gear_btn_, &QPushButton::clicked, this, []() {
 		if (g_open_settings) {
@@ -1020,7 +1020,7 @@ void MfdDeskDock::vjSteps(int steps)
 	mfd_engine_desk_vjster(eng_, steps, false, false);
 	sayStatus(mfdFill(mfdText("Desk.VjsterAskedStep", "Last request from this dock: %1 (unconfirmed)"),
 			  {QStringLiteral("%1%2x")
-				   .arg(steps > 0 ? QStringLiteral("+") : QStringLiteral("\xE2\x88\x92"))
+				   .arg(steps > 0 ? QStringLiteral("+") : QString::fromUtf8("\xE2\x88\x92"))
 				   .arg(std::abs(steps) * 0.05, 0, 'f', 2)}));
 }
 
@@ -1208,7 +1208,7 @@ void MfdDeskDock::refresh()
 				       : mfdText("Desk.StopAllShort", "Reset all"));
 	QString program = QString::fromUtf8(view_.program);
 	QString preview = QString::fromUtf8(view_.preview);
-	const QString none = QStringLiteral("\xE2\x80\x94");
+	const QString none = QString::fromUtf8("\xE2\x80\x94");
 	/* each line elides on its own; the tooltip holds the whole name */
 	auto chip = [](QLabel *l, const QString &full) {
 		setTip(l, full);
@@ -1240,9 +1240,9 @@ void MfdDeskDock::refresh()
 		/* a mark that is not colour: a filled dot on the scene on air, a ring on the one in Preview */
 		QString mark;
 		if (exists && name == program) {
-			mark = QStringLiteral("\xE2\x97\x8F ");
+			mark = QString::fromUtf8("\xE2\x97\x8F ");
 		} else if (exists && view_.studio_mode && name == preview) {
-			mark = QStringLiteral("\xE2\x97\x8B ");
+			mark = QString::fromUtf8("\xE2\x97\x8B ");
 		}
 		QString shown = scenes_[j]->fontMetrics().elidedText(mark + name, Qt::ElideRight,
 								     std::max(40, scenes_[j]->width() - 8));
@@ -1267,7 +1267,7 @@ void MfdDeskDock::refresh()
 		const struct mfd_desk_strip &st = view_.strips[i];
 		QString src = QString::fromUtf8(st.source);
 		QString label = QString::fromUtf8(st.label); /* a fader on audio or a filter: named, greyed below */
-		QString header = !src.isEmpty() ? src : !label.isEmpty() ? label : QStringLiteral("\xE2\x80\x94");
+		QString header = !src.isEmpty() ? src : !label.isEmpty() ? label : QString::fromUtf8("\xE2\x80\x94");
 		setLabel(col_names_[i], col_names_[i]->fontMetrics().elidedText(header, Qt::ElideRight,
 										std::max(28, col_names_[i]->width())));
 		setCss(col_names_[i], src.isEmpty() ? QStringLiteral("color: #6b7280;") : QString()); /* not a layer */
@@ -1373,12 +1373,12 @@ void MfdDeskDock::refresh()
 
 	/* Visual Sidechain */
 	if (!vs_loaded_) {
-		setLabel(bpm_, QStringLiteral("\xE2\x80\x94 BPM"));
+		setLabel(bpm_, QString::fromUtf8("\xE2\x80\x94 BPM"));
 		setLabel(lock_, mfdText("Desk.VsMissing", "Visual Sidechain is not loaded."));
 	} else {
 		/* no estimate yet (no audio): no number, rather than the animation's 120 */
 		setLabel(bpm_, bpm_valid_ ? QStringLiteral("%1 BPM").arg(bpm_value_, 0, 'f', 1)
-					  : QStringLiteral("\xE2\x80\x94 BPM"));
+					  : QString::fromUtf8("\xE2\x80\x94 BPM"));
 		setLabel(lock_, locked ? mfdText("Desk.Locked", "held") : mfdText("Desk.Unlocked", "auto"));
 	}
 	int step = vs_loaded_ ? (int)(((beat_index % 4) + 4) % 4) : -1;

@@ -582,7 +582,7 @@ public:
 		sd_lay->addWidget(btn_sd_learn);
 
 		auto *btn_sd_dismiss =
-			new QPushButton(QStringLiteral("\xC3\x97"), stream_deck_companion_card_); /* a cross */
+			new QPushButton(QString::fromUtf8("\xC3\x97"), stream_deck_companion_card_); /* a cross */
 		btn_sd_dismiss->setObjectName(QStringLiteral("mfdBtnStreamDeckDismiss"));
 		btn_sd_dismiss->setAccessibleName(mfdText("Dialog.StreamDeck.Hide", "Hide"));
 		btn_sd_dismiss->setToolTip(mfdText("Dialog.StreamDeck.HideTip",
@@ -798,7 +798,7 @@ private:
 		z1_name_label_->setStyleSheet(QStringLiteral("color: #f8fafc; font-size: 13px; font-weight: bold;"));
 		z1_lay->addWidget(z1_name_label_);
 
-		z1_dot_label_ = new QLabel(QStringLiteral("\xE2\x97\x8F"), zone1);
+		z1_dot_label_ = new QLabel(QString::fromUtf8("\xE2\x97\x8F"), zone1);
 		z1_dot_label_->setObjectName(QStringLiteral("mfdControllerDot"));
 		z1_lay->addWidget(z1_dot_label_);
 
@@ -2106,7 +2106,7 @@ private:
 			auto *btn_learn = new QPushButton(QString::fromUtf8(mfd_learn_button_text(false)), bind_widget);
 			btn_learn->setObjectName(QStringLiteral("mfdAdvLearn_%1").arg(row));
 			btn_learn->setMinimumWidth(106);
-			auto *btn_clear = new QPushButton(QStringLiteral("\xC3\x97"), bind_widget);
+			auto *btn_clear = new QPushButton(QString::fromUtf8("\xC3\x97"), bind_widget);
 			btn_clear->setObjectName(QStringLiteral("mfdAdvClear_%1").arg(row));
 			btn_clear->setFixedWidth(26);
 			btn_clear->setToolTip(
@@ -2517,10 +2517,10 @@ private:
 		if (snap_.studio_mode_active) {
 			const QString prev_nm = (snap_.preview_scene_name[0] != '\0')
 							? QString::fromUtf8(snap_.preview_scene_name)
-							: QStringLiteral("\xE2\x80\x94");
+							: QString::fromUtf8("\xE2\x80\x94");
 			const QString prog_nm = (snap_.program_scene_name[0] != '\0')
 							? QString::fromUtf8(snap_.program_scene_name)
-							: QStringLiteral("\xE2\x80\x94");
+							: QString::fromUtf8("\xE2\x80\x94");
 			set_label_text_and_style(
 				studio_status_label_,
 				mfdFill(mfdText("Dialog.StudioModeOn",
