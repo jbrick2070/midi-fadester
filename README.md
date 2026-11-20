@@ -8,9 +8,9 @@
 
 Midi Fadester turns the faders and knobs on a MIDI controller into live controls for OBS Studio. Fade from one scene to the next with a real crossfader. Mix two layers. Fade a camera in and out. Ride a volume. Sweep any filter setting. It is made for the Akai APC40 mkII and works with other controllers through MIDI Learn.
 
-[![Demo: the APC40 crossfader throws OBS's Studio Mode T-bar between two VJ scenes while the Fadester Desk dock follows](docs/demo/Midi-Fadester-0.9.0-demo-preview.webp)](docs/demo/Midi-Fadester-0.9.0-demo.mp4)
+[![Demo: the APC40's top row fades and cuts between VJ scenes in time with the beat, Session blacks Program out, and the Fadester Desk dock follows](docs/demo/Midi-Fadester-0.9.1-demo-preview.webp)](docs/demo/Midi-Fadester-0.9.1-demo.mp4)
 
-**[Watch the one-minute demo](docs/demo/Midi-Fadester-0.9.0-demo.mp4)** (MP4, 9 MB): the crossfader throws the Studio Mode T-bar, channel faders fade the layers of the scene on air, Visual Sidechain's Beat Zoom moves with the music, Panic and Restore visuals, tap and lock the tempo, and the Fadester Desk dock follows all of it. The "Your controller" APC40 in the corner is a drawing of the desk moves; OBS was driven by a script for the recording.
+**[Watch the one-minute demo](docs/demo/Midi-Fadester-0.9.1-demo.mp4)** (MP4, 7 MB): the crossfader throws the Studio Mode T-bar, the top row fades Preview to Program in time with the beat (1 bar, then 2 bars) and its yellow pad cuts, Session fades Program to black and back, channel faders fade the layers of the scene on air, Visual Sidechain's Beat Zoom moves with the music, and Panic turns every effect off; the Fadester Desk dock follows all of it. The "Your controller" APC40 in the corner is a drawing of the desk moves; OBS was driven by a script for the recording.
 
 ![The Strips screen: a throw in progress on the crossfader, a two-layer mix, a layer fade, a volume and the master](docs/screenshots/03-strips-throwing-and-active.png)
 
