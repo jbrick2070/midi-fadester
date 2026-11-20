@@ -613,9 +613,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p3_lay->setContentsMargins(0, 0, 0, 0);
 	p3_lay->setSpacing(10);
 
-	auto *p3_prompt = new QLabel(mfdText("Setup.Step3.Prompt",
-					     "Move the control. This strip does not change OBS until you click Done."),
-				     page3);
+	auto *p3_prompt =
+		new QLabel(page3); /* its text follows what the strip's control is doing: update_step3_controls */
+	step3_prompt_ = p3_prompt;
+	p3_prompt->setObjectName(QStringLiteral("mfdSetupStep3Prompt"));
 	p3_prompt->setWordWrap(true);
 	p3_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p3_lay->addWidget(p3_prompt);
@@ -843,6 +844,14 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 				return;
 			}
 			stack_->setCurrentIndex(2);
+			/* A strip with no control: Learn starts by itself, once, so "move the control" is true (U1-19). It
+			 * waits for a fader or knob that is being moved, so a stray message is not taken. */
+			if (!auto_learn_tried_ && snap_.setup.candidate_addr.type == MFD_MIDI_NONE &&
+			    !snap_.setup.learning) {
+				auto_learn_tried_ = true;
+				mfd_engine_start_setup_learn_auto(eng_);
+				mfd_engine_get_ui_snapshot(eng_, &snap_);
+			}
 			update_step3_controls();
 			update_footer_buttons();
 		}
@@ -881,6 +890,9 @@ void MfdSetupSheetDialog::closeEvent(QCloseEvent *event)
 
 void MfdSetupSheetDialog::open_for_slot(int slot_index)
 {
+	auto_learn_tried_ = false;
+	was_learning_ = false;
+	got_control_ = false;
 	if (!eng_ || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
 		return;
 	}
@@ -1679,6 +1691,32 @@ void MfdSetupSheetDialog::update_step3_controls()
 	btn_step3_finish_now_->setEnabled(can_finish_now);
 
 	candidate_addr_label_->setText(format_plain_midi_addr(snap_.setup.candidate_addr));
+	{
+		/* what to do now, in one sentence */
+		const bool has_control = snap_.setup.candidate_addr.type != MFD_MIDI_NONE;
+		if (was_learning_ && !snap_.setup.learning && has_control) {
+			got_control_ = true; /* Learn just caught it: say which */
+		}
+		was_learning_ = snap_.setup.learning;
+		QString prompt;
+		if (snap_.setup.learning) {
+			prompt = mfdText("Setup.Step3.Choose", "Move the fader or knob you want to use.");
+		} else if (!has_control) {
+			prompt = mfdText("Setup.Step3.NoControl",
+					 "No fader or knob yet. Press Learn, then move the one you want.");
+		} else if (got_control_) {
+			prompt = mfdFill(mfdText("Setup.Step3.GotIt",
+						 "Got it: %1. Move it to try it. Nothing changes in OBS "
+						 "until you click Done."),
+					 {format_plain_midi_addr(snap_.setup.candidate_addr)});
+		} else {
+			prompt = mfdText("Setup.Step3.Prompt",
+					 "Move the fader to try it. Nothing changes in OBS until you click Done.");
+		}
+		if (step3_prompt_->text() != prompt) {
+			step3_prompt_->setText(prompt);
+		}
+	}
 	if (snap_.setup.learning) {
 		btn_setup_learn_->setText(mfdText("Setup.LearnListening", "Move control... (Cancel)"));
 		btn_setup_learn_->setStyleSheet(

@@ -488,7 +488,7 @@ int main(void)
 	in.reason = "";
 	in.addr_type = MFD_MIDI_NONE;
 	mfd_ui_format_strip_presentation(&in, &sp);
-	REQUIRE(strcmp(sp.status_sentence, "No MIDI control assigned. Click Set up. In step 3, press Learn.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "No fader assigned. Click Set up and move the fader.") == 0);
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
 
 	/* Row 4: At end. (parked at rail) */
@@ -658,7 +658,7 @@ int main(void)
 	in.display_value = "+12.4 px";
 	mfd_ui_format_strip_presentation(&in, &sp);
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_RED);
-	REQUIRE(strcmp(sp.status_sentence, "No MIDI control assigned. Click Set up. In step 3, press Learn.") == 0);
+	REQUIRE(strcmp(sp.status_sentence, "No fader assigned. Click Set up and move the fader.") == 0);
 
 	/* Filter precondition failure sentences on FX 1 */
 	const char *filter_red_reasons[] = {

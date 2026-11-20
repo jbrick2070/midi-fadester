@@ -3810,9 +3810,60 @@ void mfd_engine_start_setup_learn(struct mfd_engine *eng)
 	}
 	eng->learning_slot_index = -1;
 	eng->setup_session.learning = true;
+	eng->setup_session.learn_auto = false;
 	mfd_midi_parser_start_learn(&eng->midi_parser);
 	mfd_engine_mark_ui_dirty(eng, true);
 	mfd_engine_unlock(eng);
+}
+
+void mfd_engine_start_setup_learn_auto(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (!eng->setup_session.active) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->learning_slot_index = -1;
+	eng->setup_session.learning = true;
+	eng->setup_session.learn_auto = true;
+	eng->setup_session.auto_moves = 0;
+	eng->setup_session.auto_addr.type = MFD_MIDI_NONE;
+	mfd_midi_parser_start_learn(&eng->midi_parser);
+	mfd_engine_mark_ui_dirty(eng, true);
+	mfd_engine_unlock(eng);
+}
+
+/* Learn that started by itself must not take a stray message: a pad pressed, a fader brushed, a controller that sends
+ * something on its own. It takes a fader or knob that is being moved: three messages in a row from the same CC or
+ * pitch bend, each with a new value. The fine half of a 14-bit pair (CC n + 32 after CC n) does not break the run.
+ * Caller holds the engine lock. True when this message completes such a run. */
+static bool setup_auto_learn_take_locked(struct mfd_engine *eng, const struct mfd_midi_addr *addr, int raw)
+{
+	struct mfd_setup_session *s = &eng->setup_session;
+	if (addr->type != MFD_MIDI_CC && addr->type != MFD_MIDI_PITCH_BEND) {
+		s->auto_moves = 0; /* a button */
+		return false;
+	}
+	bool same = s->auto_moves > 0 && s->auto_addr.type == addr->type && s->auto_addr.channel == addr->channel &&
+		    (addr->type == MFD_MIDI_PITCH_BEND || s->auto_addr.number == addr->number);
+	if (!same && s->auto_moves > 0 && addr->type == MFD_MIDI_CC && s->auto_addr.type == MFD_MIDI_CC &&
+	    s->auto_addr.channel == addr->channel && s->auto_addr.number < 32U &&
+	    addr->number == (uint8_t)(s->auto_addr.number + 32U)) {
+		return false; /* its fine half */
+	}
+	if (same) {
+		if (raw != s->auto_last_raw) {
+			++s->auto_moves;
+		}
+	} else {
+		s->auto_addr = *addr;
+		s->auto_moves = 1;
+	}
+	s->auto_last_raw = raw;
+	return s->auto_moves >= 3;
 }
 
 void mfd_engine_cancel_setup_learn(struct mfd_engine *eng)
@@ -3823,6 +3874,7 @@ void mfd_engine_cancel_setup_learn(struct mfd_engine *eng)
 	mfd_engine_lock(eng);
 	if (eng->setup_session.learning) {
 		eng->setup_session.learning = false;
+		eng->setup_session.learn_auto = false;
 		if (eng->learning_slot_index < 0) {
 			mfd_midi_parser_cancel_learn(&eng->midi_parser);
 		}
@@ -7188,8 +7240,14 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			/* The APC40's Tempo and Cue Level knobs are endless and send steps, not a position: bound to a
 			 * strip they would throw it between 0 and 100 %. Keep listening for another control. */
 			mfd_midi_parser_start_learn(&eng->midi_parser);
+		} else if (got_learned && eng->setup_session.active && eng->setup_session.learning &&
+			   eng->setup_session.learn_auto &&
+			   !setup_auto_learn_take_locked(eng, &learned, (int)dec.raw_value)) {
+			mfd_midi_parser_start_learn(
+				&eng->midi_parser); /* not a control being moved yet: keep listening */
 		} else if (got_learned) {
 			if (eng->setup_session.active && eng->setup_session.learning) {
+				eng->setup_session.learn_auto = false;
 				eng->setup_session.candidate_addr = learned;
 				mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &learned,
 									&eng->setup_session.candidate_cal);

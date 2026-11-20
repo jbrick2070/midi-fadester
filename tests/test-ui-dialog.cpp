@@ -2619,6 +2619,77 @@ int main(int argc, char **argv)
 		reset->click();
 		pump_ui();
 		REQUIRE(g_confirm_seen == 4);
+
+		/* U1-19: on a strip with no control, step 3 starts Learn by itself and says so; it takes a fader that is
+		 * being moved, never a stray message; the Learn button still takes the first message */
+		{
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+			const int k = 3;
+			mfd_engine_lock(&eng);
+			eng.fader_slots[k].addr.type = MFD_MIDI_NONE;
+			mfd_engine_mark_ui_dirty(&eng, true);
+			mfd_engine_unlock(&eng);
+			pump_ui();
+			auto to_step3 = [&](int strip) {
+				must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(strip))
+					->click();
+				pump_ui();
+				auto *sh = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+				must_find<QPushButton>(sh, QStringLiteral("mfdCardSwitchScenes"))->click();
+				pump_ui();
+				must_find<QPushButton>(sh, QStringLiteral("mfdSetupNextBtn"))->click();
+				pump_ui();
+				REQUIRE(must_find<QStackedWidget>(sh, QStringLiteral("mfdSetupStack"))->currentIndex() ==
+					2);
+				return sh;
+			};
+			auto step = [&]() {
+				mfd_engine_tick(&eng, 0.016f);
+				pump_ui();
+			};
+			QDialog *sh = to_step3(k);
+			auto *prompt = must_find<QLabel>(sh, QStringLiteral("mfdSetupStep3Prompt"));
+			REQUIRE(eng.setup_session.learning && eng.setup_session.learn_auto);
+			REQUIRE(prompt->text() == QStringLiteral("Move the fader or knob you want to use."));
+			/* a pad pressed */
+			mfd_midi_queue_push(&eng.midi_queue, 0x90U | (53U << 8) | (127U << 16), 0U);
+			step();
+			REQUIRE(eng.setup_session.learning && eng.setup_session.candidate_addr.type == MFD_MIDI_NONE);
+			/* one message from a fader that was only brushed */
+			push_midi_cc(&eng, 2, 7, 40);
+			step();
+			REQUIRE(eng.setup_session.learning && eng.setup_session.candidate_addr.type == MFD_MIDI_NONE);
+			/* another fader, moved: two values, a repeat, then the third value */
+			push_midi_cc(&eng, 5, 7, 10);
+			push_midi_cc(&eng, 5, 7, 12);
+			push_midi_cc(&eng, 5, 7, 12);
+			step();
+			REQUIRE(eng.setup_session.learning);
+			push_midi_cc(&eng, 5, 7, 15);
+			step();
+			REQUIRE(!eng.setup_session.learning && !eng.setup_session.learn_auto);
+			REQUIRE(eng.setup_session.candidate_addr.type == MFD_MIDI_CC);
+			REQUIRE(eng.setup_session.candidate_addr.channel == 5 &&
+				eng.setup_session.candidate_addr.number == 7);
+			REQUIRE(prompt->text().startsWith(QStringLiteral("Got it: Channel 6, CC 7.")));
+			/* the Learn button: the first message, as before */
+			must_find<QPushButton>(sh, QStringLiteral("mfdSetupLearnBtn"))->click();
+			pump_ui();
+			REQUIRE(eng.setup_session.learning && !eng.setup_session.learn_auto);
+			push_midi_cc(&eng, 6, 7, 1);
+			step();
+			REQUIRE(!eng.setup_session.learning && eng.setup_session.candidate_addr.channel == 6);
+			sh->reject();
+			pump_ui();
+			/* a strip that has its control: nothing starts by itself */
+			sh = to_step3(2);
+			REQUIRE(!eng.setup_session.learning);
+			REQUIRE(must_find<QLabel>(sh, QStringLiteral("mfdSetupStep3Prompt"))->text() ==
+				QStringLiteral(
+					"Move the fader to try it. Nothing changes in OBS until you click Done."));
+			sh->reject();
+			pump_ui();
+		}
 		cdlg->close();
 		cdlg.reset();
 	}

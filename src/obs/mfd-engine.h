@@ -218,6 +218,12 @@ struct mfd_setup_session {
 	struct mfd_control_calibration candidate_cal;
 	bool candidate_invert; /* single authoritative Reverse direction owner during Set up */
 	bool learning;
+	/* Learn that step 3 started by itself (the strip had no control): it takes a fader or knob that is being moved,
+	 * never a single stray message or a pad (setup_auto_learn_take_locked) */
+	bool learn_auto;
+	struct mfd_midi_addr auto_addr; /* the control seen moving */
+	int auto_moves;                 /* its messages in a row, each with a new value */
+	int auto_last_raw;
 	float candidate_raw_norm; /* 0..1 calibrated meter for Step 3 */
 	bool has_candidate_input;
 };
@@ -814,6 +820,10 @@ void mfd_engine_request_studio_mode(struct mfd_engine *eng, bool enabled);
 
 void mfd_engine_begin_setup_session(struct mfd_engine *eng, int slot_index);
 void mfd_engine_start_setup_learn(struct mfd_engine *eng);
+/* Learn started by the sheet itself when step 3 opens on a strip with no control (U1-19). It listens until one fader or
+ * knob (a CC or pitch bend) has sent three messages in a row with a changing value: a control being moved. A pad, or one
+ * message from a control that was only touched, is not taken. The Learn button still takes the first message. */
+void mfd_engine_start_setup_learn_auto(struct mfd_engine *eng);
 void mfd_engine_cancel_setup_learn(struct mfd_engine *eng);
 void mfd_engine_set_setup_invert(struct mfd_engine *eng, bool invert);
 void mfd_engine_cancel_setup_session(struct mfd_engine *eng);

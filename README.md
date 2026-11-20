@@ -258,7 +258,7 @@ The dialog says what is wrong in a sentence, next to the strip it concerns, and 
 | *APC40 mkII not found. Plug it in, then press Reconnect.* / *No MIDI controller found. Plug one in, then press Reconnect.* | The port is gone or the desk is off. | Plug it in or power it on. The plugin notices when Windows reports the device again; **Reconnect** forces a rescan, and **Change controller** picks a different port. |
 | *Could not open APC40 mkII. Unplug and replug it, then press Reconnect.* | Windows refused the port for another reason. | Do that. |
 | *Studio Mode is off.* | Switch scenes needs Studio Mode. | **Turn on Studio Mode** on the strip, or the **Studio Mode** button in OBS's Controls dock. |
-| *No MIDI control assigned. Click Set up. In step 3, press Learn.* | The strip has a job but no MIDI control. | Do that and move the fader, or press **Learn** on the Advanced tab. |
+| *No fader assigned. Click Set up and move the fader.* | The strip has a job but no MIDI control. | Do that and move the fader, or press **Learn** on the Advanced tab. |
 | *There is no ready layout for …* in a blue bar at the top | Midi Fadester has no layout for this desk, and the layout in use is for another desk, so the strips may not follow this desk's faders. | Learn each fader as the bar says. **OK** hides the bar until the window is opened again. |
 | *Scene Red was deleted.* / *Cam is no longer in scene Blue.* / *Color and Color 2 are not in the same scene.* | The scene or layer the job named is gone or moved. | **Set up** on the strip and pick again. Renames follow by themselves; only removals break a job. |
 | *Mic/Aux has no audio.* | A Volume job points at a source without sound. | Pick a source with audio. |

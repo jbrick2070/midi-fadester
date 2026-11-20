@@ -496,8 +496,8 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 	}
 	if (in->addr_type == MFD_MIDI_NONE && !is_fx_bank) {
 		say(out->status_sentence, sizeof(out->status_sentence),
-		    mfd_text("Strip.NoMidiControl", "No MIDI control assigned. Click Set up. In step 3, press Learn."),
-		    NULL, NULL, NULL, NULL);
+		    mfd_text("Strip.NoMidiControl", "No fader assigned. Click Set up and move the fader."), NULL, NULL,
+		    NULL, NULL);
 		out->severity = MFD_UI_SEVERITY_RED;
 		return;
 	}
