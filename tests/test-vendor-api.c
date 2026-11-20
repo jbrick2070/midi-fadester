@@ -6,6 +6,7 @@
 
 #include "core/apc40-palette.h"
 #include "obs/mfd-vendor-api.h"
+#include "obs/mfd-blackout.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
 #include "core/mfd-text.h"
@@ -3704,6 +3705,61 @@ static int test_vj_fill_follow_and_desk(void)
 	return 0;
 }
 
+/* ---- Blackout (H-03): the fade and the press, apart from OBS ---------------------------------------------- */
+
+static int test_blackout_logic(void)
+{
+	/* a fade is never faster than 300 ms, whatever the pad's fade time */
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(1000) - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(300) - (1000.0f / 300.0f)) < 1e-5f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(50) - (1000.0f / 300.0f)) < 1e-5f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(0) - (1000.0f / 300.0f)) < 1e-5f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(-5) - (1000.0f / 300.0f)) < 1e-5f);
+
+	/* to black over 1 s at 60 fps: it rises every frame, ends at exactly 1 and stays there */
+	float level = 0.0f;
+	const float rate = mfd_blackout_rate_for_ms(1000);
+	for (int frame = 0; frame < 59; ++frame) {
+		const float next = mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f);
+		REQUIRE(next > level && next < 1.0f);
+		level = next;
+	}
+	level = mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f);
+	level = mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f);
+	REQUIRE(level == 1.0f);
+	REQUIRE(mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f) == 1.0f);
+
+	/* pressed again half-way, it turns round from where it is: no jump */
+	level = 0.5f;
+	const float back = mfd_blackout_next_level(level, false, rate, 1.0f / 60.0f);
+	REQUIRE(back < level && fabsf(level - back - (1.0f / 60.0f)) < 1e-5f);
+	REQUIRE(mfd_blackout_next_level(0.005f, false, rate, 1.0f / 60.0f) == 0.0f); /* never below clear */
+	REQUIRE(mfd_blackout_next_level(0.0f, false, rate, 1.0f / 60.0f) == 0.0f);
+	/* a frame of no length, or a bad one, moves nothing */
+	REQUIRE(mfd_blackout_next_level(0.4f, true, rate, 0.0f) == 0.4f);
+	REQUIRE(mfd_blackout_next_level(0.4f, true, rate, -1.0f) == 0.4f);
+
+	/* The press. Outside OBS nothing is attached, so the level stays 0, but "on" is what was asked for: the
+	 * Session lamp and the dock's bar follow it. A second press asks for clear again. */
+	mfd_blackout_init();
+	mfd_blackout_reset();
+	REQUIRE(!mfd_blackout_is_on());
+	REQUIRE(mfd_blackout_last_failure() == MFD_BLACKOUT_OK);
+	mfd_blackout_toggle(1000);
+	REQUIRE(mfd_blackout_is_on());
+	REQUIRE(mfd_blackout_level() == 0.0f);
+	mfd_blackout_tick(0.5f); /* no OBS: nothing on air, nothing moves */
+	REQUIRE(mfd_blackout_level() == 0.0f);
+	mfd_blackout_toggle(1000);
+	REQUIRE(!mfd_blackout_is_on());
+	mfd_blackout_toggle(1000);
+	REQUIRE(mfd_blackout_is_on());
+	mfd_blackout_reset(); /* a scene collection change, or OBS closing: clear at once */
+	REQUIRE(!mfd_blackout_is_on() && mfd_blackout_level() == 0.0f);
+	REQUIRE(mfd_blackout_last_failure() == MFD_BLACKOUT_OK);
+	return 0;
+}
+
 /* ---- Pass 2: layer strips and their sources (B-05, B-07, Reverse direction) ---------------------------------- */
 
 static bool pass2_get_opacity(const char *source_name, float *out_alpha_01, void *user_data)
@@ -3840,6 +3896,7 @@ int main(void)
 	REQUIRE(test_enable_toggle_survives_overflow() == 0);
 	REQUIRE(test_vj_pads_drive_layers() == 0);
 	REQUIRE(test_pass2_layer_bindings() == 0);
+	REQUIRE(test_blackout_logic() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
 	fake_sg_add_source(&fake_sg, "Cam 1", true);

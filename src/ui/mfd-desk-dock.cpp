@@ -9,6 +9,7 @@
 #include "core/apc40-palette.h"
 #include "core/takeover.h"
 #include "core/vj-pads.h"
+#include "obs/mfd-blackout.h"
 #include "obs/mfd-engine.h"
 #include "ui/mfd-text-qt.hpp"
 #include "vs/vs-module.h"
@@ -144,11 +145,6 @@ QString sceneTipStudio()
 #endif
 }
 
-QString rgbCss(uint32_t rgb)
-{
-	return QStringLiteral("#%1").arg(rgb & 0xFFFFFFU, 6, 16, QLatin1Char('0'));
-}
-
 /* Dark text on a light colour, light text on a dark one (relative luminance, sRGB). */
 bool lightBackground(uint32_t rgb)
 {
@@ -212,8 +208,9 @@ void setCss(QWidget *w, const QString &css)
 
 void setTip(QWidget *w, const QString &tip)
 {
-	if (w->toolTip() != tip) {
-		w->setToolTip(tip);
+	const QString shown = mfdPlainTip(tip); /* a scene or source name is never read as HTML (F-10) */
+	if (w->toolTip() != shown) {
+		w->setToolTip(shown);
 	}
 }
 
@@ -382,6 +379,64 @@ private:
 	bool pickup_ = false;
 };
 
+/*
+ * A dock button whose colour is set by number and drawn in paintEvent: the dock's own look (1 px border, 3 px corners,
+ * bold text, dark or light text by the colour's brightness, grey when disabled), without a style sheet per colour.
+ * A button that was never given a colour draws as a plain QPushButton.
+ */
+class MfdPadButton final : public QPushButton {
+public:
+	explicit MfdPadButton(QWidget *parent = nullptr) : QPushButton(parent) {}
+
+	void setFill(uint32_t rgb)
+	{
+		rgb &= 0xFFFFFFU;
+		if (!has_fill_ || rgb != rgb_) {
+			has_fill_ = true;
+			rgb_ = rgb;
+			update();
+		}
+	}
+	bool hasFill() const { return has_fill_; }
+	uint32_t fill() const { return rgb_; }
+
+protected:
+	void paintEvent(QPaintEvent *event) override
+	{
+		if (!has_fill_) {
+			QPushButton::paintEvent(event);
+			return;
+		}
+		const bool on = isEnabled();
+		QColor fill = on ? QColor((int)((rgb_ >> 16) & 0xFFU), (int)((rgb_ >> 8) & 0xFFU), (int)(rgb_ & 0xFFU))
+				 : QColor(0x1f, 0x29, 0x37);
+		if (on && isDown()) {
+			fill = fill.darker(130);
+		}
+		const QColor ink = !on                     ? QColor(0x6b, 0x72, 0x80)
+				   : lightBackground(rgb_) ? QColor(0x0b, 0x11, 0x20)
+							   : QColor(0xf8, 0xfa, 0xfc);
+		QPainter p(this);
+		p.setRenderHint(QPainter::Antialiasing, true);
+		const bool focus = hasFocus();
+		const qreal pen_w = focus ? 2.0 : 1.0;
+		p.setPen(QPen(focus ? QColor(0xf8, 0xfa, 0xfc) : QColor(0x33, 0x41, 0x55), pen_w));
+		p.setBrush(fill);
+		const qreal inset = pen_w / 2.0;
+		p.drawRoundedRect(QRectF(rect()).adjusted(inset, inset, -inset, -inset), 3.0, 3.0);
+		QFont f = font();
+		f.setBold(true);
+		p.setFont(f);
+		p.setPen(ink);
+		/* "&&" in a scene name is one "&" (the text is escaped so that no letter becomes a shortcut) */
+		p.drawText(rect().adjusted(2, 1, -2, -1), Qt::AlignCenter | Qt::TextHideMnemonic, text());
+	}
+
+private:
+	bool has_fill_ = false;
+	uint32_t rgb_ = 0U;
+};
+
 class MfdDeskDock final : public QWidget {
 public:
 	explicit MfdDeskDock(struct mfd_engine *eng, QWidget *parent = nullptr);
@@ -467,7 +522,12 @@ private:
 
 QPushButton *MfdDeskDock::makeButton(const QString &accessible, int min_w, int min_h)
 {
-	auto *b = new QPushButton(this);
+	auto *b = new MfdPadButton(this);
+	{
+		QFont bold = b->font(); /* the text is drawn bold: the size hint must allow for it */
+		bold.setBold(true);
+		b->setFont(bold);
+	}
 	b->installEventFilter(this); /* notices a held pointer sliding off: see physical() */
 	b->setAccessibleName(accessible);
 	b->setToolTip(accessible);
@@ -902,7 +962,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	root->addStretch(1);
 
 	clock_.start();
-	built_ = true; /* every label exists from here on: event() may size them */
+	mfdPlainLabels(this); /* scene and source names are shown as plain text (F-10) */
+	built_ = true;        /* every label exists from here on: event() may size them */
 	applyFontSizes();
 	refresh();
 }
@@ -1134,14 +1195,9 @@ void MfdDeskDock::releaseHolds()
 
 void MfdDeskDock::paintButton(QPushButton *b, uint32_t rgb, bool enabled)
 {
-	QString css =
-		QStringLiteral("QPushButton { background-color: %1; color: %2; font-weight: bold; }"
-			       "QPushButton:disabled { background-color: #1f2937; color: #6b7280; }")
-			.arg(rgbCss(rgb), lightBackground(rgb) ? QStringLiteral("#0b1120") : QStringLiteral("#f8fafc"));
-	if (b->property("mfdCss").toString() != css) {
-		b->setStyleSheet(css);
-		b->setProperty("mfdCss", css);
-	}
+	/* The colour is painted by the button itself (F-09). As a style sheet, a pulsing pad was a new sheet, and a
+	 * re-polish of the button, on every frame for the whole show. */
+	static_cast<MfdPadButton *>(b)->setFill(rgb); /* every button here comes from makeButton */
 	if (b->isEnabled() != enabled) {
 		b->setEnabled(enabled);
 	}
@@ -1366,6 +1422,18 @@ void MfdDeskDock::refresh()
 		setLabel(blackout_, mfdText("Desk.BlackoutOn", "BLACKOUT: the audience sees black. Press End blackout "
 							       "(Session on the APC40)."));
 		setCss(blackout_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; font-weight: bold; "
+						 "padding: 4px;"));
+	} else if (view_.blackout_failure == (int)MFD_BLACKOUT_NO_CHANNEL ||
+		   view_.blackout_failure == (int)MFD_BLACKOUT_NO_COLOR_SOURCE) {
+		/* F-13: the press did nothing on air. The button is grey again, which is true; this line says why. */
+		setLabel(blackout_,
+			 view_.blackout_failure == (int)MFD_BLACKOUT_NO_CHANNEL
+				 ? mfdText("Desk.BlackoutNoChannel",
+					   "Blackout is not on air: other plugins hold every OBS output "
+					   "channel above the scene.")
+				 : mfdText("Desk.BlackoutNoSource",
+					   "Blackout is not on air: OBS has no Color Source to make it from."));
+		setCss(blackout_, QStringLiteral("color: #0b1120; background-color: #fbbf24; font-weight: bold; "
 						 "padding: 4px;"));
 	} else {
 		setLabel(blackout_, QString());

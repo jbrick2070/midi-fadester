@@ -24,6 +24,15 @@ QString mfdFill(const QString &text, const QStringList &values);
 QString mfdWindowTitle(const QString &window);
 
 class QWidget;
+/*
+ * Names from OBS (scenes, sources, filters, MIDI ports) are shown as they are (F-10). A QLabel left at AutoText reads
+ * a name such as "Cam <b>" or "<Title>" as HTML, and a tooltip does the same.
+ * mfdPlainLabels: every QLabel under root that is still at AutoText becomes PlainText (a label that was set to
+ * RichText on purpose keeps it). Call it once a window, or a rebuilt part of it, has all its labels.
+ * mfdPlainTip: the tooltip text to set, shown letter for letter even when a name in it looks like a tag.
+ */
+void mfdPlainLabels(QWidget *root);
+QString mfdPlainTip(const QString &tip);
 /* Asks before work is cleared: the question, the button that does it (named for what it does) and Cancel, which is the
  * default and Escape. True when the user chose to go on. The box is named "mfdConfirmBox"; its title shows the version. */
 bool mfdConfirm(QWidget *parent, const QString &window, const QString &question, const QString &do_it);

@@ -49,6 +49,15 @@ private:
 	void update_step3_controls();
 	void update_footer_buttons();
 	void on_done_clicked();
+	/* The engine's verdict on the choices as they stand, asked again only when a choice or the topology revision
+	 * has changed (F-07): the sheet is refreshed on every engine change, and for a filter setting each check
+	 * builds the filter's whole property set. */
+	bool validate_cached(const struct mfd_setup_candidate &cand, struct mfd_msg *out_msg);
+	bool valid_cache_set_ = false;
+	bool valid_cache_ok_ = false;
+	uint64_t valid_cache_rev_ = 0ULL;
+	struct mfd_setup_candidate valid_cache_cand_ {};
+	struct mfd_msg valid_cache_msg_ {};
 
 	struct mfd_engine *eng_ = nullptr;
 	struct mfd_ui_catalog *catalog_ = nullptr;

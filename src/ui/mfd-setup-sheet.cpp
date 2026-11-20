@@ -856,6 +856,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 		}
 	});
 	connect(btn_done_, &QPushButton::clicked, this, &MfdSetupSheetDialog::on_done_clicked);
+	mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10) */
 }
 
 MfdSetupSheetDialog::~MfdSetupSheetDialog()
@@ -987,6 +988,30 @@ void MfdSetupSheetDialog::refresh_from_snapshot(const struct mfd_ui_snapshot &sn
 	}
 	update_step3_controls();
 	update_footer_buttons();
+}
+
+/* A style sheet is set only when it differs: Qt re-polishes the widget on every setStyleSheet (F-07). */
+static void set_style_if_changed(QWidget *w, const QString &style)
+{
+	if (w && w->styleSheet() != style) {
+		w->setStyleSheet(style);
+	}
+}
+
+bool MfdSetupSheetDialog::validate_cached(const struct mfd_setup_candidate &cand, struct mfd_msg *out_msg)
+{
+	/* build_candidate() starts from a zeroed struct, so two equal sets of choices compare equal byte for byte */
+	if (!valid_cache_set_ || valid_cache_rev_ != snap_.config_topology_rev ||
+	    std::memcmp(&valid_cache_cand_, &cand, sizeof(cand)) != 0) {
+		valid_cache_cand_ = cand;
+		valid_cache_rev_ = snap_.config_topology_rev;
+		valid_cache_ok_ = mfd_engine_validate_setup_candidate_msg(eng_, &cand, &valid_cache_msg_);
+		valid_cache_set_ = true;
+	}
+	if (out_msg) {
+		*out_msg = valid_cache_msg_;
+	}
+	return valid_cache_ok_;
 }
 
 struct mfd_setup_candidate MfdSetupSheetDialog::build_candidate() const
@@ -1494,13 +1519,13 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 		if (studio_on) {
 			step2_tbar_info_->setText(mfdText("Setup.StudioModeOn",
 							  "Studio Mode is on. Ready to fade Preview into Program."));
-			step2_tbar_info_->setStyleSheet(
-				QStringLiteral("color: #6ee7b7; font-size: 14px; font-weight: bold;"));
+			set_style_if_changed(step2_tbar_info_,
+					     QStringLiteral("color: #6ee7b7; font-size: 14px; font-weight: bold;"));
 			step2_turn_on_studio_btn_->hide();
 		} else {
 			step2_tbar_info_->setText(mfdText("Msg.StudioModeOff", "Studio Mode is off."));
-			step2_tbar_info_->setStyleSheet(
-				QStringLiteral("color: #fde68a; font-size: 14px; font-weight: bold;"));
+			set_style_if_changed(step2_tbar_info_,
+					     QStringLiteral("color: #fde68a; font-size: 14px; font-weight: bold;"));
 			step2_turn_on_studio_btn_->show();
 		}
 	}
@@ -1566,7 +1591,7 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 		    !chosen_filter_prop_.isEmpty()) {
 			struct mfd_setup_candidate cand = build_candidate();
 			struct mfd_msg rsn;
-			if (!mfd_engine_validate_setup_candidate_msg(eng_, &cand, &rsn) && rsn.code != MFD_MSG_NONE) {
+			if (!validate_cached(cand, &rsn) && rsn.code != MFD_MSG_NONE) {
 				filter_validation_refusal_->setText(msg_text(rsn));
 				filter_validation_refusal_->show();
 			} else {
@@ -1717,15 +1742,18 @@ void MfdSetupSheetDialog::update_step3_controls()
 	}
 	if (snap_.setup.learning) {
 		btn_setup_learn_->setText(mfdText("Setup.LearnListening", "Move control... (Cancel)"));
-		btn_setup_learn_->setStyleSheet(
+		set_style_if_changed(
+			btn_setup_learn_,
 			QStringLiteral("QPushButton { background-color: #b45309; color: #ffffff; font-weight: bold; "
 				       "border-radius: 5px; padding: 6px 12px; }"));
 		hw_panel_->show();
 	} else {
 		btn_setup_learn_->setText(mfdText("Learn.Button", "Learn"));
-		btn_setup_learn_->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; "
-			"border-radius: 5px; padding: 6px 12px; font-weight: bold; }"));
+		set_style_if_changed(
+			btn_setup_learn_,
+			QStringLiteral(
+				"QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; "
+				"border-radius: 5px; padding: 6px 12px; font-weight: bold; }"));
 	}
 
 	int owners[MFD_MAX_FADER_SLOTS] = {0};
@@ -1768,8 +1796,7 @@ void MfdSetupSheetDialog::update_footer_buttons()
 		btn_next_->setEnabled(true);
 	} else if (page == 1) {
 		struct mfd_setup_candidate cand = build_candidate();
-		char rsn[160] = {0};
-		const bool valid = mfd_engine_validate_setup_candidate(eng_, &cand, rsn, sizeof(rsn));
+		const bool valid = validate_cached(cand, nullptr);
 		btn_next_->setEnabled(valid);
 	} else {
 		btn_done_->setEnabled(true);

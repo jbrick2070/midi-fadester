@@ -634,6 +634,7 @@ public:
 		}
 
 		populate_device_combos();
+		mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10); the help text stays rich */
 		refresh_from_engine();
 	}
 
@@ -1428,9 +1429,15 @@ private:
 			refresh_from_engine();
 		});
 
+		/* F-06: each step applies at once, but the settings file is written once, when the edit is done (focus
+		 * leaves the box or Enter). Holding the arrow no longer writes the file many times a second. */
 		connect(tau_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double val) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_smooth_tau_ms(eng_, static_cast<float>(val));
+			}
+		});
+		connect(tau_spin_, &QDoubleSpinBox::editingFinished, this, [this]() {
+			if (!rebuilding_adv_table_) {
 				mfd_engine_save_global_config(eng_);
 			}
 		});
@@ -1455,10 +1462,10 @@ private:
 				mfd_engine_save_global_config(eng_);
 			}
 		});
+		/* the engine asks for the save itself (once, at the next flush): no second write here (F-06) */
 		connect(vj_fade_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int ms) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_vj_buttons(eng_, vj_check_->isChecked(), ms);
-				mfd_engine_save_global_config(eng_);
 			}
 		});
 
@@ -1806,7 +1813,7 @@ private:
 			const QString assign_q = QString::fromUtf8(sp.assignment_sentence);
 			if (strip_assign_labels_[i]->text() != assign_q) {
 				strip_assign_labels_[i]->setText(assign_q);
-				strip_assign_btns_[i]->setToolTip(assign_q);
+				strip_assign_btns_[i]->setToolTip(mfdPlainTip(assign_q));
 			}
 			const QString assign_lbl_style =
 				sp.dimmed
@@ -2247,7 +2254,7 @@ private:
 				auto *lbl_fsum = new QLabel(full_summary, fcell);
 				lbl_fsum->setObjectName(QStringLiteral("mfdAdvFilterSummary_%1").arg(row));
 				lbl_fsum->setMaximumWidth(118);
-				lbl_fsum->setToolTip(full_summary);
+				lbl_fsum->setToolTip(mfdPlainTip(full_summary));
 				lbl_fsum->setStyleSheet(
 					(slot.filter_name[0] != '\0' && slot.filter_prop[0] != '\0')
 						? QStringLiteral("color: #7dd3fc; font-size: 11px; font-weight: bold;")
@@ -2438,6 +2445,7 @@ private:
 		for (int c = 0; c < 9; ++c) {
 			table_->resizeColumnToContents(c);
 		}
+		mfdPlainLabels(table_); /* the rows' labels are new */
 		last_adv_topology_rev_ = snap_.config_topology_rev;
 		rebuilding_adv_table_ = false;
 	}
@@ -2457,7 +2465,12 @@ private:
 
 	void refresh_advanced_tab(bool can_finish_tbar)
 	{
-		if (snap_.config_topology_rev != last_adv_topology_rev_ && !any_adv_combo_popup_open()) {
+		/* The table (18 rows of widgets, two source enumerations and a catalog read) is rebuilt only while the
+		 * Advanced tab is the one shown (F-06). Hidden, it stays stale: last_adv_topology_rev_ is left alone, so
+		 * the refresh that a tab switch runs rebuilds it. A rebuild that was asked for outright (~0) is done. */
+		const bool adv_shown = !main_tabs_ || main_tabs_->currentIndex() == 1;
+		if (snap_.config_topology_rev != last_adv_topology_rev_ && !any_adv_combo_popup_open() &&
+		    (adv_shown || last_adv_topology_rev_ == ~0ULL)) {
 			rebuild_table_rows();
 		}
 
@@ -2660,8 +2673,8 @@ private:
 			if (bar->styleSheet() != desired_style) {
 				bar->setStyleSheet(desired_style);
 			}
-			if (bar->toolTip() != desired_tip) {
-				bar->setToolTip(desired_tip);
+			if (bar->toolTip() != mfdPlainTip(desired_tip)) {
+				bar->setToolTip(mfdPlainTip(desired_tip));
 			}
 		}
 	}

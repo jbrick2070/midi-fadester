@@ -189,6 +189,13 @@ static void refresh_studio_mode_state_on_ui_thread(void)
 		return;
 	}
 
+	if (!g_tbar_slider.isNull()) {
+		/* C-08: the slider found earlier is still alive (the QPointer clears itself when OBS destroys it), so the
+		 * end of every transition does not search all of OBS's widgets again and write a log line. */
+		g_slider_tbar_found.store(true, std::memory_order_relaxed);
+		return;
+	}
+
 	QSlider *slider = locate_slider_tbar_on_ui_thread();
 	g_tbar_slider = slider;
 	if (slider) {

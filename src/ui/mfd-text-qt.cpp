@@ -10,8 +10,33 @@
 
 #include <plugin-support.h>
 
+#include <QLabel>
+#include <QList>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QTextDocument>
+#include <QWidget>
+
+void mfdPlainLabels(QWidget *root)
+{
+	if (!root) {
+		return;
+	}
+	const QList<QLabel *> labels = root->findChildren<QLabel *>();
+	for (QLabel *label : labels) {
+		if (label->textFormat() == Qt::AutoText) {
+			label->setTextFormat(Qt::PlainText);
+		}
+	}
+}
+
+QString mfdPlainTip(const QString &tip)
+{
+	if (!Qt::mightBeRichText(tip)) {
+		return tip;
+	}
+	return QStringLiteral("<qt>") + tip.toHtmlEscaped() + QStringLiteral("</qt>");
+}
 
 QString mfdText(const char *key, const char *english)
 {

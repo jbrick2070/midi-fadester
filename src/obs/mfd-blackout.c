@@ -19,13 +19,14 @@
 static struct {
 	bool ready;
 	pthread_mutex_t lock;
-	bool target;            /* black asked for */
-	float level;            /* 0 clear .. 1 black */
-	float rate;             /* level per second */
-	float written;          /* level last written to the source, -1 none */
-	obs_source_t *source;   /* the private black source, a reference of ours */
-	int channel;            /* the output channel it is on, -1 none */
-	uint32_t width, height; /* canvas size last written */
+	bool target;                       /* black asked for */
+	float level;                       /* 0 clear .. 1 black */
+	float rate;                        /* level per second */
+	float written;                     /* level last written to the source, -1 none */
+	enum mfd_blackout_failure failure; /* why the last request could not go on air */
+	obs_source_t *source;              /* the private black source, a reference of ours */
+	int channel;                       /* the output channel it is on, -1 none */
+	uint32_t width, height;            /* canvas size last written */
 } g_bo = {.channel = -1, .written = -1.0f};
 
 void mfd_blackout_init(void)
@@ -37,6 +38,36 @@ void mfd_blackout_init(void)
 	g_bo.ready = true;
 }
 
+float mfd_blackout_rate_for_ms(int fade_ms)
+{
+	const int ms = fade_ms < BLACKOUT_MIN_MS ? BLACKOUT_MIN_MS : fade_ms;
+	return 1000.0f / (float)ms;
+}
+
+float mfd_blackout_next_level(float level, bool to_black, float rate_per_sec, float seconds)
+{
+	const float goal = to_black ? 1.0f : 0.0f;
+	const float step = (seconds > 0.0f && rate_per_sec > 0.0f) ? seconds * rate_per_sec : 0.0f;
+	if (level < goal) {
+		return fminf(goal, level + step);
+	}
+	if (level > goal) {
+		return fmaxf(goal, level - step);
+	}
+	return goal;
+}
+
+enum mfd_blackout_failure mfd_blackout_last_failure(void)
+{
+	if (!g_bo.ready) {
+		return MFD_BLACKOUT_OK;
+	}
+	pthread_mutex_lock(&g_bo.lock);
+	enum mfd_blackout_failure failure = g_bo.failure;
+	pthread_mutex_unlock(&g_bo.lock);
+	return failure;
+}
+
 void mfd_blackout_toggle(int fade_ms)
 {
 	if (!g_bo.ready) {
@@ -45,7 +76,8 @@ void mfd_blackout_toggle(int fade_ms)
 	int ms = fade_ms < BLACKOUT_MIN_MS ? BLACKOUT_MIN_MS : fade_ms;
 	pthread_mutex_lock(&g_bo.lock);
 	g_bo.target = !g_bo.target;
-	g_bo.rate = 1000.0f / (float)ms;
+	g_bo.rate = mfd_blackout_rate_for_ms(fade_ms);
+	g_bo.failure = MFD_BLACKOUT_OK; /* a new press: the last refusal is no longer the news */
 	bool on = g_bo.target;
 	pthread_mutex_unlock(&g_bo.lock);
 	obs_log(LOG_INFO, "Blackout: %s over %d ms", on ? "fading Program to black" : "fading Program back", ms);
@@ -98,13 +130,7 @@ void mfd_blackout_tick(float seconds)
 	uint32_t w = g_bo.width, h = g_bo.height;
 	if (g_bo.source && g_bo.channel >= 0) {
 		/* only moves once the source is on air: a fade never starts as a jump */
-		float goal = g_bo.target ? 1.0f : 0.0f;
-		float step = seconds * g_bo.rate;
-		if (g_bo.level < goal) {
-			g_bo.level = fminf(goal, g_bo.level + step);
-		} else if (g_bo.level > goal) {
-			g_bo.level = fmaxf(goal, g_bo.level - step);
-		}
+		g_bo.level = mfd_blackout_next_level(g_bo.level, g_bo.target, g_bo.rate, seconds);
 		level = g_bo.level;
 		bool resized = have_video && (ovi.base_width != g_bo.width || ovi.base_height != g_bo.height);
 		if (resized) {
@@ -172,6 +198,7 @@ void mfd_blackout_ui(void)
 			obs_log(LOG_WARNING, "Blackout: OBS's colour source is not available, so Blackout cannot work");
 			pthread_mutex_lock(&g_bo.lock);
 			g_bo.target = false;
+			g_bo.failure = MFD_BLACKOUT_NO_COLOR_SOURCE;
 			pthread_mutex_unlock(&g_bo.lock);
 			return;
 		}
@@ -181,6 +208,7 @@ void mfd_blackout_ui(void)
 			obs_source_release(made);
 			pthread_mutex_lock(&g_bo.lock);
 			g_bo.target = false;
+			g_bo.failure = MFD_BLACKOUT_NO_CHANNEL;
 			pthread_mutex_unlock(&g_bo.lock);
 			return;
 		}
@@ -212,6 +240,7 @@ void mfd_blackout_ui(void)
 		g_bo.channel = free_ch;
 		if (free_ch < 0) {
 			g_bo.target = false; /* never claim black that is not on air */
+			g_bo.failure = MFD_BLACKOUT_NO_CHANNEL;
 			g_bo.level = 0.0f;
 		}
 		pthread_mutex_unlock(&g_bo.lock);
@@ -244,6 +273,7 @@ void mfd_blackout_reset(void)
 	pthread_mutex_lock(&g_bo.lock);
 	g_bo.target = false;
 	g_bo.level = 0.0f;
+	g_bo.failure = MFD_BLACKOUT_OK;
 	obs_source_t *mine = g_bo.source;
 	int ch = g_bo.channel;
 	g_bo.source = NULL;

@@ -800,8 +800,9 @@ struct mfd_desk_view {
 	bool vs_panic;
 	bool vs_panic_known;
 	bool vs_last_failed;
-	bool blackout;       /* Program black or fading to or from black */
-	bool video_controls; /* show the video speed rows (the Advanced tab's switch) */
+	bool blackout;        /* Program black or fading to or from black */
+	int blackout_failure; /* enum mfd_blackout_failure: why the last blackout asked for is not on air (F-13) */
+	bool video_controls;  /* show the video speed rows (the Advanced tab's switch) */
 };
 
 /* A snapshot for the dock, copied under the engine lock (no OBS calls). The LEDs are worked out with Shift held when

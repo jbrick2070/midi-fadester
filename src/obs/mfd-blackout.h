@@ -23,6 +23,19 @@ extern "C" {
  * detach and release the source).
  */
 
+/* Why the last blackout that was asked for could not go on air (F-13). The dock shows it; a new press clears it. */
+enum mfd_blackout_failure {
+	MFD_BLACKOUT_OK = 0,
+	MFD_BLACKOUT_NO_COLOR_SOURCE, /* OBS has no colour source to make the black from */
+	MFD_BLACKOUT_NO_CHANNEL,      /* every output channel above the scene is held by other plugins */
+};
+enum mfd_blackout_failure mfd_blackout_last_failure(void);
+
+/* The fade itself, apart from OBS (tested, H-03). The speed of a fade of fade_ms (never faster than 300 ms), in
+ * level per second; and the level one step later, on its way to black (1) or to clear (0), never past it. */
+float mfd_blackout_rate_for_ms(int fade_ms);
+float mfd_blackout_next_level(float level, bool to_black, float rate_per_sec, float seconds);
+
 void mfd_blackout_init(void);
 void mfd_blackout_shutdown(void); /* UI thread, module unload */
 

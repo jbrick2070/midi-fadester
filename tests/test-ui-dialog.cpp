@@ -1301,6 +1301,13 @@ int main(int argc, char **argv)
 		QStringLiteral("Mixes Color and Color 2 in Red"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_1"))->text() ==
 		QStringLiteral("Color 100%, Color 2 48%"));
+	/* F-10: a label that carries scene and source names shows them as plain text, and a tooltip built from a name
+	 * that looks like a tag is shown letter for letter */
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_1"))->textFormat() == Qt::PlainText);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_1"))->textFormat() == Qt::PlainText);
+	REQUIRE(mfdPlainTip(QStringLiteral("Cam 1")) == QStringLiteral("Cam 1"));
+	REQUIRE(mfdPlainTip(QStringLiteral("Shows <b>Cam</b>")) ==
+		QStringLiteral("<qt>Shows &lt;b&gt;Cam&lt;/b&gt;</qt>"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_2"))->text() ==
 		QStringLiteral("Shows or hides Cam in Blue"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_2"))->text() ==

@@ -7477,6 +7477,7 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 	out->crossfader = eng->fader_slots[0].last_applied_val;
 	out->vs_panic = eng->vs_panic;
 	out->blackout = mfd_blackout_is_on();
+	out->blackout_failure = (int)mfd_blackout_last_failure();
 	out->video_controls = eng->desk_video_controls;
 	out->vs_panic_known = eng->vs_panic_known;
 	out->vs_last_failed = eng->vs_last_failed;
@@ -9754,7 +9755,9 @@ void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms)
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		mfd_smoother_set_tau_ms(&eng->fader_slots[i].smoother, eng->smooth_tau_ms);
 	}
-	mfd_engine_mark_ui_dirty(eng, true);
+	/* a value, not a change of what the strips are: the settings window refreshes without rebuilding its Advanced
+	 * table on every step of the Smoothing box (F-06) */
+	mfd_engine_mark_ui_dirty(eng, false);
 	mfd_engine_unlock(eng);
 }
 
