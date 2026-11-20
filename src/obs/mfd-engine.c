@@ -6129,6 +6129,24 @@ bool mfd_engine_desk_video_controls(const struct mfd_engine *eng)
 	return eng && eng->desk_video_controls;
 }
 
+bool mfd_engine_take_desk_first_show(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return false;
+	}
+	mfd_engine_lock(eng);
+	bool take = !eng->desk_dock_shown && eng->frontend_finished_loading && eng->midi_dev.is_open &&
+		    mfd_is_apc40_mk2_name(eng->midi_dev.opened_name);
+	if (take) {
+		eng->desk_dock_shown = true;
+	}
+	mfd_engine_unlock(eng);
+	if (take) {
+		mfd_engine_save_global_config(eng);
+	}
+	return take;
+}
+
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
 {
 	return vj_effective_fade_ms(eng);
@@ -8348,6 +8366,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		mfd_engine_lock(eng);
 		vj_restore_loaded_punches_locked(eng);
 		eng->frontend_finished_loading = true;
+		mfd_engine_mark_ui_dirty(eng, false); /* the UI thread looks once more: the dock's first show (U1-01) */
 		refresh_apc40_detected_locked(eng);
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
@@ -8832,6 +8851,7 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
 	obs_data_set_bool(data, "vj_buttons_enabled", !eng->vj_disabled);
 	obs_data_set_bool(data, "desk_video_controls", eng->desk_video_controls);
+	obs_data_set_bool(data, "desk_dock_shown", eng->desk_dock_shown);
 	obs_data_set_int(data, "vj_fade_ms", vj_effective_fade_ms(eng));
 	obs_data_set_bool(data, "vj_autofill_done", eng->vj_autofill_done);
 	obs_data_array_t *punch = obs_data_array_create();
@@ -8916,6 +8936,12 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		/* The plugin's own settings from before this key (0.9.0 and older showed the rows always): keep them, so
 		 * an update never takes a control away from a dock in use. A new install has no file and starts without. */
 		eng->desk_video_controls = true;
+	}
+	if (obs_data_has_user_value(data, "desk_dock_shown")) {
+		eng->desk_dock_shown = obs_data_get_bool(data, "desk_dock_shown");
+	} else if (!user_file) {
+		/* settings from before this key: the user has lived with the dock where it is; never open it for them */
+		eng->desk_dock_shown = true;
 	}
 	if (obs_data_has_user_value(data, "vj_fade_ms")) {
 		long long ms = obs_data_get_int(data, "vj_fade_ms");

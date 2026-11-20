@@ -826,6 +826,16 @@ private:
 		z1_btn_show_ctrl_->setStyleSheet(z1_btn_style);
 		z1_lay->addWidget(z1_btn_show_ctrl_);
 
+		/* the show screen, one click from the first tab (it was a button on the Advanced tab, U1-01) */
+		auto *z1_btn_show_desk = new QPushButton(mfdText("Dialog.ShowDesk", "Show Fadester Desk"), zone1);
+		z1_btn_show_desk->setObjectName(QStringLiteral("mfdBtnShowDesk"));
+		z1_btn_show_desk->setToolTip(
+			mfdText("Dialog.ShowDesk.Tip", "The APC40 on screen, for the show. Also in OBS's Docks menu."));
+		z1_btn_show_desk->setCursor(Qt::PointingHandCursor);
+		z1_btn_show_desk->setStyleSheet(z1_btn_style);
+		z1_lay->addWidget(z1_btn_show_desk);
+		connect(z1_btn_show_desk, &QPushButton::clicked, this, []() { mfd_desk_dock_show(); });
+
 		lay->addWidget(zone1);
 
 		connect(z1_btn_reconnect_, &QPushButton::clicked, this, [this]() {
@@ -1204,15 +1214,6 @@ private:
 		vj_fill_bar->addWidget(vj_fill_result_, 1);
 		root->addLayout(vj_fill_bar);
 		connect(btn_vj_fill, &QPushButton::clicked, this, [this]() { fill_faders_from_scene(); });
-		/* 0.8.0: the dock that mirrors the desk, one click away (it starts hidden in OBS's Docks menu) */
-		auto *btn_show_desk = new QPushButton(
-			mfdText("Dialog.ShowDesk",
-				"Show the Fadester Desk dock (the APC40 on screen; also in the Docks menu)"),
-			adv_tab);
-		btn_show_desk->setObjectName(QStringLiteral("mfdAdvShowDesk"));
-		root->addWidget(btn_show_desk);
-		connect(btn_show_desk, &QPushButton::clicked, this, []() { mfd_desk_dock_show(); });
-
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 				if (snap_.slots[i].enabled && snap_.slots[i].target_type == MFD_TARGET_TBAR &&
@@ -2709,10 +2710,20 @@ static std::atomic<bool> g_ui_refresh_queued{false};
 static MfdUiDispatcher *g_ui_dispatcher = nullptr;
 static QPointer<MfdSettingsDialog> g_dialog;
 
+/* The Fadester Desk dock shows itself once, the first time an APC40 mkII is open: after OBS has finished loading (its
+ * dock layout is restored by then), on the UI thread. An installation that already has settings never gets it. */
+static void show_desk_the_first_time()
+{
+	if (mfd_engine_take_desk_first_show(mfd_engine_get())) {
+		mfd_desk_dock_show();
+	}
+}
+
 void MfdUiDispatcher::on_drain()
 {
 	g_ui_refresh_queued.store(false);
 	mfd_engine_flush_pending_ui_work(mfd_engine_get());
+	show_desk_the_first_time();
 	if (g_dialog) {
 		g_dialog->refresh_from_engine();
 	}
@@ -2750,6 +2761,7 @@ static void on_midi_ports_changed()
 		g_dialog->on_hardware_ports_changed();
 		g_dialog->refresh_from_engine();
 	}
+	show_desk_the_first_time(); /* an APC40 plugged in after OBS started */
 	mfd_desk_dock_refresh();
 }
 
@@ -2781,9 +2793,21 @@ static void queue_midi_ports_changed()
 }
 #endif
 
+static void open_settings_from_dock()
+{
+	mfd_ui_show_settings();
+}
+
 static void on_tools_menu_clicked(void *unused)
 {
 	UNUSED_PARAMETER(unused);
+	mfd_ui_show_settings();
+}
+
+} // namespace
+
+void mfd_ui_show_settings(void)
+{
 	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
 	if (!g_dialog) {
 		g_dialog = new MfdSettingsDialog(mfd_engine_get(), main_win);
@@ -2795,8 +2819,6 @@ static void on_tools_menu_clicked(void *unused)
 	g_dialog->raise();
 	g_dialog->activateWindow();
 }
-
-} // namespace
 
 QDialog *mfd_ui_create_settings_dialog(struct mfd_engine *eng, QWidget *parent)
 {
@@ -2816,6 +2838,7 @@ void mfd_ui_init(void)
 
 	obs_frontend_add_tools_menu_item(obs_module_text("ToolsMenuTitle"), on_tools_menu_clicked, nullptr);
 	mfd_desk_dock_init(); /* before OBS restores the dock layout */
+	mfd_desk_dock_set_settings_opener(open_settings_from_dock);
 
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
 #ifdef _WIN32
@@ -2832,6 +2855,7 @@ void mfd_ui_init(void)
 
 void mfd_ui_shutdown(void)
 {
+	mfd_desk_dock_set_settings_opener(nullptr);
 	mfd_desk_dock_shutdown();
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), nullptr, nullptr);
 

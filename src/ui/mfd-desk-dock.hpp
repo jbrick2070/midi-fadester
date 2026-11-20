@@ -20,8 +20,12 @@ void mfd_desk_dock_init(void);
  * frame tick asks about 30 times a second while the dock is visible). */
 void mfd_desk_dock_refresh(void);
 
-/* Shows the dock (the settings dialog's button): false when it is not registered (no OBS frontend). */
+/* Shows the dock (the settings dialog's button, and once by itself the first time an APC40 mkII is seen): false when it
+ * is not registered (no OBS frontend). UI thread. */
 bool mfd_desk_dock_show(void);
+
+/* What the dock's gear button opens: the settings dialog registers its opener here (nullptr takes it away). */
+void mfd_desk_dock_set_settings_opener(void (*open_settings)(void));
 
 /* Takes the dock out again (idempotent; OBS_FRONTEND_EVENT_EXIT does it first when OBS quits). */
 void mfd_desk_dock_shutdown(void);

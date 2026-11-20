@@ -1483,6 +1483,12 @@ int main(int argc, char **argv)
 		auto *about = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvAbout"));
 		REQUIRE(about->text().contains(version));
 		REQUIRE(about->text().contains(QString::fromUtf8(PLUGIN_GIT_COMMIT)));
+		/* U1-01: the way to the show screen is on the first tab, beside Show controller, not on Advanced */
+		auto *show_desk = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnShowDesk"));
+		REQUIRE(show_desk->text() == QStringLiteral("Show Fadester Desk"));
+		REQUIRE(show_desk->parentWidget() ==
+			must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnShowController"))->parentWidget());
+		REQUIRE(dlg->findChild<QPushButton *>(QStringLiteral("mfdAdvShowDesk")) == nullptr);
 	}
 
 	capture_and_verify_png(svg_dlg, screenshot_dir, QStringLiteral("08-show-controller-svg.png"));
@@ -2296,6 +2302,22 @@ int main(int argc, char **argv)
 				std::unique_ptr<QDialog> adlg(mfd_ui_create_settings_dialog(&eng, nullptr));
 				REQUIRE(adlg->findChild<QLabel *>(QStringLiteral("mfdAdvVjLegend")) == nullptr);
 				REQUIRE(adlg->findChild<QLabel *>(QStringLiteral("mfdAdvVjScenesLegend")) == nullptr);
+			}
+
+			/* U1-01: a gear on the dock's first line opens the settings (whatever opener is registered) */
+			{
+				static int opened = 0;
+				auto *gear = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskGearBtn"));
+				REQUIRE(gear && gear->isVisible() &&
+					gear->toolTip() == QStringLiteral("Midi Fadester settings"));
+				REQUIRE(!gear->isEnabled()); /* no settings dialog registered yet */
+				mfd_desk_dock_set_settings_opener([]() { ++opened; });
+				again();
+				REQUIRE(gear->isEnabled());
+				gear->click();
+				REQUIRE(opened == 1);
+				mfd_desk_dock_set_settings_opener(nullptr);
+				again();
 			}
 
 			/* U1-14: a fader that waits to pick up shows it on its bar: amber, with the marker where it starts to

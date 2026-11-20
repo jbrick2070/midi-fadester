@@ -6032,6 +6032,9 @@ int main(void)
 		 * update); a new install, which has no settings file, starts without them */
 		REQUIRE(eng.desk_video_controls);
 		REQUIRE(mfd_engine_desk_video_controls(&eng));
+		/* U1-01: settings from before the dock showed itself count as shown: an update never pops the dock open */
+		REQUIRE(eng.desk_dock_shown);
+		REQUIRE(!mfd_engine_take_desk_first_show(&eng));
 		mfd_engine_get_ui_snapshot(&eng, snap);
 		REQUIRE(!snap->first_run_offer_pending);
 		os_unlink(tmp_v013_json);
@@ -6064,6 +6067,40 @@ int main(void)
 			struct mfd_engine fresh;
 			memset(&fresh, 0, sizeof(fresh));
 			REQUIRE(!mfd_engine_desk_video_controls(&fresh)); /* a new install: hidden */
+		}
+		{
+			/* a new install (no settings file): the dock shows itself once, the first time an APC40 mkII is
+			 * open after OBS has finished loading, and never again; the flag is saved and read back */
+			const bool was_loaded = eng.frontend_finished_loading;
+			const bool was_open = eng.midi_dev.is_open;
+			char was_name[sizeof(eng.midi_dev.opened_name)];
+			snprintf(was_name, sizeof(was_name), "%s", eng.midi_dev.opened_name);
+			eng.desk_dock_shown = false;
+			eng.frontend_finished_loading = false;
+			eng.midi_dev.is_open = true;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "APC40 mkII");
+			REQUIRE(!mfd_engine_take_desk_first_show(
+				&eng)); /* OBS still loading: its dock layout is not back */
+			eng.frontend_finished_loading = true;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "nanoKONTROL2");
+			REQUIRE(!mfd_engine_take_desk_first_show(
+				&eng)); /* another controller: the dock is the APC40's */
+			eng.midi_dev.is_open = false;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "APC40 mkII");
+			REQUIRE(!mfd_engine_take_desk_first_show(&eng)); /* no APC40 open */
+			REQUIRE(!eng.desk_dock_shown);
+			eng.midi_dev.is_open = true;
+			REQUIRE(mfd_engine_take_desk_first_show(&eng));
+			REQUIRE(eng.desk_dock_shown);
+			REQUIRE(!mfd_engine_take_desk_first_show(&eng)); /* once */
+			REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+			eng.desk_dock_shown = false;
+			REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+			REQUIRE(eng.desk_dock_shown);
+			os_unlink(tmp_v020_json);
+			eng.frontend_finished_loading = was_loaded;
+			eng.midi_dev.is_open = was_open;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "%s", was_name);
 		}
 	}
 

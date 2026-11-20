@@ -48,6 +48,7 @@
 namespace {
 
 constexpr const char *kDockId = "midi-fadester-desk";
+void (*g_open_settings)(void) = nullptr; /* the settings dialog's opener, for the gear button */
 constexpr int kStrips = (int)MFD_VJ_STRIPS;
 constexpr int kRows = 5; /* top to bottom: Scene fade, Show, Fade, Flash, Blend */
 constexpr uint8_t kChPulse = 10U;
@@ -408,6 +409,7 @@ private:
 	void applyFontSizes();
 	void showHelp();
 	QPushButton *help_btn_ = nullptr;
+	QPushButton *gear_btn_ = nullptr;
 	QPointer<QDialog> help_;
 	int base_px_ = 0; /* the font size the larger texts were last worked out from */
 
@@ -512,6 +514,17 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	help_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	connect(help_btn_, &QPushButton::clicked, this, [this]() { showHelp(); });
 	title_row->addWidget(help_btn_);
+	/* the way from the show screen to the settings (it used to be the Tools menu only) */
+	gear_btn_ = makeButton(mfdText("Desk.Settings", "Midi Fadester settings"), kButtonHeight, kButtonHeight);
+	gear_btn_->setObjectName(QStringLiteral("mfdDeskGearBtn"));
+	gear_btn_->setText(QStringLiteral("\xE2\x9A\x99"));
+	gear_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	connect(gear_btn_, &QPushButton::clicked, this, []() {
+		if (g_open_settings) {
+			g_open_settings();
+		}
+	});
+	title_row->addWidget(gear_btn_);
 	root->addLayout(title_row);
 	/* Panic first: it must be seen however short the dock is */
 	panic_ = new QLabel(this);
@@ -1404,6 +1417,7 @@ void MfdDeskDock::refresh()
 	paintButton(vs_panic_, view_.vs_panic_known && view_.vs_panic ? 0xEF4444U : 0x475569U, vs_loaded_);
 	paintButton(vs_tap_, 0x475569U, vs_loaded_);
 	paintButton(help_btn_, 0x334155U, true);
+	paintButton(gear_btn_, 0x334155U, g_open_settings != nullptr);
 	paintButton(vs_lock_, locked ? 0x0EA5E9U : 0x475569U, vs_loaded_);
 	paintButton(vs_downbeat_, 0x475569U, vs_loaded_);
 	if (vj_box_->isHidden() == view_.video_controls) {
@@ -1521,6 +1535,11 @@ bool mfd_desk_dock_show(void)
 		}
 	}
 	return false;
+}
+
+void mfd_desk_dock_set_settings_opener(void (*open_settings)(void))
+{
+	g_open_settings = open_settings;
 }
 
 void mfd_desk_dock_shutdown(void)

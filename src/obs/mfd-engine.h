@@ -533,6 +533,10 @@ struct mfd_engine {
 	 * they do nothing for most people. A settings file written before this key keeps them on, so nothing disappears
 	 * from a dock that is in use when the plugin is updated. */
 	bool desk_video_controls;
+	/* The Fadester Desk dock has shown itself once (the first time an APC40 mkII was open). A settings file from
+	 * before this key counts as shown: an update must not pop a dock open in front of a user who chose to keep it
+	 * closed. */
+	bool desk_dock_shown;
 	int vj_fade_ms; /* 0 = the default, 1000 ms */
 	struct mfd_vj_pads vj;
 	float vj_fade_restore[MFD_VJ_STRIPS];  /* the level a Clip Stop faded out from */
@@ -866,6 +870,10 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng);
 /* The dock's video speed rows, shown or hidden. Persisted with the global settings. */
 void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown);
+/* UI thread. True exactly once in an installation's life: OBS has finished loading (so its dock layout is restored),
+ * an APC40 mkII is open, and the dock has never shown itself. The flag is set and saved before it returns true, so the
+ * caller only has to show the dock. */
+bool mfd_engine_take_desk_first_show(struct mfd_engine *eng);
 bool mfd_engine_desk_video_controls(const struct mfd_engine *eng);
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng);
 

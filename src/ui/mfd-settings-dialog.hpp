@@ -11,6 +11,8 @@ extern "C" {
 #endif
 
 void mfd_ui_init(void);
+/* Opens the settings dialog, or raises it (Tools menu, and the Fadester Desk dock's gear button). UI thread. */
+void mfd_ui_show_settings(void);
 void mfd_ui_shutdown(void);
 
 #ifdef __cplusplus
