@@ -51,6 +51,9 @@ constexpr uint8_t kChPulse = 10U;
 constexpr uint8_t kChBlink = 15U;
 constexpr double kPi = 3.14159265358979323846;
 constexpr size_t kLeds = 55U; /* 6 per strip, 5 scenes, Record, Session */
+/* No pad or button is lower than this: at 14 or 22 px they were smaller than everything else in OBS, and on a laptop
+ * at 125 % too small to hit in a dark room (U1-11). */
+constexpr int kButtonHeight = 28;
 
 /* Row r (0 = top) is this cell of the strip (mfd_vj_pads_leds' order per strip) and this note base. */
 const int kRowCell[kRows] = {MFD_DESK_RESTART, MFD_DESK_SHOW, MFD_DESK_FADE, MFD_DESK_FLASH, MFD_DESK_BLEND};
@@ -343,6 +346,8 @@ private:
 	void releaseHolds();
 	void sayStatus(const QString &text, bool over_reason = true);
 	void paintButton(QPushButton *b, uint32_t rgb, bool enabled);
+	void applyFontSizes();
+	int base_px_ = 0; /* the font size the larger texts were last worked out from */
 
 	struct mfd_engine *eng_ = nullptr;
 	QLabel *title_ = nullptr;
@@ -410,9 +415,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	setMinimumSize(300, 240);
 	setStyleSheet(QStringLiteral("QWidget#mfdDeskDock, QWidget#mfdDeskBody { background-color: #0b1120; }"
 				     "QScrollArea { border: none; background-color: #0b1120; }"
-				     "QLabel { color: #e2e8f0; font-size: 11px; }"
+				     "QLabel { color: #e2e8f0; }"
 				     "QPushButton { border: 1px solid #334155; border-radius: 3px; color: #0b1120;"
-				     " font-size: 10px; padding: 1px; }"
+				     " padding: 1px; }"
 				     "QPushButton:focus { border: 2px solid #f8fafc; }"
 				     "QProgressBar { border: 1px solid #334155; background: #111827; }"
 				     "QProgressBar::chunk { background: #94a3b8; }"));
@@ -433,7 +438,6 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 
 	title_ = new QLabel(this);
 	title_->setObjectName(QStringLiteral("mfdDeskTitle"));
-	title_->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: bold;"));
 	title_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	root->addWidget(title_);
 	/* Panic first: it must be seen however short the dock is */
@@ -457,7 +461,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	status_row->addWidget(status_, 1);
 	turn_on_ = makeButton(mfdText("Desk.TurnOnTip", "Turn the APC40 pads on again (the same switch is on the "
 							"Advanced tab of Midi Fadester's settings)"),
-			      60, 24);
+			      60, kButtonHeight);
 	turn_on_->setObjectName(QStringLiteral("mfdDeskTurnOn"));
 	turn_on_->setText(mfdText("Desk.TurnOn", "Turn on"));
 	turn_on_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -468,7 +472,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		refresh();
 	});
 	status_row->addWidget(turn_on_);
-	reconnect_ = makeButton(mfdText("Desk.ReconnectTip", "Look for the APC40 mkII again"), 80, 24);
+	reconnect_ = makeButton(mfdText("Desk.ReconnectTip", "Look for the APC40 mkII again"), 80, kButtonHeight);
 	reconnect_->setObjectName(QStringLiteral("mfdDeskReconnect"));
 	reconnect_->setText(mfdText("Desk.Reconnect", "Reconnect"));
 	reconnect_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -487,7 +491,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	studio_note_->setStyleSheet(QStringLiteral("color: #fde68a;"));
 	studio_note_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	studio_row->addWidget(studio_note_, 1);
-	studio_btn_ = makeButton(mfdText("Strip.TurnOnStudioMode", "Turn on Studio Mode"), 80, 24);
+	studio_btn_ = makeButton(mfdText("Strip.TurnOnStudioMode", "Turn on Studio Mode"), 80, kButtonHeight);
 	studio_btn_->setObjectName(QStringLiteral("mfdDeskStudioBtn"));
 	studio_btn_->setText(mfdText("Strip.TurnOnStudioMode", "Turn on Studio Mode"));
 	studio_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -507,14 +511,10 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	on_air_ = new QLabel(this);
 	on_air_->setObjectName(QStringLiteral("mfdDeskOnAir"));
 	on_air_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-	on_air_->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: bold; color: #ffffff; "
-					      "background-color: #b91c1c; border-radius: 3px; padding: 3px 6px;"));
 	air_box->addWidget(on_air_);
 	preview_ = new QLabel(this);
 	preview_->setObjectName(QStringLiteral("mfdDeskPreview"));
 	preview_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-	preview_->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: bold; color: #ffffff; "
-					       "background-color: #15803d; border-radius: 3px; padding: 3px 6px;"));
 	air_box->addWidget(preview_);
 	root->addLayout(air_box);
 
@@ -522,8 +522,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	auto *scene_row = new QHBoxLayout();
 	scene_row->setSpacing(4);
 	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
-		QPushButton *b =
-			makeButton(mfdFill(mfdText("Desk.SceneButton", "Scene %1"), {QString::number(j + 1)}), 60, 28);
+		QPushButton *b = makeButton(mfdFill(mfdText("Desk.SceneButton", "Scene %1"), {QString::number(j + 1)}),
+					    60, kButtonHeight);
 		scenes_[j] = b;
 		b->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); /* a long name never widens the dock */
 		connect(b, &QPushButton::pressed, this, [this, j, b]() {
@@ -578,7 +578,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		for (int i = 0; i < kStrips; ++i) {
 			QPushButton *b = makeButton(mfdFill(mfdText("Desk.PadName", "%1, column %2"),
 							    {rowName(r), QString::number(i + 1)}),
-						    30, 22);
+						    30, kButtonHeight);
 			pads_[r][i] = b;
 			b->setObjectName(QStringLiteral("mfdDeskPad_%1_%2").arg(r).arg(i));
 			if (r == 0) {
@@ -600,8 +600,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	clip_name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
 	grid->addWidget(clip_name, kRows + 2, 0);
 	for (int i = 0; i < kStrips; ++i) {
-		QPushButton *b = makeButton(
-			mfdFill(mfdText("Desk.ClipStopName", "Reset, column %1"), {QString::number(i + 1)}), 30, 14);
+		QPushButton *b =
+			makeButton(mfdFill(mfdText("Desk.ClipStopName", "Reset, column %1"), {QString::number(i + 1)}),
+				   30, kButtonHeight);
 		clip_stops_[i] = b;
 		connect(b, &QPushButton::pressed, this, [this, i, b]() {
 			if (!physical(b)) {
@@ -627,7 +628,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		makeButton(mfdText("Desk.StopAllTip", "Reset all: every effect off and every source back to its own "
 						      "blend. With Shift: fade every source out. On the "
 						      "APC40: Stop All Clips."),
-			   80, 24);
+			   80, kButtonHeight);
 	stop_all_->setText(mfdText("Desk.StopAllShort", "Reset all"));
 	connect(stop_all_, &QPushButton::pressed, this, [this]() {
 		if (!physical(stop_all_)) {
@@ -641,10 +642,10 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	});
 	connect(stop_all_, &QPushButton::released, this,
 		[this]() { pressNote(0U, MFD_VJ_NOTE_STOP_ALL, false, false); });
-	shift_ = makeButton(mfdText("Desk.Shift", "Shift for the next pad"), 60, 24);
+	shift_ = makeButton(mfdText("Desk.Shift", "Shift for the next pad"), 60, kButtonHeight);
 	shift_->setText(mfdText("Desk.ShiftShort", "Shift"));
 	shift_->setCheckable(true);
-	session_ = makeButton(mfdText("Desk.Session", "Fade Preview on air"), 70, 24);
+	session_ = makeButton(mfdText("Desk.Session", "Fade Preview on air"), 70, kButtonHeight);
 	session_->setObjectName(QStringLiteral("mfdDeskFadeBtn"));
 	session_->setText(mfdText("Desk.SessionShort", "Fade"));
 	connect(session_, &QPushButton::clicked, this, [this]() {
@@ -654,7 +655,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	});
 	blackout_btn_ = makeButton(mfdText("Desk.Blackout",
 					   "Blackout: the audience sees black; again: back. On the APC40: Session."),
-				   70, 24);
+				   70, kButtonHeight);
 	blackout_btn_->setObjectName(QStringLiteral("mfdDeskBlackoutBtn"));
 	blackout_btn_->setText(mfdText("Desk.RowBlackoutShort", "Blackout"));
 	connect(blackout_btn_, &QPushButton::clicked, this, [this]() {
@@ -687,7 +688,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	xfader_ = new QProgressBar(this);
 	xfader_->setRange(0, 1000);
 	xfader_->setTextVisible(false);
-	xfader_->setFixedHeight(8);
+	xfader_->setFixedHeight(10);
 	xfader_->setAccessibleName(mfdText("Desk.Crossfader", "Crossfader (T-bar)"));
 	xfader_->setToolTip(xfader_->accessibleName());
 	root->addWidget(xfader_);
@@ -700,34 +701,33 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	auto *vs_row = new QHBoxLayout();
 	bpm_ = new QLabel(this);
 	bpm_->setObjectName(QStringLiteral("mfdDeskBpm"));
-	bpm_->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: bold;")); /* smaller than what is on air */
 	bpm_->setMinimumWidth(72);
 	vs_row->addWidget(bpm_);
 	lock_ = new QLabel(this);
-	vs_row->addWidget(lock_);
+	lock_->setWordWrap(true); /* "Visual Sidechain is not loaded." is long in some languages */
+	vs_row->addWidget(lock_, 1);
 	for (int k = 0; k < 4; ++k) {
 		beats_[k] = new QLabel(this);
-		beats_[k]->setFixedSize(12, 12);
+		beats_[k]->setFixedSize(14, 14);
 		vs_row->addWidget(beats_[k]);
 	}
-	vs_row->addStretch(1);
 	root->addLayout(vs_row);
 	auto *vs_buttons = new QHBoxLayout();
 	vs_panic_ = makeButton(mfdText("Desk.VsPanic",
 				       "Panic: all Visual Sidechain effects off; again: on again. On the APC40: "
 				       "Record."),
-			       70, 24);
+			       70, kButtonHeight);
 	vs_panic_->setObjectName(QStringLiteral("mfdDeskPanicBtn"));
 	vs_panic_->setText(mfdText("Desk.VsPanicShort", "Panic"));
-	vs_tap_ = makeButton(mfdText("Desk.VsTap", "Tap the tempo. On the APC40: Metronome."), 50, 24);
+	vs_tap_ = makeButton(mfdText("Desk.VsTap", "Tap the tempo. On the APC40: Metronome."), 50, kButtonHeight);
 	vs_tap_->setText(mfdText("Desk.VsTapShort", "Tap"));
 	vs_lock_ = makeButton(mfdText("Desk.VsLock",
 				      "Hold the BPM, or let it follow the music again. On the APC40: Shift + "
 				      "Metronome."),
-			      50, 24);
+			      50, kButtonHeight);
 	vs_lock_->setText(mfdText("Desk.VsLockShort", "Hold BPM"));
-	vs_downbeat_ =
-		makeButton(mfdText("Desk.VsDownbeat", "Now is beat 1. On the APC40: Shift + Tap Tempo."), 70, 24);
+	vs_downbeat_ = makeButton(mfdText("Desk.VsDownbeat", "Now is beat 1. On the APC40: Shift + Tap Tempo."), 70,
+				  kButtonHeight);
 	vs_downbeat_->setText(mfdText("Desk.VsDownbeatShort", "Beat 1"));
 	const std::pair<QPushButton *, enum mfd_vj_command_kind> vs[] = {{vs_panic_, MFD_VJ_CMD_VS_PANIC},
 									 {vs_tap_, MFD_VJ_CMD_VS_TAP},
@@ -765,7 +765,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 					       "scroll wheel or the arrow keys)"));
 	speed_dial_->setToolTip(speed_dial_->accessibleName());
 	vj_row->addWidget(speed_dial_);
-	vj_play_ = makeButton(mfdText("Desk.VjsterPlayTip", "Play or pause the video. On the APC40: Play."), 70, 24);
+	vj_play_ = makeButton(mfdText("Desk.VjsterPlayTip", "Play or pause the video. On the APC40: Play."), 70,
+			      kButtonHeight);
 	vj_play_->setText(mfdText("Desk.VjsterPlay", "Play / Pause"));
 	connect(vj_play_, &QPushButton::pressed, this, [this]() {
 		if (physical(vj_play_)) {
@@ -785,7 +786,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 				    : mfdFill(mfdText("Desk.VjsterPresetTip",
 						      "Ask VJster for %1 (Fadester Companion 0.1.17 or later)"),
 					      {label}),
-			40, 26);
+			40, kButtonHeight);
 		b->setText(label);
 		b->setObjectName(QStringLiteral("mfdDeskSpeedPreset_%1").arg(k));
 		vj_presets_[k] = b;
@@ -808,12 +809,34 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	root->addStretch(1);
 
 	clock_.start();
+	applyFontSizes();
 	refresh();
+}
+
+/* The dock's text is OBS's own, its font-size setting included: nothing here fixes a size. Only what must stand out is
+ * set, worked out from that size: the title a little larger, ON AIR and PREVIEW the largest text on the dock. */
+void MfdDeskDock::applyFontSizes()
+{
+	const int base = fontInfo().pixelSize();
+	if (base <= 0 || base == base_px_) {
+		return;
+	}
+	base_px_ = base;
+	const QString strong = QStringLiteral("font-size: %1px; font-weight: bold;").arg(base + 1);
+	title_->setStyleSheet(strong);
+	bpm_->setStyleSheet(strong); /* smaller than what is on air */
+	const QString chip = QStringLiteral("font-size: %1px; font-weight: bold; color: #ffffff; background-color: %2; "
+					    "border-radius: 3px; padding: 3px 6px;");
+	const QString big = QString::number((int)std::lround((double)base * 1.4));
+	on_air_->setStyleSheet(chip.arg(big, QStringLiteral("#b91c1c")));
+	preview_->setStyleSheet(chip.arg(big, QStringLiteral("#15803d")));
+	status_->setMinimumHeight(status_->fontMetrics().lineSpacing());
 }
 
 void MfdDeskDock::showEvent(QShowEvent *e)
 {
 	QWidget::showEvent(e);
+	applyFontSizes();
 	mfd_engine_set_desk_visible(eng_, true); /* the engine's frame tick asks for repaints now */
 	refresh();
 }
@@ -830,6 +853,8 @@ bool MfdDeskDock::event(QEvent *e)
 	/* Alt-Tab or a click elsewhere while a pad is held down: let go of the dock's holds. */
 	if (e->type() == QEvent::WindowDeactivate) {
 		releaseHolds();
+	} else if ((e->type() == QEvent::FontChange || e->type() == QEvent::StyleChange) && title_ && status_) {
+		applyFontSizes(); /* OBS's theme or font size changed */
 	}
 	return QWidget::event(e);
 }
@@ -1198,7 +1223,7 @@ void MfdDeskDock::refresh()
 			k == 0 ? (flash ? QStringLiteral("#f59e0b") : QStringLiteral("#92400e")) /* beat 1: amber */
 			       : (flash ? QStringLiteral("#f8fafc") : QStringLiteral("#64748b"));
 		setCss(beats_[k],
-		       QStringLiteral("background-color: %1; border-radius: 6px;")
+		       QStringLiteral("background-color: %1; border-radius: 7px;")
 			       .arg(on ? lit : (k == 0 ? QStringLiteral("#3b2a12") : QStringLiteral("#1f2937"))));
 	}
 	if (const char *old_vs = vs_module_conflict_path()) {

@@ -2156,6 +2156,15 @@ int main(int argc, char **argv)
 			REQUIRE(status->isVisible() &&
 				status->height() > 0); /* its line is always there: nothing jumps */
 			REQUIRE(status->mapTo(sd, QPoint(0, 0)).y() < cut_pad->mapTo(sd, QPoint(0, 0)).y());
+			/* U1-11: the dock's text is OBS's own size (nothing fixes 10 or 11 px), and no button is lower than
+			 * 28 px */
+			REQUIRE(fade->fontInfo().pixelSize() == sd->fontInfo().pixelSize());
+			REQUIRE(status->fontInfo().pixelSize() == sd->fontInfo().pixelSize());
+			for (QPushButton *b : sd->findChildren<QPushButton *>()) {
+				if (b->isVisible()) {
+					REQUIRE(b->height() >= 28);
+				}
+			}
 			const QPoint fade_at = fade->mapTo(sd, QPoint(0, 0));
 
 			/* U1-03: ON AIR and PREVIEW are two lines, each with its word, and the largest text on the dock */
@@ -2277,15 +2286,17 @@ int main(int argc, char **argv)
 			g_lang_lookup = text_lookup_create(desk_locale_dir.filePath(file).toUtf8().constData());
 			REQUIRE(g_lang_lookup != nullptr);
 			mfd_text_set_lookup(lang_locale_text);
-			/* two looks: the show, and both emergency bars on */
-			for (int look = 0; look < 2; ++look) {
-				const bool emergency = look >= 1;
+			/* four looks: the show; both emergency bars on; the same at the dock's narrowest (its 380 px body, U1-11);
+			 * and at its narrowest with Shift held, when the row names change */
+			for (int look = 0; look < 4; ++look) {
+				const bool emergency = look == 1 || look == 2;
+				eng.vj.shift = look == 3;
 				if (emergency) {
 					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, true);
 					mfd_blackout_toggle(300);
 				}
 				QWidget *ld = mfd_desk_dock_create(&eng);
-				ld->resize(look == 2 ? 380 : 560, 760);
+				ld->resize(look >= 2 ? 380 : 560, 760);
 				ld->show();
 				pump_ui();
 				for (QPushButton *b : ld->findChildren<QPushButton *>()) {
@@ -2326,6 +2337,7 @@ int main(int argc, char **argv)
 					mfd_blackout_toggle(300);
 					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
 				}
+				eng.vj.shift = false;
 			}
 			mfd_text_set_lookup(test_locale_text);
 			text_lookup_destroy(g_lang_lookup);
