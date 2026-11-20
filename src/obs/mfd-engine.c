@@ -5698,6 +5698,18 @@ static bool vj_feed_locked(struct mfd_engine *eng, const struct mfd_midi_decoded
 			   : mfd_vj_pads_feed_cc(&eng->vj, dec->addr.channel, (uint8_t)dec->addr.number,
 						 (uint8_t)(dec->raw_value & 0x7FU), acts, MFD_VJ_MAX_ACTIONS, &n);
 	if (!fed) {
+		if (is_note && dec->addr.type == MFD_MIDI_NOTE_ON && dec->addr.channel < 16U &&
+		    dec->addr.number < 128U) {
+			/* once per button: which APC40 buttons send a plain press but have no job (to pick free ones) */
+			static uint8_t logged[16][16];
+			uint8_t *byte = &logged[dec->addr.channel][dec->addr.number / 8U];
+			uint8_t bit = (uint8_t)(1U << (dec->addr.number % 8U));
+			if (!(*byte & bit)) {
+				*byte |= bit;
+				obs_log(LOG_INFO, "APC40: button note %u on channel %u has no job",
+					(unsigned)dec->addr.number, (unsigned)dec->addr.channel + 1U);
+			}
+		}
 		return false;
 	}
 	for (size_t i = 0; i < n; ++i) {

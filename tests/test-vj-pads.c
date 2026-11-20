@@ -131,7 +131,7 @@ int main(void)
 	REQUIRE(led_velocity(&p, 2) == mfd_vj_blend_color(MFD_VJ_BLEND_DARKEN));
 	struct mfd_vj_led leds[MFD_VJ_MAX_LEDS];
 	REQUIRE(mfd_vj_pads_leds(&p, leds, MFD_VJ_MAX_LEDS) ==
-		56U); /* 40 pads, 8 Clip Stops, 5 scenes, Record, Session, Master */
+		55U); /* 40 pads, 8 Clip Stops, 5 scenes, Record, Session */
 
 	/* 8. Saved punch modes: Normal and Darken are refused. */
 	mfd_vj_pads_set_punch(&p, 4, MFD_VJ_BLEND_MULTIPLY);
@@ -213,9 +213,7 @@ int main(void)
 	REQUIRE(feed(&q, false, 0, 82) && n == 0);
 	REQUIRE(feed(&q, true, 0, 86) && n == 1 && acts[0].strip == 4);
 	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
-	REQUIRE(feed(&q, true, 0, 80) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE); /* Master fades too */
-	REQUIRE(feed(&q, false, 0, 80) && n == 0);
-	REQUIRE(mfd_vj_pads_is_button(0, 80) && !mfd_vj_pads_is_button(1, 80));
+	REQUIRE(!mfd_vj_pads_is_button(0, 80) && !mfd_vj_pads_is_button(0, 103)); /* Master and Bank: no job */
 	REQUIRE(feed(&q, true, 0, 98));
 	REQUIRE(feed(&q, true, 0, 83) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PROGRAM && acts[0].strip == 1);
 	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
@@ -229,7 +227,6 @@ int main(void)
 	q.take_ready = true;
 	q.vs_panic = true;
 	REQUIRE(led_at(&q, 102, 0, NULL) == 1U && led_at(&q, 93, 0, NULL) == 1U); /* Record: on or off only */
-	REQUIRE(led_at(&q, 80, 0, NULL) == 1U); /* Master lights with Session when a fade is ready */
 	struct mfd_vj_led ql[MFD_VJ_MAX_LEDS];
 	size_t qc = mfd_vj_pads_leds(&q, ql, MFD_VJ_MAX_LEDS);
 	for (size_t i = 0; i < qc; ++i) {

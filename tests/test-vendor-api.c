@@ -2813,20 +2813,19 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PROGRAM && g_vj_cmds[0].arg == 0);
 	mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", true);
 	/* The scene already on air: its Scene Launch button does nothing, with or without Shift (it never goes to Preview
-	 * too, which would leave nothing to fade to). Master fades Preview to Program like Session. */
+	 * too, which would leave nothing to fade to). */
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 83);
 	vj_shift_tap(eng, 83);
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 0);
-	vj_tap(eng, 80);
+	vj_tap(eng, 102);
 	mfd_engine_flush_pending_ui_work(eng);
-	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE);
-	/* Preview and Program the same scene: Session and Master have nothing to fade to. */
+	REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_TAKE); /* another scene in Preview fades */
+	/* Preview and Program the same scene: Session has nothing to fade to. */
 	mfd_engine_set_test_frontend_state(eng, true, true, "Scene B", "Scene B", true);
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 102);
-	vj_tap(eng, 80);
 	vj_tap(eng, 83);
 	mfd_engine_flush_pending_ui_work(eng);
 	REQUIRE(g_vj_cmd_count == 0);
@@ -3349,7 +3348,7 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_flush_pending_ui_work(eng);
 		/* 14a. The view: pads on, names and follow from the strips, Program red on the scene row, 55 LEDs. */
 		mfd_engine_get_desk_view(eng, false, v);
-		REQUIRE(v->pads == MFD_DESK_PADS_ON && v->desk_connected && v->finished_loading && v->led_count == 56U);
+		REQUIRE(v->pads == MFD_DESK_PADS_ON && v->desk_connected && v->finished_loading && v->led_count == 55U);
 		REQUIRE(v->scene_count == 3 && strcmp(v->scenes[1], "Scene B") == 0 && v->studio_mode);
 		REQUIRE(v->leds[48 + 1].velocity == 5U); /* Scene B on air: red */
 		REQUIRE(strcmp(v->strips[1].source, "B1") == 0 && v->strips[1].single_layer && v->strips[1].follows &&

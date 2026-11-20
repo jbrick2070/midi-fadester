@@ -32,7 +32,6 @@
  *                                           the transition; with Shift, or outside Studio Mode, straight to Program
  *                                           (with the transition too)
  *   Session (note 102)                      fade Preview to Program
- *   Master (note 80)                        fade Preview to Program (handier, under the Scene Launch column)
  *   Cue Level (CC 47, relative)             transition length, 50 ms a detent; with Shift, the pad fade time
  *
  * Visual Sidechain: Record (note 93) panics or restores; Metronome (note 90) taps the tempo, with Shift locks or
@@ -80,7 +79,6 @@ extern "C" {
 #define MFD_VJ_NOTE_METRONOME 90U
 #define MFD_VJ_NOTE_RECORD 93U
 #define MFD_VJ_NOTE_SESSION 102U
-#define MFD_VJ_NOTE_MASTER 80U /* track-select Master: fade, like Session */
 #define MFD_VJ_NOTE_SHIFT 98U
 #define MFD_VJ_NOTE_PLAY 91U
 #define MFD_VJ_NOTE_TAP_TEMPO 99U
@@ -169,7 +167,7 @@ struct mfd_vj_pads {
 	enum mfd_vj_blend punch[MFD_VJ_STRIPS];
 	enum mfd_vj_scene_state scene[MFD_VJ_SCENES];
 	bool vs_panic;   /* Record lamp on (the engine blinks it while Visual Sidechain is panicked) */
-	bool take_ready; /* Studio Mode with another scene in Preview (Session and Master light) */
+	bool take_ready; /* Studio Mode with another scene in Preview (Session lights) */
 };
 
 void mfd_vj_pads_init(struct mfd_vj_pads *p);

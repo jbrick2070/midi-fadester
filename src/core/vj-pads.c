@@ -82,7 +82,7 @@ bool mfd_vj_pads_is_button(uint8_t channel, uint8_t note)
 		(note >= MFD_VJ_NOTE_SCENE && note < MFD_VJ_NOTE_SCENE + MFD_VJ_SCENES) || note == MFD_VJ_NOTE_SHIFT ||
 		note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO || note == MFD_VJ_NOTE_NUDGE_DOWN ||
 		note == MFD_VJ_NOTE_NUDGE_UP || note == MFD_VJ_NOTE_METRONOME || note == MFD_VJ_NOTE_RECORD ||
-		note == MFD_VJ_NOTE_SESSION || note == MFD_VJ_NOTE_MASTER);
+		note == MFD_VJ_NOTE_SESSION);
 }
 
 bool mfd_vj_pads_is_knob(uint8_t channel, uint8_t cc)
@@ -190,7 +190,7 @@ static void feed_transport(struct mfd_vj_pads *p, uint8_t note, struct mfd_vj_ac
 		push(out, max, count, p->shift ? MFD_VJ_ACTION_VS_LOCK : MFD_VJ_ACTION_VS_TAP, -1, MFD_VJ_BLEND_NORMAL);
 	} else if (note == MFD_VJ_NOTE_RECORD) {
 		push(out, max, count, MFD_VJ_ACTION_VS_PANIC, -1, MFD_VJ_BLEND_NORMAL);
-	} else if (note == MFD_VJ_NOTE_SESSION || note == MFD_VJ_NOTE_MASTER) {
+	} else if (note == MFD_VJ_NOTE_SESSION) {
 		push(out, max, count, MFD_VJ_ACTION_TAKE, -1, MFD_VJ_BLEND_NORMAL);
 	}
 }
@@ -219,7 +219,7 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 		}
 	} else if (note == MFD_VJ_NOTE_PLAY || note == MFD_VJ_NOTE_TAP_TEMPO || note == MFD_VJ_NOTE_NUDGE_DOWN ||
 		   note == MFD_VJ_NOTE_NUDGE_UP || note == MFD_VJ_NOTE_METRONOME || note == MFD_VJ_NOTE_RECORD ||
-		   note == MFD_VJ_NOTE_SESSION || note == MFD_VJ_NOTE_MASTER) {
+		   note == MFD_VJ_NOTE_SESSION) {
 		if (note_on) {
 			feed_transport(p, note, out, max, &count);
 		}
@@ -465,7 +465,6 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 	}
 	led(out, max, &count, 0U, MFD_VJ_NOTE_RECORD, p->vs_panic ? LAMP_ON : LAMP_OFF, false);
 	led(out, max, &count, 0U, MFD_VJ_NOTE_SESSION, p->take_ready ? LAMP_ON : LAMP_OFF, false);
-	led(out, max, &count, 0U, MFD_VJ_NOTE_MASTER, p->take_ready ? LAMP_ON : LAMP_OFF, false); /* appended last */
 	return count;
 }
 

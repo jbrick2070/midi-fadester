@@ -305,7 +305,6 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 | Stop All Clips | **Clean:** every effect off (Clean / All FX Off) and every source back to its own blend. With Shift: **fade every source out**. |
 | Scene Launch 1–5 | The first five scenes in OBS's Scenes list, top first. Press once: the scene goes to **Preview**. Press the scene in Preview again: it **fades** to Program with the transition. The scene already on air does nothing, so there is always something to fade to. With Shift (or outside Studio Mode): **straight to Program**, skipping Preview. Both use your OBS transition; Midi Fadester never changes it. |
 | Session | **Fade** Preview to Program with the transition. |
-| Master | **Fade** Preview to Program too: the same as Session, closer to hand under the Scene Launch column. |
 | Cue Level knob | **Transition length**, 50 ms per click. With Shift: the **pad fade time**. |
 | Tempo knob | **Video speed** 0.05x faster or slower per click; with Shift held, 0.25x. |
 | Nudge − / Nudge + | **Video speed** 0.25x slower / faster. |
@@ -318,7 +317,7 @@ the scene on air** fills empty faders the same way at any time. A newly filled f
 dim white at their own blend, the blend colour when punched (Lighten azure, Screen yellow, Additive orange, Multiply violet, Subtract magenta),
 bright white while flashing, amber when faded out, blacked out or at 0 %, row 4 blinking dim / bright red when the source is hidden
 (pressing its pads would change nothing you can see), row 5 azure when the column is pinned, all dark when the column
-has no source. Clip Stop lights while its column has a blend punched; Session and Master light when a fade is ready; Record
+has no source. Clip Stop lights while its column has a blend punched; Session lights when a fade is ready; Record
 blinks while Visual Sidechain is panicked. Pulses and blinks use the desk's slowest rate, and start from the dim colour, so a pad stays lit even if the desk does
 not animate it. A source's own blend is the one it had in the scene when its column took it: Clean never turns a shape on
 black into a black wall by forcing Normal. When a column moves to another source (a scene change, a layer added),
