@@ -180,12 +180,14 @@ int main(void)
 	REQUIRE(feed(&q, true, 0, 33) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_FADE && acts[0].strip == 1);
 	REQUIRE(feed(&q, true, 0, 39) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_FADE &&
 		acts[0].strip == 7); /* a scene fade whatever the column holds */
+	REQUIRE(feed(&q, true, 0, 32) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_CUT); /* pad 1: the cut */
 	REQUIRE(feed(&q, false, 0, 39) && n == 0);
 	REQUIRE(feed(&q, true, 3, 52) && n == 0); /* Clip Stop on a strip without a source */
 	REQUIRE(feed(&q, true, 1, 52) && n == 1 && acts[0].kind == MFD_VJ_ACTION_COLUMN_CLEAN && acts[0].strip == 1);
 	REQUIRE(feed(&q, true, 0, 98));
 	REQUIRE(feed(&q, true, 0, 25) && n == 1 && acts[0].kind == MFD_VJ_ACTION_WAKE && acts[0].strip == 1);
-	REQUIRE(feed(&q, true, 0, 37) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_CUT && acts[0].strip == 5);
+	REQUIRE(feed(&q, true, 0, 37) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_FADE &&
+		acts[0].strip == 5); /* Shift changes nothing on the top row */
 	REQUIRE(feed(&q, true, 5, 52) && n == 1 && acts[0].kind == MFD_VJ_ACTION_PIN_TOGGLE &&
 		acts[0].strip == 5); /* Shift + Clip Stop pins, even a column with no source yet */
 	REQUIRE(feed(&q, true, 0, 17) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SNAP && acts[0].strip == 1);
@@ -204,9 +206,9 @@ int main(void)
 	/* 12. Row 4 lights (hidden blinks red on channel 16, 0 % is amber), the scene-fade greens, pinned columns on
 	 * Clip Stop while Shift is held. */
 	uint8_t ch = 0;
-	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 23U && led_velocity(&q, 39) == 114U);
+	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 13U && led_velocity(&q, 39) == 114U);
 	q.take_ready = true; /* the row shows its eight greens, dark to light, whether or not a scene waits */
-	REQUIRE(led_velocity(&q, 32) == 23U && led_velocity(&q, 33) == 123U && led_velocity(&q, 37) == 21U &&
+	REQUIRE(led_velocity(&q, 32) == 13U && led_velocity(&q, 33) == 23U && led_velocity(&q, 37) == 21U &&
 		led_velocity(&q, 39) == 114U);
 	q.take_ready = false;
 	mfd_vj_pads_set_hidden(&q, 0, true);

@@ -20,9 +20,10 @@
  *   Row 3 pad k (note 16 + k)               fade strip k out; again, fade it back in; with Shift, snap 0 % / 100 %
  *   Row 4 pad k (note 24 + k)               show or hide the source (its eye in OBS); with Shift, wake it: shown,
  *                                           100 %, blend Normal
- *   Row 5 pad k (note 32 + k)               scene fade: Preview to Program over 32 / 2^k beats (8 bars on the left,
- *                                           1/4 beat on the right) at Visual Sidechain's BPM, 120 when it has none;
- *                                           with Shift, a cut. Lit in eight greens while a scene waits in Preview.
+ *   Row 5 pad 1 (note 32)                   cut: Preview to Program at once. Lit yellow.
+ *   Row 5 pad k = 2..8 (note 31 + k)         scene fade: Preview to Program over 32 / 2^(k-2) beats (8 bars on pad 2,
+ *                                           1/2 beat on pad 8) at Visual Sidechain's BPM, 120 when it has none.
+ *                                           Lit in seven greens, dark (longest) to light. Shift changes nothing here.
  *   Clip Stop k (note 52, ch k)             column clean: the source back to its home blend, flash or blackout let go;
  *                                           with Shift, pin or unpin the column (a pinned column keeps its source when
  *                                           the scene on air changes; with Shift held, Clip Stop lights the pinned ones)
@@ -53,8 +54,8 @@
  * It also says what each LED should show. Scenes: Program red, Preview green pulsing, other scenes dim blue, no scene
  * off (Preview pulses between dim and bright green, so it stays lit if the desk does not animate). Sources: dim white
  * at their home blend, the blend colour when punched, bright white while flashing, amber when faded
- * out, at 0 % or blacked out, blinking dim / bright red when hidden, off without a source. Row 5: eight greens, dark (the longest
- * fade) to light (the shortest). Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
+ * out, at 0 % or blacked out, blinking dim / bright red when hidden, off without a source. Row 5: the cut yellow, then seven greens,
+ * dark (the longest fade) to light (the shortest). Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
  */
 
 #include <stdbool.h>
@@ -131,8 +132,8 @@ enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_CUE_STEPS,       /* steps: transition length by steps x 50 ms */
 	MFD_VJ_ACTION_FADE_STEPS,      /* steps: pad fade time by steps x 50 ms */
 	MFD_VJ_ACTION_BLACKOUT_TOGGLE, /* Program to black, or back (Session) */
-	MFD_VJ_ACTION_SCENE_FADE,      /* strip = top-row pad 0..7: Preview to Program at that pad's length */
-	MFD_VJ_ACTION_SCENE_CUT,       /* Shift + top-row pad: Preview to Program at once */
+	MFD_VJ_ACTION_SCENE_FADE,      /* strip = top-row pad 1..7: Preview to Program at that pad's length */
+	MFD_VJ_ACTION_SCENE_CUT,       /* top-row pad 0 (yellow): Preview to Program at once */
 };
 
 /* What a Scene Launch button shows. */

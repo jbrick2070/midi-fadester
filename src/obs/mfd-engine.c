@@ -6605,8 +6605,8 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 			calldata_free(&cd);
 		}
 		int ms = 50; /* a cut: as short as OBS allows */
-		if (cmd->arg >= 0 && cmd->arg < (int)MFD_VJ_STRIPS) {
-			double beats = 32.0 / (double)(1 << cmd->arg);
+		if (cmd->arg >= 1 && cmd->arg < (int)MFD_VJ_STRIPS) {
+			double beats = 32.0 / (double)(1 << (cmd->arg - 1)); /* pad 1: 8 bars .. pad 7: 1/2 beat */
 			ms = (int)lround(beats * 60000.0 / bpm);
 		}
 		ms = ms < 50 ? 50 : ms > 20000 ? 20000 : ms; /* OBS's own limits */
@@ -6617,7 +6617,7 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 		obs_frontend_preview_program_trigger_transition();
 		obs_frontend_set_transition_duration(user_ms);
 		obs_log(LOG_INFO, "APC40: scene fade to \"%s\" over %d ms (%s, %.0f BPM)", cmd->scene, ms,
-			cmd->arg < 0 ? "Shift: cut" : "top row", bpm);
+			cmd->arg < 0 ? "cut" : "top row", bpm);
 		break;
 	}
 	case MFD_VJ_CMD_SET_VISIBLE: {

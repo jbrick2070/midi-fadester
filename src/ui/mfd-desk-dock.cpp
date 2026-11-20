@@ -62,7 +62,7 @@ QString rowName(int r)
 {
 	switch (r) {
 	case 0:
-		return mfdText("Desk.RowSceneFade", "Scene fade, long to short (Shift: cut)");
+		return mfdText("Desk.RowSceneFade", "Cut, then scene fades from long to short");
 	case 1:
 		return mfdText("Desk.RowShow", "Show / hide (Shift: wake)");
 	case 2:
@@ -80,7 +80,7 @@ QString rowShortName(int r, bool shift = false)
 	if (shift) {
 		switch (r) {
 		case 0:
-			return mfdText("Desk.RowCutShort", "Cut");
+			return mfdText("Desk.RowSceneFadeShort", "Scene fade"); /* Shift changes nothing here */
 		case 1:
 			return mfdText("Desk.RowWakeShort", "Wake");
 		case 2:
@@ -948,9 +948,10 @@ void MfdDeskDock::refresh()
 			} else if (cell == MFD_DESK_RESTART) {
 				/* the top row: scene fades, whatever the column holds */
 				can = can && view_.take_ready && !view_.tbar_busy;
-				why = mfdFill(mfdText("Desk.Tip.SceneFade",
-						      "Fade Preview to Program over %1 beats (Shift: cut)"),
-					      {QString::number(32.0 / (double)(1 << i), 'g', 3)});
+				why = i == 0 ? mfdText("Desk.Tip.SceneCut", "Cut Preview to Program at once")
+					     : mfdFill(mfdText("Desk.Tip.SceneFade",
+							       "Fade Preview to Program over %1 beats"),
+						       {QString::number(32.0 / (double)(1 << (i - 1)), 'g', 3)});
 			} else if (!st.has_layer) {
 				can = false;
 				why = mfdText("Desk.Tip.Empty", "No source on this column.");

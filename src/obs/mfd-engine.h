@@ -339,7 +339,7 @@ enum mfd_vj_command_kind {
 	MFD_VJ_CMD_VS_LOCK,     /* Visual Sidechain BPM lock toggled */
 	MFD_VJ_CMD_VS_RESYNC,   /* Visual Sidechain downbeat resync */
 	MFD_VJ_CMD_TRANSITION,  /* arg: transition length change in ms */
-	MFD_VJ_CMD_SCENE_FADE,  /* scene (in Preview), arg: top-row pad 0..7 (32 / 2^arg beats), -1 a cut */
+	MFD_VJ_CMD_SCENE_FADE,  /* scene (in Preview), arg: top-row pad 1..7 (32 / 2^(arg-1) beats), -1 a cut */
 };
 
 #define MFD_VJ_CMD_MAX 16

@@ -2912,10 +2912,10 @@ static int test_vj_fill_follow_and_desk(void)
 	REQUIRE(!(eng->vj.hidden & 0x01U));
 	fake_sg_find_source(&sg, "B1")->hidden = false;
 
-	/* 8. The top row fades the scene in Preview to Program at each pad's length (pad 1 = 16 beats); Shift: a cut. */
+	/* 8. The top row fades the scene in Preview to Program at each pad's length (pad 2 = 8 bars); pad 1 cuts. */
 	g_vj_cmd_count = 0;
 	vj_tap(eng, 33);
-	vj_shift_tap(eng, 39);
+	vj_tap(eng, 32);
 	mfd_engine_flush_pending_ui_work(eng);
 	if (eng->cached_studio_mode && eng->cached_preview_scene[0] &&
 	    strcmp(eng->cached_preview_scene, eng->cached_program_scene) != 0) {

@@ -20,9 +20,9 @@
 #define COLOR_AZURE 37U
 #define COLOR_BLUE_DIM 46U
 
-/* The top row's scene fades, longest to shortest: palette greens from dark to light (white-lifted at the short end so
- * all eight read as different on the desk). */
-static const uint8_t k_fade_green[MFD_VJ_STRIPS] = {23U, 123U, 22U, 76U, 122U, 21U, 20U, 114U};
+/* The top row: the cut in yellow, then the scene fades, longest to shortest, in palette greens from dark to light
+ * (white-lifted at the short end so all seven read as different on the desk). */
+static const uint8_t k_fade_green[MFD_VJ_STRIPS] = {13U /* the cut: yellow */, 23U, 22U, 76U, 122U, 21U, 20U, 114U};
 
 /* An RGB pad's MIDI channel picks its animation; the rate is the desk's slowest, 1/2 (a two-beat breath). */
 #define CH_SOLID 0U
@@ -244,8 +244,8 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 		}
 	} else if (note >= MFD_VJ_NOTE_ROW_RESTART) {
 		int s = (int)(note - MFD_VJ_NOTE_ROW_RESTART);
-		if (note_on) { /* the top row: scene fades, long on the left, short on the right; Shift: a cut */
-			push(out, max, &count, p->shift ? MFD_VJ_ACTION_SCENE_CUT : MFD_VJ_ACTION_SCENE_FADE, s,
+		if (note_on) { /* the top row: the cut on the left, then scene fades from long to short; Shift or not */
+			push(out, max, &count, s == 0 ? MFD_VJ_ACTION_SCENE_CUT : MFD_VJ_ACTION_SCENE_FADE, s,
 			     MFD_VJ_BLEND_NORMAL);
 		}
 	} else if (note >= MFD_VJ_NOTE_ROW_SHOW) {
@@ -440,7 +440,7 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		} else {
 			pad(out, max, &count, show, !layer ? COLOR_OFF : (p->zero & b) ? COLOR_AMBER : COLOR_WHITE_DIM);
 		}
-		/* scene fades: eight greens, always, darkest (longest) to lightest (shortest) */
+		/* the cut yellow, then the scene fades in seven greens, darkest (longest) to lightest (shortest) */
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_RESTART + (unsigned)i), k_fade_green[i]);
 		led(out, max, &count, (uint8_t)i, MFD_VJ_NOTE_CLIP_STOP,
 		    p->shift ? ((p->pinned & b) ? LAMP_ON : LAMP_OFF) /* Shift held: which columns are pinned */
