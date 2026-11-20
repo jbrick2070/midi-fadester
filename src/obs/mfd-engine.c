@@ -5390,11 +5390,8 @@ static void vj_take_locked(struct mfd_engine *eng)
 static void vj_scene_fade_locked(struct mfd_engine *eng, int pad)
 {
 	const char *preview = vj_preview_locked(eng);
-	if (!mfd_engine_is_studio_mode_active(eng)) {
-		return;
-	}
-	/* the cut always goes to the UI thread: a scene fade still running there jumps to its end */
-	if (pad >= 0 && (preview[0] == '\0' || strcmp(preview, eng->cached_program_scene) == 0)) {
+	if (!mfd_engine_is_studio_mode_active(eng) || preview[0] == '\0' ||
+	    strcmp(preview, eng->cached_program_scene) == 0) {
 		return; /* nothing waiting in Preview: nothing to fade to */
 	}
 	if (vj_tbar_busy_locked(eng)) {
@@ -6585,18 +6582,6 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 		break;
 	}
 	case MFD_VJ_CMD_SCENE_FADE: {
-		if (cmd->arg < 0) { /* the cut: a scene fade still under way jumps to its end first */
-			obs_source_t *tr = obs_frontend_get_current_transition();
-			bool running = tr && obs_transition_is_active(tr);
-			if (running) {
-				obs_transition_force_stop(tr);
-				obs_log(LOG_INFO, "APC40: cut: the scene fade under way jumps to its end");
-			}
-			obs_source_release(tr);
-			if (running) {
-				break;
-			}
-		}
 		obs_source_t *on_air = obs_frontend_get_current_scene();
 		bool already = on_air && strcmp(obs_source_get_name(on_air), cmd->scene) == 0;
 		obs_source_release(on_air);

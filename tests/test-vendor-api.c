@@ -2922,12 +2922,8 @@ static int test_vj_fill_follow_and_desk(void)
 		REQUIRE(g_vj_cmd_count == 2 && g_vj_cmds[0].kind == MFD_VJ_CMD_SCENE_FADE && g_vj_cmds[0].arg == 1 &&
 			strcmp(g_vj_cmds[0].scene, eng->cached_preview_scene) == 0);
 		REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_SCENE_FADE && g_vj_cmds[1].arg == -1);
-	} else if (eng->cached_studio_mode) {
-		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_SCENE_FADE &&
-			g_vj_cmds[0].arg ==
-				-1); /* nothing in Preview to fade to; the cut still goes (it ends a running fade) */
 	} else {
-		REQUIRE(g_vj_cmd_count == 0); /* outside Studio Mode the top row does nothing */
+		REQUIRE(g_vj_cmd_count == 0); /* nothing in Preview to fade to */
 	}
 
 	/* 9. Blackout (Shift + row 2): 0 % while held, back to the fader's level after. Snap (Shift + row 3). */
