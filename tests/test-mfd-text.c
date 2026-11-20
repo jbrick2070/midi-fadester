@@ -114,6 +114,42 @@ int main(void)
 	mfd_msg_fill(&msg, "%2: %1 / %3", text, sizeof(text));
 	REQUIRE(strcmp(text, "Red: Cam %2 / ") == 0);
 
+	/* UTF-8 checks (C-01): what a fixed buffer leaves when it cuts a long non-ASCII name is repaired */
+	REQUIRE(mfd_utf8_is_valid(NULL));
+	REQUIRE(mfd_utf8_is_valid(""));
+	REQUIRE(mfd_utf8_is_valid("Plain -> \xD0\x9F\xD1\x80\xD0\xB8 \xE6\x97\xA5 \xF0\x9F\x8E\x9A"));
+	REQUIRE(!mfd_utf8_is_valid("cut \xD0"));         /* a two-byte character cut after its first byte */
+	REQUIRE(!mfd_utf8_is_valid("cut \xE6\x97"));     /* a three-byte one cut after two */
+	REQUIRE(!mfd_utf8_is_valid("\x80 stray"));       /* a continuation byte on its own */
+	REQUIRE(!mfd_utf8_is_valid("\xC0\xAF"));         /* overlong '/' */
+	REQUIRE(!mfd_utf8_is_valid("\xED\xA0\x80"));     /* a surrogate */
+	REQUIRE(!mfd_utf8_is_valid("\xF4\x90\x80\x80")); /* past U+10FFFF */
+	char fix1[] = "Scene \xD0\x9F\xD0";
+	REQUIRE(mfd_utf8_make_valid(fix1));
+	REQUIRE(strcmp(fix1, "Scene \xD0\x9F") == 0);
+	char fix2[] = "a\x80"
+		      "b\xE6\x97\xA5"
+		      "c\xE6\x97";
+	REQUIRE(mfd_utf8_make_valid(fix2));
+	REQUIRE(strcmp(fix2, "ab\xE6\x97\xA5"
+			     "c") == 0);
+	char ok[] = "unchanged \xC3\xA9";
+	REQUIRE(!mfd_utf8_make_valid(ok));
+	REQUIRE(strcmp(ok, "unchanged \xC3\xA9") == 0);
+	REQUIRE(!mfd_utf8_make_valid(NULL));
+	/* a "%s -> %s" label of two 31-letter Cyrillic names, cut to 127 bytes as the engine's label buffer does */
+	char cyr[63];
+	for (size_t i = 0; i < 31U; ++i) {
+		cyr[2U * i] = (char)0xD0;
+		cyr[2U * i + 1U] = (char)0x96;
+	}
+	cyr[62] = '\0';
+	char lbl[128];
+	snprintf(lbl, sizeof(lbl), "%s -> %s", cyr, cyr);
+	REQUIRE(strlen(lbl) == 127U && !mfd_utf8_is_valid(lbl));
+	REQUIRE(mfd_utf8_make_valid(lbl));
+	REQUIRE(strlen(lbl) == 126U && mfd_utf8_is_valid(lbl));
+
 	printf("test-mfd-text: PASS\n");
 	return 0;
 }

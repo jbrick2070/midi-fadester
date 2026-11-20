@@ -617,13 +617,34 @@ static void modulator_load(void *data, obs_data_t *settings)
 	pthread_mutex_unlock(&f->mutex);
 }
 
+/* Copy and Paste Filters call save while libobs holds the parent's filter lock, and this filter's tick looks up its
+ * targets (which takes that lock) while it holds f->mutex: waiting for f->mutex there could freeze the UI and the
+ * graphics thread for good (D-02). The tick never holds f->mutex for long, so a wait that does not end within
+ * 250 ms means that cycle: the save then goes on without the baseline restore, and OBS goes on running. */
+static bool lock_for_save(struct vs_modulator_filter *f)
+{
+	const uint64_t deadline = os_gettime_ns() + 250000000ULL;
+	while (pthread_mutex_trylock(&f->mutex) != 0) {
+		if (os_gettime_ns() >= deadline)
+			return false;
+		os_sleep_ms(1);
+	}
+	return true;
+}
+
 static void modulator_save(void *data, obs_data_t *settings)
 {
 	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
 	if (!f || !settings)
 		return;
 
-	pthread_mutex_lock(&f->mutex);
+	if (!lock_for_save(f)) {
+		blog(LOG_WARNING,
+		     "[visual-sidechain] Audio Modulator '%s': saved without restoring its targets (the "
+		     "video thread was writing them)",
+		     obs_source_get_name(f->context));
+		return;
+	}
 
 	/* 1. Restore all live target filter settings to their baseline values right now so OBS
 	 * serializes the unmodulated baseline values into the scene collection JSON (R-MOD-6). A manual edit made while

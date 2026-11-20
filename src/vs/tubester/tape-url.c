@@ -68,9 +68,14 @@ bool tub_path_is_usable_as(const char *path, enum tub_path_style style)
 		if (drive && !names_something(path, 3, len, style))
 			return false;
 	}
+	/* Control characters are refused everywhere. ? * < > | " cannot be in a Windows name, but are legal in a Mac
+	 * one, and the address writer encodes them, so a Mac tape may hold them (E-05). */
 	for (size_t i = 0; i < len; i++) {
 		unsigned char c = (unsigned char)path[i];
-		if (c < 0x20 || c == 0x7f || c == '?' || c == '*' || c == '<' || c == '>' || c == '|' || c == '"')
+		if (c < 0x20 || c == 0x7f)
+			return false;
+		if (style == TUB_PATH_STYLE_WINDOWS &&
+		    (c == '?' || c == '*' || c == '<' || c == '>' || c == '|' || c == '"'))
 			return false;
 	}
 	return true;

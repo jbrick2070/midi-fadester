@@ -410,11 +410,32 @@ static bool is_host_property_name(const char *name)
 	return false;
 }
 
+/* The first c at or after p that is not inside a double-quoted string, or NULL. end bounds the scan; with end NULL it
+ * stops at the terminator. A label or tooltip may hold ';' or '>' (G-04). */
+static const char *find_unquoted(const char *p, const char *end, char c)
+{
+	bool in_str = false;
+	for (; end ? p < end : *p != '\0'; p++) {
+		if (in_str) {
+			if (*p == '\\' && (end ? p + 1 < end : p[1] != '\0'))
+				p++;
+			else if (*p == '"')
+				in_str = false;
+			continue;
+		}
+		if (*p == '"')
+			in_str = true;
+		else if (*p == c)
+			return p;
+	}
+	return NULL;
+}
+
 static bool parse_annotation_block(const char *ann_start, const char *ann_end, struct vs_shader_param_info *param)
 {
 	const char *p = ann_start;
 	while (p < ann_end) {
-		const char *semi = memchr(p, ';', (size_t)(ann_end - p));
+		const char *semi = find_unquoted(p, ann_end, ';');
 		const char *stmt_end = semi ? semi : ann_end;
 
 		const char *eq = memchr(p, '=', (size_t)(stmt_end - p));
@@ -589,7 +610,7 @@ static bool parse_uniforms_from_source(const char *src, bool override_entire_eff
 				const char *ann_close = NULL;
 				if (*rest == '<') {
 					ann_open = rest + 1;
-					ann_close = strchr(ann_open, '>');
+					ann_close = find_unquoted(ann_open, NULL, '>');
 					if (ann_close)
 						rest = ann_close + 1;
 				}
@@ -655,9 +676,22 @@ static bool parse_uniforms_from_source(const char *src, bool override_entire_eff
 										       &info->default_val[3]);
 										info->has_default = true;
 									}
+								} else if (*v == '{') {
+									/* float4 tint = {1.0, 0.5, 0.2, 1.0}; as OBS's own
+									 * effects write it (G-07) */
+									if (sscanf(v + 1, "%lf , %lf , %lf , %lf",
+										   &info->default_val[0],
+										   &info->default_val[1],
+										   &info->default_val[2],
+										   &info->default_val[3]) == 4)
+										info->has_default = true;
 								} else {
-									info->default_val[0] = strtod(v, NULL);
-									info->has_default = true;
+									char *num_end = NULL;
+									const double d = strtod(v, &num_end);
+									if (num_end && num_end != v) {
+										info->default_val[0] = d;
+										info->has_default = true;
+									}
 								}
 							}
 						}
@@ -727,7 +761,7 @@ static bool strip_annotations_and_check_braces(const char *src, struct str_build
 
 			if (*scan == '<') {
 				const char *lt = scan;
-				const char *gt = strchr(lt + 1, '>');
+				const char *gt = find_unquoted(lt + 1, NULL, '>');
 				if (!gt) {
 					snprintf(err_msg, err_cap, "Unclosed uniform annotation '<'");
 					return false;

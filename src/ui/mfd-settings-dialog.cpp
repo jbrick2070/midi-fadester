@@ -58,6 +58,8 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRectF>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QScrollArea>
 #include <QStringList>
 #include <QTabWidget>
@@ -399,8 +401,14 @@ public:
 		setWindowTitle(mfdFill(mfdText("Dialog.WindowTitle", "Midi Fadester %1 (commit %2, built %3)"),
 				       {QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
 					QString::fromUtf8(PLUGIN_BUILT_AT)}));
-		resize(1380, 660);
-		setMinimumSize(1160, 560);
+		/* 1380 x 660 where it fits; on a 1080p laptop at 150 % (1280 x 720 points) or smaller the dialog is cut to
+		 * the screen, and the strips scroll sideways (F-12). */
+		QScreen *scr = parent ? parent->screen() : QGuiApplication::primaryScreen();
+		const QRect avail = scr ? scr->availableGeometry() : QRect(0, 0, 1380, 660);
+		const int dlg_w = std::min(1380, std::max(640, avail.width() - 40));
+		const int dlg_h = std::min(660, std::max(400, avail.height() - 60));
+		setMinimumSize(std::min(1160, dlg_w), std::min(560, dlg_h));
+		resize(dlg_w, dlg_h);
 		setStyleSheet(QStringLiteral(
 			"QDialog#mfdSettingsDialog { background-color: #0b1120; color: #f8fafc; } "
 			"QTabWidget::pane { border: 1px solid #1e293b; background-color: #0b1120; border-radius: 6px; } "
@@ -1503,6 +1511,13 @@ private:
 				if (name == cfg_name) {
 					select_idx = static_cast<int>(i) + 1;
 				}
+			}
+			if (!cfg_name.isEmpty() && select_idx == 0) {
+				/* the saved port is unplugged: the engine waits for it, so the list says so instead of
+				 * showing Auto-Detect (F-11) */
+				cb->addItem(mfdFill(mfdText("Dialog.Source.Missing", "%1 (missing)"), {cfg_name}),
+					    cfg_name);
+				select_idx = cb->count() - 1;
 			}
 			cb->setCurrentIndex(select_idx);
 			cb->blockSignals(false);

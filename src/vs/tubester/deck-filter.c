@@ -1540,6 +1540,16 @@ static void format_time(double seconds, char *out, size_t size)
 		snprintf(out, size, "%lld:%02lld", m, s);
 }
 
+/* The rule a tape path breaks, in the words of the system the plugin runs on: a Mac path may hold ? * < > | " (E-05). */
+static const char *bad_path_text(void)
+{
+#ifdef _WIN32
+	return obs_module_text("Tubester.Status.BadPath");
+#else
+	return obs_module_text("Tubester.Status.BadPathMac");
+#endif
+}
+
 static void status_text(struct tub_deck_filter *f, struct dstr *out)
 {
 	pthread_mutex_lock(&f->mutex);
@@ -1572,7 +1582,7 @@ static void status_text(struct tub_deck_filter *f, struct dstr *out)
 		dstr_cat(out, obs_module_text("Tubester.Status.NoTape"));
 	} else if (tape == TAPE_UNUSABLE) {
 		dstr_cat(out, " ");
-		dstr_cat(out, obs_module_text("Tubester.Status.BadPath"));
+		dstr_cat(out, bad_path_text());
 	} else if (known && (state == TUB_STATE_PLAYING || state == TUB_STATE_PAUSED || state == TUB_STATE_ENDED)) {
 		char pos[32], len[32], line[256];
 		int pct = (int)lround(rate * 100.0);
@@ -1635,7 +1645,7 @@ static bool tape_modified(void *priv, obs_properties_t *props, obs_property_t *p
 	if (tape[0] == '\0')
 		vs_property_info_set_text(status, obs_module_text("Tubester.Status.NoTape"));
 	else if (!tub_path_is_usable(tape))
-		vs_property_info_set_text(status, obs_module_text("Tubester.Status.BadPath"));
+		vs_property_info_set_text(status, bad_path_text());
 	else
 		vs_property_info_set_text(status, obs_module_text("Tubester.Status.Loading"));
 	/* redraws the properties already built, as the Speed Fader's Clear button does */

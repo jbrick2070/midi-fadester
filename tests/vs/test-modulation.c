@@ -370,6 +370,20 @@ static void test_modulation_flash_guard_caps_luminance_direction_changes(void)
 	assert(!vs_mod_slot_uses_flash_clock(&cfg));
 	cfg.signal_id = VS_SIG_KICK_SAFE;
 	assert(vs_mod_slot_uses_flash_clock(&cfg));
+
+	/* A filter this file does not know is judged by its setting's name, so the guard fails closed (D-10): a kick on
+	 * Image Mask/Blend's opacity is held to the flash clock, its image path is not. */
+	snprintf(cfg.target_filter_id, sizeof(cfg.target_filter_id), "mask_filter");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "opacity");
+	cfg.signal_id = VS_SIG_KICK;
+	assert(vs_mod_slot_uses_flash_clock(&cfg));
+	assert(vs_mod_is_luminance_target("mask_filter", "opacity"));
+	assert(vs_mod_is_luminance_target("some_plugin_filter", "Brightness"));
+	assert(vs_mod_is_luminance_target("some_plugin_filter", "glow_alpha"));
+	assert(!vs_mod_is_luminance_target("mask_filter", "image_path"));
+	assert(!vs_mod_is_luminance_target("nvidia_blur_filter", "intensity"));
+	assert(!vs_mod_is_luminance_target("color_filter", "hue_shift"));
+	assert(!vs_mod_is_luminance_target("visual_sidechain_shader_filter", "tunnel_speed"));
 }
 
 int main(void)

@@ -68,6 +68,7 @@ static std::atomic<bool> g_tbar_debug_log{false};
 /* UI-thread-only per-transition latch & active-transition guard state (zero timers) */
 static uint64_t g_tbar_ui_last_released_epoch = 0ULL;
 static bool g_tbar_ui_throw_active = false;
+static bool g_tbar_frontend_cb = false; /* UI thread: our frontend event callback is registered */
 static bool g_tbar_awaiting_transition_stop = false;
 
 struct mfd_deferred_tbar_cmd {
@@ -275,6 +276,32 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 		g_pending_deferred_tbar.active = false;
 		return;
 	}
+
+	/* While OBS clears its scene data (a scene collection switch, or exit) it empties output 0 and runs queued
+	 * events: OBS's T-bar code would then use the missing transition without a check (C-02). */
+	obs_source_t *out0 = obs_get_output_source(0);
+	if (!out0) {
+		g_tbar_ui_throw_active = false;
+		g_tbar_awaiting_transition_stop = false;
+		g_pending_deferred_tbar.active = false;
+		/* The engine counts this throw as running: end it there too, queued, because the engine may be the caller
+		 * of this function, in the middle of a step under its lock. OBS runs queued events while it clears the
+		 * collection, so this lands before the next collection's first throw. */
+		QWidget *main_win = g_main_win.data();
+		if (main_win && (do_set || do_release)) {
+			QMetaObject::invokeMethod(
+				main_win,
+				[]() {
+					/* a throw that started after this was queued is the next collection's: leave it (QA-07) */
+					if (!g_tbar_ui_throw_active) {
+						mfd_engine_on_external_tbar_reset(mfd_engine_get());
+					}
+				},
+				Qt::QueuedConnection);
+		}
+		return;
+	}
+	obs_source_release(out0);
 
 	if (g_tbar_slider.isNull()) {
 		g_tbar_slider = locate_slider_tbar_on_ui_thread();
@@ -2785,6 +2812,25 @@ static void on_tbar_frontend_event(enum obs_frontend_event event, void *unused)
 		g_pending_deferred_tbar.active = false;
 		refresh_studio_mode_state_on_ui_thread();
 		break;
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+	case OBS_FRONTEND_EVENT_EXIT: {
+		/* OBS empties its output channels with the collection: drop a parked command and end a throw here, so
+		 * nothing reaches OBS's T-bar code without a transition (C-02). */
+		const bool was_throwing = g_tbar_ui_throw_active;
+		g_tbar_ui_throw_active = false;
+		g_tbar_awaiting_transition_stop = false;
+		g_pending_deferred_tbar.active = false;
+		if (was_throwing) {
+			mfd_engine_on_external_tbar_reset(mfd_engine_get());
+		}
+		if (event == OBS_FRONTEND_EVENT_EXIT && g_tbar_frontend_cb) {
+			/* OBS takes its callbacks away right after EXIT, before modules unload (A-06) */
+			g_tbar_frontend_cb = false;
+			obs_frontend_remove_event_callback(on_tbar_frontend_event, nullptr);
+		}
+		break;
+	}
 	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED: {
 		const bool external_reset = g_tbar_ui_throw_active && !g_tbar_awaiting_transition_stop;
 		g_tbar_ui_throw_active = false;
@@ -2983,6 +3029,7 @@ void mfd_tbar_init(void)
 	mfd_engine_set_tbar_driver(mfd_tbar_driver_apply);
 	mfd_engine_set_tbar_unlatch_fn(mfd_tbar_reset_release_latch);
 	obs_frontend_add_event_callback(on_tbar_frontend_event, nullptr);
+	g_tbar_frontend_cb = true;
 }
 
 void mfd_tbar_shutdown(void)
@@ -2996,7 +3043,10 @@ void mfd_tbar_shutdown(void)
 		g_selftest_thread.join();
 	}
 #endif
-	obs_frontend_remove_event_callback(on_tbar_frontend_event, nullptr);
+	if (g_tbar_frontend_cb) { /* already gone when OBS sent EXIT */
+		g_tbar_frontend_cb = false;
+		obs_frontend_remove_event_callback(on_tbar_frontend_event, nullptr);
+	}
 	mfd_engine_set_tbar_unlatch_fn(nullptr);
 	mfd_engine_set_tbar_driver(nullptr);
 	g_pending_deferred_tbar.active = false;

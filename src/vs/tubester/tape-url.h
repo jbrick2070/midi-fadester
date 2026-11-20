@@ -35,8 +35,8 @@ enum tub_path_style {
 #define TUB_PATH_STYLE_HOST TUB_PATH_STYLE_POSIX
 #endif
 
-/* True when the path can name a tape (R-TAP-3), no control characters, none of ? * < > | ", not longer than
- * TUB_PATH_MAX. Whether the file exists is not checked here.
+/* True when the path can name a tape (R-TAP-3), no control characters, not longer than TUB_PATH_MAX, and on Windows
+ * none of ? * < > | " (legal in a Mac name). Whether the file exists is not checked here.
  * Windows: absolute on a drive (C:\... or C:/..., with something after the root) or a UNC share
  * (\\server\share\...); device paths such as \\.\ and \\?\ are refused.
  * POSIX (macOS): absolute (/Users/...), with something after the root; a backslash is an ordinary character. */

@@ -6,9 +6,11 @@
 
 #include "obs/mfd-vendor-api.h"
 #include "core/midi-parser.h"
+#include "core/mfd-text.h"
 #include "core/tbar-logic.h"
 #include <obs-module.h>
 #include <util/bmem.h>
+#include <util/darray.h>
 #include <util/threading.h>
 #include <assert.h>
 #include <math.h>
@@ -228,9 +230,80 @@ static void set_error_comment(obs_data_t *response_data, const char *error_code,
 	if (!response_data || !sentence) {
 		return;
 	}
-	obs_data_set_string(response_data, "error", sentence);
-	obs_data_set_string(response_data, "comment", sentence);
+	/* a sentence that echoes request text was cut to a fixed buffer and can end inside a character */
+	char *valid = bstrdup(sentence);
+	mfd_utf8_make_valid(valid);
+	obs_data_set_string(response_data, "error", valid);
+	obs_data_set_string(response_data, "comment", valid);
 	obs_data_set_string(response_data, "error_code", error_code ? error_code : "");
+	bfree(valid);
+}
+
+/* Holds one string item to rewrite after the walk: obs_data items are not changed while they are iterated. */
+struct utf8_fix {
+	char *name;
+	char *value;
+};
+
+static void make_utf8_valid_depth(obs_data_t *data, int depth);
+
+static void make_array_utf8_valid(obs_data_array_t *array, int depth)
+{
+	const size_t n = obs_data_array_count(array);
+	for (size_t i = 0; i < n; ++i) {
+		obs_data_t *item = obs_data_array_item(array, i);
+		make_utf8_valid_depth(item, depth + 1);
+		obs_data_release(item);
+	}
+}
+
+static void make_utf8_valid_depth(obs_data_t *data, int depth)
+{
+	if (!data || depth > 16) {
+		return;
+	}
+	DARRAY(struct utf8_fix) fixes;
+	da_init(fixes);
+	for (obs_data_item_t *it = obs_data_first(data); it; obs_data_item_next(&it)) {
+		switch (obs_data_item_gettype(it)) {
+		case OBS_DATA_STRING: {
+			const char *v = obs_data_item_get_string(it);
+			if (v && !mfd_utf8_is_valid(v)) {
+				struct utf8_fix fix = {bstrdup(obs_data_item_get_name(it)), bstrdup(v)};
+				mfd_utf8_make_valid(fix.value);
+				da_push_back(fixes, &fix);
+			}
+			break;
+		}
+		case OBS_DATA_OBJECT: {
+			obs_data_t *obj = obs_data_item_get_obj(it);
+			make_utf8_valid_depth(obj, depth + 1);
+			obs_data_release(obj);
+			break;
+		}
+		case OBS_DATA_ARRAY: {
+			obs_data_array_t *arr = obs_data_item_get_array(it);
+			if (arr) {
+				make_array_utf8_valid(arr, depth);
+				obs_data_array_release(arr);
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	for (size_t i = 0; i < fixes.num; ++i) {
+		obs_data_set_string(data, fixes.array[i].name, fixes.array[i].value);
+		bfree(fixes.array[i].name);
+		bfree(fixes.array[i].value);
+	}
+	da_free(fixes);
+}
+
+void mfd_vendor_make_utf8_valid(obs_data_t *data)
+{
+	make_utf8_valid_depth(data, 0);
 }
 
 /* A present parameter of the wrong JSON type (a string, a bool, an object) would read as 0 and move the slot to 0 %:
@@ -378,6 +451,9 @@ static void emit_vendor_event(const char *event_name, obs_data_t *event_data)
 	if (!event_name || !event_data || os_atomic_load_bool(&g_vendor_shutting_down)) {
 		return;
 	}
+	/* obs-websocket writes events in strict UTF-8 mode and nothing catches its error: a strip label cut inside a
+	 * character would end the OBS process (C-01) */
+	mfd_vendor_make_utf8_valid(event_data);
 	if (g_event_sink) {
 		g_event_sink(event_name, event_data, g_event_sink_user_data);
 	}
@@ -1617,6 +1693,26 @@ void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_d
 	mfd_engine_unlock(eng);
 }
 
+/* Every reply leaves through obs-websocket, which writes it in strict UTF-8 mode with nothing to catch its error: each
+ * handler's reply is made valid UTF-8 before it goes (C-01). The tests call the handlers themselves. */
+#define MFD_UTF8_SAFE_HANDLER(handler)                                                                   \
+	static void handler##_utf8(obs_data_t *request_data, obs_data_t *response_data, void *priv_data) \
+	{                                                                                                \
+		handler(request_data, response_data, priv_data);                                         \
+		mfd_vendor_make_utf8_valid(response_data);                                               \
+	}
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_mix_reply)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_get_state)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_set_fader_value)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_nudge_fader)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_auto_fade)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_set_slot)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_load_profile)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_get_catalog)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_reset_fx)
+MFD_UTF8_SAFE_HANDLER(mfd_vendor_handle_fill_from_scene)
+#undef MFD_UTF8_SAFE_HANDLER
+
 bool mfd_vendor_api_register(struct mfd_engine *eng)
 {
 	os_atomic_store_bool(&g_vendor_shutting_down, false);
@@ -1642,19 +1738,23 @@ bool mfd_vendor_api_register(struct mfd_engine *eng)
 
 	/* BroadcastCustomEvent is delivered to network clients, not native OBS event callbacks.
 	 * The provider sends the same correlated response to this fixed vendor request. */
-	bool mix_reply = obs_websocket_vendor_register_request(g_vendor, "mix_reply", mfd_vendor_handle_mix_reply, eng);
+	bool mix_reply =
+		obs_websocket_vendor_register_request(g_vendor, "mix_reply", mfd_vendor_handle_mix_reply_utf8, eng);
 	os_atomic_store_bool(&g_mix_reply_registered, mix_reply);
-	bool r1 = obs_websocket_vendor_register_request(g_vendor, "get_state", mfd_vendor_handle_get_state, eng);
-	bool r2 = obs_websocket_vendor_register_request(g_vendor, "set_fader_value", mfd_vendor_handle_set_fader_value,
+	bool r1 = obs_websocket_vendor_register_request(g_vendor, "get_state", mfd_vendor_handle_get_state_utf8, eng);
+	bool r2 = obs_websocket_vendor_register_request(g_vendor, "set_fader_value",
+							mfd_vendor_handle_set_fader_value_utf8, eng);
+	bool r3 =
+		obs_websocket_vendor_register_request(g_vendor, "nudge_fader", mfd_vendor_handle_nudge_fader_utf8, eng);
+	bool r4 = obs_websocket_vendor_register_request(g_vendor, "auto_fade", mfd_vendor_handle_auto_fade_utf8, eng);
+	bool r5 = obs_websocket_vendor_register_request(g_vendor, "set_slot", mfd_vendor_handle_set_slot_utf8, eng);
+	bool r6 = obs_websocket_vendor_register_request(g_vendor, "load_profile", mfd_vendor_handle_load_profile_utf8,
 							eng);
-	bool r3 = obs_websocket_vendor_register_request(g_vendor, "nudge_fader", mfd_vendor_handle_nudge_fader, eng);
-	bool r4 = obs_websocket_vendor_register_request(g_vendor, "auto_fade", mfd_vendor_handle_auto_fade, eng);
-	bool r5 = obs_websocket_vendor_register_request(g_vendor, "set_slot", mfd_vendor_handle_set_slot, eng);
-	bool r6 = obs_websocket_vendor_register_request(g_vendor, "load_profile", mfd_vendor_handle_load_profile, eng);
-	bool r7 = obs_websocket_vendor_register_request(g_vendor, "get_catalog", mfd_vendor_handle_get_catalog, eng);
-	bool r8 = obs_websocket_vendor_register_request(g_vendor, "reset_fx", mfd_vendor_handle_reset_fx, eng);
-	bool r9 = obs_websocket_vendor_register_request(g_vendor, "fill_from_scene", mfd_vendor_handle_fill_from_scene,
-							eng);
+	bool r7 =
+		obs_websocket_vendor_register_request(g_vendor, "get_catalog", mfd_vendor_handle_get_catalog_utf8, eng);
+	bool r8 = obs_websocket_vendor_register_request(g_vendor, "reset_fx", mfd_vendor_handle_reset_fx_utf8, eng);
+	bool r9 = obs_websocket_vendor_register_request(g_vendor, "fill_from_scene",
+							mfd_vendor_handle_fill_from_scene_utf8, eng);
 
 	obs_log(LOG_INFO,
 		"Registered obs-websocket vendor '%s' requests (get_state=%d, set_fader_value=%d, nudge_fader=%d, auto_fade=%d, set_slot=%d, load_profile=%d, get_catalog=%d, reset_fx=%d, fill_from_scene=%d)",

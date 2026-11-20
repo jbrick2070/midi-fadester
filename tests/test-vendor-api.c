@@ -123,6 +123,21 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
 }
 
+static int g_utf8_events_seen;
+static int g_utf8_events_invalid;
+
+static void utf8_event_sink(const char *event_name, obs_data_t *event_data, void *user_data)
+{
+	(void)event_name;
+	(void)user_data;
+	++g_utf8_events_seen;
+	for (obs_data_item_t *it = obs_data_first(event_data); it; obs_data_item_next(&it)) {
+		if (obs_data_item_gettype(it) == OBS_DATA_STRING && !mfd_utf8_is_valid(obs_data_item_get_string(it))) {
+			++g_utf8_events_invalid;
+		}
+	}
+}
+
 static bool get_slot_parked_via_get_state(struct mfd_engine *eng, int slot_idx)
 {
 	obs_data_t *req = obs_data_create();
@@ -4902,6 +4917,171 @@ int main(void)
 		eng.scene_graph_ops = &g_fake_sg_ops;
 	}
 
+	/* 12i-2 (B-01): a scene change does not take a filter knob out of pick-up while OBS still holds what the knob
+	 * wrote. A whole-number setting sits up to half a step away from the knob, more than the 1.5 % pick-up window,
+	 * so it used to freeze the knob at every scene or Preview change. A value written from outside is still taken. */
+	{
+		void *prev_owner = (void *)fake_sg.owner_eng;
+		fake_sg_cleanup_filters(&fake_sg);
+		fake_sg.owner_eng = &eng;
+		fake_sg_add_source(&fake_sg, "Knob Host", false);
+		struct fake_sg_filter *knob_flt = fake_sg_add_filter(&fake_sg, "Knob Host", "Blur", "blur_filter_v2",
+								     true, FAKE_SCHEMA_BLUR_GROUPED);
+		REQUIRE(knob_flt != NULL);
+		mfd_engine_load_apc40_defaults(&eng);
+		mfd_engine_set_smooth_tau_ms(&eng, 0.0f);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_3");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Knob Host");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "passes");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+		struct mfd_fader_slot *knob = &eng.fader_slots[12]; /* fx_3: Device knob 3, Ch 1 CC 18 */
+		REQUIRE(knob->cached_available && knob->filter_prop_valid && knob->filter_prop_is_int);
+		for (int v = 0; v <= 127 && knob->takeover.state != MFD_TAKEOVER_ENGAGED; v += 4) {
+			push_midi_cc(&eng, 0, 18, (uint8_t)v);
+			mfd_engine_tick(&eng, 0.016f);
+		}
+		REQUIRE(knob->takeover.state == MFD_TAKEOVER_ENGAGED);
+		push_midi_cc(&eng, 0, 18, 42); /* between two steps of 1..8 */
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(knob->takeover.state == MFD_TAKEOVER_ENGAGED);
+		REQUIRE(knob->has_last_written_mapped);
+		const long long written = obs_data_get_int(knob_flt->settings, "passes");
+		REQUIRE(written == knob->last_written_int);
+		mfd_engine_frontend_event_for_test(&eng, OBS_FRONTEND_EVENT_SCENE_CHANGED);
+		REQUIRE(knob->takeover.state == MFD_TAKEOVER_ENGAGED);
+		mfd_engine_frontend_event_for_test(&eng, OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED);
+		REQUIRE(knob->takeover.state == MFD_TAKEOVER_ENGAGED);
+
+		/* B-02: a timed fade on radius (fx_4) takes steps smaller than the write gate (0.1 % of 0..50), so some
+		 * frames move its value without writing. fx_3 writes passes on the same filter every frame, and OBS
+		 * signals "update" for the whole filter: the fade must not be taken for an outside edit and stopped. */
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_4");
+		obs_data_set_string(req, "target_mode", "filter_param");
+		obs_data_set_string(req, "source_a", "Knob Host");
+		obs_data_set_string(req, "filter_name", "Blur");
+		obs_data_set_string(req, "filter_prop", "radius");
+		mfd_vendor_handle_set_slot(req, res, &eng);
+		REQUIRE(!obs_data_has_user_value(res, "error"));
+		obs_data_release(req);
+		obs_data_release(res);
+		struct mfd_fader_slot *radius = &eng.fader_slots[13]; /* fx_4 */
+		REQUIRE(radius->cached_available && !radius->filter_prop_is_int);
+		char radius_err[128] = {0};
+		REQUIRE(mfd_engine_set_slot_value(&eng, 13, 0.25f, false, "api", radius_err, sizeof(radius_err)));
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fx_4");
+		obs_data_set_double(req, "to", 0.0);
+		obs_data_set_int(req, "ms", 5000);
+		mfd_vendor_handle_auto_fade(req, res, &eng);
+		REQUIRE(radius->auto_fade_active);
+		obs_data_release(req);
+		obs_data_release(res);
+		const int radius_writes_before = knob_flt->settings_writes;
+		for (int f = 0; f < 30; ++f) {
+			push_midi_cc(&eng, 0, 18,
+				     (f % 2) ? 100 : 30); /* passes 7, then 3 (off the rails): a write every frame */
+			mfd_engine_tick(&eng, 0.016f);
+		}
+		REQUIRE(knob_flt->settings_writes > radius_writes_before + 25);
+		REQUIRE(radius->auto_fade_active);
+		REQUIRE(radius->last_applied_val < 0.25f && radius->last_applied_val > 0.2f);
+		push_midi_cc(&eng, 0, 18, 42);
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(knob->takeover.state == MFD_TAKEOVER_ENGAGED);
+		const long long written_now = obs_data_get_int(knob_flt->settings, "passes");
+		REQUIRE(written_now == knob->last_written_int);
+		obs_data_set_int(knob_flt->settings, "passes", written_now == 8 ? 1 : 8); /* changed in OBS */
+		mfd_engine_frontend_event_for_test(&eng, OBS_FRONTEND_EVENT_SCENE_CHANGED);
+		REQUIRE(knob->takeover.state == MFD_TAKEOVER_WAITING);
+		fake_sg_cleanup_filters(&fake_sg);
+		fake_sg.owner_eng = prev_owner;
+		mfd_engine_load_apc40_defaults(&eng);
+	}
+
+	/* 12i-3 (C-01): a label cut inside a character, and any reply or event string, leaves as valid UTF-8 */
+	{
+		struct mfd_fader_slot long_mix = eng.fader_slots[1];
+		long_mix.enabled = true;
+		long_mix.target_type = MFD_TARGET_TWO_SOURCE_MIX;
+		for (size_t i = 0; i < 31U; ++i) { /* 31 Cyrillic letters: 62 bytes each, "%s -> %s" is 128 */
+			long_mix.source_a_name[2U * i] = (char)0xD0;
+			long_mix.source_a_name[2U * i + 1U] = (char)0x96;
+			long_mix.source_b_name[2U * i] = (char)0xD0;
+			long_mix.source_b_name[2U * i + 1U] = (char)0x97;
+		}
+		long_mix.source_a_name[62] = '\0';
+		long_mix.source_b_name[62] = '\0';
+		char mix_label[128];
+		char mix_reason[160];
+		bool mix_avail = false;
+		mfd_engine_get_slot_status(&eng, &long_mix, mix_label, sizeof(mix_label), &mix_avail, mix_reason,
+					   sizeof(mix_reason));
+		REQUIRE(strlen(mix_label) == 126U);
+		REQUIRE(mfd_utf8_is_valid(mix_label));
+
+		obs_data_t *reply = obs_data_create();
+		obs_data_set_string(reply, "label", "Cut \xD0");
+		obs_data_set_string(reply, "ok", "\xC3\xA9");
+		obs_data_t *inner = obs_data_create();
+		obs_data_set_string(inner, "name", "\xE6\x97\xA5\xE6\x97");
+		obs_data_set_obj(reply, "slot", inner);
+		obs_data_array_t *arr = obs_data_array_create();
+		obs_data_t *item = obs_data_create();
+		obs_data_set_string(item, "error", "Slot '\x80x'");
+		obs_data_array_push_back(arr, item);
+		obs_data_release(item);
+		obs_data_set_array(reply, "slots", arr);
+		mfd_vendor_make_utf8_valid(reply);
+		REQUIRE(strcmp(obs_data_get_string(reply, "label"), "Cut ") == 0);
+		REQUIRE(strcmp(obs_data_get_string(reply, "ok"), "\xC3\xA9") == 0);
+		obs_data_t *inner_after = obs_data_get_obj(reply, "slot");
+		REQUIRE(strcmp(obs_data_get_string(inner_after, "name"), "\xE6\x97\xA5") == 0);
+		obs_data_release(inner_after);
+		obs_data_array_t *arr_after = obs_data_get_array(reply, "slots");
+		obs_data_t *item_after = obs_data_array_item(arr_after, 0);
+		REQUIRE(strcmp(obs_data_get_string(item_after, "error"), "Slot 'x'") == 0);
+		obs_data_release(item_after);
+		obs_data_array_release(arr_after);
+		obs_data_array_release(arr);
+		obs_data_release(inner);
+		obs_data_release(reply);
+
+		/* every event is repaired before it leaves */
+		g_utf8_events_seen = 0;
+		g_utf8_events_invalid = 0;
+		mfd_vendor_set_event_sink(utf8_event_sink, NULL);
+		mfd_vendor_emit_fader_changed_ex("fader_1", 0.5f, "Cut \xD0", "api");
+		REQUIRE(g_utf8_events_seen == 1 && g_utf8_events_invalid == 0);
+		mfd_vendor_set_event_sink(on_fake_ws_event, &ws_log);
+
+		/* an unknown slot id echoed in the error sentence is cut to fit, and still ends on a whole character */
+		req = obs_data_create();
+		res = obs_data_create();
+		char long_slot[240];
+		memset(long_slot, 'a', 216);
+		long_slot[216] = (char)0xC3;
+		long_slot[217] = (char)0xA9;
+		long_slot[218] = '\0';
+		obs_data_set_string(req, "slot", long_slot);
+		obs_data_set_double(req, "value", 0.5);
+		mfd_vendor_handle_set_fader_value(req, res, &eng);
+		REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "unknown_slot") == 0);
+		REQUIRE(mfd_utf8_is_valid(obs_data_get_string(res, "error")));
+		REQUIRE(mfd_utf8_is_valid(obs_data_get_string(res, "comment")));
+		obs_data_release(req);
+		obs_data_release(res);
+	}
+
 	/* 12j: Import opens the MIDI port the file names and keeps the imported bindings. No port has this name, so the
 	 * open attempt fails as "not found" and no real port is opened. */
 	{
@@ -6575,6 +6755,9 @@ int main(void)
 			/* Simulate OBS restarting after crash with Blur still saved as enabled == false */
 			REQUIRE(!flt_blur->enabled);
 			REQUIRE(mfd_engine_import_config_file(&rec_eng, tmp_crash_json));
+			/* B-03: OBS sends SCENE_COLLECTION_CHANGED after the load callback; it must not forget the saved
+			 * on/off state the load put in the lease (the leases go at SCENE_COLLECTION_CLEANUP, before the load) */
+			mfd_engine_frontend_event_for_test(&rec_eng, OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED);
 			/* Graceful shutdown on recovered engine restores pre-MFD enabled == true! */
 			mfd_engine_restore_all_bypass_leases(&rec_eng);
 			REQUIRE(flt_blur->enabled);

@@ -447,6 +447,69 @@ static void test_invalid_numeric_annotations_are_rejected(void)
 	}
 }
 
+/* A label or tooltip may hold ';' or '>' (G-04); a float4 default may be written with braces, as OBS's own effects do
+ * (G-07); a default that is not a number gives none. */
+static void test_quoted_annotations_and_brace_defaults(void)
+{
+	static const char *const src =
+		"uniform float speed < string label = \"Speed > 1\"; string tooltip = \"Cycles per second; zero stops it.\";"
+		" float minimum = 0.0; float maximum = 4.0; > = 1.5;\n"
+		"uniform float4 tint = {1.0, 0.5, 0.25, 1.0};\n"
+		"uniform float4 shade = float4(0.1, 0.2, 0.3, 0.4);\n";
+	struct vs_shader_parse_result res;
+	assert(vs_shader_ExpandAndParse(src, "", false, NULL, NULL, &res) == VS_SHADER_OK);
+	bool found_speed = false, found_tint = false, found_shade = false;
+	for (size_t i = 0; i < res.param_count; i++) {
+		const struct vs_shader_param_info *p = &res.params[i];
+		if (strcmp(p->name, "speed") == 0) {
+			found_speed = true;
+			assert(strcmp(p->label, "Speed > 1") == 0);
+			assert(strcmp(p->tooltip, "Cycles per second; zero stops it.") == 0);
+			assert(p->has_min && p->min_val == 0.0 && p->has_max && p->max_val == 4.0);
+			assert(p->has_default && p->default_val[0] == 1.5);
+		} else if (strcmp(p->name, "tint") == 0) {
+			found_tint = true;
+			assert(p->has_default);
+			assert(p->default_val[0] == 1.0 && p->default_val[1] == 0.5 && p->default_val[2] == 0.25 &&
+			       p->default_val[3] == 1.0);
+		} else if (strcmp(p->name, "shade") == 0) {
+			found_shade = true;
+			assert(p->has_default && p->default_val[3] == 0.4);
+		}
+	}
+	assert(found_speed && found_tint && found_shade);
+	/* the annotation is gone from the effect text, quoted '>' and ';' included */
+	assert(res.full_effect_source && strstr(res.full_effect_source, "tooltip") == NULL);
+	assert(strstr(res.full_effect_source, "zero stops it") == NULL);
+	vs_shader_parse_result_free(&res);
+
+	/* the three shipped tooltips with a ';' in them are read */
+	static const struct {
+		const char *file;
+		const char *param;
+		const char *start;
+	} shipped[] = {
+		{"fft-hex-pulse-lattice.shader", "hex_ripple_speed", "Outward ripple cycles per second; "},
+		{"fft-polygon-tunnel.shader", "tunnel_speed", "Rings per second; "},
+		{"fft-polygon-tunnel.shader", "tunnel_rotation_speed", "Radians per second; "},
+	};
+	for (size_t k = 0; k < sizeof(shipped) / sizeof(shipped[0]); k++) {
+		char *text = read_builtin_shader(shipped[k].file);
+		struct vs_shader_parse_result r;
+		assert(vs_shader_ExpandAndParse(text, VS_SHADERS_DIR, false, NULL, NULL, &r) == VS_SHADER_OK);
+		free(text);
+		bool seen = false;
+		for (size_t i = 0; i < r.param_count; i++) {
+			if (strcmp(r.params[i].name, shipped[k].param) == 0) {
+				seen = true;
+				assert(strncmp(r.params[i].tooltip, shipped[k].start, strlen(shipped[k].start)) == 0);
+			}
+		}
+		assert(seen);
+		vs_shader_parse_result_free(&r);
+	}
+}
+
 static void test_builtin_shaders_parse_and_provenance(void)
 {
 	static const char *const k_builtin_shaders[] = {
@@ -468,7 +531,7 @@ static void test_builtin_shaders_parse_and_provenance(void)
 		assert(valid);
 
 		/* image is premultiplied and shaders return premultiplied colour (R-SHD-5): multiplying by alpha again
-		 * darkens soft edges. A static guard only; tests/obs-shader-screenshot-selftest.ps1 checks the pixels. */
+		 * darkens soft edges. A static guard only; tests/vs/obs-shader-screenshot-selftest.ps1 checks the pixels. */
 		char *text = read_builtin_shader(k_builtin_shaders[i]);
 		assert(strstr(text, "base.rgb * base.a") == NULL);
 
@@ -671,6 +734,7 @@ int main(void)
 	test_host_control_setting_names_are_reserved();
 	test_reserved_names_after_parameter_limit();
 	test_invalid_numeric_annotations_are_rejected();
+	test_quoted_annotations_and_brace_defaults();
 	test_builtin_shaders_parse_and_provenance();
 	test_geometry_shader_control_contract();
 	printf("test-shader-parser: all 11 built-in shaders and parser assertions passed\n");

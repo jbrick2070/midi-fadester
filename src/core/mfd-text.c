@@ -6,6 +6,7 @@
 
 #include "core/mfd-text.h"
 
+#include <stdint.h>
 #include <string.h>
 
 static mfd_text_lookup_fn lookup_text;
@@ -81,4 +82,80 @@ size_t mfd_text_fill(char *out, size_t out_size, const char *text, const char *c
 	}
 	out[used] = '\0';
 	return used;
+}
+
+/* Length of the well-formed UTF-8 sequence at p, or 0 when p does not start one. A NUL inside a sequence fails the
+ * continuation test, so this never reads past the string's end. */
+static size_t utf8_sequence_length(const unsigned char *p)
+{
+	const unsigned char c = p[0];
+	if (c < 0x80U) {
+		return 1U;
+	}
+	size_t n;
+	uint32_t cp;
+	if (c >= 0xC2U && c <= 0xDFU) {
+		n = 2U;
+		cp = c & 0x1FU;
+	} else if (c >= 0xE0U && c <= 0xEFU) {
+		n = 3U;
+		cp = c & 0x0FU;
+	} else if (c >= 0xF0U && c <= 0xF4U) {
+		n = 4U;
+		cp = c & 0x07U;
+	} else {
+		return 0U; /* a continuation byte on its own, C0/C1 (overlong) or F5..FF */
+	}
+	for (size_t i = 1U; i < n; ++i) {
+		if ((p[i] & 0xC0U) != 0x80U) {
+			return 0U;
+		}
+		cp = (cp << 6U) | (uint32_t)(p[i] & 0x3FU);
+	}
+	if ((n == 3U && cp < 0x800U) || (n == 4U && (cp < 0x10000U || cp > 0x10FFFFU)) ||
+	    (cp >= 0xD800U && cp <= 0xDFFFU)) {
+		return 0U;
+	}
+	return n;
+}
+
+bool mfd_utf8_is_valid(const char *s)
+{
+	if (!s) {
+		return true;
+	}
+	const unsigned char *p = (const unsigned char *)s;
+	while (*p) {
+		const size_t n = utf8_sequence_length(p);
+		if (n == 0U) {
+			return false;
+		}
+		p += n;
+	}
+	return true;
+}
+
+bool mfd_utf8_make_valid(char *s)
+{
+	if (!s) {
+		return false;
+	}
+	unsigned char *r = (unsigned char *)s;
+	unsigned char *w = r;
+	bool changed = false;
+	while (*r) {
+		const size_t n = utf8_sequence_length(r);
+		if (n == 0U) {
+			++r;
+			changed = true;
+			continue;
+		}
+		if (w != r) {
+			memmove(w, r, n);
+		}
+		w += n;
+		r += n;
+	}
+	*w = '\0';
+	return changed;
 }

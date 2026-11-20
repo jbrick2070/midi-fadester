@@ -313,7 +313,7 @@ try {
 
     # Check (d): 10 Hz click+kick track across all 11 built-in shaders -> at most 3 luminance reversals/s (P0-1)
     Write-TenHzClickTrackWav -wavPath $clickWavPath
-    $shaderDir = Resolve-Path (Join-Path $PSScriptRoot "..\data\shaders")
+    $shaderDir = Resolve-Path (Join-Path $PSScriptRoot "..\..\data\shaders")
     $shaderFiles = @(Get-ChildItem -Path $shaderDir -Filter "*.shader" | Sort-Object Name)
     if ($shaderFiles.Count -lt 11) {
         throw "Expected at least 11 built-in shaders in $shaderDir, found $($shaderFiles.Count)"
