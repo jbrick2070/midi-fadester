@@ -365,7 +365,7 @@ int main(void)
 	REQUIRE(strcmp(ctrl.status_sentence, "APC40 mkII not found. Plug it in, then press Reconnect.") == 0);
 
 	mfd_ui_format_controller_status(false, "", "", MFD_WINMM_ERR_NO_DEVICES, &ctrl);
-	REQUIRE(strcmp(ctrl.status_sentence, "No MIDI controller found. Plug one in, then press Reconnect.") == 0);
+	REQUIRE(strcmp(ctrl.status_sentence, "No MIDI controller found. Plug one in.") == 0);
 
 	mfd_ui_format_controller_status(false, "APC40 mkII", "", MFD_WINMM_ERR_OPEN_FAILED, &ctrl);
 	REQUIRE(strcmp(ctrl.status_sentence,
@@ -383,9 +383,9 @@ int main(void)
 	REQUIRE(strcmp(dev_err, "APC40 mkII not found. Plug it in, then press Reconnect.") == 0);
 	mfd_ui_format_device_error(MFD_WINMM_ERR_CONFIGURED_NOT_FOUND, MFD_WINMM_OP_OPEN, 0U, "", dev_err,
 				   sizeof(dev_err));
-	REQUIRE(strcmp(dev_err, "No MIDI controller found. Plug one in, then press Reconnect.") == 0);
+	REQUIRE(strcmp(dev_err, "No MIDI controller found. Plug one in.") == 0);
 	mfd_ui_format_device_error(MFD_WINMM_ERR_NO_DEVICES, MFD_WINMM_OP_OPEN, 0U, "", dev_err, sizeof(dev_err));
-	REQUIRE(strcmp(dev_err, "No MIDI controller found. Plug one in, then press Reconnect.") == 0);
+	REQUIRE(strcmp(dev_err, "No MIDI controller found. Plug one in.") == 0);
 	mfd_ui_format_device_error(MFD_WINMM_ERR_OPEN_FAILED, MFD_WINMM_OP_START, 4U, "APC40 mkII", dev_err,
 				   sizeof(dev_err));
 	REQUIRE(strcmp(dev_err, "Could not open APC40 mkII. Unplug and replug it, then press Reconnect.") == 0);
@@ -408,12 +408,29 @@ int main(void)
 	REQUIRE(strcmp(sp.title, "2") == 0);
 	REQUIRE(sp.dimmed);
 	REQUIRE(sp.bar_percent == 40);
-	REQUIRE(strcmp(sp.assignment_sentence, "Not used. Click to set up.") == 0);
+	REQUIRE(strcmp(sp.assignment_sentence, "Not used") == 0);
 	REQUIRE(sp.status_sentence[0] == '\0');
 	REQUIRE(sp.state_readout[0] == '\0');
 	REQUIRE(sp.severity == MFD_UI_SEVERITY_NONE);
 	REQUIRE(sp.bottom_action == MFD_UI_ACTION_SETUP);
 	REQUIRE(strcmp(sp.bottom_button_text, "Set up") == 0);
+
+	/* U1-20: a fader the plugin filled from the scene on air says that it follows the scene (its card rewrites
+	 * itself on a scene change); one the user set, or pinned, says what it shows or hides */
+	memset(&in, 0, sizeof(in));
+	in.slot_index = 2;
+	in.enabled = true;
+	in.addr_type = MFD_MIDI_CC;
+	in.target_type = MFD_TARGET_SINGLE_LAYER;
+	in.available = true;
+	in.scene_name = "VJ 4 Plasma";
+	in.source_a_name = "Plasma";
+	in.auto_follow = true;
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(strcmp(sp.assignment_sentence, "Follows the scene on air: Plasma") == 0);
+	in.auto_follow = false;
+	mfd_ui_format_strip_presentation(&in, &sp);
+	REQUIRE(strcmp(sp.assignment_sentence, "Shows or hides Plasma in VJ 4 Plasma") == 0);
 
 	/* Row 2: Switch scenes with Studio Mode off -> Amber + "Turn on Studio Mode" button + live bar */
 	memset(&in, 0, sizeof(in));
@@ -689,7 +706,7 @@ int main(void)
 	REQUIRE(strcmp(sentence, "FX 1 controls Blur (Radius) on Cam 1") == 0);
 
 	mfd_ui_format_live_scene_note("Red", sentence, sizeof(sentence));
-	REQUIRE(strcmp(sentence, "You will see this when scene Red is live.") == 0);
+	REQUIRE(strcmp(sentence, "You will see this when scene Red is on air.") == 0);
 
 	const char *others[] = {"Blue", "Green", "Yellow"};
 	mfd_ui_format_shared_layer_note("Color 2", others, 0U, sentence, sizeof(sentence));

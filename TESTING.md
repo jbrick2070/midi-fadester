@@ -86,7 +86,7 @@ Clicking `[Set up]` (or `[Fix]`) opens a non-destructive transactional sheet ove
 
 ### State 6 — 3-Step `Set up` Sheet: Step 2 of 3 (`Which?` + Shared-Source Warning)
 
-Step 2 filters pickers to valid OBS scenes/sources for the chosen role, explains `"You will see this when scene Red is live."`, and warns in amber whenever a chosen layer also appears in another scene (`"Color 2 is also in scene Blue; it will fade there too."`) because Midi Fadester attaches its GPU opacity filter at the source level.
+Step 2 filters pickers to valid OBS scenes/sources for the chosen role, explains `"You will see this when scene Red is on air."`, and warns in amber whenever a chosen layer also appears in another scene (`"Color 2 is also in scene Blue; it will fade there too."`) because Midi Fadester attaches its GPU opacity filter at the source level.
 
 ![State 6: Set up Step 2 Pickers and Multi-Scene Warning](docs/screenshots/06-setup-step2-pickers.png)
 

@@ -202,6 +202,7 @@ static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_s
 	in.enabled = s.enabled;
 	in.addr_type = s.addr.type;
 	in.target_type = s.target_type;
+	in.auto_follow = s.auto_follow;
 	in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
 	in.source_a_name = s.source_a_name;
 	in.source_b_name = s.source_b_name;
@@ -560,7 +561,7 @@ public:
 		auto *sd_text =
 			new QLabel(mfdText("Dialog.StreamDeck.Text",
 					   "Fadester for OBS adds touch controls, live meters, crossfader control, and "
-					   "auto-fades to the same Midi Fadester slots."),
+					   "auto-fades to the same Midi Fadester strips."),
 				   sd_copy);
 		sd_text->setObjectName(QStringLiteral("mfdStreamDeckCompanionText"));
 		sd_text->setWordWrap(true);
@@ -1209,13 +1210,12 @@ private:
 
 		/* APC40 mkII VJ pads (core/vj-pads.h): on/off, the fade time and what each pad row does. */
 		auto *vj_bar = new QHBoxLayout();
-		vj_check_ = new QCheckBox(mfdText("Dialog.VjPads", "APC40 mkII pads: blend modes, flash and fades"),
-					  adv_tab);
+		vj_check_ = new QCheckBox(mfdText("Dialog.VjPads", "Use the APC40 pads"), adv_tab);
 		vj_check_->setObjectName(QStringLiteral("mfdAdvVjCheck"));
 		vj_check_->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		vj_bar->addWidget(vj_check_);
 		vj_bar->addSpacing(12);
-		auto *lbl_vj_fade = new QLabel(mfdText("Dialog.VjFadeTime", "Pad fade time:"), adv_tab);
+		auto *lbl_vj_fade = new QLabel(mfdText("Dialog.VjFadeTime", "Source fade time:"), adv_tab);
 		lbl_vj_fade->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		vj_bar->addWidget(lbl_vj_fade);
 		vj_fade_spin_ = new QSpinBox(adv_tab);
@@ -1513,8 +1513,7 @@ private:
 			}
 			cb->blockSignals(true);
 			cb->clear();
-			cb->addItem(mfdText("Dialog.Device.AutoDetect", "(Auto-Detect Known Controller / First Port)"),
-				    QStringLiteral(""));
+			cb->addItem(mfdText("Dialog.Device.AutoDetect", "Automatic"), QStringLiteral(""));
 			int select_idx = 0;
 			for (size_t i = 0U; i < count; ++i) {
 				const QString name = QString::fromUtf8(devs[i].name);
@@ -1718,7 +1717,7 @@ private:
 			if (btn_clean_all_fx_->styleSheet() != clean_style) {
 				btn_clean_all_fx_->setStyleSheet(clean_style);
 			}
-			btn_clean_all_fx_->setEnabled(eligible_fx >= 0);
+			btn_clean_all_fx_->setEnabled(eligible_fx > 0); /* nothing to clean: it says so by being grey */
 		}
 
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {

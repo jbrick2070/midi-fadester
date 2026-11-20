@@ -185,11 +185,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	card_volume_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardVolume"), MFD_TARGET_AUDIO_VOLUME, mfdText("Setup.Card.Volume", "Volume"),
 		mfdText("Setup.Card.Volume.Description", "Control the volume of one audio source."));
-	card_filter_ = create_mode_card_button(
-		page1, QStringLiteral("mfdCardFilterSetting"), MFD_TARGET_FILTER_PARAM,
-		mfdText("Setup.Card.Filter", "Filter or effect setting"),
-		mfdText("Setup.Card.Filter.Description",
-			"Sweep any numeric filter, shader, or reactivity slider on a layer or scene."));
+	card_filter_ = create_mode_card_button(page1, QStringLiteral("mfdCardFilterSetting"), MFD_TARGET_FILTER_PARAM,
+					       mfdText("Setup.Card.Filter", "Filter or effect setting"),
+					       mfdText("Setup.Card.Filter.Description",
+						       "Move one slider of a filter or effect."));
 	grid->addWidget(card_tbar_, 0, 0);
 	grid->addWidget(card_mix_, 0, 1);
 	grid->addWidget(card_single_, 1, 0);
@@ -1427,8 +1426,7 @@ void MfdSetupSheetDialog::configure_spinboxes_for_prop(bool preserve_range)
 	mfd_filter_format_display_value_ex(0.0f, pi->current_val, pi->current_val, pmin, pmax, pi->is_int, pi->step,
 					   pi->suffix, false, true, cur_buf, sizeof(cur_buf));
 	lbl_filter_limits_note_->setText(
-		mfdFill(mfdText("Setup.FilterLimits",
-				"Allowed range: %1 to %2  \xC2\xB7  Current OBS value: %3 (inverted ranges supported)"),
+		mfdFill(mfdText("Setup.FilterLimits", "Range: %1 to %2. Now: %3."),
 			{QString::fromUtf8(min_buf), QString::fromUtf8(max_buf), QString::fromUtf8(cur_buf)}));
 
 	updating_widgets_ = prev_upd;

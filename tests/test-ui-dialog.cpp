@@ -1109,7 +1109,7 @@ int main(int argc, char **argv)
 	REQUIRE(fr_banner->isHidden());
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		auto *assign_lbl = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_%1").arg(i));
-		REQUIRE(assign_lbl->text() == QStringLiteral("Not used. Click to set up."));
+		REQUIRE(assign_lbl->text() == QStringLiteral("Not used"));
 		REQUIRE(eng.fader_slots[i].addr.type == MFD_MIDI_CC);
 	}
 	const int writes_before_unassigned = g_mock_tbar_set_writes + sg.total_opacity_writes + sg.total_volume_writes;
@@ -1129,7 +1129,7 @@ int main(int argc, char **argv)
 	auto *sd_dismiss = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckDismiss"));
 	REQUIRE(!sd_card->isHidden());
 	REQUIRE(sd_title->text() == QStringLiteral("Use a Stream Deck?"));
-	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester slots")));
+	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester strips")));
 	REQUIRE(sd_dismiss->text() == QString(QChar(0x00D7)));
 	REQUIRE(sd_dismiss->accessibleName() == QStringLiteral("Hide"));
 	REQUIRE(!sd_card->styleSheet().contains(QStringLiteral("#172554"))); /* no filled card */
@@ -1462,7 +1462,7 @@ int main(int argc, char **argv)
 	combo_right->setCurrentIndex(combo_right->findData(QStringLiteral("Color 2")));
 	pump_ui();
 	REQUIRE(same_refusal->isHidden());
-	REQUIRE(live_note->text() == QStringLiteral("You will see this when scene Red is live."));
+	REQUIRE(live_note->text() == QStringLiteral("You will see this when scene Red is on air."));
 	REQUIRE(!shared_note->isHidden());
 	REQUIRE(shared_note->text() == QStringLiteral("Color 2 is also in scene Blue; it will fade there too."));
 	REQUIRE(btn_next->isEnabled());
