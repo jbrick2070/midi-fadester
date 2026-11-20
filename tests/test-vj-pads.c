@@ -169,7 +169,7 @@ int main(void)
 	REQUIRE(feed(&t, false, 0, 91) && n == 0);
 	REQUIRE(!feed(&t, true, 1, 91) && !feed(&t, true, 0, 92)); /* Play on another channel; Stop */
 
-	/* 11. Rows 4 and 5, Clip Stop, blackout and snap. */
+	/* 11. Row 4, the top row's scene fades, Clip Stop (Shift: pin), blackout and snap. */
 	struct mfd_vj_pads q;
 	mfd_vj_pads_init(&q);
 	mfd_vj_pads_set_has_layer(&q, 0, true);
@@ -177,17 +177,23 @@ int main(void)
 	REQUIRE(feed(&q, true, 0, 24) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SHOW_TOGGLE && acts[0].strip == 0);
 	REQUIRE(feed(&q, false, 0, 24) && n == 0);
 	REQUIRE(feed(&q, true, 0, 26) && n == 0); /* no source on strip 3: nothing to show or hide */
-	REQUIRE(feed(&q, true, 0, 33) && n == 1 && acts[0].kind == MFD_VJ_ACTION_RESTART && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 33) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_FADE && acts[0].strip == 1);
+	REQUIRE(feed(&q, true, 0, 39) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_FADE &&
+		acts[0].strip == 7); /* a scene fade whatever the column holds */
+	REQUIRE(feed(&q, false, 0, 39) && n == 0);
 	REQUIRE(feed(&q, true, 3, 52) && n == 0); /* Clip Stop on a strip without a source */
 	REQUIRE(feed(&q, true, 1, 52) && n == 1 && acts[0].kind == MFD_VJ_ACTION_COLUMN_CLEAN && acts[0].strip == 1);
 	REQUIRE(feed(&q, true, 0, 98));
 	REQUIRE(feed(&q, true, 0, 25) && n == 1 && acts[0].kind == MFD_VJ_ACTION_WAKE && acts[0].strip == 1);
-	REQUIRE(feed(&q, true, 0, 37) && n == 1 && acts[0].kind == MFD_VJ_ACTION_PIN_TOGGLE && acts[0].strip == 5);
+	REQUIRE(feed(&q, true, 0, 37) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_CUT && acts[0].strip == 5);
+	REQUIRE(feed(&q, true, 5, 52) && n == 1 && acts[0].kind == MFD_VJ_ACTION_PIN_TOGGLE &&
+		acts[0].strip == 5); /* Shift + Clip Stop pins, even a column with no source yet */
 	REQUIRE(feed(&q, true, 0, 17) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SNAP && acts[0].strip == 1);
 	REQUIRE(feed(&q, true, 0, 9) && n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_ON && acts[0].strip == 1);
 	REQUIRE(led_velocity(&q, 9) == 9U);     /* amber while blacked out */
-	REQUIRE(led_at(&q, 52, 1, NULL) == 1U); /* Clip Stop lit while the column holds a blackout */
+	REQUIRE(led_at(&q, 52, 1, NULL) == 0U); /* Shift held: Clip Stop shows the pins (none) */
 	REQUIRE(feed(&q, false, 0, 98));
+	REQUIRE(led_at(&q, 52, 1, NULL) == 1U);  /* Clip Stop lit while the column holds a blackout */
 	REQUIRE(feed(&q, true, 0, 9) && n == 0); /* already held: no flash on top of the blackout */
 	REQUIRE(feed(&q, false, 0, 9) && n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_OFF);
 	REQUIRE(led_at(&q, 52, 1, NULL) == 0U && led_velocity(&q, 9) == 1U);
@@ -195,28 +201,36 @@ int main(void)
 	n = mfd_vj_pads_release_all(&q, acts, MFD_VJ_MAX_ACTIONS);
 	REQUIRE(n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_OFF && q.blackout == 0 && !q.shift);
 
-	/* 12. Row 4 and row 5 lights: hidden blinks red (channel 16), 0 % is amber, a pinned column is azure. */
+	/* 12. Row 4 lights (hidden blinks red on channel 16, 0 % is amber), the scene-fade greens, pinned columns on
+	 * Clip Stop while Shift is held. */
 	uint8_t ch = 0;
-	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 1U);
+	REQUIRE(led_velocity(&q, 24) == 1U && led_velocity(&q, 32) == 23U && led_velocity(&q, 39) == 23U);
+	q.take_ready = true; /* a scene waits in Preview: the row lights in its eight greens, dark to bright */
+	REQUIRE(led_velocity(&q, 32) == 23U && led_velocity(&q, 33) == 123U && led_velocity(&q, 37) == 21U &&
+		led_velocity(&q, 39) == 114U);
+	q.take_ready = false;
 	mfd_vj_pads_set_hidden(&q, 0, true);
 	REQUIRE(led_at(&q, 24, -1, &ch) == 5U && ch == 15U);
 	mfd_vj_pads_set_hidden(&q, 0, false);
 	mfd_vj_pads_set_zero(&q, 0, true);
 	REQUIRE(led_velocity(&q, 24) == 9U);
 	mfd_vj_pads_set_pinned(&q, 0, true);
-	REQUIRE(led_velocity(&q, 32) == 37U);
-	REQUIRE(led_velocity(&q, 26) == 0U && led_velocity(&q, 34) == 0U); /* no source: dark */
+	REQUIRE(led_at(&q, 52, 0, NULL) == 0U);
+	q.shift = true;
+	REQUIRE(led_at(&q, 52, 0, NULL) == 1U && led_at(&q, 52, 1, NULL) == 0U); /* Shift: Clip Stop shows the pins */
+	q.shift = false;
+	REQUIRE(led_velocity(&q, 26) == 0U && led_velocity(&q, 34) == 23U); /* no source: row 4 dark, fades dim green */
 
-	/* 13. Scenes: Scene Launch picks (Shift: straight to Program); Session takes. Lights: Program red, Preview green
+	/* 13. Scenes: Scene Launch picks (Shift: straight to Program); Session is Blackout. Lights: Program red, Preview green
 	 * pulsing (channel 11), idle dim blue, no scene off. */
 	REQUIRE(feed(&q, true, 0, 82) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PICK && acts[0].strip == 0);
 	REQUIRE(feed(&q, false, 0, 82) && n == 0);
 	REQUIRE(feed(&q, true, 0, 86) && n == 1 && acts[0].strip == 4);
-	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
+	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_TOGGLE);
 	REQUIRE(!mfd_vj_pads_is_button(0, 80) && !mfd_vj_pads_is_button(0, 103)); /* Master and Bank: no job */
 	REQUIRE(feed(&q, true, 0, 98));
 	REQUIRE(feed(&q, true, 0, 83) && n == 1 && acts[0].kind == MFD_VJ_ACTION_SCENE_PROGRAM && acts[0].strip == 1);
-	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_TAKE);
+	REQUIRE(feed(&q, true, 0, 102) && n == 1 && acts[0].kind == MFD_VJ_ACTION_BLACKOUT_TOGGLE);
 	REQUIRE(feed(&q, false, 0, 98));
 	mfd_vj_pads_set_scene(&q, 0, MFD_VJ_SCENE_PROGRAM);
 	mfd_vj_pads_set_scene(&q, 1, MFD_VJ_SCENE_PREVIEW);
@@ -225,6 +239,7 @@ int main(void)
 	REQUIRE(led_at(&q, 83, -1, &ch) == 21U && ch == 10U);
 	REQUIRE(led_velocity(&q, 84) == 46U && led_velocity(&q, 85) == 0U);
 	q.take_ready = true;
+	q.blackout_lamp = true; /* Session blinks while Program is black */
 	q.vs_panic = true;
 	REQUIRE(led_at(&q, 102, 0, NULL) == 1U && led_at(&q, 93, 0, NULL) == 1U); /* Record: on or off only */
 	struct mfd_vj_led ql[MFD_VJ_MAX_LEDS];

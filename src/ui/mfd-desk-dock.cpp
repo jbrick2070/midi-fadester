@@ -61,7 +61,7 @@ QString rowName(int r)
 {
 	switch (r) {
 	case 0:
-		return mfdText("Desk.RowRestart", "Restart (Shift: pin)");
+		return mfdText("Desk.RowSceneFade", "Scene fade, long to short (Shift: cut)");
 	case 1:
 		return mfdText("Desk.RowShow", "Show / hide (Shift: wake)");
 	case 2:
@@ -79,7 +79,7 @@ QString rowShortName(int r, bool shift = false)
 	if (shift) {
 		switch (r) {
 		case 0:
-			return mfdText("Desk.RowPinShort", "Pin");
+			return mfdText("Desk.RowCutShort", "Cut");
 		case 1:
 			return mfdText("Desk.RowWakeShort", "Wake");
 		case 2:
@@ -92,7 +92,7 @@ QString rowShortName(int r, bool shift = false)
 	}
 	switch (r) {
 	case 0:
-		return mfdText("Desk.RowRestartShort", "Restart");
+		return mfdText("Desk.RowSceneFadeShort", "Scene fade");
 	case 1:
 		return mfdText("Desk.RowShowShort", "Show / hide");
 	case 2:
@@ -326,7 +326,9 @@ private:
 	QPushButton *clip_stops_[kStrips] = {};
 	QPushButton *stop_all_ = nullptr;
 	QPushButton *shift_ = nullptr;
-	QPushButton *session_ = nullptr;
+	QPushButton *session_ = nullptr; /* the dock's Fade */
+	QPushButton *blackout_btn_ = nullptr;
+	QLabel *blackout_ = nullptr;
 	QProgressBar *faders_[kStrips] = {};
 	QProgressBar *xfader_ = nullptr;
 	QLabel *bpm_ = nullptr;
@@ -402,6 +404,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	panic_ = new QLabel(this);
 	panic_->setWordWrap(true);
 	root->addWidget(panic_);
+	blackout_ = new QLabel(this); /* its own line: Panic and Blackout can both be on */
+	blackout_->setWordWrap(true);
+	root->addWidget(blackout_);
 	on_air_ = new QLabel(this);
 	on_air_->setObjectName(QStringLiteral("mfdDeskOnAir"));
 	on_air_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -462,7 +467,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		}
 	}
 	auto *clip_name = new QLabel(mfdText("Desk.RowClipStopShort", "Clip Stop"), this);
-	clip_name->setToolTip(mfdText("Desk.RowClipStop", "Clip Stop (own blend)"));
+	clip_name->setToolTip(
+		mfdText("Desk.RowClipStopTip", "Clip Stop: back to its own blend (Shift: pin the column)"));
 	clip_name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
 	grid->addWidget(clip_name, kRows + 1, 0);
 	for (int i = 0; i < kStrips; ++i) {
@@ -503,15 +509,24 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	shift_->setCheckable(true);
 	session_ = makeButton(mfdText("Desk.Session", "Fade Preview to Program"), 70, 24);
 	session_->setText(mfdText("Desk.SessionShort", "Fade"));
-	connect(session_, &QPushButton::pressed, this, [this]() {
-		if (physical(session_)) {
-			pressNote(0U, MFD_VJ_NOTE_SESSION, true, false);
+	connect(session_, &QPushButton::clicked, this, [this]() {
+		if (eng_) {
+			mfd_engine_desk_fade(eng_); /* with or without the desk */
 		}
 	});
-	connect(session_, &QPushButton::released, this, [this]() { pressNote(0U, MFD_VJ_NOTE_SESSION, false, false); });
+	blackout_btn_ = makeButton(mfdText("Desk.Blackout",
+					   "Blackout: Program fades to black; again, back (Session on the desk)"),
+				   70, 24);
+	blackout_btn_->setText(mfdText("Desk.RowBlackoutShort", "Blackout"));
+	connect(blackout_btn_, &QPushButton::clicked, this, [this]() {
+		if (eng_) {
+			mfd_engine_desk_blackout(eng_); /* always reachable, so a blackout can always be ended */
+		}
+	});
 	transport->addWidget(stop_all_);
 	transport->addWidget(shift_);
 	transport->addWidget(session_);
+	transport->addWidget(blackout_btn_);
 
 	/* fader levels (read-only), under their columns */
 	auto *fader_name = new QLabel(mfdText("Desk.Faders", "Faders"), this);
@@ -914,8 +929,12 @@ void MfdDeskDock::refresh()
 			QString why;
 			if (st.owned[cell]) {
 				why = mfdText("Desk.Tip.Owned", "A fader learned this button.");
-			} else if (cell == MFD_DESK_RESTART && shift) {
-				can = can && st.can_pin_toggle;
+			} else if (cell == MFD_DESK_RESTART) {
+				/* the top row: scene fades, whatever the column holds */
+				can = can && view_.take_ready && !view_.tbar_busy;
+				why = mfdFill(mfdText("Desk.Tip.SceneFade",
+						      "Fade Preview to Program over %1 beats (Shift: cut)"),
+					      {QString::number(32.0 / (double)(1 << i), 'g', 3)});
 			} else if (!st.has_layer) {
 				can = false;
 				why = mfdText("Desk.Tip.Empty", "No source on this column.");
@@ -935,7 +954,7 @@ void MfdDeskDock::refresh()
 		}
 		const struct mfd_vj_led &stop = view_.leds[i * MFD_DESK_CELLS + MFD_DESK_CLIP_STOP];
 		paintButton(clip_stops_[i], ledColor(stop, beat_pos, 0x22C55EU),
-			    pads_on && st.has_layer && !st.owned[MFD_DESK_CLIP_STOP]);
+			    pads_on && !st.owned[MFD_DESK_CLIP_STOP] && (shift ? st.can_pin_toggle : st.has_layer));
 		faders_[i]->setValue((int)std::lround(std::clamp(st.level, 0.0f, 1.0f) * 1000.0f));
 		setTip(faders_[i], src.isEmpty()
 					   ? mfdFill(mfdText("Desk.FaderEmpty", "Fader %1"), {QString::number(i + 1)})
@@ -947,8 +966,19 @@ void MfdDeskDock::refresh()
 	paintButton(stop_all_, 0x475569U, pads_on && !view_.stop_all_owned);
 	paintButton(shift_, shift ? 0xF8FAFCU : 0x475569U, pads_on);
 	session_->setVisible(view_.studio_mode);
-	paintButton(session_, view_.take_ready ? 0x22C55EU : 0x475569U,
-		    pads_on && view_.take_ready && !view_.tbar_busy && !view_.session_owned);
+	paintButton(session_, view_.take_ready ? 0x22C55EU : 0x475569U, view_.take_ready && !view_.tbar_busy);
+	paintButton(blackout_btn_, view_.blackout ? 0xEF4444U : 0x475569U, view_.finished_loading);
+	if (view_.blackout) {
+		setLabel(blackout_, mfdText("Desk.BlackoutOn", "BLACKOUT \xE2\x80\x94 Program is black. Press Blackout "
+							       "(or Session on the desk) again to bring it back."));
+		setCss(blackout_,
+		       QStringLiteral("color: #f8fafc; background-color: #111827; border: 1px solid #ef4444; "
+				      "padding: 4px;"));
+	} else {
+		setLabel(blackout_, QString());
+		setCss(blackout_, QString());
+	}
+	blackout_->setVisible(!blackout_->text().isEmpty());
 
 	/* Visual Sidechain */
 	if (!vs_loaded_) {

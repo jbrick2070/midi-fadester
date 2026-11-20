@@ -83,6 +83,8 @@ target_sources(
     src/obs/mfd-layer-filter.c
     src/obs/mfd-engine.h
     src/obs/mfd-engine.c
+    src/obs/mfd-blackout.c
+    src/obs/mfd-blackout.h
     src/obs/mfd-tbar.h
     src/obs/mfd-tbar.cpp
     src/obs/obs-websocket-api.h

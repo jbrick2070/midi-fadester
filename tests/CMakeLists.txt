@@ -112,6 +112,7 @@ add_executable(
   test-vendor-api.c
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-blackout.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
   "${_midi_backend}"
   "${_core}/midi-queue.c"
@@ -155,6 +156,7 @@ add_executable(
   "${CMAKE_SOURCE_DIR}/src/vs/vs-conflict.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-blackout.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
   "${_midi_backend}"
   "${_core}/midi-queue.c"
@@ -226,6 +228,7 @@ set(
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.h"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
+  "${CMAKE_SOURCE_DIR}/src/obs/mfd-blackout.c"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.h"
   "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
   "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.hpp"

@@ -5,6 +5,7 @@
  */
 
 #include "obs/mfd-engine.h"
+#include "obs/mfd-blackout.h"
 #include "obs/mfd-layer-filter.h"
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
@@ -414,7 +415,16 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 		eng->vj_follow_pending = false;
 		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
 	}
+	bool live_ui = !eng->scene_graph_ops && obs_initialized();
 	mfd_engine_unlock(eng);
+
+	if (live_ui) {
+		int tms = obs_frontend_get_transition_duration();
+		mfd_engine_lock(eng);
+		eng->cached_transition_ms = tms;
+		mfd_engine_unlock(eng);
+		mfd_blackout_ui(); /* attach the black source when asked for, let it go when clear */
+	}
 
 	uint8_t eyes_done = 0U;
 	for (int i = 0; i < ncmd; ++i) {
@@ -5376,6 +5386,21 @@ static void vj_take_locked(struct mfd_engine *eng)
 	}
 }
 
+/* A top-row scene fade (pad 0..7) or, pad -1, a cut: Preview to Program at that length. Studio Mode only. */
+static void vj_scene_fade_locked(struct mfd_engine *eng, int pad)
+{
+	const char *preview = vj_preview_locked(eng);
+	if (!mfd_engine_is_studio_mode_active(eng) || preview[0] == '\0' ||
+	    strcmp(preview, eng->cached_program_scene) == 0) {
+		return; /* nothing waiting in Preview: nothing to fade to */
+	}
+	if (vj_tbar_busy_locked(eng)) {
+		obs_log(LOG_INFO, "APC40: a crossfader throw is under way, so the scene fades wait for it");
+		return;
+	}
+	vj_queue_cmd_locked(eng, MFD_VJ_CMD_SCENE_FADE, preview, NULL, pad);
+}
+
 /* Scene Launch j: into Preview; pressed again while in Preview, taken. With Shift, or outside Studio Mode, straight
  * to Program. Both use the current transition: Midi Fadester never changes the user's transition. */
 static void vj_scene_locked(struct mfd_engine *eng, int j, bool direct)
@@ -5529,6 +5554,16 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		break;
 	case MFD_VJ_ACTION_TAKE:
 		vj_take_locked(eng);
+		break;
+	case MFD_VJ_ACTION_SCENE_FADE:
+		vj_scene_fade_locked(eng, s);
+		break;
+	case MFD_VJ_ACTION_SCENE_CUT:
+		vj_scene_fade_locked(eng, -1);
+		break;
+	case MFD_VJ_ACTION_BLACKOUT_TOGGLE:
+		mfd_blackout_toggle(eng->cached_transition_ms);
+		eng->vj_state_dirty = true;
 		break;
 	case MFD_VJ_ACTION_VS_PANIC:
 		vj_queue_cmd_locked(eng, MFD_VJ_CMD_VS_PANIC, NULL, NULL, 0);
@@ -5803,6 +5838,7 @@ static void vj_status_locked(struct mfd_engine *eng, bool read_eyes)
 			     strcmp(eng->cached_preview_scene, eng->cached_program_scene) != 0;
 	/* The Record lamp is on or off only: half a second on, half off while Visual Sidechain is panicked. */
 	eng->vj.vs_panic = eng->vs_panic && fmodf(eng->vj_blink_sec, 1.0f) < 0.5f;
+	eng->vj.blackout_lamp = mfd_blackout_is_on() && fmodf(eng->vj_blink_sec, 1.0f) < 0.5f;
 }
 
 /* Whether a strip other than `except` shows the source a home key names. */
@@ -6544,6 +6580,45 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 		}
 		break;
 	}
+	case MFD_VJ_CMD_SCENE_FADE: {
+		obs_source_t *on_air = obs_frontend_get_current_scene();
+		bool already = on_air && strcmp(obs_source_get_name(on_air), cmd->scene) == 0;
+		obs_source_release(on_air);
+		obs_source_t *prev = obs_frontend_get_current_preview_scene();
+		bool meant = prev && strcmp(obs_source_get_name(prev), cmd->scene) == 0;
+		obs_source_release(prev);
+		if (already || !meant) {
+			break; /* on air already, or Preview holds another scene by now: nothing unexpected goes out */
+		}
+		double bpm = 120.0; /* Visual Sidechain's tempo when it knows one */
+		proc_handler_t *ph = obs_get_proc_handler();
+		if (ph) {
+			calldata_t cd;
+			calldata_init(&cd);
+			if (proc_handler_call(ph, "visual_sidechain_get_signals", &cd) && calldata_bool(&cd, "ok")) {
+				double b = calldata_float(&cd, "bpm");
+				if (isfinite(b) && b >= 40.0 && b <= 300.0) {
+					bpm = b;
+				}
+			}
+			calldata_free(&cd);
+		}
+		int ms = 50; /* a cut: as short as OBS allows */
+		if (cmd->arg >= 0 && cmd->arg < (int)MFD_VJ_STRIPS) {
+			double beats = 32.0 / (double)(1 << cmd->arg);
+			ms = (int)lround(beats * 60000.0 / bpm);
+		}
+		ms = ms < 50 ? 50 : ms > 20000 ? 20000 : ms; /* OBS's own limits */
+		/* the user's transition length is theirs: this fade's length is set, the fade starts with it (OBS keeps
+		 * the length a transition started with), then the user's length is put back */
+		int user_ms = obs_frontend_get_transition_duration();
+		obs_frontend_set_transition_duration(ms);
+		obs_frontend_preview_program_trigger_transition();
+		obs_frontend_set_transition_duration(user_ms);
+		obs_log(LOG_INFO, "APC40: scene fade to \"%s\" over %d ms (%s, %.0f BPM)", cmd->scene, ms,
+			cmd->arg < 0 ? "Shift: cut" : "top row", bpm);
+		break;
+	}
 	case MFD_VJ_CMD_SET_VISIBLE: {
 		obs_source_t *scene_src = obs_get_source_by_name(cmd->scene);
 		obs_scene_t *sc = scene_src ? obs_scene_from_source(scene_src) : NULL;
@@ -6770,6 +6845,7 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 	out->led_count = mfd_vj_pads_leds(&pads, out->leds, MFD_VJ_MAX_LEDS);
 	out->crossfader = eng->fader_slots[0].last_applied_val;
 	out->vs_panic = eng->vs_panic;
+	out->blackout = mfd_blackout_is_on();
 	out->vs_panic_known = eng->vs_panic_known;
 	out->vs_last_failed = eng->vs_last_failed;
 	mfd_engine_unlock(eng);
@@ -6832,6 +6908,30 @@ bool mfd_engine_desk_vs(struct mfd_engine *eng, enum mfd_vj_command_kind kind)
 	bool ok = vj_queue_cmd_locked(eng, kind, NULL, NULL, 0);
 	mfd_engine_unlock(eng);
 	return ok;
+}
+
+void mfd_engine_desk_fade(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	vj_take_locked(eng);
+	mfd_engine_unlock(eng);
+	mfd_engine_mark_ui_dirty(eng, false);
+}
+
+void mfd_engine_desk_blackout(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	int ms = eng->cached_transition_ms;
+	eng->vj_state_dirty = true;
+	mfd_engine_unlock(eng);
+	mfd_blackout_toggle(ms);
+	mfd_engine_mark_ui_dirty(eng, false);
 }
 
 void mfd_engine_desk_vjster(struct mfd_engine *eng, int steps, bool reset, bool play_pause)
@@ -7335,6 +7435,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	for (int k = 0; k < mix_count; ++k) {
 		mfd_vendor_send_mix_set(eng, mix_slots[k], mix_revs[k], mix_dbs[k]);
 	}
+	mfd_blackout_tick(seconds); /* no engine lock: it updates its own source */
 }
 
 static void mfd_engine_video_tick(void *param, float seconds)
@@ -8168,6 +8269,11 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		mfd_engine_process_scene_graph_changes(eng);
 	}
 
+	if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING ||
+	    event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP || event == OBS_FRONTEND_EVENT_EXIT) {
+		mfd_blackout_reset(); /* OBS clears its output channels with the collection: start clear */
+	}
+
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		mfd_engine_lock(eng);
@@ -8991,6 +9097,7 @@ bool mfd_engine_init(void)
 	mfd_engine_reevaluate_slots(&g_engine, false);
 	obs_frontend_add_event_callback(on_frontend_event, &g_engine);
 	obs_frontend_add_save_callback(on_save_callback, &g_engine);
+	mfd_blackout_init();
 	obs_add_tick_callback(mfd_engine_video_tick, &g_engine);
 
 	g_engine.initialized = true;
@@ -9015,6 +9122,7 @@ void mfd_engine_shutdown(void)
 	mfd_engine_unlock(&g_engine);
 
 	obs_remove_tick_callback(mfd_engine_video_tick, &g_engine);
+	mfd_blackout_shutdown();
 	obs_frontend_remove_save_callback(on_save_callback, &g_engine);
 	obs_frontend_remove_event_callback(on_frontend_event, &g_engine);
 

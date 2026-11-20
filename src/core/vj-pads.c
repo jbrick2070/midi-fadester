@@ -20,6 +20,10 @@
 #define COLOR_AZURE 37U
 #define COLOR_BLUE_DIM 46U
 
+/* The top row's scene fades, longest to shortest: palette greens from dark to bright (white-lifted at the short end so
+ * all eight read as different on the desk). */
+static const uint8_t k_fade_green[MFD_VJ_STRIPS] = {23U, 123U, 22U, 76U, 122U, 21U, 20U, 114U};
+
 /* An RGB pad's MIDI channel picks its animation; the rate is the desk's slowest, 1/2 (a two-beat breath). */
 #define CH_SOLID 0U
 #define CH_PULSE 10U /* channel 11: pulsing, 1/2 */
@@ -191,7 +195,7 @@ static void feed_transport(struct mfd_vj_pads *p, uint8_t note, struct mfd_vj_ac
 	} else if (note == MFD_VJ_NOTE_RECORD) {
 		push(out, max, count, MFD_VJ_ACTION_VS_PANIC, -1, MFD_VJ_BLEND_NORMAL);
 	} else if (note == MFD_VJ_NOTE_SESSION) {
-		push(out, max, count, MFD_VJ_ACTION_TAKE, -1, MFD_VJ_BLEND_NORMAL);
+		push(out, max, count, MFD_VJ_ACTION_BLACKOUT_TOGGLE, -1, MFD_VJ_BLEND_NORMAL);
 	}
 }
 
@@ -209,7 +213,9 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 	if (note == MFD_VJ_NOTE_SHIFT) {
 		p->shift = note_on;
 	} else if (note == MFD_VJ_NOTE_CLIP_STOP) {
-		if (note_on && (p->has_layer & bit((int)channel))) {
+		if (note_on && p->shift) {
+			push(out, max, &count, MFD_VJ_ACTION_PIN_TOGGLE, (int)channel, MFD_VJ_BLEND_NORMAL);
+		} else if (note_on && (p->has_layer & bit((int)channel))) {
 			push(out, max, &count, MFD_VJ_ACTION_COLUMN_CLEAN, (int)channel, MFD_VJ_BLEND_NORMAL);
 		}
 	} else if (note >= MFD_VJ_NOTE_SCENE && note < MFD_VJ_NOTE_SCENE + MFD_VJ_SCENES) {
@@ -238,10 +244,9 @@ bool mfd_vj_pads_feed(struct mfd_vj_pads *p, bool note_on, uint8_t channel, uint
 		}
 	} else if (note >= MFD_VJ_NOTE_ROW_RESTART) {
 		int s = (int)(note - MFD_VJ_NOTE_ROW_RESTART);
-		if (note_on && p->shift) {
-			push(out, max, &count, MFD_VJ_ACTION_PIN_TOGGLE, s, MFD_VJ_BLEND_NORMAL);
-		} else if (note_on && (p->has_layer & bit(s))) {
-			push(out, max, &count, MFD_VJ_ACTION_RESTART, s, MFD_VJ_BLEND_NORMAL);
+		if (note_on) { /* the top row: scene fades, long on the left, short on the right; Shift: a cut */
+			push(out, max, &count, p->shift ? MFD_VJ_ACTION_SCENE_CUT : MFD_VJ_ACTION_SCENE_FADE, s,
+			     MFD_VJ_BLEND_NORMAL);
 		}
 	} else if (note >= MFD_VJ_NOTE_ROW_SHOW) {
 		int s = (int)(note - MFD_VJ_NOTE_ROW_SHOW);
@@ -435,12 +440,13 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		} else {
 			pad(out, max, &count, show, !layer ? COLOR_OFF : (p->zero & b) ? COLOR_AMBER : COLOR_WHITE_DIM);
 		}
+		/* scene fades: eight greens, darkest (longest) to brightest, while a scene waits in Preview; dim otherwise */
 		pad(out, max, &count, (uint8_t)(MFD_VJ_NOTE_ROW_RESTART + (unsigned)i),
-		    !layer            ? COLOR_OFF
-		    : (p->pinned & b) ? COLOR_AZURE
-				      : COLOR_WHITE_DIM);
+		    p->take_ready ? k_fade_green[i] : k_fade_green[0]);
 		led(out, max, &count, (uint8_t)i, MFD_VJ_NOTE_CLIP_STOP,
-		    layer && (p->current[i] != p->home[i] || ((p->flashing | p->blackout) & b)) ? LAMP_ON : LAMP_OFF,
+		    p->shift ? ((p->pinned & b) ? LAMP_ON : LAMP_OFF) /* Shift held: which columns are pinned */
+		    : layer && (p->current[i] != p->home[i] || ((p->flashing | p->blackout) & b)) ? LAMP_ON
+												  : LAMP_OFF,
 		    false);
 	}
 	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
@@ -464,7 +470,7 @@ size_t mfd_vj_pads_leds(const struct mfd_vj_pads *p, struct mfd_vj_led *out, siz
 		}
 	}
 	led(out, max, &count, 0U, MFD_VJ_NOTE_RECORD, p->vs_panic ? LAMP_ON : LAMP_OFF, false);
-	led(out, max, &count, 0U, MFD_VJ_NOTE_SESSION, p->take_ready ? LAMP_ON : LAMP_OFF, false);
+	led(out, max, &count, 0U, MFD_VJ_NOTE_SESSION, p->blackout_lamp ? LAMP_ON : LAMP_OFF, false);
 	return count;
 }
 
