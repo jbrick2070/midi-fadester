@@ -65,6 +65,7 @@ static const char *lang_locale_text(const char *key)
 #include <QMetaObject>
 #include <QRegularExpression>
 #include <QWidget>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -167,16 +168,26 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 static QString g_confirm_text;
 static QString g_confirm_title;
 static int g_confirm_seen = 0;
-static void answer_next_confirm(bool yes)
+static void answer_next_confirm(bool yes, int tries_left = 200)
 {
 	QMetaObject::invokeMethod(
 		qApp,
-		[yes]() {
-			QMessageBox *box = nullptr;
-			for (QWidget *w : QApplication::topLevelWidgets()) {
-				if (w->objectName() == QStringLiteral("mfdConfirmBox") && !w->isHidden()) {
-					box = qobject_cast<QMessageBox *>(w);
+		[yes, tries_left]() {
+			QMessageBox *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+			if (!box || box->objectName() != QStringLiteral("mfdConfirmBox")) {
+				box = nullptr;
+				for (QWidget *w : QApplication::topLevelWidgets()) {
+					if (w->objectName() == QStringLiteral("mfdConfirmBox") && w->isVisible()) {
+						box = qobject_cast<QMessageBox *>(w);
+					}
 				}
+			}
+			if (!box && tries_left > 0) {
+				/* macOS opens the box as a sheet that becomes visible a little after its event loop starts: look
+				 * again shortly instead of failing on the first pass */
+				QTimer::singleShot(10, qApp,
+						   [yes, tries_left]() { answer_next_confirm(yes, tries_left - 1); });
+				return;
 			}
 			REQUIRE(box != nullptr);
 			++g_confirm_seen;
