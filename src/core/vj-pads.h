@@ -53,8 +53,8 @@
  * It also says what each LED should show. Scenes: Program red, Preview green pulsing, other scenes dim blue, no scene
  * off (Preview pulses between dim and bright green, so it stays lit if the desk does not animate). Sources: dim white
  * at their home blend, the blend colour when punched, bright white while flashing, amber when faded
- * out, at 0 % or blacked out, blinking dim / bright red when hidden, azure on row 5 when the column is pinned, off without a
- * source. Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
+ * out, at 0 % or blacked out, blinking dim / bright red when hidden, off without a source. Row 5: eight greens, dark (the longest
+ * fade) to bright, while a scene waits in Preview. Pulses and blinks run at the desk's slowest rate (1/2), sent on the animation's MIDI channel.
  */
 
 #include <stdbool.h>
@@ -118,7 +118,7 @@ enum mfd_vj_action_kind {
 	MFD_VJ_ACTION_SNAP,            /* strip: straight to 0 % when it shows, else back up (Shift + row 3) */
 	MFD_VJ_ACTION_SHOW_TOGGLE,     /* strip: the source's eye on or off (row 4) */
 	MFD_VJ_ACTION_WAKE,            /* strip: shown, 100 %, blend Normal (Shift + row 4) */
-	MFD_VJ_ACTION_RESTART,         /* strip: restart the source's video (row 5) */
+	MFD_VJ_ACTION_RESTART,         /* strip: restart the source's video (no desk button since 0.9.1) */
 	MFD_VJ_ACTION_PIN_TOGGLE,      /* strip: pin the column to its source, or let it follow the scene again */
 	MFD_VJ_ACTION_COLUMN_CLEAN,    /* strip: blend Normal, flash and blackout let go (Clip Stop) */
 	MFD_VJ_ACTION_SCENE_PICK,      /* strip = scene 0..4: to Preview, or take it when it is in Preview */

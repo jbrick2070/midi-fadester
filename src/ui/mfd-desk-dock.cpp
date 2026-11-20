@@ -45,7 +45,7 @@ namespace {
 
 constexpr const char *kDockId = "midi-fadester-desk";
 constexpr int kStrips = (int)MFD_VJ_STRIPS;
-constexpr int kRows = 5; /* top to bottom: Restart, Show, Fade, Flash, Blend */
+constexpr int kRows = 5; /* top to bottom: Scene fade, Show, Fade, Flash, Blend */
 constexpr uint8_t kChPulse = 10U;
 constexpr uint8_t kChBlink = 15U;
 constexpr double kPi = 3.14159265358979323846;

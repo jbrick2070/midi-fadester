@@ -5564,6 +5564,7 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 	case MFD_VJ_ACTION_BLACKOUT_TOGGLE:
 		mfd_blackout_toggle(eng->cached_transition_ms);
 		eng->vj_state_dirty = true;
+		mfd_engine_mark_ui_dirty(eng, false); /* the UI thread puts the black on air, dock shown or not */
 		break;
 	case MFD_VJ_ACTION_VS_PANIC:
 		vj_queue_cmd_locked(eng, MFD_VJ_CMD_VS_PANIC, NULL, NULL, 0);
@@ -6917,8 +6918,8 @@ void mfd_engine_desk_fade(struct mfd_engine *eng)
 	}
 	mfd_engine_lock(eng);
 	vj_take_locked(eng);
+	mfd_engine_mark_ui_dirty(eng, false); /* under the lock: the unlock wakes the UI thread */
 	mfd_engine_unlock(eng);
-	mfd_engine_mark_ui_dirty(eng, false);
 }
 
 void mfd_engine_desk_blackout(struct mfd_engine *eng)
@@ -6927,11 +6928,10 @@ void mfd_engine_desk_blackout(struct mfd_engine *eng)
 		return;
 	}
 	mfd_engine_lock(eng);
-	int ms = eng->cached_transition_ms;
+	mfd_blackout_toggle(eng->cached_transition_ms); /* lock order: engine, then the blackout's own */
 	eng->vj_state_dirty = true;
-	mfd_engine_unlock(eng);
-	mfd_blackout_toggle(ms);
 	mfd_engine_mark_ui_dirty(eng, false);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_engine_desk_vjster(struct mfd_engine *eng, int steps, bool reset, bool play_pause)

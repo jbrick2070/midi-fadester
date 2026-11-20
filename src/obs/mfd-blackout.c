@@ -198,28 +198,40 @@ void mfd_blackout_ui(void)
 	if (!src) {
 		return;
 	}
-	if (need && ch >= 0 && !channel_holds(ch, src)) {
+	if (need && (ch < 0 || !channel_holds(ch, src))) {
 		/* OBS (a scene collection reload) or another plugin took the channel: find another, keep the fade */
 		int free_ch = free_channel();
 		if (free_ch >= 0) {
 			obs_set_output_source((uint32_t)free_ch, src);
 			obs_log(LOG_INFO, "Blackout: output channel %d was taken, moved to channel %d", ch, free_ch);
+		} else {
+			obs_log(LOG_WARNING, "Blackout: every OBS output channel above the scene is in use, so the "
+					     "blackout is let go");
 		}
 		pthread_mutex_lock(&g_bo.lock);
 		g_bo.channel = free_ch;
+		if (free_ch < 0) {
+			g_bo.target = false; /* never claim black that is not on air */
+			g_bo.level = 0.0f;
+		}
 		pthread_mutex_unlock(&g_bo.lock);
 	} else if (!need) {
-		/* clear again: take it off air and let it go */
+		/* clear again: take it off air and let it go, unless black was asked for again meanwhile */
 		pthread_mutex_lock(&g_bo.lock);
-		obs_source_t *mine = g_bo.source;
-		g_bo.source = NULL;
-		g_bo.channel = -1;
-		g_bo.written = -1.0f;
-		pthread_mutex_unlock(&g_bo.lock);
-		if (ch >= 0 && channel_holds(ch, src)) {
-			obs_set_output_source((uint32_t)ch, NULL);
+		obs_source_t *mine = NULL;
+		if (!g_bo.target && g_bo.level <= 0.0f && g_bo.source == src) {
+			mine = g_bo.source;
+			g_bo.source = NULL;
+			g_bo.channel = -1;
+			g_bo.written = -1.0f;
 		}
-		obs_source_release(mine);
+		pthread_mutex_unlock(&g_bo.lock);
+		if (mine) {
+			if (ch >= 0 && channel_holds(ch, src)) {
+				obs_set_output_source((uint32_t)ch, NULL);
+			}
+			obs_source_release(mine);
+		}
 	}
 	obs_source_release(src);
 }
