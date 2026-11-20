@@ -320,7 +320,11 @@ private:
 	QLabel *row_names_[kRows] = {};
 	QLabel *timing_ = nullptr;
 	QPushButton *reconnect_ = nullptr;
+	QPushButton *turn_on_ = nullptr; /* the pads, when they are switched off in the settings */
 	QLabel *status_ = nullptr;
+	QLabel *studio_note_ = nullptr;
+	QPushButton *studio_btn_ = nullptr;
+	QWidget *grid_box_ = nullptr; /* the pad grid: hidden while the pads cannot work for a lasting reason */
 	QPushButton *scenes_[MFD_VJ_SCENES] = {};
 	QLabel *col_names_[kStrips] = {};
 	QPushButton *pads_[kRows][kStrips] = {};
@@ -410,6 +414,61 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	blackout_->setObjectName(QStringLiteral("mfdDeskBlackoutBar"));
 	blackout_->setWordWrap(true);
 	root->addWidget(blackout_);
+
+	/* why something waits, at the top: in a short dock the last row is scrolled out of view (U1-06). The label always
+	 * keeps one line, so a message that comes and goes never moves the buttons under the pointer. */
+	auto *status_row = new QHBoxLayout();
+	status_ = new QLabel(this);
+	status_->setObjectName(QStringLiteral("mfdDeskStatus"));
+	status_->setWordWrap(true);
+	status_->setStyleSheet(QStringLiteral("color: #94a3b8;"));
+	status_->setMinimumHeight(status_->fontMetrics().lineSpacing());
+	status_row->addWidget(status_, 1);
+	turn_on_ = makeButton(mfdText("Desk.TurnOnTip", "Turn the APC40 pads on again (the same switch is on the "
+							"Advanced tab of Midi Fadester's settings)"),
+			      60, 24);
+	turn_on_->setObjectName(QStringLiteral("mfdDeskTurnOn"));
+	turn_on_->setText(mfdText("Desk.TurnOn", "Turn on"));
+	turn_on_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	connect(turn_on_, &QPushButton::clicked, this, [this]() {
+		mfd_engine_set_vj_buttons(eng_, true, mfd_engine_vj_fade_ms(eng_));
+		mfd_engine_save_global_config(eng_);
+		mfd_engine_notify_state_changed(eng_); /* the settings dialog's switch follows */
+		refresh();
+	});
+	status_row->addWidget(turn_on_);
+	reconnect_ = makeButton(mfdText("Desk.ReconnectTip", "Look for the APC40 mkII again"), 80, 24);
+	reconnect_->setObjectName(QStringLiteral("mfdDeskReconnect"));
+	reconnect_->setText(mfdText("Desk.Reconnect", "Reconnect"));
+	reconnect_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	connect(reconnect_, &QPushButton::clicked, this, [this]() {
+		mfd_engine_poll_midi_health_on_ui_thread(eng_);
+		refresh();
+	});
+	status_row->addWidget(reconnect_);
+	root->addLayout(status_row);
+
+	/* Studio Mode off: said in words, with the button that turns it on (U1-07). Its own row: the status line above
+	 * is shared with messages that stand for a few seconds. */
+	auto *studio_row = new QHBoxLayout();
+	studio_note_ = new QLabel(mfdText("Msg.StudioModeOff", "Studio Mode is off."), this);
+	studio_note_->setObjectName(QStringLiteral("mfdDeskStudioNote"));
+	studio_note_->setStyleSheet(QStringLiteral("color: #fde68a;"));
+	studio_note_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+	studio_row->addWidget(studio_note_, 1);
+	studio_btn_ = makeButton(mfdText("Strip.TurnOnStudioMode", "Turn on Studio Mode"), 80, 24);
+	studio_btn_->setObjectName(QStringLiteral("mfdDeskStudioBtn"));
+	studio_btn_->setText(mfdText("Strip.TurnOnStudioMode", "Turn on Studio Mode"));
+	studio_btn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	studio_btn_->setStyleSheet(QStringLiteral("QPushButton { background-color: #fbbf24; color: #0b1120; "
+						  "padding: 2px 8px; }"));
+	connect(studio_btn_, &QPushButton::clicked, this, [this]() {
+		mfd_engine_request_studio_mode(eng_, true);
+		refresh();
+	});
+	studio_row->addWidget(studio_btn_);
+	root->addLayout(studio_row);
+
 	on_air_ = new QLabel(this);
 	on_air_->setObjectName(QStringLiteral("mfdDeskOnAir"));
 	on_air_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -439,7 +498,10 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 
 	/* the pad grid: the scene fades on top in their own green frame (they work on the whole scene, not on a column),
 	 * then the strips' source names over the per-column rows, with the row names beside them */
-	auto *grid = new QGridLayout();
+	grid_box_ = new QWidget(this);
+	grid_box_->setObjectName(QStringLiteral("mfdDeskGrid"));
+	auto *grid = new QGridLayout(grid_box_);
+	grid->setContentsMargins(0, 0, 0, 0);
 	grid->setHorizontalSpacing(3);
 	grid->setVerticalSpacing(3);
 	auto *fade_frame = new QFrame(this); /* made before the pads, so it draws under them */
@@ -532,6 +594,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	shift_->setText(mfdText("Desk.ShiftShort", "Shift"));
 	shift_->setCheckable(true);
 	session_ = makeButton(mfdText("Desk.Session", "Fade Preview to Program"), 70, 24);
+	session_->setObjectName(QStringLiteral("mfdDeskFadeBtn"));
 	session_->setText(mfdText("Desk.SessionShort", "Fade"));
 	connect(session_, &QPushButton::clicked, this, [this]() {
 		if (eng_) {
@@ -567,7 +630,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		faders_[i] = bar;
 		grid->addWidget(bar, kRows + 3, i + 1, Qt::AlignHCenter);
 	}
-	root->addLayout(grid);
+	root->addWidget(grid_box_);
 	root->addLayout(transport);
 	xfader_ = new QProgressBar(this);
 	xfader_->setRange(0, 1000);
@@ -682,20 +745,6 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	}
 	root->addLayout(preset_row);
 
-	auto *status_row = new QHBoxLayout();
-	status_ = new QLabel(this);
-	status_->setWordWrap(true);
-	status_->setStyleSheet(QStringLiteral("color: #94a3b8;"));
-	status_row->addWidget(status_, 1);
-	reconnect_ = makeButton(mfdText("Desk.ReconnectTip", "Look for the APC40 mkII again"), 80, 24);
-	reconnect_->setText(mfdText("Desk.Reconnect", "Reconnect"));
-	reconnect_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-	connect(reconnect_, &QPushButton::clicked, this, [this]() {
-		mfd_engine_poll_midi_health_on_ui_thread(eng_);
-		refresh();
-	});
-	status_row->addWidget(reconnect_);
-	root->addLayout(status_row);
 	root->addStretch(1);
 
 	clock_.start();
@@ -894,6 +943,22 @@ void MfdDeskDock::refresh()
 						       : mfdText("Desk.DeskOff", "no APC40 mkII")}));
 
 	bool pads_on = view_.finished_loading && view_.pads == MFD_DESK_PADS_ON && !view_.learn_or_setup;
+	/* The pads cannot work until the user changes something (no APC40, pads switched off, another layout): the grid
+	 * goes, and what still works stays. Never while loading or while Learn or Set up runs: those pass by themselves,
+	 * and the dock must not flash or change size for them. */
+	bool pads_gone = view_.finished_loading &&
+			 (view_.pads == MFD_DESK_PADS_NO_APC40 || view_.pads == MFD_DESK_PADS_BUTTONS_OFF ||
+			  view_.pads == MFD_DESK_PADS_OTHER_PROFILE);
+	if (grid_box_->isHidden() != pads_gone) {
+		grid_box_->setVisible(!pads_gone);
+		stop_all_->setVisible(!pads_gone);
+		shift_->setVisible(!pads_gone);
+	}
+	/* why a scene fade cannot start now: the tooltip of the grey pads and of the grey Fade button */
+	QString no_fade = !view_.studio_mode  ? mfdText("Msg.StudioModeOff", "Studio Mode is off.")
+			  : !view_.take_ready ? mfdText("Desk.Tip.SameScene",
+							"Preview and on air are the same scene. Pick another scene.")
+					      : QString();
 	bool shift = shift_->isChecked() || view_.desk_shift; /* what a click on a pad does now */
 	for (int r = 0; r < kRows; ++r) {
 		setLabel(row_names_[r], rowShortName(r, shift));
@@ -967,6 +1032,9 @@ void MfdDeskDock::refresh()
 					     : mfdFill(mfdText("Desk.Tip.SceneFade",
 							       "Fade Preview to Program over %1 beats"),
 						       {QString::number(32.0 / (double)(1 << (i - 1)), 'g', 3)});
+				if (!no_fade.isEmpty()) {
+					why = no_fade; /* a grey pad says why it is grey, not what it would do */
+				}
 			} else if (!st.has_layer) {
 				can = false;
 				why = mfdText("Desk.Tip.Empty", "No source on this column.");
@@ -997,8 +1065,14 @@ void MfdDeskDock::refresh()
 	xfader_->setValue((int)std::lround(std::clamp(view_.crossfader, 0.0f, 1.0f) * 1000.0f));
 	paintButton(stop_all_, 0x475569U, pads_on && !view_.stop_all_owned);
 	paintButton(shift_, shift ? 0xF8FAFCU : 0x475569U, pads_on);
-	session_->setVisible(view_.studio_mode);
+	/* Fade keeps its place when it cannot act: buttons that move are pressed by mistake (U1-07) */
 	paintButton(session_, view_.take_ready ? 0x22C55EU : 0x475569U, view_.take_ready && !view_.tbar_busy);
+	setTip(session_, no_fade.isEmpty() ? session_->accessibleName() : no_fade);
+	bool studio_off = view_.finished_loading && !view_.studio_mode;
+	if (studio_note_->isHidden() == studio_off) {
+		studio_note_->setVisible(studio_off);
+		studio_btn_->setVisible(studio_off);
+	}
 	paintButton(blackout_btn_, view_.blackout ? 0xEF4444U : 0x475569U, view_.finished_loading);
 	/* the button says what a press does now, as Panic turns into Restore */
 	setButtonText(blackout_btn_, view_.blackout ? mfdText("Desk.BlackoutEndShort", "End blackout")
@@ -1078,19 +1152,25 @@ void MfdDeskDock::refresh()
 	} else if (view_.pads == MFD_DESK_PADS_NO_APC40) {
 		why = mfdText("Desk.WhyNoDesk", "Connect the APC40 mkII to use the pads.");
 	} else if (view_.pads == MFD_DESK_PADS_BUTTONS_OFF) {
-		why = mfdText("Desk.WhyOff", "The APC40 buttons are switched off in Midi Fadester's settings.");
+		why = mfdText("Desk.WhyOff", "The APC40 pads are turned off.");
 	} else if (view_.pads == MFD_DESK_PADS_OTHER_PROFILE) {
 		why = mfdText("Desk.WhyProfile",
-			      "Choose the APC40 mkII profile in Midi Fadester's settings to use the pads.");
+			      "The pads need the APC40 mkII layout. Open Tools, Midi Fadester, Change controller.");
 	} else if (view_.learn_or_setup) {
 		why = mfdText("Desk.WhyLearn", "The pads wait while MIDI Learn or Set up is running.");
 	} else if (view_.tbar_busy) {
 		why = mfdText("Desk.TbarBusy", "Crossfader throw under way: the scene buttons wait.");
+	} else if (view_.studio_mode && !view_.take_ready) {
+		why = no_fade; /* Studio Mode off has its own row, with its button */
 	}
 	bool lost = view_.finished_loading && view_.pads == MFD_DESK_PADS_NO_APC40;
+	bool off = view_.finished_loading && view_.pads == MFD_DESK_PADS_BUTTONS_OFF;
 	reconnect_->setVisible(lost);
+	turn_on_->setVisible(off);
+	paintButton(reconnect_, 0xFBBF24U, true);
+	paintButton(turn_on_, 0xFBBF24U, true);
 	setCss(status_,
-	       lost ? QStringLiteral("color: #fde68a; font-weight: bold;") : QStringLiteral("color: #94a3b8;"));
+	       pads_gone ? QStringLiteral("color: #fde68a; font-weight: bold;") : QStringLiteral("color: #94a3b8;"));
 	bool fresh_message = !status_is_reason_ && status_over_reason_ && status_age_.isValid() &&
 			     status_age_.elapsed() <=
 				     4000;      /* "cannot act now" gives way to the reason that explains it */

@@ -2091,6 +2091,99 @@ int main(int argc, char **argv)
 			mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
 			REQUIRE(!mfd_blackout_is_on());
 		}
+		/* U1-06, U1-07: the reason on top, Studio Mode off said in words with its button, Fade keeps its place, and the
+		 * grid goes only for a lasting reason */
+		{
+			char was_preview[MFD_SOURCE_NAME_MAX];
+			char was_program[MFD_SOURCE_NAME_MAX];
+			std::snprintf(was_preview, sizeof(was_preview), "%s", eng.cached_preview_scene);
+			std::snprintf(was_program, sizeof(was_program), "%s", eng.cached_program_scene);
+			const bool was_studio = mfd_engine_is_studio_mode_active(&eng);
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+			QWidget *sd = mfd_desk_dock_create(&eng);
+			sd->resize(560, 760);
+			sd->show();
+			pump_ui();
+			auto again = [&]() { /* the dock repaints when it is shown */
+					     sd->hide();
+					     sd->show();
+					     pump_ui();
+			};
+			auto *grid = sd->findChild<QWidget *>(QStringLiteral("mfdDeskGrid"));
+			auto *fade = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskFadeBtn"));
+			auto *note = sd->findChild<QLabel *>(QStringLiteral("mfdDeskStudioNote"));
+			auto *studio_btn = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskStudioBtn"));
+			auto *status = sd->findChild<QLabel *>(QStringLiteral("mfdDeskStatus"));
+			auto *turn_on = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskTurnOn"));
+			auto *cut_pad = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_0"));
+			REQUIRE(grid && fade && note && studio_btn && status && turn_on && cut_pad);
+			REQUIRE(grid->isVisible() && fade->isVisible() && fade->isEnabled() && cut_pad->isEnabled());
+			REQUIRE(!note->isVisible() && !studio_btn->isVisible() && !turn_on->isVisible());
+			REQUIRE(status->isVisible() &&
+				status->height() > 0); /* its line is always there: nothing jumps */
+			REQUIRE(status->mapTo(sd, QPoint(0, 0)).y() < cut_pad->mapTo(sd, QPoint(0, 0)).y());
+			const QPoint fade_at = fade->mapTo(sd, QPoint(0, 0));
+
+			/* Preview and Program the same scene: the grey pads and the status line say so */
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Red", "Red", true);
+			again();
+			REQUIRE(fade->isVisible() && !fade->isEnabled() && !cut_pad->isEnabled());
+			REQUIRE(cut_pad->toolTip().startsWith(
+				QStringLiteral("Preview and on air are the same scene.")));
+			REQUIRE(status->text().startsWith(QStringLiteral("Preview and on air are the same scene.")));
+
+			/* Studio Mode off */
+			mfd_engine_set_test_frontend_state(&eng, true, false, "", "Red", true);
+			again();
+			REQUIRE(fade->isVisible() && !fade->isEnabled());
+			REQUIRE(fade->mapTo(sd, QPoint(0, 0)).x() == fade_at.x()); /* it does not slide */
+			REQUIRE(fade->toolTip() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(cut_pad->toolTip() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(note->isVisible() && note->text() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(studio_btn->isVisible() && studio_btn->text() == QStringLiteral("Turn on Studio Mode"));
+			studio_btn->click();
+			pump_ui();
+			REQUIRE(mfd_engine_is_studio_mode_active(&eng));
+			REQUIRE(!note->isVisible() && !studio_btn->isVisible());
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+
+			/* Learn or Set up running: the pads wait, the grid stays (no flashing, no resize) */
+			eng.learning_slot_index = 0;
+			again();
+			REQUIRE(grid->isVisible() && !cut_pad->isEnabled());
+			REQUIRE(status->text() ==
+				QStringLiteral("The pads wait while MIDI Learn or Set up is running."));
+			eng.learning_slot_index = -1;
+			/* loading: the same */
+			eng.frontend_finished_loading = false;
+			again();
+			REQUIRE(grid->isVisible());
+			eng.frontend_finished_loading = true;
+
+			/* the pads switched off: the grid goes, Fade and Blackout stay, and one click turns them on */
+			eng.vj_disabled = true;
+			again();
+			REQUIRE(!grid->isVisible() && fade->isVisible());
+			REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskBlackoutBtn"))->isVisible());
+			REQUIRE(status->text() == QStringLiteral("The APC40 pads are turned off."));
+			REQUIRE(turn_on->isVisible() && turn_on->text() == QStringLiteral("Turn on"));
+			turn_on->click();
+			pump_ui();
+			REQUIRE(!eng.vj_disabled && grid->isVisible() && !turn_on->isVisible());
+
+			/* no APC40: the reason and Reconnect on top, the grid gone */
+			eng.midi_dev.is_open = false;
+			again();
+			auto *reconnect = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskReconnect"));
+			REQUIRE(reconnect && reconnect->isVisible() && !grid->isVisible());
+			REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
+			REQUIRE(reconnect->mapTo(sd, QPoint(0, 0)).y() < fade->mapTo(sd, QPoint(0, 0)).y());
+			eng.midi_dev.is_open = true;
+
+			sd->hide();
+			delete sd;
+			mfd_engine_set_test_frontend_state(&eng, true, was_studio, was_preview, was_program, true);
+		}
 		/* every language: no button or row name is cut off at a normal dock size (scene and column names elide on
 		 * purpose); German and Russian are saved for a look */
 		const QDir desk_locale_dir = QFileInfo(QString::fromUtf8(MFD_TEST_LOCALE_FILE)).dir();
