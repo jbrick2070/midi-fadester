@@ -106,10 +106,8 @@ void vs_audio_tap_tick_with_lookup(struct vs_audio_tap *tap, obs_source_t *filte
 void vs_audio_tap_get_defaults(obs_data_t *settings);
 void vs_audio_tap_update_from_settings(struct vs_audio_tap *tap, obs_source_t *filter_source, obs_data_t *settings);
 /* Adds the tap status warning row at the current position (top-level) so it stays visible when the
- * analysis group sits at the bottom of a panel. vs_audio_tap_add_properties then skips adding it again. */
-void vs_audio_tap_add_status_property(obs_properties_t *props);
+ * analysis group sits at the bottom of a panel. vs_audio_tap_add_properties_with_tap then skips adding it again. */
 void vs_audio_tap_add_status_property_for_source(obs_properties_t *props, obs_source_t *filter_source);
-void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source);
 void vs_audio_tap_add_properties_with_tap(obs_properties_t *props, obs_source_t *filter_source,
 					  struct vs_audio_tap *tap);
 

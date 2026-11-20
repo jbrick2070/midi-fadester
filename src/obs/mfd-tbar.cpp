@@ -55,6 +55,9 @@ static std::atomic<bool> g_logged_missing_error{false};
 static std::atomic<int> g_last_pos_1024{0};
 static std::atomic<bool> g_tbar_release_latched{false};
 static std::atomic<uint64_t> g_tbar_throw_epoch{1ULL};
+#ifdef MFD_ENABLE_SELF_TEST
+/* Counters only the live self-test reads. They exist, and are fed, only in a build with the harness (C-09): an
+ * ordinary build does none of this on a throw. */
 static std::atomic<int> g_tbar_set_count{0};
 static std::atomic<int> g_tbar_release_count{0};
 static std::atomic<int> g_tbar_first_release_raw_cc{-1};
@@ -63,6 +66,7 @@ static std::atomic<int> g_tbar_writes_since_release{0};
 static std::atomic<int> g_tbar_post_first_release_writes{0};
 static std::atomic<int> g_tbar_writes_before_unpark{0};
 static std::atomic<bool> g_tbar_awaiting_unpark{false};
+#endif
 static std::atomic<bool> g_tbar_debug_log{false};
 
 /* UI-thread-only per-transition latch & active-transition guard state (zero timers) */
@@ -460,11 +464,13 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 		g_tbar_slider->setValue(pos_1024);
 		g_tbar_slider->blockSignals(false);
 		obs_frontend_set_tbar_position(pos_1024);
+#ifdef MFD_ENABLE_SELF_TEST
 		g_tbar_set_count.fetch_add(1, std::memory_order_relaxed);
 		g_tbar_writes_since_release.fetch_add(1, std::memory_order_relaxed);
 		if (g_tbar_release_count.load(std::memory_order_relaxed) >= 1) {
 			g_tbar_post_first_release_writes.fetch_add(1, std::memory_order_relaxed);
 		}
+#endif
 	}
 
 	if (do_release) {
@@ -479,8 +485,10 @@ static void execute_tbar_on_ui_thread(int pos_1024, bool do_set, bool do_release
 			}
 			obs_source_release(tr_rel);
 		}
+#ifdef MFD_ENABLE_SELF_TEST
 		g_tbar_release_count.fetch_add(1, std::memory_order_relaxed);
 		g_tbar_writes_since_release.store(0, std::memory_order_relaxed);
+#endif
 	}
 }
 
@@ -3004,6 +3012,7 @@ bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_c
 			/* Per-transition release latch already tripped; block both slider write and release. */
 			return true;
 		}
+#ifdef MFD_ENABLE_SELF_TEST
 		if (act.completed_throw) {
 			struct mfd_engine *eng_rel = mfd_engine_get();
 			if (eng_rel && eng_rel->has_last_midi) {
@@ -3018,6 +3027,7 @@ bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_c
 				}
 			}
 		}
+#endif
 		g_last_pos_1024.store(0, std::memory_order_relaxed);
 		if (out_completed_throw) {
 			*out_completed_throw = act.completed_throw;
@@ -3036,6 +3046,7 @@ bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_c
 		return true;
 	}
 
+#ifdef MFD_ENABLE_SELF_TEST
 	if (g_tbar_awaiting_unpark.load(std::memory_order_relaxed)) {
 		struct mfd_engine *eng_now = mfd_engine_get();
 		if (eng_now) {
@@ -3051,6 +3062,7 @@ bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_c
 	if (act.completed_throw) {
 		g_tbar_awaiting_unpark.store(true, std::memory_order_relaxed);
 	}
+#endif
 
 	QWidget *main_win = g_main_win.data();
 	if (!main_win) {

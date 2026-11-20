@@ -264,10 +264,6 @@ public:
 		update();
 	}
 
-	int bar_percent() const { return bar_pct_; }
-	bool showing_pickup() const { return show_pickup_; }
-	QString arrow_glyph() const { return arrow_glyph_; }
-
 protected:
 	void paintEvent(QPaintEvent *event) override
 	{

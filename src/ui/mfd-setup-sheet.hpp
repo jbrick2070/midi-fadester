@@ -27,7 +27,6 @@ public:
 
 	void open_for_slot(int slot_index);
 	void refresh_from_snapshot(const struct mfd_ui_snapshot &snap);
-	int current_slot_index() const { return slot_index_; }
 	void reject() override;
 
 protected:

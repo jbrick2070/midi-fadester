@@ -1349,9 +1349,6 @@ bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_n
 	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->source_exists) {
 		return eng->scene_graph_ops->source_exists(source_name, eng->scene_graph_user_data);
 	}
-	if (eng && eng->source_exists_fn) {
-		return eng->source_exists_fn(source_name, eng->source_exists_user_data);
-	}
 	if (!obs_initialized()) {
 		return false;
 	}
@@ -2032,20 +2029,6 @@ static bool filter_live_value_is_ours(const struct mfd_fader_slot *slot, double 
 						 slot->filter_prop_is_int);
 	return slot->filter_prop_is_int ? (llround(live_val) == llround(cur_mapped))
 					: (fabs(live_val - cur_mapped) <= 1e-6);
-}
-
-bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
-						     const char *source_a, const char *filter_name,
-						     const char *filter_prop, bool has_from_to, double *inout_from_val,
-						     double *inout_to_val, struct mfd_filter_prop_info *out_prop_info,
-						     char *out_err, size_t err_size)
-{
-	struct mfd_msg msg;
-	bool ok = mfd_engine_validate_filter_param_binding_msg_locked(eng, slot_index, enabled, source_a, filter_name,
-								      filter_prop, has_from_to, inout_from_val,
-								      inout_to_val, out_prop_info, &msg);
-	mfd_msg_format_english(&msg, out_err, err_size);
-	return ok;
 }
 
 bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
@@ -3873,15 +3856,6 @@ static bool append_live_vendor_audio_cb(void *param, obs_source_t *src)
 	return true;
 }
 
-bool mfd_engine_fill_vendor_catalog_locked(struct mfd_engine *eng, const char *source_name, obs_data_t *response_data,
-					   char *out_err, size_t err_size)
-{
-	struct mfd_msg msg;
-	bool ok = mfd_engine_fill_vendor_catalog_msg_locked(eng, source_name, response_data, &msg);
-	mfd_msg_format_english(&msg, out_err, err_size);
-	return ok;
-}
-
 bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const char *source_name,
 					       obs_data_t *response_data, struct mfd_msg *out_msg)
 {
@@ -5643,7 +5617,7 @@ static void sync_volume_slots_from_live_locked(struct mfd_engine *eng)
 static bool apc40_relative_knob(const struct mfd_engine *eng, const struct mfd_midi_addr *a)
 {
 	return eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name) && a->type == MFD_MIDI_CC &&
-	       a->channel == 0U && (a->number == MFD_VJ_CC_TEMPO || a->number == 47U);
+	       a->channel == 0U && (a->number == MFD_VJ_CC_TEMPO || a->number == MFD_VJ_CC_CUE_LEVEL);
 }
 
 static int vj_effective_fade_ms(const struct mfd_engine *eng)
@@ -7302,17 +7276,6 @@ void mfd_engine_set_test_scene_list(struct mfd_engine *eng, const char *const *n
 		eng->cached_scene_count = i + 1;
 	}
 	mfd_engine_unlock(eng);
-}
-
-bool mfd_engine_slot_follows_scene(struct mfd_engine *eng, int slot_index)
-{
-	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
-		return false;
-	}
-	mfd_engine_lock(eng);
-	bool f = eng->fader_slots[slot_index].auto_follow;
-	mfd_engine_unlock(eng);
-	return f;
 }
 
 void mfd_engine_vs_result(struct mfd_engine *eng, bool from_poll, enum mfd_vj_command_kind kind, bool answered,
@@ -9703,11 +9666,6 @@ static bool load_global_config_if_present(struct mfd_engine *eng)
 	}
 	bfree(cfg_path);
 	return loaded;
-}
-
-void mfd_engine_load_global_config(struct mfd_engine *eng)
-{
-	(void)load_global_config_if_present(eng);
 }
 
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)

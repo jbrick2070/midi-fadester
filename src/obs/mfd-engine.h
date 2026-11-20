@@ -30,6 +30,8 @@ extern "C" {
 #endif
 
 #define MFD_MAX_FADER_SLOTS 18
+/* The engine's strips and a layout's strips are the same 18 (B-15): a layout is copied into the strips by index. */
+typedef char mfd_strip_counts_must_agree[(MFD_MAX_FADER_SLOTS == (int)MFD_APC40_DEFAULT_SLOT_COUNT) ? 1 : -1];
 #define MFD_MAX_CAL_ENTRIES 64
 #define MFD_PROFILE_NAME_MAX 32
 #define MFD_SOURCE_NAME_MAX 256
@@ -355,7 +357,6 @@ typedef void (*mfd_tbar_unlatch_fn)(void);
  * drives the retry from its tick; the driver has no timer.
  */
 typedef bool (*mfd_tbar_deferred_fn)(bool run);
-typedef bool (*mfd_source_exists_fn)(const char *source_name, void *user_data);
 typedef void (*mfd_filter_host_cb)(const char *source_name, bool is_scene, void *param);
 typedef void (*mfd_source_filter_cb)(const char *filter_name, const char *type_id, bool enabled, void *param);
 typedef void (*mfd_numeric_prop_cb)(const struct mfd_filter_prop_info *info, void *param);
@@ -573,8 +574,6 @@ struct mfd_engine {
 	/* Optional test overrides when running outside live OBS */
 	const struct mfd_scene_graph_ops *scene_graph_ops;
 	void *scene_graph_user_data;
-	mfd_source_exists_fn source_exists_fn;
-	void *source_exists_user_data;
 	bool studio_mode_override_set;
 	bool studio_mode_override;
 
@@ -689,8 +688,6 @@ int mfd_engine_fill_strips_from_scene(struct mfd_engine *eng, const char *scene,
 				      size_t out_scene_size);
 /* Tests: the Scenes list as OBS would give it, top first. */
 void mfd_engine_set_test_scene_list(struct mfd_engine *eng, const char *const *names, int count);
-/* Whether strip 1..8 follows the scene on air. */
-bool mfd_engine_slot_follows_scene(struct mfd_engine *eng, int slot_index);
 /* Visual Sidechain's panic state as it answered (the Record LED). */
 void mfd_engine_set_vs_panic(struct mfd_engine *eng, bool panic);
 
@@ -707,8 +704,6 @@ struct mfd_source_filter_catalog *mfd_source_filter_catalog_create(void);
 void mfd_source_filter_catalog_destroy(struct mfd_source_filter_catalog *cat);
 bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *source_name,
 					  struct mfd_source_filter_catalog *out);
-bool mfd_engine_fill_vendor_catalog_locked(struct mfd_engine *eng, const char *source_name, obs_data_t *response_data,
-					   char *out_err, size_t err_size);
 bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const char *source_name,
 					       obs_data_t *response_data, struct mfd_msg *out_msg);
 bool mfd_is_internal_filter(const char *filter_name, const char *type_id);
@@ -718,11 +713,6 @@ void mfd_engine_format_slot_display_value(const struct mfd_fader_slot *slot, flo
 /* translate: the UI's words (" (Off)", "dB", "%") in the language OBS runs in; false is the API's English. */
 void mfd_engine_format_slot_display_value_ex(const struct mfd_fader_slot *slot, float norm_01, bool translate,
 					     char *out, size_t out_size);
-bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
-						     const char *source_a, const char *filter_name,
-						     const char *filter_prop, bool has_from_to, double *inout_from_val,
-						     double *inout_to_val, struct mfd_filter_prop_info *out_prop_info,
-						     char *out_err, size_t err_size);
 bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
 							 const char *source_a, const char *filter_name,
 							 const char *filter_prop, bool has_from_to,
@@ -955,7 +945,6 @@ void mfd_engine_start_learn(struct mfd_engine *eng, int slot_index);
 void mfd_engine_cancel_learn(struct mfd_engine *eng);
 
 bool mfd_engine_save_global_config(struct mfd_engine *eng);
-void mfd_engine_load_global_config(struct mfd_engine *eng);
 bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath);
 bool mfd_engine_import_config_file(struct mfd_engine *eng, const char *filepath);
 bool mfd_engine_import_config_file_and_reopen(struct mfd_engine *eng, const char *filepath);

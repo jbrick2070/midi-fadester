@@ -21,7 +21,7 @@ static const char *const k_launchcontrolxl_usb_tokens[] = {"Launch Control XL", 
  * To add a new MIDI controller: append one mfd_controller_profile_def entry below with its
  * support tier (VERIFIED once tested on physical hardware, BETA_UNTESTED when mapped from
  * manufacturer MIDI documentation), WinMM port-name match substrings, physical topology flags,
- * and default 10-slot MIDI CC bindings.
+ * and the default MIDI bindings of its 18 strips (MFD_APC40_DEFAULT_SLOT_COUNT).
  */
 static const struct mfd_controller_profile_def k_profile_registry[] = {
 	{

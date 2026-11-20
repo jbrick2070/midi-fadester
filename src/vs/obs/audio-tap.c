@@ -657,11 +657,6 @@ void vs_audio_tap_add_status_property_for_source(obs_properties_t *props, obs_so
 	}
 }
 
-void vs_audio_tap_add_status_property(obs_properties_t *props)
-{
-	vs_audio_tap_add_status_property_for_source(props, NULL);
-}
-
 void vs_audio_tap_add_properties_with_tap(obs_properties_t *props, obs_source_t *filter_source,
 					  struct vs_audio_tap *tap)
 {
@@ -760,9 +755,4 @@ void vs_audio_tap_add_properties_with_tap(obs_properties_t *props, obs_source_t 
 			obs_data_release(settings);
 		}
 	}
-}
-
-void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source)
-{
-	vs_audio_tap_add_properties_with_tap(props, filter_source, NULL);
 }

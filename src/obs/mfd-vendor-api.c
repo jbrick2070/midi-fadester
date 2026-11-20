@@ -689,86 +689,18 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		set_proc_reason(cd, "shutting_down", "Midi Fadester is shutting down.");
 		return;
 	}
-	if (eng->setup_session.active && eng->setup_session.slot_index == idx) {
-		mfd_engine_unlock(eng);
-		calldata_set_bool(cd, "ok", false);
-		calldata_set_bool(cd, "success", false);
-		set_proc_reason(cd, mfd_msg_slug(MFD_MSG_STRIP_PAUSED_IN_SETUP),
-				"Strip is currently paused while Set up is open.");
-		return;
-	}
-	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if (!mfd_engine_is_slot_writable(eng, slot)) {
-		bool avail = false;
+	/* One decision tree for "set a strip's value" (C-10): the engine's, which the obs-websocket request uses too.
+	 * This proc had a copy of its own that had drifted: at a rail it applied the output and sent fader_changed
+	 * again on every call. */
+	struct mfd_msg set_msg;
+	if (!mfd_engine_set_slot_value_msg(eng, idx, val, false, "api", &set_msg)) {
 		char reason[160] = {0};
-		struct mfd_msg reason_msg;
-		mfd_engine_get_slot_status_msg(eng, slot, NULL, 0U, &avail, reason, sizeof(reason), &reason_msg);
+		mfd_msg_format_english(&set_msg, reason, sizeof(reason));
 		mfd_engine_unlock(eng);
 		calldata_set_bool(cd, "ok", false);
 		calldata_set_bool(cd, "success", false);
-		set_proc_reason(cd, mfd_msg_slug(reason_msg.code), reason);
+		set_proc_reason(cd, mfd_msg_slug(set_msg.code), reason);
 		return;
-	}
-	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
-			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
-
-	slot->auto_fade_active = false;
-	slot->auto_fade_is_reset_fx = false;
-	slot->pending_clean_apply_on_avail = false;
-	slot->tbar_midi_active = false;
-	slot->tbar_from_idle_band = false;
-	slot->takeover.dial_reversed = false;
-
-	if (slot->target_type == MFD_TARGET_TBAR) {
-		if (mfd_tbar_is_in_target_rail_zone(val, false)) {
-			if (!was_parked) {
-				if (slot->tbar_state == MFD_TBAR_IDLE) {
-					mfd_engine_unlatch_tbar(eng);
-				}
-				mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
-				mfd_engine_notify_fader_changed(eng, idx, "api");
-				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-					mfd_engine_notify_state_changed(eng);
-				}
-			}
-		} else if (mfd_tbar_is_in_origin_rail_zone(val, false)) {
-			if (slot->tbar_state == MFD_TBAR_THROWING) {
-				mfd_engine_apply_tbar_abort(eng, slot);
-				mfd_engine_notify_fader_changed(eng, idx, "api");
-				mfd_engine_notify_state_changed(eng);
-			} else if (was_parked) {
-				mfd_engine_unlatch_tbar(eng);
-				slot->tbar_state = MFD_TBAR_IDLE;
-				mfd_takeover_unpark_from_api(&slot->takeover, 0.0f);
-				mfd_smoother_reset(&slot->smoother, 0.0f);
-				slot->last_applied_val = 0.0f;
-				mfd_engine_notify_fader_changed(eng, idx, "api");
-				mfd_engine_notify_state_changed(eng);
-			}
-		} else {
-			if (was_parked || slot->tbar_state == MFD_TBAR_IDLE) {
-				mfd_engine_unlatch_tbar(eng);
-			}
-			slot->tbar_state = MFD_TBAR_THROWING;
-			mfd_takeover_unpark_from_api(&slot->takeover, val);
-			mfd_smoother_reset(&slot->smoother, val);
-			mfd_engine_apply_slot_output(eng, slot, val);
-			mfd_engine_notify_fader_changed(eng, idx, "api");
-			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-				mfd_engine_notify_state_changed(eng);
-			}
-		}
-	} else {
-		mfd_takeover_unpark_from_api(&slot->takeover, val);
-		mfd_smoother_reset(&slot->smoother, val);
-		mfd_engine_apply_slot_output(eng, slot, val);
-		if (slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
-			mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f, val);
-		}
-		mfd_engine_notify_fader_changed(eng, idx, "api");
-		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-			mfd_engine_notify_state_changed(eng);
-		}
 	}
 
 	mfd_engine_mark_ui_dirty(eng, false);

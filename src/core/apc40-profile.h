@@ -14,6 +14,8 @@ extern "C" {
 
 #define MFD_FADER_STRIP_COUNT 10U
 #define MFD_FX_SLOT_COUNT 8U
+/* Also the number of strips the engine keeps (MFD_MAX_FADER_SLOTS in obs/mfd-engine.h, which checks when it is
+ * compiled that the two agree): every layout fills exactly these. */
 #define MFD_APC40_DEFAULT_SLOT_COUNT 18U
 
 struct mfd_apc40_default_slot {
