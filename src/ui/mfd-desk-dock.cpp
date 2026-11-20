@@ -62,7 +62,8 @@ QString rowName(int r)
 {
 	switch (r) {
 	case 0:
-		return mfdText("Desk.RowSceneFade", "Cut, then scene fades from long to short");
+		return mfdText("Desk.RowSceneFade",
+			       "Cut, then fade Preview on air over 32, 16, 8, 4, 2, 1 or \xC2\xBD beats");
 	case 1:
 		return mfdText("Desk.RowShow", "Show / hide (Shift: wake)");
 	case 2:
@@ -80,7 +81,7 @@ QString rowShortName(int r, bool shift = false)
 	if (shift) {
 		switch (r) {
 		case 0:
-			return mfdText("Desk.RowSceneFadeShort", "Scene fade"); /* Shift changes nothing here */
+			return mfdText("Desk.RowSceneFadeShort", "Fade, beats"); /* Shift changes nothing here */
 		case 1:
 			return mfdText("Desk.RowWakeShort", "Wake");
 		case 2:
@@ -93,7 +94,7 @@ QString rowShortName(int r, bool shift = false)
 	}
 	switch (r) {
 	case 0:
-		return mfdText("Desk.RowSceneFadeShort", "Scene fade");
+		return mfdText("Desk.RowSceneFadeShort", "Fade, beats");
 	case 1:
 		return mfdText("Desk.RowShowShort", "Show / hide");
 	case 2:
@@ -103,6 +104,21 @@ QString rowShortName(int r, bool shift = false)
 	default:
 		return mfdText("Desk.RowBlendShort", "Blend punch");
 	}
+}
+
+/* What is printed on a pad of the top row: a cut mark that needs no translation and fits a 30 px pad in every
+ * language, then the fade's length in beats. The longest is not 32 beats below 96 BPM: OBS caps a transition at 20 s,
+ * and the pad then says so. */
+QString sceneFadePadText(int column, bool capped)
+{
+	static const char *const k_beats[] = {"32", "16", "8", "4", "2", "1", "\xC2\xBD"};
+	if (column <= 0) {
+		return QStringLiteral("\xE2\x9C\x82"); /* scissors */
+	}
+	if (column == 1 && capped) {
+		return QStringLiteral("20s");
+	}
+	return QString::fromUtf8(k_beats[std::min(column, 7) - 1]);
 }
 
 QString rgbCss(uint32_t rgb)
@@ -551,6 +567,9 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 						    30, 22);
 			pads_[r][i] = b;
 			b->setObjectName(QStringLiteral("mfdDeskPad_%1_%2").arg(r).arg(i));
+			if (r == 0) {
+				b->setText(sceneFadePadText(i, false));
+			}
 			connect(b, &QPushButton::pressed, this, [this, r, i, b]() {
 				if (physical(b)) {
 					pressPad(r, i, true);
@@ -907,7 +926,7 @@ void MfdDeskDock::releaseHolds()
 void MfdDeskDock::paintButton(QPushButton *b, uint32_t rgb, bool enabled)
 {
 	QString css =
-		QStringLiteral("QPushButton { background-color: %1; color: %2; }"
+		QStringLiteral("QPushButton { background-color: %1; color: %2; font-weight: bold; }"
 			       "QPushButton:disabled { background-color: #1f2937; color: #6b7280; }")
 			.arg(rgbCss(rgb), lightBackground(rgb) ? QStringLiteral("#0b1120") : QStringLiteral("#f8fafc"));
 	if (b->property("mfdCss").toString() != css) {
@@ -1060,10 +1079,16 @@ void MfdDeskDock::refresh()
 			} else if (cell == MFD_DESK_RESTART) {
 				/* the top row: scene fades, whatever the column holds */
 				can = can && view_.take_ready && !view_.tbar_busy;
-				why = i == 0 ? mfdText("Desk.Tip.SceneCut", "Cut Preview to Program at once")
-					     : mfdFill(mfdText("Desk.Tip.SceneFade",
-							       "Fade Preview to Program over %1 beats"),
-						       {QString::number(32.0 / (double)(1 << (i - 1)), 'g', 3)});
+				why = i == 0 ? mfdText("Desk.Tip.SceneCut", "Cut Preview on air at once")
+				      : i == 1
+					      ? mfdText("Desk.Tip.SceneFadeCapped",
+							"Fade Preview on air over 32 beats. Below 96 BPM, OBS caps this "
+							"fade at 20 s.")
+					      : mfdFill(mfdText("Desk.Tip.SceneFade",
+								"Fade Preview on air over %1 beats"),
+							{QString::number(32.0 / (double)(1 << (i - 1)), 'g', 3)});
+				/* the engine times these fades by Visual Sidechain's tempo (120 BPM without one) */
+				setButtonText(pads_[r][i], sceneFadePadText(i, bpm_valid_ && bpm_value_ < 96.0));
 				if (!no_fade.isEmpty()) {
 					why = no_fade; /* a grey pad says why it is grey, not what it would do */
 				}

@@ -2142,6 +2142,32 @@ int main(int argc, char **argv)
 				}
 			}
 			{
+				/* U1-04: the framed pads say what they do: a cut mark, then the fade's length in beats */
+				const QStringList want = {QString(QChar(0x2702)), QStringLiteral("32"),
+							  QStringLiteral("16"),   QStringLiteral("8"),
+							  QStringLiteral("4"),    QStringLiteral("2"),
+							  QStringLiteral("1"),    QString(QChar(0x00BD))};
+				for (int i = 0; i < 8; ++i) {
+					auto *p =
+						sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_%1").arg(i));
+					REQUIRE(p && p->text() == want.at(i));
+					REQUIRE(p->fontMetrics().horizontalAdvance(p->text()) <=
+						30 - 4); /* the pad's least width */
+				}
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_0"))
+						->toolTip()
+						.startsWith(QStringLiteral("Cut Preview on air")));
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_1"))
+						->toolTip()
+						.contains(QStringLiteral("Below 96 BPM, OBS caps this fade at 20 s")));
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_3"))->toolTip() ==
+					QStringLiteral("Fade Preview on air over 8 beats"));
+				/* the other rows carry no text: their row name says what they do */
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_0"))
+						->text()
+						.isEmpty());
+			}
+			{
 				/* the scene buttons mark the two scenes with a dot and a ring, not by colour alone */
 				int dots = 0, rings = 0;
 				for (QPushButton *b : sd->findChildren<QPushButton *>()) {
