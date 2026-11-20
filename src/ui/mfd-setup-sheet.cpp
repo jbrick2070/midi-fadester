@@ -123,7 +123,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	  filter_cat_(mfd_source_filter_catalog_create())
 {
 	setObjectName(QStringLiteral("mfdSetupSheet"));
-	setWindowTitle(mfdText("Setup.WindowTitle", "Midi Fadester \xE2\x80\x94 Set up strip"));
+	setWindowTitle(mfdWindowTitle(mfdText("Setup.WindowTitle", "Set up strip")));
 	resize(640, 560);
 	setStyleSheet(QStringLiteral(
 		"QDialog { background-color: #0b1120; color: #f8fafc; } "
@@ -185,11 +185,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	card_volume_ = create_mode_card_button(
 		page1, QStringLiteral("mfdCardVolume"), MFD_TARGET_AUDIO_VOLUME, mfdText("Setup.Card.Volume", "Volume"),
 		mfdText("Setup.Card.Volume.Description", "Control the volume of one audio source."));
-	card_filter_ = create_mode_card_button(
-		page1, QStringLiteral("mfdCardFilterSetting"), MFD_TARGET_FILTER_PARAM,
-		mfdText("Setup.Card.Filter", "Filter or effect setting"),
-		mfdText("Setup.Card.Filter.Description",
-			"Sweep any numeric filter, shader, or reactivity slider on a layer or scene."));
+	card_filter_ = create_mode_card_button(page1, QStringLiteral("mfdCardFilterSetting"), MFD_TARGET_FILTER_PARAM,
+					       mfdText("Setup.Card.Filter", "Filter or effect setting"),
+					       mfdText("Setup.Card.Filter.Description",
+						       "Move one slider of a filter or effect."));
 	grid->addWidget(card_tbar_, 0, 0);
 	grid->addWidget(card_mix_, 0, 1);
 	grid->addWidget(card_single_, 1, 0);
@@ -204,7 +203,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p1_lay->addLayout(grid, 1);
 
 	auto *not_used_row = new QHBoxLayout();
-	btn_not_used_ = new QPushButton(mfdText("Setup.NotUsed", "Not used (turn off this strip's assignment)"), page1);
+	btn_not_used_ = new QPushButton(mfdText("Setup.NotUsed", "Not used"), page1);
 	btn_not_used_->setObjectName(QStringLiteral("mfdBtnNotUsed"));
 	btn_not_used_->setCursor(Qt::PointingHandCursor);
 	btn_not_used_->setStyleSheet(
@@ -227,6 +226,21 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	connect(card_filter_, &QPushButton::clicked, this,
 		[this]() { select_mode_and_go_step2(MFD_TARGET_FILTER_PARAM); });
 	connect(btn_not_used_, &QPushButton::clicked, this, [this]() {
+		/* the one button of this sheet that acts at once, without Done: when the strip has a job, it asks first
+		 * (U1-18) */
+		if (snap_.slots[slot_index_].target_type != MFD_TARGET_UNASSIGNED) {
+			char strip_title[64] = {0};
+			mfd_ui_strip_title(slot_index_, snap_.slots[slot_index_].label, strip_title,
+					   sizeof(strip_title));
+			if (!mfdConfirm(
+				    this, mfdText("Setup.NotUsed", "Not used"),
+				    mfdFill(mfdText("Setup.NotUsed.Confirm",
+						    "Remove the job of %1? It does nothing until you set it up again."),
+					    {QString::fromUtf8(strip_title)}),
+				    mfdText("Setup.NotUsed.Yes", "Remove"))) {
+				return;
+			}
+		}
 		committed_or_unassigned_ = true;
 		mfd_engine_unassign_slot_preserve_addr(eng_, slot_index_);
 		accept();
@@ -598,9 +612,10 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	p3_lay->setContentsMargins(0, 0, 0, 0);
 	p3_lay->setSpacing(10);
 
-	auto *p3_prompt = new QLabel(mfdText("Setup.Step3.Prompt",
-					     "Move the control. This strip does not change OBS until you click Done."),
-				     page3);
+	auto *p3_prompt =
+		new QLabel(page3); /* its text follows what the strip's control is doing: update_step3_controls */
+	step3_prompt_ = p3_prompt;
+	p3_prompt->setObjectName(QStringLiteral("mfdSetupStep3Prompt"));
 	p3_prompt->setWordWrap(true);
 	p3_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p3_lay->addWidget(p3_prompt);
@@ -828,6 +843,14 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 				return;
 			}
 			stack_->setCurrentIndex(2);
+			/* A strip with no control: Learn starts by itself, once, so "move the control" is true (U1-19). It
+			 * waits for a fader or knob that is being moved, so a stray message is not taken. */
+			if (!auto_learn_tried_ && snap_.setup.candidate_addr.type == MFD_MIDI_NONE &&
+			    !snap_.setup.learning) {
+				auto_learn_tried_ = true;
+				mfd_engine_start_setup_learn_auto(eng_);
+				mfd_engine_get_ui_snapshot(eng_, &snap_);
+			}
 			update_step3_controls();
 			update_footer_buttons();
 		}
@@ -866,6 +889,9 @@ void MfdSetupSheetDialog::closeEvent(QCloseEvent *event)
 
 void MfdSetupSheetDialog::open_for_slot(int slot_index)
 {
+	auto_learn_tried_ = false;
+	was_learning_ = false;
+	got_control_ = false;
 	if (!eng_ || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
 		return;
 	}
@@ -1400,8 +1426,7 @@ void MfdSetupSheetDialog::configure_spinboxes_for_prop(bool preserve_range)
 	mfd_filter_format_display_value_ex(0.0f, pi->current_val, pi->current_val, pmin, pmax, pi->is_int, pi->step,
 					   pi->suffix, false, true, cur_buf, sizeof(cur_buf));
 	lbl_filter_limits_note_->setText(
-		mfdFill(mfdText("Setup.FilterLimits",
-				"Allowed range: %1 to %2  \xC2\xB7  Current OBS value: %3 (inverted ranges supported)"),
+		mfdFill(mfdText("Setup.FilterLimits", "Range: %1 to %2. Now: %3."),
 			{QString::fromUtf8(min_buf), QString::fromUtf8(max_buf), QString::fromUtf8(cur_buf)}));
 
 	updating_widgets_ = prev_upd;
@@ -1664,6 +1689,32 @@ void MfdSetupSheetDialog::update_step3_controls()
 	btn_step3_finish_now_->setEnabled(can_finish_now);
 
 	candidate_addr_label_->setText(format_plain_midi_addr(snap_.setup.candidate_addr));
+	{
+		/* what to do now, in one sentence */
+		const bool has_control = snap_.setup.candidate_addr.type != MFD_MIDI_NONE;
+		if (was_learning_ && !snap_.setup.learning && has_control) {
+			got_control_ = true; /* Learn just caught it: say which */
+		}
+		was_learning_ = snap_.setup.learning;
+		QString prompt;
+		if (snap_.setup.learning) {
+			prompt = mfdText("Setup.Step3.Choose", "Move the fader or knob you want to use.");
+		} else if (!has_control) {
+			prompt = mfdText("Setup.Step3.NoControl",
+					 "No fader or knob yet. Press Learn, then move the one you want.");
+		} else if (got_control_) {
+			prompt = mfdFill(mfdText("Setup.Step3.GotIt",
+						 "Got it: %1. Move it to try it. Nothing changes in OBS "
+						 "until you click Done."),
+					 {format_plain_midi_addr(snap_.setup.candidate_addr)});
+		} else {
+			prompt = mfdText("Setup.Step3.Prompt",
+					 "Move the fader to try it. Nothing changes in OBS until you click Done.");
+		}
+		if (step3_prompt_->text() != prompt) {
+			step3_prompt_->setText(prompt);
+		}
+	}
 	if (snap_.setup.learning) {
 		btn_setup_learn_->setText(mfdText("Setup.LearnListening", "Move control... (Cancel)"));
 		btn_setup_learn_->setStyleSheet(

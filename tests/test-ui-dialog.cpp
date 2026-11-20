@@ -9,11 +9,13 @@
 #include "ui/mfd-settings-dialog.hpp"
 #include "ui/mfd-svg-canvas.hpp"
 #include "obs/mfd-engine.h"
+#include "obs/mfd-blackout.h"
 #include "obs/mfd-vendor-api.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
 #include "core/mfd-text.h"
 #include "ui/mfd-text-qt.hpp"
+#include <plugin-support.h>
 #include <obs-module.h>
 #include <util/text-lookup.h>
 
@@ -59,8 +61,11 @@ static const char *lang_locale_text(const char *key)
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QMetaObject>
 #include <QRegularExpression>
 #include <QWidget>
+#include <QTimer>
 
 #include <algorithm>
 #include <cmath>
@@ -156,6 +161,52 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 	const uint32_t raw_msg = static_cast<uint32_t>(0xB0U | (ch & 0x0FU)) |
 				 (static_cast<uint32_t>(cc & 0x7FU) << 8) | (static_cast<uint32_t>(val & 0x7FU) << 16);
 	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
+}
+
+/* Answers the next confirmation box (the settings dialog's and the Set up sheet's "mfdConfirmBox"): its named button, or
+ * Cancel. Queued, so it runs inside the box's own event loop; what the box said is handed back for the test to read. */
+static QString g_confirm_text;
+static QString g_confirm_title;
+static int g_confirm_seen = 0;
+static void answer_next_confirm(bool yes, int tries_left = 200)
+{
+	QMetaObject::invokeMethod(
+		qApp,
+		[yes, tries_left]() {
+			QMessageBox *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+			if (!box || box->objectName() != QStringLiteral("mfdConfirmBox")) {
+				box = nullptr;
+				for (QWidget *w : QApplication::topLevelWidgets()) {
+					if (w->objectName() == QStringLiteral("mfdConfirmBox") && w->isVisible()) {
+						box = qobject_cast<QMessageBox *>(w);
+					}
+				}
+			}
+			if (!box && tries_left > 0) {
+				/* macOS opens the box as a sheet that becomes visible a little after its event loop starts: look
+				 * again shortly instead of failing on the first pass */
+				QTimer::singleShot(10, qApp,
+						   [yes, tries_left]() { answer_next_confirm(yes, tries_left - 1); });
+				return;
+			}
+			REQUIRE(box != nullptr);
+			++g_confirm_seen;
+			g_confirm_text = box->text();
+		/* QMessageBox ignores a window title on macOS (Apple's rule for alerts), so the test reads the title the
+			 * box was given there and the one it shows elsewhere */
+#ifdef __APPLE__
+			g_confirm_title = box->property("mfdTitle").toString();
+#else
+			g_confirm_title = box->windowTitle();
+#endif
+			auto *btn = box->findChild<QPushButton *>(yes ? QStringLiteral("mfdConfirmYes")
+								      : QStringLiteral("mfdConfirmCancel"));
+			REQUIRE(btn != nullptr);
+			REQUIRE(box->defaultButton() == box->findChild<QPushButton *>(QStringLiteral(
+								"mfdConfirmCancel"))); /* Enter keeps the work */
+			btn->click();
+		},
+		Qt::QueuedConnection);
 }
 
 static void pump_ui()
@@ -1001,26 +1052,50 @@ int main(int argc, char **argv)
 	dlg->show();
 	pump_ui();
 
-	/* --- 1. First-Run Offer: screenshot, [I'll set it up], and [Yes] --- */
+	/* --- 1. First run (U1-02, U1-10): the layout is applied without a question; a notice says what was set up, with OK
+	 * and a small Start empty that asks before it clears all 18 strips; one coloured bar at a time --- */
 	auto *fr_banner = must_find<QWidget>(dlg.get(), QStringLiteral("mfdFirstRunBanner"));
 	auto *fr_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdFirstRunText"));
 	auto *fr_yes = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdFirstRunYesBtn"));
 	auto *fr_custom = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdFirstRunCustomBtn"));
-	REQUIRE(!fr_banner->isHidden());
-	REQUIRE(fr_text->text().contains(QStringLiteral("Start with the usual layout?")));
-
-	/* Optional companion discovery stays separate from MIDI controller selection. */
 	auto *sd_card = must_find<QWidget>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionCard"));
-	auto *sd_title = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionTitle"));
-	auto *sd_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionText"));
-	auto *sd_learn = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckLearn"));
-	auto *sd_dismiss = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckDismiss"));
-	REQUIRE(!sd_card->isHidden());
-	REQUIRE(sd_title->text() == QStringLiteral("Use a Stream Deck?"));
-	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester slots")));
-	REQUIRE(sd_dismiss->text() == QStringLiteral("Hide"));
-	REQUIRE(sd_learn->property("destinationUrl").toString() ==
-		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
+	auto *studio_bar = must_find<QWidget>(dlg.get(), QStringLiteral("mfdStudioNote"));
+	REQUIRE(!fr_banner->isHidden());
+	/* before the engine has applied the layout, Master has no job and the notice does not claim one */
+	REQUIRE(fr_text->text() ==
+		QStringLiteral("Set up for you: the crossfader switches scenes, and faders 1 to 8 follow "
+			       "the scene on air. Click a strip to change it."));
+	REQUIRE(!eng.first_run_layout_applied);
+	mfd_engine_apply_first_run_layout(&eng); /* what the UI thread does once OBS has finished loading */
+	pump_ui();
+	REQUIRE(eng.first_run_layout_applied && !eng.first_run_offer_dismissed);
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	REQUIRE(eng.fader_slots[0].target_type == MFD_TARGET_TBAR);
+	REQUIRE(fr_text->text() ==
+		QStringLiteral(
+			"Set up for you: the crossfader switches scenes, faders 1 to 8 follow the scene on air, and "
+			"Master is the volume of Desktop Audio. Click a strip to change it."));
+	REQUIRE(!fr_text->text().contains(QLatin1Char('?'))); /* a notice, not a question */
+	REQUIRE(fr_yes->text() == QStringLiteral("OK"));
+	REQUIRE(fr_custom->text() == QStringLiteral("Start empty"));
+	REQUIRE(fr_custom->height() < fr_yes->height() || fr_custom->font().pixelSize() < fr_yes->font().pixelSize() ||
+		fr_custom->fontInfo().pixelSize() < fr_yes->fontInfo().pixelSize()); /* the quiet one of the two */
+	/* one bar at a time: the Stream Deck line and the Studio Mode bar wait for the notice to go */
+	REQUIRE(sd_card->isHidden());
+	REQUIRE(studio_bar->isHidden());
+	mfd_engine_set_test_frontend_state(&eng, true, false, "", "Red", true);
+	pump_ui();
+	REQUIRE(!fr_banner->isHidden() && studio_bar->isHidden() && sd_card->isHidden());
+	mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+	pump_ui();
+	/* applying it a second time changes nothing (once per installation) */
+	eng.fader_slots[9].target_type = MFD_TARGET_UNASSIGNED;
+	mfd_engine_apply_first_run_layout(&eng);
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+	eng.first_run_layout_applied = false;
+	mfd_engine_apply_first_run_layout(&eng);
+	pump_ui();
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
 
 	auto *z1_name = must_find<QLabel>(dlg.get(), QStringLiteral("mfdControllerNameLabel"));
 	auto *z1_status = must_find<QLabel>(dlg.get(), QStringLiteral("mfdControllerStatusLabel"));
@@ -1031,18 +1106,27 @@ int main(int argc, char **argv)
 
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("01-first-run-offer.png"));
 
-	sd_dismiss->click();
-	pump_ui();
-	REQUIRE(sd_card->isHidden());
-	REQUIRE(eng.stream_deck_companion_dismissed);
-
-	/* Click [I'll set it up] -> all 10 strips become Not used, APC40 CCs remain bound and live */
+	/* [Start empty] asks first, names 18 strips, and Cancel keeps everything */
+	g_confirm_seen = 0;
+	answer_next_confirm(false);
 	fr_custom->click();
 	pump_ui();
+	REQUIRE(g_confirm_seen == 1);
+	REQUIRE(g_confirm_text.startsWith(QStringLiteral("Clear all 18 strips?")));
+	REQUIRE(g_confirm_title == QStringLiteral("Midi Fadester ") + QString::fromUtf8(PLUGIN_VERSION) +
+					   QString::fromUtf8(" \xE2\x80\x94 Start empty"));
+	REQUIRE(!fr_banner->isHidden());
+	REQUIRE(eng.fader_slots[0].target_type == MFD_TARGET_TBAR);
+	REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	/* ... and confirmed: all 18 strips become Not used, the APC40 CCs remain bound and live */
+	answer_next_confirm(true);
+	fr_custom->click();
+	pump_ui();
+	REQUIRE(g_confirm_seen == 2);
 	REQUIRE(fr_banner->isHidden());
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		auto *assign_lbl = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_%1").arg(i));
-		REQUIRE(assign_lbl->text() == QStringLiteral("Not used. Click to set up."));
+		REQUIRE(assign_lbl->text() == QStringLiteral("Not used"));
 		REQUIRE(eng.fader_slots[i].addr.type == MFD_MIDI_CC);
 	}
 	const int writes_before_unassigned = g_mock_tbar_set_writes + sg.total_opacity_writes + sg.total_volume_writes;
@@ -1054,17 +1138,44 @@ int main(int argc, char **argv)
 	REQUIRE((g_mock_tbar_set_writes + sg.total_opacity_writes + sg.total_volume_writes) ==
 		writes_before_unassigned);
 
-	/* Re-arm First-Run Offer and click [Yes] -> Crossfader = T-bar, Master = Desktop Audio volume */
+	/* With the notice gone, the Stream Deck line shows: one quiet line with a link and a cross. It stays separate from
+	 * MIDI controller selection. */
+	auto *sd_title = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionTitle"));
+	auto *sd_text = must_find<QLabel>(dlg.get(), QStringLiteral("mfdStreamDeckCompanionText"));
+	auto *sd_learn = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckLearn"));
+	auto *sd_dismiss = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckDismiss"));
+	REQUIRE(!sd_card->isHidden());
+	REQUIRE(sd_title->text() == QStringLiteral("Use a Stream Deck?"));
+	REQUIRE(sd_text->text().contains(QStringLiteral("same Midi Fadester strips")));
+	REQUIRE(sd_dismiss->text() == QString(QChar(0x00D7)));
+	REQUIRE(sd_dismiss->accessibleName() == QStringLiteral("Hide"));
+	REQUIRE(!sd_card->styleSheet().contains(QStringLiteral("#172554"))); /* no filled card */
+	REQUIRE(sd_card->height() < fr_yes->sizeHint().height() + 24);
+	REQUIRE(sd_learn->property("destinationUrl").toString() ==
+		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
+	sd_dismiss->click();
+	pump_ui();
+	REQUIRE(sd_card->isHidden());
+	REQUIRE(eng.stream_deck_companion_dismissed);
+
+	/* A new first run: the defaults, the layout applied, and [OK] only takes the notice away: no strip changes */
 	mfd_engine_lock(&eng);
+	mfd_engine_load_apc40_defaults(&eng);
 	eng.first_run_offer_dismissed = false;
+	eng.first_run_layout_applied = false;
 	mfd_engine_mark_ui_dirty(&eng, true);
 	mfd_engine_unlock(&eng);
+	mfd_engine_apply_first_run_layout(&eng);
 	pump_ui();
 	REQUIRE(!fr_banner->isHidden());
+	REQUIRE(fr_text->text().contains(QStringLiteral("Master is the volume of Desktop Audio")));
+	const uint64_t rev9_before_ok = eng.slot_config_rev[9];
 
 	fr_yes->click();
 	pump_ui();
 	REQUIRE(fr_banner->isHidden());
+	REQUIRE(eng.first_run_offer_dismissed);
+	REQUIRE(eng.slot_config_rev[9] == rev9_before_ok);
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_0"))->text() ==
 		QStringLiteral("Switches scenes (T-bar)"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_0"))->text() == QStringLiteral("Ready"));
@@ -1271,7 +1382,7 @@ int main(int argc, char **argv)
 	mfd_engine_reevaluate_slots(&eng, true);
 	pump_ui();
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_1"))->text() ==
-		QStringLiteral("Move the fader down to 12% to pick up."));
+		QStringLiteral("Move the fader down to 12% to start."));
 	REQUIRE(bar1->property("showingPickup").toBool());
 	REQUIRE(bar1->property("arrowGlyph").toString() == QStringLiteral("\u2193"));
 
@@ -1296,7 +1407,7 @@ int main(int argc, char **argv)
 	}
 
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_1"))->text() ==
-		QStringLiteral("Move the fader down to 12% to pick up."));
+		QStringLiteral("Move the fader down to 12% to start."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_4"))->text() ==
 		QStringLiteral("Color 2 is no longer in scene Red."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_5"))->text() ==
@@ -1327,6 +1438,8 @@ int main(int argc, char **argv)
 	pump_ui();
 
 	auto *sheet = must_find<QDialog>(dlg.get(), QStringLiteral("mfdSetupSheet"));
+	REQUIRE(sheet->windowTitle() == QStringLiteral("Midi Fadester ") + QString::fromUtf8(PLUGIN_VERSION) +
+						QString::fromUtf8(" \xE2\x80\x94 Set up strip"));
 	auto *stack = must_find<QStackedWidget>(sheet, QStringLiteral("mfdSetupStack"));
 	REQUIRE(!sheet->isHidden());
 	REQUIRE(stack->currentIndex() == 0);
@@ -1366,7 +1479,7 @@ int main(int argc, char **argv)
 	combo_right->setCurrentIndex(combo_right->findData(QStringLiteral("Color 2")));
 	pump_ui();
 	REQUIRE(same_refusal->isHidden());
-	REQUIRE(live_note->text() == QStringLiteral("You will see this when scene Red is live."));
+	REQUIRE(live_note->text() == QStringLiteral("You will see this when scene Red is on air."));
 	REQUIRE(!shared_note->isHidden());
 	REQUIRE(shared_note->text() == QStringLiteral("Color 2 is also in scene Blue; it will fade there too."));
 	REQUIRE(btn_next->isEnabled());
@@ -1465,8 +1578,26 @@ int main(int argc, char **argv)
 		struct mfd_ui_snapshot svg_snap {};
 		mfd_engine_get_ui_snapshot(&eng, &svg_snap);
 		const QByteArray desk_xml = mfd_make_apc40_desk_svg(svg_snap);
-		REQUIRE(desk_xml.contains("Clip launch pads"));
+		REQUIRE(desk_xml.contains("Pads: see the Fadester Desk dock."));
+		REQUIRE(!desk_xml.contains("for desk orientation")); /* U1-22: the pads do a great deal */
 		REQUIRE(desk_xml.contains("Scene pads"));
+	}
+
+	/* U1-23: every window shows the version; the main dialog's title holds no commit or build time */
+	{
+		const QString version = QString::fromUtf8(PLUGIN_VERSION);
+		REQUIRE(dlg->windowTitle() == QStringLiteral("Midi Fadester ") + version);
+		REQUIRE(svg_dlg->windowTitle() ==
+			QStringLiteral("Midi Fadester ") + version + QString::fromUtf8(" \xE2\x80\x94 Controller"));
+		auto *about = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvAbout"));
+		REQUIRE(about->text().contains(version));
+		REQUIRE(about->text().contains(QString::fromUtf8(PLUGIN_GIT_COMMIT)));
+		/* U1-01: the way to the show screen is on the first tab, beside Show controller, not on Advanced */
+		auto *show_desk = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnShowDesk"));
+		REQUIRE(show_desk->text() == QStringLiteral("Show Fadester Desk"));
+		REQUIRE(show_desk->parentWidget() ==
+			must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnShowController"))->parentWidget());
+		REQUIRE(dlg->findChild<QPushButton *>(QStringLiteral("mfdAdvShowDesk")) == nullptr);
 	}
 
 	capture_and_verify_png(svg_dlg, screenshot_dir, QStringLiteral("08-show-controller-svg.png"));
@@ -2029,8 +2160,37 @@ int main(int argc, char **argv)
 		capture_and_verify_png(desk, screenshot_dir, QStringLiteral("13-desk-dock.png"));
 		/* what it shows: the version, and a live pad on a column with a source (column 1, Show / hide) */
 		auto *desk_title = desk->findChild<QLabel *>(QStringLiteral("mfdDeskTitle"));
-		REQUIRE(desk_title && desk_title->text().startsWith(QStringLiteral("Fadester Desk")) &&
-			desk_title->text().contains(QStringLiteral("APC40 mkII")));
+		/* the dock's own title bar says Fadester Desk; this line starts with what matters and holds the version */
+		REQUIRE(desk_title && desk_title->text().startsWith(QStringLiteral("APC40 mkII connected")) &&
+			desk_title->text().contains(QStringLiteral("Midi Fadester ") +
+						    QString::fromUtf8(PLUGIN_VERSION)));
+		{
+			/* U1-05, U1-12: the dock says what a button does, not what is printed on the APC40; the hardware's
+			 * name is in the tooltip, with a lead-in */
+			QStringList texts;
+			for (QLabel *l : desk->findChildren<QLabel *>()) {
+				texts << l->text();
+			}
+			for (QPushButton *b : desk->findChildren<QPushButton *>()) {
+				texts << b->text();
+			}
+			for (const char *old_word :
+			     {"Clip Stop", "Stop All", "Blend punch", "Lock", "Downbeat", "Scene fade"}) {
+				REQUIRE(!texts.contains(QString::fromUtf8(old_word)));
+			}
+			for (const char *new_word :
+			     {"Reset", "Reset all", "Blend", "Hold BPM", "Beat 1", "Fade out", "Fade"}) {
+				REQUIRE(texts.contains(QString::fromUtf8(new_word)));
+			}
+			REQUIRE(texts.count(QStringLiteral("Fade")) == 1);     /* one Fade: Preview on air */
+			REQUIRE(texts.count(QStringLiteral("Blackout")) == 1); /* one Blackout: Program to black */
+			REQUIRE(desk->findChild<QPushButton *>(QStringLiteral("mfdDeskBlackoutBtn"))
+					->toolTip()
+					.endsWith(QStringLiteral("On the APC40: Session.")));
+			REQUIRE(desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPanicBtn"))
+					->toolTip()
+					.endsWith(QStringLiteral("On the APC40: Record.")));
+		}
 		auto *show_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_0"));
 		REQUIRE(show_pad && show_pad->isEnabled());
 		auto *empty_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_7"));
@@ -2038,6 +2198,299 @@ int main(int argc, char **argv)
 		desk->hide();
 		delete desk;
 		desk = nullptr;
+		/* U1-08: the two emergency states. The Panic bar names the button as it now reads (Restore); the Blackout
+		 * bar is as solid as the Panic bar, and its button says what a press does (End blackout). */
+		{
+			mfd_blackout_init();
+			REQUIRE(!mfd_blackout_is_on());
+			mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, true);
+			mfd_blackout_toggle(300);
+			REQUIRE(mfd_blackout_is_on());
+			QWidget *ed = mfd_desk_dock_create(&eng);
+			ed->resize(560, 520);
+			ed->show();
+			pump_ui();
+			auto *panic_bar = ed->findChild<QLabel *>(QStringLiteral("mfdDeskPanicBar"));
+			auto *panic_btn = ed->findChild<QPushButton *>(QStringLiteral("mfdDeskPanicBtn"));
+			auto *black_bar = ed->findChild<QLabel *>(QStringLiteral("mfdDeskBlackoutBar"));
+			auto *black_btn = ed->findChild<QPushButton *>(QStringLiteral("mfdDeskBlackoutBtn"));
+			REQUIRE(panic_bar && panic_btn && black_bar && black_btn);
+			REQUIRE(panic_bar->isVisible() && black_bar->isVisible());
+			REQUIRE(panic_btn->text() == QStringLiteral("Restore"));
+			REQUIRE(panic_bar->text().contains(QStringLiteral("Press Restore")));
+			REQUIRE(!panic_bar->text().contains(QStringLiteral("Panic again")));
+			REQUIRE(black_btn->text() == QStringLiteral("End blackout"));
+			REQUIRE(black_bar->text().contains(QStringLiteral("Press End blackout")));
+			REQUIRE(black_bar->styleSheet().contains(QStringLiteral("background-color: #b91c1c")));
+			REQUIRE(panic_bar->styleSheet().contains(QStringLiteral("background-color: #b91c1c")));
+			REQUIRE(black_btn->isEnabled()); /* a blackout can always be ended */
+			/* both bars stand above the scene row: seen however short the dock is */
+			auto *first_pad = ed->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_0"));
+			REQUIRE(first_pad &&
+				panic_bar->mapTo(ed, QPoint(0, 0)).y() < first_pad->mapTo(ed, QPoint(0, 0)).y());
+			REQUIRE(black_bar->mapTo(ed, QPoint(0, 0)).y() < first_pad->mapTo(ed, QPoint(0, 0)).y());
+			ed->hide();
+			delete ed;
+			mfd_blackout_toggle(300);
+			mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+			REQUIRE(!mfd_blackout_is_on());
+		}
+		/* U1-06, U1-07: the reason on top, Studio Mode off said in words with its button, Fade keeps its place, and the
+		 * grid goes only for a lasting reason */
+		{
+			char was_preview[MFD_SOURCE_NAME_MAX];
+			char was_program[MFD_SOURCE_NAME_MAX];
+			std::snprintf(was_preview, sizeof(was_preview), "%s", eng.cached_preview_scene);
+			std::snprintf(was_program, sizeof(was_program), "%s", eng.cached_program_scene);
+			const bool was_studio = mfd_engine_is_studio_mode_active(&eng);
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+			const int was_scene_count = eng.cached_scene_count;
+			std::snprintf(eng.cached_scenes[0], sizeof(eng.cached_scenes[0]), "Red");
+			std::snprintf(eng.cached_scenes[1], sizeof(eng.cached_scenes[1]), "Blue");
+			std::snprintf(eng.cached_scenes[2], sizeof(eng.cached_scenes[2]), "Q&A");
+			eng.cached_scene_count = 3;
+			QWidget *sd = mfd_desk_dock_create(&eng);
+			sd->resize(560, 760);
+			sd->show();
+			pump_ui();
+			auto again = [&]() { /* the dock repaints when it is shown */
+					     sd->hide();
+					     sd->show();
+					     pump_ui();
+			};
+			auto *grid = sd->findChild<QWidget *>(QStringLiteral("mfdDeskGrid"));
+			auto *fade = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskFadeBtn"));
+			auto *note = sd->findChild<QLabel *>(QStringLiteral("mfdDeskStudioNote"));
+			auto *studio_btn = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskStudioBtn"));
+			auto *status = sd->findChild<QLabel *>(QStringLiteral("mfdDeskStatus"));
+			auto *turn_on = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskTurnOn"));
+			auto *cut_pad = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_0"));
+			REQUIRE(grid && fade && note && studio_btn && status && turn_on && cut_pad);
+			REQUIRE(grid->isVisible() && fade->isVisible() && fade->isEnabled() && cut_pad->isEnabled());
+			REQUIRE(!note->isVisible() && !studio_btn->isVisible() && !turn_on->isVisible());
+			REQUIRE(status->isVisible() &&
+				status->height() > 0); /* its line is always there: nothing jumps */
+			REQUIRE(status->mapTo(sd, QPoint(0, 0)).y() < cut_pad->mapTo(sd, QPoint(0, 0)).y());
+			/* U1-11: the dock's text is OBS's own size (nothing fixes 10 or 11 px), and no button is lower than
+			 * 28 px */
+			REQUIRE(fade->fontInfo().pixelSize() == sd->fontInfo().pixelSize());
+			REQUIRE(status->fontInfo().pixelSize() == sd->fontInfo().pixelSize());
+			for (QPushButton *b : sd->findChildren<QPushButton *>()) {
+				if (b->isVisible()) {
+					REQUIRE(b->height() >= 28);
+				}
+			}
+			const QPoint fade_at = fade->mapTo(sd, QPoint(0, 0));
+
+			/* U1-03: ON AIR and PREVIEW are two lines, each with its word, and the largest text on the dock */
+			auto *on_air = sd->findChild<QLabel *>(QStringLiteral("mfdDeskOnAir"));
+			auto *preview = sd->findChild<QLabel *>(QStringLiteral("mfdDeskPreview"));
+			REQUIRE(on_air && preview && on_air->isVisible() && preview->isVisible());
+			REQUIRE(on_air->text() == QStringLiteral("ON AIR  Red"));
+			REQUIRE(preview->text() == QStringLiteral("PREVIEW  Blue"));
+			REQUIRE(preview->mapTo(sd, QPoint(0, 0)).y() > on_air->mapTo(sd, QPoint(0, 0)).y());
+			for (QLabel *l : sd->findChildren<QLabel *>()) {
+				if (l != on_air && l != preview && l->isVisible()) {
+					REQUIRE(l->fontInfo().pixelSize() < on_air->fontInfo().pixelSize());
+				}
+			}
+			{
+				/* U1-04: the framed pads say what they do: a cut mark, then the fade's length in beats */
+				const QStringList want = {QString(QChar(0x2702)), QStringLiteral("32"),
+							  QStringLiteral("16"),   QStringLiteral("8"),
+							  QStringLiteral("4"),    QStringLiteral("2"),
+							  QStringLiteral("1"),    QString(QChar(0x00BD))};
+				for (int i = 0; i < 8; ++i) {
+					auto *p =
+						sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_%1").arg(i));
+					REQUIRE(p && p->text() == want.at(i));
+					REQUIRE(p->fontMetrics().horizontalAdvance(p->text()) <=
+						30 - 4); /* the pad's least width */
+				}
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_0"))
+						->toolTip()
+						.startsWith(QStringLiteral("Cut Preview on air")));
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_1"))
+						->toolTip()
+						.contains(QStringLiteral("Below 96 BPM, OBS caps this fade at 20 s")));
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_0_3"))->toolTip() ==
+					QStringLiteral("Fade Preview on air over 8 beats"));
+				/* the other rows carry no text: their row name says what they do */
+				REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_0"))
+						->text()
+						.isEmpty());
+			}
+			{
+				/* the scene buttons mark the two scenes with a dot and a ring, not by colour alone */
+				int dots = 0, rings = 0;
+				for (QPushButton *b : sd->findChildren<QPushButton *>()) {
+					dots += b->text().startsWith(QChar(0x25CF)) ? 1 : 0;
+					rings += b->text().startsWith(QChar(0x25CB)) ? 1 : 0;
+				}
+				REQUIRE(dots == 1 && rings == 1);
+			}
+
+			/* Preview and Program the same scene: the grey pads and the status line say so */
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Red", "Red", true);
+			again();
+			REQUIRE(fade->isVisible() && !fade->isEnabled() && !cut_pad->isEnabled());
+			REQUIRE(cut_pad->toolTip().startsWith(
+				QStringLiteral("Preview and on air are the same scene.")));
+			REQUIRE(status->text().startsWith(QStringLiteral("Preview and on air are the same scene.")));
+
+			/* Studio Mode off */
+			mfd_engine_set_test_frontend_state(&eng, true, false, "", "Red", true);
+			again();
+			REQUIRE(fade->isVisible() && !fade->isEnabled());
+			REQUIRE(fade->mapTo(sd, QPoint(0, 0)).x() == fade_at.x()); /* it does not slide */
+			REQUIRE(fade->toolTip() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(on_air->isVisible() && !preview->isVisible()); /* no Preview without Studio Mode */
+			REQUIRE(cut_pad->toolTip() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(note->isVisible() && note->text() == QStringLiteral("Studio Mode is off."));
+			REQUIRE(studio_btn->isVisible() && studio_btn->text() == QStringLiteral("Turn on Studio Mode"));
+			studio_btn->click();
+			pump_ui();
+			REQUIRE(mfd_engine_is_studio_mode_active(&eng));
+			REQUIRE(!note->isVisible() && !studio_btn->isVisible());
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+
+			/* Learn or Set up running: the pads wait, the grid stays (no flashing, no resize) */
+			eng.learning_slot_index = 0;
+			again();
+			REQUIRE(grid->isVisible() && !cut_pad->isEnabled());
+			REQUIRE(status->text() ==
+				QStringLiteral("The pads wait while MIDI Learn or Set up is running."));
+			eng.learning_slot_index = -1;
+			/* loading: the same */
+			eng.frontend_finished_loading = false;
+			again();
+			REQUIRE(grid->isVisible());
+			eng.frontend_finished_loading = true;
+
+			/* the pads switched off: the grid goes, Fade and Blackout stay, and one click turns them on */
+			eng.vj_disabled = true;
+			again();
+			REQUIRE(!grid->isVisible() && fade->isVisible());
+			REQUIRE(sd->findChild<QPushButton *>(QStringLiteral("mfdDeskBlackoutBtn"))->isVisible());
+			REQUIRE(status->text() == QStringLiteral("The APC40 pads are turned off."));
+			REQUIRE(turn_on->isVisible() && turn_on->text() == QStringLiteral("Turn on"));
+			turn_on->click();
+			pump_ui();
+			REQUIRE(!eng.vj_disabled && grid->isVisible() && !turn_on->isVisible());
+
+			/* U1-09: the guide to the pads is on the dock (its "?" button), not three paragraphs on the Advanced
+			 * tab; it uses the dock's own words and shows the version in its title */
+			{
+				auto *help_btn = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskHelpBtn"));
+				REQUIRE(help_btn && help_btn->isVisible() && help_btn->text() == QStringLiteral("?"));
+				REQUIRE(help_btn->mapTo(sd, QPoint(0, 0)).y() < on_air->mapTo(sd, QPoint(0, 0)).y());
+				help_btn->click();
+				pump_ui();
+				auto *help = sd->window()->findChild<QDialog *>(QStringLiteral("mfdDeskHelpDialog"));
+				REQUIRE(help && help->isVisible());
+				REQUIRE(help->windowTitle() ==
+					QStringLiteral("Midi Fadester ") + QString::fromUtf8(PLUGIN_VERSION) +
+						QString::fromUtf8(" \xE2\x80\x94 What the pads do"));
+				const QString pads_text =
+					help->findChild<QLabel *>(QStringLiteral("mfdDeskHelpPads"))->text();
+				REQUIRE(pads_text.contains(QStringLiteral("Reset (Clip Stop on the APC40)")));
+				REQUIRE(pads_text.contains(QString::fromUtf8("32, 16, 8, 4, 2, 1 or \xC2\xBD beats")));
+				REQUIRE(!pads_text.contains(QStringLiteral("punch")) &&
+					!pads_text.contains(QStringLiteral("bars")));
+				REQUIRE(help->findChild<QLabel *>(QStringLiteral("mfdDeskHelpScenes"))
+						->text()
+						.contains(QStringLiteral("Blackout (Session)")));
+				REQUIRE(help->findChild<QLabel *>(QStringLiteral("mfdDeskHelpSpeed")) != nullptr);
+				help_btn->click(); /* a second click raises the same window */
+				pump_ui();
+				REQUIRE(sd->window()
+						->findChildren<QDialog *>(QStringLiteral("mfdDeskHelpDialog"))
+						.size() == 1);
+				help->close();
+				pump_ui();
+				std::unique_ptr<QDialog> adlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+				REQUIRE(adlg->findChild<QLabel *>(QStringLiteral("mfdAdvVjLegend")) == nullptr);
+				REQUIRE(adlg->findChild<QLabel *>(QStringLiteral("mfdAdvVjScenesLegend")) == nullptr);
+			}
+
+			/* U1-01: a gear on the dock's first line opens the settings (whatever opener is registered) */
+			{
+				static int opened = 0;
+				auto *gear = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskGearBtn"));
+				REQUIRE(gear && gear->isVisible() &&
+					gear->toolTip() == QStringLiteral("Midi Fadester settings"));
+				REQUIRE(!gear->isEnabled()); /* no settings dialog registered yet */
+				mfd_desk_dock_set_settings_opener([]() { ++opened; });
+				again();
+				REQUIRE(gear->isEnabled());
+				gear->click();
+				REQUIRE(opened == 1);
+				mfd_desk_dock_set_settings_opener(nullptr);
+				again();
+			}
+
+			/* U1-14: a fader that waits to pick up shows it on its bar: amber, with the marker where it starts to
+			 * act, and the sentence in its tooltip */
+			{
+				struct mfd_fader_slot &s1 = eng.fader_slots[1];
+				const struct mfd_takeover was_takeover = s1.takeover;
+				auto *f0 = sd->findChild<QWidget *>(QStringLiteral("mfdDeskFader_0"));
+				auto *f1 = sd->findChild<QWidget *>(QStringLiteral("mfdDeskFader_1"));
+				REQUIRE(f0 && f1 && s1.enabled && s1.target_type != MFD_TARGET_UNASSIGNED);
+				s1.takeover.has_last_fader = true;
+				s1.takeover.state = MFD_TAKEOVER_WAITING;
+				s1.takeover.hint = MFD_HINT_MOVE_UP;
+				s1.takeover.polarity_reversed = false;
+				s1.takeover.target_obs = 1.0f;
+				again();
+				REQUIRE(f0->property("showingPickup").toBool());
+				REQUIRE(f0->property("pickupPermille").toInt() == 1000);
+				REQUIRE(f0->toolTip().endsWith(QStringLiteral("Move the fader up to 100% to start.")));
+				s1.takeover.has_last_fader = false; /* its position not seen yet: nothing to say */
+				again();
+				REQUIRE(!f0->property("showingPickup").toBool());
+				s1.takeover = was_takeover;
+				again();
+				REQUIRE(f0->property("showingPickup").toBool() ==
+					(was_takeover.has_last_fader && was_takeover.state == MFD_TAKEOVER_WAITING &&
+					 was_takeover.hint != MFD_HINT_NONE));
+			}
+
+			/* U1-13: the video speed rows show only when switched on, on the Advanced tab */
+			{
+				auto *video = sd->findChild<QWidget *>(QStringLiteral("mfdDeskVideoBox"));
+				std::unique_ptr<QDialog> vdlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+				auto *check = must_find<QCheckBox>(vdlg.get(), QStringLiteral("mfdAdvDeskVideoCheck"));
+				REQUIRE(video);
+				const bool was_video = eng.desk_video_controls;
+				mfd_engine_set_desk_video_controls(&eng, false);
+				again();
+				REQUIRE(!video->isVisible());
+				REQUIRE(sd->findChild<QWidget *>(QStringLiteral("mfdDeskSpeedDial"))->isHidden() ||
+					!sd->findChild<QWidget *>(QStringLiteral("mfdDeskSpeedDial"))->isVisible());
+				check->setChecked(false);
+				check->setChecked(true); /* the user ticks it */
+				REQUIRE(eng.desk_video_controls);
+				again();
+				REQUIRE(video->isVisible());
+				REQUIRE(sd->findChild<QWidget *>(QStringLiteral("mfdDeskSpeedDial"))->isVisible());
+				eng.desk_video_controls = was_video;
+			}
+
+			/* no APC40: the reason and Reconnect on top, the grid gone */
+			eng.midi_dev.is_open = false;
+			again();
+			auto *reconnect = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskReconnect"));
+			REQUIRE(reconnect && reconnect->isVisible() && !grid->isVisible());
+			REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
+			REQUIRE(reconnect->mapTo(sd, QPoint(0, 0)).y() < fade->mapTo(sd, QPoint(0, 0)).y());
+			eng.midi_dev.is_open = true;
+
+			sd->hide();
+			delete sd;
+			eng.cached_scene_count = was_scene_count;
+			mfd_engine_set_test_frontend_state(&eng, true, was_studio, was_preview, was_program, true);
+		}
 		/* every language: no button or row name is cut off at a normal dock size (scene and column names elide on
 		 * purpose); German and Russian are saved for a look */
 		const QDir desk_locale_dir = QFileInfo(QString::fromUtf8(MFD_TEST_LOCALE_FILE)).dir();
@@ -2047,40 +2500,61 @@ int main(int argc, char **argv)
 			g_lang_lookup = text_lookup_create(desk_locale_dir.filePath(file).toUtf8().constData());
 			REQUIRE(g_lang_lookup != nullptr);
 			mfd_text_set_lookup(lang_locale_text);
-			QWidget *ld = mfd_desk_dock_create(&eng);
-			ld->resize(560, 760);
-			ld->show();
-			pump_ui();
-			for (QPushButton *b : ld->findChildren<QPushButton *>()) {
-				if (!b->isVisible() || (b->objectName().isEmpty() && b->text().isEmpty())) {
-					continue;
+			/* four looks: the show; both emergency bars on; the same at the dock's narrowest (its 380 px body, U1-11);
+			 * and at its narrowest with Shift held, when the row names change */
+			for (int look = 0; look < 4; ++look) {
+				const bool emergency = look == 1 || look == 2;
+				eng.vj.shift = look == 3;
+				eng.desk_video_controls = look != 1; /* the video speed rows too, wide and narrow */
+				if (emergency) {
+					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, true);
+					mfd_blackout_toggle(300);
 				}
-				if (b->fontMetrics().horizontalAdvance(b->text()) > b->width() - 4) {
-					desk_cut << QStringLiteral("%1: button \"%2\" (%3 px)")
-							    .arg(file, b->text())
-							    .arg(b->width());
+				QWidget *ld = mfd_desk_dock_create(&eng);
+				ld->resize(look >= 2 ? 380 : 560, 760);
+				ld->show();
+				pump_ui();
+				for (QPushButton *b : ld->findChildren<QPushButton *>()) {
+					if (!b->isVisible() || (b->objectName().isEmpty() && b->text().isEmpty())) {
+						continue;
+					}
+					if (b->fontMetrics().horizontalAdvance(b->text()) > b->width() - 4) {
+						desk_cut << QStringLiteral("%1: button \"%2\" (%3 px)")
+								    .arg(file, b->text())
+								    .arg(b->width());
+					}
 				}
-			}
-			for (QLabel *l : ld->findChildren<QLabel *>()) {
-				if (!l->isVisible() || l->wordWrap() ||
-				    l->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored || l->text().isEmpty()) {
-					continue;
+				for (QLabel *l : ld->findChildren<QLabel *>()) {
+					if (!l->isVisible() || l->wordWrap() ||
+					    l->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored ||
+					    l->text().isEmpty()) {
+						continue;
+					}
+					if (l->fontMetrics().horizontalAdvance(l->text()) > l->width()) {
+						desk_cut << QStringLiteral("%1: label \"%2\" (%3 px)")
+								    .arg(file, l->text())
+								    .arg(l->width());
+					}
 				}
-				if (l->fontMetrics().horizontalAdvance(l->text()) > l->width()) {
-					desk_cut << QStringLiteral("%1: label \"%2\" (%3 px)")
-							    .arg(file, l->text())
-							    .arg(l->width());
-				}
-			}
-			if (file == QStringLiteral("de-DE.ini") || file == QStringLiteral("ru-RU.ini")) {
-				QPixmap pm = ld->grab();
-				REQUIRE(pm.save(QDir(screenshot_dir)
+				if (file == QStringLiteral("de-DE.ini") || file == QStringLiteral("ru-RU.ini")) {
+					QPixmap pm = ld->grab();
+					REQUIRE(pm.save(
+						QDir(screenshot_dir)
 							.filePath(QStringLiteral("desk-") + file.left(5) +
+								  (look == 0 ? QString()
+									     : QStringLiteral("-look%1").arg(look)) +
 								  QStringLiteral(".png")),
 						"PNG"));
+				}
+				ld->hide();
+				delete ld;
+				if (emergency) {
+					mfd_blackout_toggle(300);
+					mfd_engine_vs_result(&eng, true, MFD_VJ_CMD_VS_PANIC, true, false);
+				}
+				eng.vj.shift = false;
+				eng.desk_video_controls = false;
 			}
-			ld->hide();
-			delete ld;
 			mfd_text_set_lookup(test_locale_text);
 			text_lookup_destroy(g_lang_lookup);
 			g_lang_lookup = nullptr;
@@ -2092,6 +2566,149 @@ int main(int argc, char **argv)
 		REQUIRE(!eng.desk_visible);
 		eng.setup_session.active = was_setup;
 		eng.learning_slot_index = was_learning;
+	}
+
+	{
+		/* U1-18: the three actions that clear work ask first, and Cancel (the default) keeps everything */
+		mfd_engine_cancel_setup_session(&eng);
+		std::unique_ptr<QDialog> cdlg(mfd_ui_create_settings_dialog(&eng, nullptr));
+		cdlg->setAttribute(Qt::WA_DontShowOnScreen, true);
+		cdlg->show();
+		pump_ui();
+		int with_job = -1;
+		for (int i = 1; i <= 9 && with_job < 0; ++i) {
+			if (eng.fader_slots[i].enabled && eng.fader_slots[i].target_type != MFD_TARGET_UNASSIGNED) {
+				with_job = i;
+			}
+		}
+		REQUIRE(with_job > 0);
+		const enum mfd_target_type job = eng.fader_slots[with_job].target_type;
+
+		/* Not used, in the Set up sheet: the one button there that acts without Done */
+		must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(with_job))->click();
+		pump_ui();
+		auto *csheet = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+		auto *not_used = must_find<QPushButton>(csheet, QStringLiteral("mfdBtnNotUsed"));
+		REQUIRE(not_used->text() == QStringLiteral("Not used"));
+		g_confirm_seen = 0;
+		answer_next_confirm(false);
+		not_used->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 1);
+		REQUIRE(g_confirm_text.startsWith(QStringLiteral("Remove the job of ")));
+		REQUIRE(g_confirm_title.startsWith(QStringLiteral("Midi Fadester ") +
+						   QString::fromUtf8(PLUGIN_VERSION)));
+		REQUIRE(!csheet->isHidden());
+		REQUIRE(eng.fader_slots[with_job].target_type == job);
+		csheet->reject();
+		pump_ui();
+
+		/* Reset all strips, on the Advanced tab */
+		auto *reset = must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdAdvDefaultsBtn"));
+		answer_next_confirm(false);
+		reset->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 2);
+		REQUIRE(g_confirm_text.startsWith(QStringLiteral("Reset all 18 strips to the ")) ||
+			g_confirm_text.startsWith(QStringLiteral("Clear all 18 strips?")));
+		REQUIRE(g_confirm_text.endsWith(QStringLiteral("The jobs you gave them are removed.")));
+		REQUIRE(eng.fader_slots[with_job].target_type == job); /* Cancel: nothing changed */
+
+		/* ... and confirmed, each does what it did before */
+		must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(with_job))->click();
+		pump_ui();
+		csheet = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+		answer_next_confirm(true);
+		must_find<QPushButton>(csheet, QStringLiteral("mfdBtnNotUsed"))->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 3);
+		REQUIRE(eng.fader_slots[with_job].target_type == MFD_TARGET_UNASSIGNED);
+		/* a strip with no job has nothing to lose: no question */
+		must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(with_job))->click();
+		pump_ui();
+		csheet = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+		must_find<QPushButton>(csheet, QStringLiteral("mfdBtnNotUsed"))->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 3);
+
+		eng.fader_slots[0].target_type = MFD_TARGET_UNASSIGNED; /* the crossfader's job, to see it come back */
+		answer_next_confirm(true);
+		reset->click();
+		pump_ui();
+		REQUIRE(g_confirm_seen == 4);
+
+		/* U1-19: on a strip with no control, step 3 starts Learn by itself and says so; it takes a fader that is
+		 * being moved, never a stray message; the Learn button still takes the first message */
+		{
+			mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
+			const int k = 3;
+			mfd_engine_lock(&eng);
+			eng.fader_slots[k].addr.type = MFD_MIDI_NONE;
+			mfd_engine_mark_ui_dirty(&eng, true);
+			mfd_engine_unlock(&eng);
+			pump_ui();
+			auto to_step3 = [&](int strip) {
+				must_find<QPushButton>(cdlg.get(), QStringLiteral("mfdStripActionBtn_%1").arg(strip))
+					->click();
+				pump_ui();
+				auto *sh = must_find<QDialog>(cdlg.get(), QStringLiteral("mfdSetupSheet"));
+				must_find<QPushButton>(sh, QStringLiteral("mfdCardSwitchScenes"))->click();
+				pump_ui();
+				must_find<QPushButton>(sh, QStringLiteral("mfdSetupNextBtn"))->click();
+				pump_ui();
+				REQUIRE(must_find<QStackedWidget>(sh, QStringLiteral("mfdSetupStack"))->currentIndex() ==
+					2);
+				return sh;
+			};
+			auto step = [&]() {
+				mfd_engine_tick(&eng, 0.016f);
+				pump_ui();
+			};
+			QDialog *sh = to_step3(k);
+			auto *prompt = must_find<QLabel>(sh, QStringLiteral("mfdSetupStep3Prompt"));
+			REQUIRE(eng.setup_session.learning && eng.setup_session.learn_auto);
+			REQUIRE(prompt->text() == QStringLiteral("Move the fader or knob you want to use."));
+			/* a pad pressed */
+			mfd_midi_queue_push(&eng.midi_queue, 0x90U | (53U << 8) | (127U << 16), 0U);
+			step();
+			REQUIRE(eng.setup_session.learning && eng.setup_session.candidate_addr.type == MFD_MIDI_NONE);
+			/* one message from a fader that was only brushed */
+			push_midi_cc(&eng, 2, 7, 40);
+			step();
+			REQUIRE(eng.setup_session.learning && eng.setup_session.candidate_addr.type == MFD_MIDI_NONE);
+			/* another fader, moved: two values, a repeat, then the third value */
+			push_midi_cc(&eng, 5, 7, 10);
+			push_midi_cc(&eng, 5, 7, 12);
+			push_midi_cc(&eng, 5, 7, 12);
+			step();
+			REQUIRE(eng.setup_session.learning);
+			push_midi_cc(&eng, 5, 7, 15);
+			step();
+			REQUIRE(!eng.setup_session.learning && !eng.setup_session.learn_auto);
+			REQUIRE(eng.setup_session.candidate_addr.type == MFD_MIDI_CC);
+			REQUIRE(eng.setup_session.candidate_addr.channel == 5 &&
+				eng.setup_session.candidate_addr.number == 7);
+			REQUIRE(prompt->text().startsWith(QStringLiteral("Got it: Channel 6, CC 7.")));
+			/* the Learn button: the first message, as before */
+			must_find<QPushButton>(sh, QStringLiteral("mfdSetupLearnBtn"))->click();
+			pump_ui();
+			REQUIRE(eng.setup_session.learning && !eng.setup_session.learn_auto);
+			push_midi_cc(&eng, 6, 7, 1);
+			step();
+			REQUIRE(!eng.setup_session.learning && eng.setup_session.candidate_addr.channel == 6);
+			sh->reject();
+			pump_ui();
+			/* a strip that has its control: nothing starts by itself */
+			sh = to_step3(2);
+			REQUIRE(!eng.setup_session.learning);
+			REQUIRE(must_find<QLabel>(sh, QStringLiteral("mfdSetupStep3Prompt"))->text() ==
+				QStringLiteral(
+					"Move the fader to try it. Nothing changes in OBS until you click Done."));
+			sh->reject();
+			pump_ui();
+		}
+		cdlg->close();
+		cdlg.reset();
 	}
 	mfd_engine_destroy_mutex(&eng);
 	mfd_text_set_lookup(nullptr);

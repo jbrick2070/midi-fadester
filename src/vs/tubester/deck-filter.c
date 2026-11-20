@@ -1679,7 +1679,12 @@ static void refresh_speed_fader_status(obs_properties_t *props, obs_data_t *sett
 	if (!status || !settings)
 		return;
 	long long slot = obs_data_get_int(settings, TUB_SETTING_SPEED_FADER);
-	if (slot < 0 || slot >= VS_FADER_SLOT_COUNT) {
+	/* the two fader speeds and Clear mean nothing until a fader is chosen (U1-16) */
+	const bool chosen = slot >= 0 && slot < VS_FADER_SLOT_COUNT;
+	obs_property_set_visible(obs_properties_get(props, TUB_SETTING_SPEED_FADER_MIN), chosen);
+	obs_property_set_visible(obs_properties_get(props, TUB_SETTING_SPEED_FADER_MAX), chosen);
+	obs_property_set_visible(obs_properties_get(props, S_SPEED_FADER_CLEAR), chosen);
+	if (!chosen) {
 		vs_property_info_set_text(status, obs_module_text("Tubester.SpeedFader.StatusFixed"));
 		return;
 	}
@@ -1769,6 +1774,11 @@ static void add_speed_fader_group(obs_properties_t *props, struct tub_deck_filte
 		obs_data_t *settings = obs_source_get_settings(f->context);
 		refresh_speed_fader_status(props, settings);
 		obs_data_release(settings);
+	} else {
+		/* no filter yet (OBS asking for the type's properties): no fader is chosen */
+		obs_property_set_visible(p_min, false);
+		obs_property_set_visible(p_max, false);
+		obs_property_set_visible(obs_properties_get(props, S_SPEED_FADER_CLEAR), false);
 	}
 }
 
@@ -1831,6 +1841,7 @@ static obs_properties_t *deck_get_properties(void *data)
 	obs_property_set_long_description(p_start, obs_module_text("Tubester.StartSeconds.Tooltip"));
 
 	add_speed_fader_group(props, f);
+	vs_properties_add_version(props);
 	return props;
 }
 

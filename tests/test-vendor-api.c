@@ -5113,10 +5113,46 @@ int main(void)
 		push_midi_cc(&eng, 0, 16, 64);
 		mfd_engine_tick(&eng, 0.016f);
 		REQUIRE(eng.midi_parser.cc_has_msb[0][16]);
+		/* QA-08: a file the user picks in Import never brings the first-run layout or the dock's first show with it.
+		 * An old export has neither key: both count as done. */
+		const bool was_layout_applied = eng.first_run_layout_applied;
+		const bool was_dock_shown = eng.desk_dock_shown;
+		eng.first_run_layout_applied = false;
+		eng.desk_dock_shown = false;
 		REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_same_json));
 		remove(tmp_same_json);
 		REQUIRE(eng.midi_dev.is_open && eng.midi_dev.error_kind == MFD_WINMM_OK);
 		REQUIRE(!eng.midi_parser.cc_has_msb[0][16]);
+		REQUIRE(eng.first_run_layout_applied);
+		REQUIRE(eng.desk_dock_shown);
+		{
+			/* An export from a new install that had not seen its APC40 yet says "not yet" twice: the layout is
+			 * still never applied after Import (Master keeps what the file gave it), and a dock this
+			 * installation already showed stays shown. */
+			const char *tmp_fresh_json = "test-mfd-import-fresh-export.json";
+			FILE *fresh_fp = fopen(tmp_fresh_json, "wb");
+			REQUIRE(fresh_fp != NULL);
+			fputs("{\"device_name\":\"Fadester Test Port B\",\"active_profile\":\"apc40mk2\","
+			      "\"first_run_offer_dismissed\":false,\"first_run_layout_applied\":false,"
+			      "\"desk_dock_shown\":false}\n",
+			      fresh_fp);
+			fclose(fresh_fp);
+			REQUIRE(mfd_engine_import_config_file_and_reopen(&eng, tmp_fresh_json));
+			REQUIRE(eng.first_run_layout_applied);
+			REQUIRE(eng.desk_dock_shown);
+			const enum mfd_target_type master_job = eng.fader_slots[9].target_type;
+			const uint64_t master_rev = eng.slot_config_rev[9];
+			mfd_engine_apply_first_run_layout(&eng);
+			REQUIRE(eng.fader_slots[9].target_type == master_job);
+			REQUIRE(eng.slot_config_rev[9] == master_rev);
+			/* the same file read as the plugin's own settings (OBS starting) keeps what it says */
+			REQUIRE(mfd_engine_import_config_file(&eng, tmp_fresh_json));
+			REQUIRE(!eng.first_run_layout_applied);
+			REQUIRE(!eng.desk_dock_shown);
+			remove(tmp_fresh_json);
+		}
+		eng.first_run_layout_applied = was_layout_applied;
+		eng.desk_dock_shown = was_dock_shown;
 
 		snprintf(eng.configured_device_name, sizeof(eng.configured_device_name), "%s", saved_dev);
 		mfd_winmm_init(&eng.midi_dev, &eng.midi_queue);
@@ -6002,6 +6038,96 @@ int main(void)
 		REQUIRE(snap->slots[fi].target_type == MFD_TARGET_UNASSIGNED);
 	}
 
+	/* U1-02: the layout without a question. The first time the APC40 is seen, Master becomes Desktop Audio volume and
+	 * nothing else changes; once only; a Master that already has a job is left alone; OK changes no strip. */
+	{
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_offer_dismissed = false;
+		eng.first_run_layout_applied = false;
+		const uint64_t rev1 = eng.slot_config_rev[1];
+		mfd_engine_apply_first_run_layout(&eng);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(snap->first_run_offer_pending); /* the notice stays until OK */
+		REQUIRE(eng.first_run_layout_applied);
+		REQUIRE(snap->slots[0].target_type == MFD_TARGET_TBAR);
+		REQUIRE(snap->slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+		REQUIRE(strcmp(snap->slots[9].source_a_name, "desktop audio") == 0);
+		REQUIRE(eng.slot_config_rev[1] == rev1); /* the eight faders are not touched */
+		/* once: a Master the user cleared afterwards stays cleared */
+		mfd_engine_reset_slot_mode_state(&eng, &eng.fader_slots[9], MFD_TARGET_UNASSIGNED);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		/* a Master with a job of its own is never taken over */
+		eng.first_run_layout_applied = false;
+		mfd_engine_reset_slot_mode_state(&eng, &eng.fader_slots[9], MFD_TARGET_TBAR);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_TBAR);
+		REQUIRE(eng.first_run_layout_applied);
+		/* not before OBS has finished loading, not without the APC40, not once the notice is dismissed */
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_layout_applied = false;
+		mfd_engine_set_test_frontend_state(&eng, false, true, "alpha Scene", "Blue", true);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(!eng.first_run_layout_applied);
+		mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", false);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(!eng.first_run_layout_applied);
+		mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", true);
+		eng.first_run_offer_dismissed = true;
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(!eng.first_run_layout_applied && eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		/* OK: the notice goes, no strip changes */
+		eng.first_run_offer_dismissed = false;
+		mfd_engine_apply_first_run_layout(&eng);
+		const uint64_t rev9 = eng.slot_config_rev[9];
+		mfd_engine_acknowledge_first_run(&eng);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(!snap->first_run_offer_pending);
+		REQUIRE(eng.slot_config_rev[9] == rev9);
+		REQUIRE(snap->slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+	}
+
+	/* QA-01: an updating user who never answered the old question. Their settings file has the offer still open
+	 * and no first_run_layout_applied key: the layout is not applied to them, Master keeps no job, and the notice
+	 * (still pending) does not claim one. */
+	{
+		const char *tmp_old_json = "test_upgrade_090_unanswered_global.json";
+		FILE *fp = fopen(tmp_old_json, "wb");
+		REQUIRE(fp != NULL);
+		fputs("{\"device_name\":\"APC40 mkII\",\"active_profile\":\"apc40mk2\",\"smooth_tau_ms\":16.0,"
+		      "\"first_run_offer_dismissed\":false}\n",
+		      fp);
+		fclose(fp);
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_offer_dismissed = true;
+		eng.first_run_layout_applied = false;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_old_json));
+		os_unlink(tmp_old_json);
+		REQUIRE(!eng.first_run_offer_dismissed);
+		REQUIRE(eng.first_run_layout_applied);
+		mfd_engine_set_test_frontend_state(&eng, true, true, "alpha Scene", "Blue", true);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		const uint64_t rev9_old = eng.slot_config_rev[9];
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_UNASSIGNED);
+		REQUIRE(eng.slot_config_rev[9] == rev9_old);
+		mfd_engine_get_ui_snapshot(&eng, snap);
+		REQUIRE(snap->first_run_offer_pending);
+		/* a file that says the layout was not applied yet (written by a new install before its first APC40)
+		 * keeps saying so */
+		const char *tmp_new_json = "test_new_install_global.json";
+		eng.first_run_layout_applied = false;
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_new_json));
+		eng.first_run_layout_applied = true;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_new_json));
+		os_unlink(tmp_new_json);
+		REQUIRE(!eng.first_run_layout_applied);
+		mfd_engine_apply_first_run_layout(&eng);
+		REQUIRE(eng.fader_slots[9].target_type == MFD_TARGET_AUDIO_VOLUME);
+		mfd_engine_load_apc40_defaults(&eng);
+		eng.first_run_offer_dismissed = false;
+	}
+
 	/* [I'll set it up]: all 10 APC40 addresses stay bound & live, all 10 modes = MFD_TARGET_UNASSIGNED */
 	eng.first_run_offer_dismissed = false;
 	mfd_engine_decline_first_run_usual_layout(&eng);
@@ -6028,6 +6154,14 @@ int main(void)
 		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v013_json));
 		REQUIRE(eng.first_run_offer_dismissed);
 		REQUIRE(!eng.stream_deck_companion_dismissed);
+		/* U1-13: settings from before the dock's video switch keep the video speed rows (nothing disappears on an
+		 * update); a new install, which has no settings file, starts without them */
+		REQUIRE(eng.desk_video_controls);
+		REQUIRE(mfd_engine_desk_video_controls(&eng));
+		/* U1-01: settings from before the dock showed itself count as shown: an update never pops the dock open */
+		REQUIRE(eng.desk_dock_shown);
+		REQUIRE(!mfd_engine_desk_first_show_due(&eng));
+		REQUIRE(eng.first_run_layout_applied); /* QA-01: not a first run */
 		mfd_engine_get_ui_snapshot(&eng, snap);
 		REQUIRE(!snap->first_run_offer_pending);
 		os_unlink(tmp_v013_json);
@@ -6043,7 +6177,63 @@ int main(void)
 		REQUIRE(eng.slot_config_rev[0] > rev0_pre_imp);
 		REQUIRE(!eng.first_run_offer_dismissed);
 		mfd_engine_cancel_setup_session(&eng);
+		/* the switch is saved and read back, off as well as on */
+		mfd_engine_set_desk_video_controls(&eng, false);
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+		eng.desk_video_controls = true;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+		REQUIRE(!eng.desk_video_controls);
+		mfd_engine_set_desk_video_controls(&eng, true);
+		REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+		eng.desk_video_controls = false;
+		REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+		REQUIRE(eng.desk_video_controls);
+		eng.desk_video_controls = false;
 		os_unlink(tmp_v020_json);
+		{
+			struct mfd_engine fresh;
+			memset(&fresh, 0, sizeof(fresh));
+			REQUIRE(!mfd_engine_desk_video_controls(&fresh)); /* a new install: hidden */
+		}
+		{
+			/* a new install (no settings file): the dock shows itself once, the first time an APC40 mkII is
+			 * open after OBS has finished loading, and never again; the flag is saved and read back */
+			const bool was_loaded = eng.frontend_finished_loading;
+			const bool was_open = eng.midi_dev.is_open;
+			char was_name[sizeof(eng.midi_dev.opened_name)];
+			snprintf(was_name, sizeof(was_name), "%s", eng.midi_dev.opened_name);
+			eng.desk_dock_shown = false;
+			eng.frontend_finished_loading = false;
+			eng.midi_dev.is_open = true;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "APC40 mkII");
+			REQUIRE(!mfd_engine_desk_first_show_due(
+				&eng)); /* OBS still loading: its dock layout is not back */
+			eng.frontend_finished_loading = true;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "nanoKONTROL2");
+			REQUIRE(!mfd_engine_desk_first_show_due(
+				&eng)); /* another controller: the dock is the APC40's */
+			eng.midi_dev.is_open = false;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "APC40 mkII");
+			REQUIRE(!mfd_engine_desk_first_show_due(&eng)); /* no APC40 open */
+			REQUIRE(!eng.desk_dock_shown);
+			eng.midi_dev.is_open = true;
+			/* due stays due until the dock really showed: a dock that could not be shown yet gets its turn
+			 * later (QA-03) */
+			REQUIRE(mfd_engine_desk_first_show_due(&eng));
+			REQUIRE(!eng.desk_dock_shown);
+			REQUIRE(mfd_engine_desk_first_show_due(&eng));
+			mfd_engine_desk_first_show_done(&eng);
+			REQUIRE(eng.desk_dock_shown);
+			REQUIRE(!mfd_engine_desk_first_show_due(&eng)); /* once */
+			REQUIRE(mfd_engine_export_config_file(&eng, tmp_v020_json));
+			eng.desk_dock_shown = false;
+			REQUIRE(mfd_engine_import_config_file(&eng, tmp_v020_json));
+			REQUIRE(eng.desk_dock_shown);
+			os_unlink(tmp_v020_json);
+			eng.frontend_finished_loading = was_loaded;
+			eng.midi_dev.is_open = was_open;
+			snprintf(eng.midi_dev.opened_name, sizeof(eng.midi_dev.opened_name), "%s", was_name);
+		}
 	}
 
 	/* 16f: Bounded 4-mode candidate-validator equivalence matrix (MIDI-FADESTER-UI.md Property Test)

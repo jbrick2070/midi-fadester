@@ -116,9 +116,8 @@ static void say_controller_problem(enum controller_problem problem, const char *
 		}
 		break;
 	case CONTROLLER_NONE_FOUND:
-		say(s, n,
-		    mfd_text("Controller.NoneFound", "No MIDI controller found. Plug one in, then press Reconnect."),
-		    NULL, NULL, NULL, NULL);
+		say(s, n, mfd_text("Controller.NoneFound", "No MIDI controller found. Plug one in."), NULL, NULL, NULL,
+		    NULL);
 		break;
 	case CONTROLLER_OPEN_FAILED:
 	default:
@@ -316,7 +315,7 @@ static void format_assignment(const struct mfd_ui_strip_input *in, struct mfd_ui
 	const char *fp = has_text(in->filter_prop_label) ? in->filter_prop_label : in->filter_prop;
 
 	if (!in->enabled || in->target_type == MFD_TARGET_UNASSIGNED) {
-		say(as, as_size, mfd_text("Assign.NotUsed", "Not used. Click to set up."), NULL, NULL, NULL, NULL);
+		say(as, as_size, mfd_text("Assign.NotUsed", "Not used"), NULL, NULL, NULL, NULL);
 		say(sl, sl_size, mfd_text("Svg.NotUsed", "Not used"), NULL, NULL, NULL, NULL);
 		return;
 	}
@@ -364,7 +363,12 @@ static void format_assignment(const struct mfd_ui_strip_input *in, struct mfd_ui
 		}
 		break;
 	case MFD_TARGET_SINGLE_LAYER:
-		if (has_text(sa)) {
+		if (has_text(sa) && in->auto_follow) {
+			/* the card rewrites itself when the scene changes: it says why, before that happens */
+			say(as, as_size, mfd_text("Assign.Follows", "Follows the scene on air: %1"), sa, NULL, NULL,
+			    NULL);
+			say(sl, sl_size, mfd_text("Svg.Layer", "Layer: %1"), sa, NULL, NULL, NULL);
+		} else if (has_text(sa)) {
 			if (has_text(sc)) {
 				say(as, as_size, mfd_text("Assign.LayerInScene", "Shows or hides %1 in %2"), sa, sc,
 				    NULL, NULL);
@@ -414,7 +418,7 @@ static void format_assignment(const struct mfd_ui_strip_input *in, struct mfd_ui
 		}
 		break;
 	default:
-		say(as, as_size, mfd_text("Assign.NotUsed", "Not used. Click to set up."), NULL, NULL, NULL, NULL);
+		say(as, as_size, mfd_text("Assign.NotUsed", "Not used"), NULL, NULL, NULL, NULL);
 		say(sl, sl_size, mfd_text("Svg.NotUsed", "Not used"), NULL, NULL, NULL, NULL);
 		break;
 	}
@@ -428,14 +432,14 @@ static void format_pickup_sentence(const struct mfd_ui_strip_input *in, bool phy
 	const bool is_knob = (in->slot_index >= 10 && in->slot_index < 18);
 	const char *text;
 	if (is_knob) {
-		text = phys_move_up ? mfd_text("Pickup.KnobRight", "Turn the knob right to %1% to pick up.")
-				    : mfd_text("Pickup.KnobLeft", "Turn the knob left to %1% to pick up.");
+		text = phys_move_up ? mfd_text("Pickup.KnobRight", "Turn the knob right to %1% to start.")
+				    : mfd_text("Pickup.KnobLeft", "Turn the knob left to %1% to start.");
 	} else if (in->is_horizontal) {
-		text = phys_move_up ? mfd_text("Pickup.CrossfaderRight", "Move the crossfader right to %1% to pick up.")
-				    : mfd_text("Pickup.CrossfaderLeft", "Move the crossfader left to %1% to pick up.");
+		text = phys_move_up ? mfd_text("Pickup.CrossfaderRight", "Move the crossfader right to %1% to start.")
+				    : mfd_text("Pickup.CrossfaderLeft", "Move the crossfader left to %1% to start.");
 	} else {
-		text = phys_move_up ? mfd_text("Pickup.FaderUp", "Move the fader up to %1% to pick up.")
-				    : mfd_text("Pickup.FaderDown", "Move the fader down to %1% to pick up.");
+		text = phys_move_up ? mfd_text("Pickup.FaderUp", "Move the fader up to %1% to start.")
+				    : mfd_text("Pickup.FaderDown", "Move the fader down to %1% to start.");
 	}
 	say(out, out_size, text, pct, NULL, NULL, NULL);
 }
@@ -488,16 +492,16 @@ void mfd_ui_format_strip_presentation(const struct mfd_ui_strip_input *in, struc
 		} else if (has_text(in->reason)) {
 			snprintf(out->status_sentence, sizeof(out->status_sentence), "%s", in->reason);
 		} else {
-			say(out->status_sentence, sizeof(out->status_sentence),
-			    mfd_text("Assign.NotUsed", "Not used. Click to set up."), NULL, NULL, NULL, NULL);
+			say(out->status_sentence, sizeof(out->status_sentence), mfd_text("Assign.NotUsed", "Not used"),
+			    NULL, NULL, NULL, NULL);
 		}
 		out->severity = MFD_UI_SEVERITY_RED;
 		return;
 	}
 	if (in->addr_type == MFD_MIDI_NONE && !is_fx_bank) {
 		say(out->status_sentence, sizeof(out->status_sentence),
-		    mfd_text("Strip.NoMidiControl", "No MIDI control assigned. Click Set up. In step 3, press Learn."),
-		    NULL, NULL, NULL, NULL);
+		    mfd_text("Strip.NoMidiControl", "No fader assigned. Click Set up and move the fader."), NULL, NULL,
+		    NULL, NULL);
 		out->severity = MFD_UI_SEVERITY_RED;
 		return;
 	}
@@ -665,7 +669,7 @@ void mfd_ui_format_live_scene_note(const char *scene_name, char *out, size_t out
 		out[0] = '\0';
 		return;
 	}
-	say(out, out_size, mfd_text("Note.LiveScene", "You will see this when scene %1 is live."), scene_name, NULL,
+	say(out, out_size, mfd_text("Note.LiveScene", "You will see this when scene %1 is on air."), scene_name, NULL,
 	    NULL, NULL);
 }
 

@@ -218,6 +218,12 @@ struct mfd_setup_session {
 	struct mfd_control_calibration candidate_cal;
 	bool candidate_invert; /* single authoritative Reverse direction owner during Set up */
 	bool learning;
+	/* Learn that step 3 started by itself (the strip had no control): it takes a fader or knob that is being moved,
+	 * never a single stray message or a pad (setup_auto_learn_take_locked) */
+	bool learn_auto;
+	struct mfd_midi_addr auto_addr; /* the control seen moving */
+	int auto_moves;                 /* its messages in a row, each with a new value */
+	int auto_last_raw;
 	float candidate_raw_norm; /* 0..1 calibrated meter for Step 3 */
 	bool has_candidate_input;
 };
@@ -484,6 +490,9 @@ struct mfd_engine {
 	bool tbar_bidirectional_flip;
 
 	bool first_run_offer_dismissed;
+	/* The usual layout's one change beyond the defaults (Master = Desktop Audio volume) was made, once, the first
+	 * time an APC40 mkII was seen (mfd_engine_apply_first_run_layout). */
+	bool first_run_layout_applied;
 	bool stream_deck_companion_dismissed;
 	bool frontend_finished_loading;
 	bool apc40_controller_detected;
@@ -529,6 +538,14 @@ struct mfd_engine {
 
 	/* APC40 mkII VJ buttons (core/vj-pads.h): blend punch and pick, flash, fades, Clean FX. On unless turned off. */
 	bool vj_disabled;
+	/* The Fadester Desk dock shows its video speed rows (VJster through Fadester Companion). Off on a new install:
+	 * they do nothing for most people. A settings file written before this key keeps them on, so nothing disappears
+	 * from a dock that is in use when the plugin is updated. */
+	bool desk_video_controls;
+	/* The Fadester Desk dock has shown itself once (the first time an APC40 mkII was open). A settings file from
+	 * before this key counts as shown: an update must not pop a dock open in front of a user who chose to keep it
+	 * closed. */
+	bool desk_dock_shown;
 	int vj_fade_ms; /* 0 = the default, 1000 ms */
 	struct mfd_vj_pads vj;
 	float vj_fade_restore[MFD_VJ_STRIPS];  /* the level a Clip Stop faded out from */
@@ -699,6 +716,9 @@ struct mfd_desk_strip {
 	char source[MFD_SOURCE_NAME_MAX]; /* the strip's layer, "" when it has none */
 	char label[MFD_SOURCE_NAME_MAX];  /* what its fader drives when it is not a layer (audio, a filter), else "" */
 	float level;                      /* the fader's value, 0..1 */
+	bool pickup;                      /* the fader waits: it must travel to pickup_target before it acts */
+	bool pickup_up;                   /* ... by moving up (else down) */
+	float pickup_target;              /* where the physical fader picks up, 0..1 */
 	bool has_layer;                   /* a Layer Opacity or Two-Source Mix layer the pads act on */
 	bool single_layer;                /* a Layer Opacity strip: flash, blackout, fade and snap work */
 	bool source_missing;              /* a Layer Opacity strip whose source is not available now */
@@ -731,7 +751,8 @@ struct mfd_desk_view {
 	bool vs_panic;
 	bool vs_panic_known;
 	bool vs_last_failed;
-	bool blackout; /* Program black or fading to or from black */
+	bool blackout;       /* Program black or fading to or from black */
+	bool video_controls; /* show the video speed rows (the Advanced tab's switch) */
 };
 
 /* A snapshot for the dock, copied under the engine lock (no OBS calls). The LEDs are worked out with Shift held when
@@ -799,6 +820,10 @@ void mfd_engine_request_studio_mode(struct mfd_engine *eng, bool enabled);
 
 void mfd_engine_begin_setup_session(struct mfd_engine *eng, int slot_index);
 void mfd_engine_start_setup_learn(struct mfd_engine *eng);
+/* Learn started by the sheet itself when step 3 opens on a strip with no control (U1-19). It listens until one fader or
+ * knob (a CC or pitch bend) has sent three messages in a row with a changing value: a control being moved. A pad, or one
+ * message from a control that was only touched, is not taken. The Learn button still takes the first message. */
+void mfd_engine_start_setup_learn_auto(struct mfd_engine *eng);
 void mfd_engine_cancel_setup_learn(struct mfd_engine *eng);
 void mfd_engine_set_setup_invert(struct mfd_engine *eng, bool invert);
 void mfd_engine_cancel_setup_session(struct mfd_engine *eng);
@@ -814,6 +839,13 @@ bool mfd_engine_commit_setup_session(struct mfd_engine *eng, const struct mfd_se
 bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					 struct mfd_msg *out_msg);
 
+/* UI thread. The usual layout without a question (U1-02): the first time an APC40 mkII is seen on its own layout after
+ * OBS has finished loading, Master becomes the volume of OBS's Desktop Audio when OBS has that source and Master has no
+ * job yet. Nothing else changes: the crossfader and the eight faders are already set (the defaults and the fill from
+ * the scene on air). Once per installation; the settings dialog then shows a notice of what was set up. */
+void mfd_engine_apply_first_run_layout(struct mfd_engine *eng);
+/* The notice's OK: it is not shown again. No strip changes. */
+void mfd_engine_acknowledge_first_run(struct mfd_engine *eng);
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng);
 void mfd_engine_set_stream_deck_companion_dismissed(struct mfd_engine *eng, bool dismissed);
@@ -856,6 +888,14 @@ void mfd_engine_set_tbar_bidirectional_flip(struct mfd_engine *eng, bool flip);
 /* APC40 mkII VJ buttons: on/off and the Clip Stop fade time (50..20000 ms). Persisted with the global settings. */
 void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms);
 bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng);
+/* The dock's video speed rows, shown or hidden. Persisted with the global settings. */
+void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown);
+/* UI thread. The dock's first show, once in an installation's life. _due: OBS has finished loading (so its dock layout
+ * is restored), an APC40 mkII is open, and the dock has never shown itself. _done: the caller showed it; only then is
+ * the flag set and saved, so a dock that could not be shown yet (not registered, no dock frame) gets its turn later. */
+bool mfd_engine_desk_first_show_due(struct mfd_engine *eng);
+void mfd_engine_desk_first_show_done(struct mfd_engine *eng);
+bool mfd_engine_desk_video_controls(const struct mfd_engine *eng);
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng);
 
 void mfd_engine_start_learn(struct mfd_engine *eng, int slot_index);

@@ -1048,12 +1048,42 @@ static void populate_target_setting_list(struct vs_modulator_filter *f, obs_prop
 	obs_source_release(target);
 }
 
-static void set_slot_inner_controls_visible(obs_properties_t *props, uint32_t slot_idx, bool enabled, bool is_custom_hz)
+/* "More settings" (U1-16): a slot opens on what most people need: the filter and the setting to move, the signal it
+ * follows, the amount, the range, and Flash Guard, the photosensitivity guard, which is never hidden. The Depth Fader,
+ * Invert and the update rate wait behind the switch, each shown anyway while it is in use, so nothing that acts is out
+ * of sight. */
+#define S_MOD_SHOW_MORE "mod_show_more"
+
+static void set_slot_inner_controls_visible(obs_properties_t *props, obs_data_t *settings, uint32_t slot_idx,
+					    bool enabled, bool is_custom_hz)
 {
 	static const char *const k_always_when_enabled[] = {
-		"target_filter", "target_setting", "signal",      "amount_pct",   "depth_fader",    "min_value",
-		"max_value",     "invert",         "flash_guard", "rate_divider", "binding_status", "depth_reset",
+		"target_filter", "target_setting", "signal",      "amount_pct",
+		"min_value",     "max_value",      "flash_guard", "binding_status",
 	};
+	const bool more = settings && obs_data_get_bool(settings, S_MOD_SHOW_MORE);
+	{
+		char k[64];
+		slot_key(k, sizeof(k), slot_idx, "depth_fader");
+		const bool depth_used = settings && obs_data_get_int(settings, k) >= 0;
+		obs_property_t *p = obs_properties_get(props, k);
+		if (p)
+			obs_property_set_visible(p, enabled && (more || depth_used));
+		slot_key(k, sizeof(k), slot_idx, "depth_reset");
+		p = obs_properties_get(props, k);
+		if (p)
+			obs_property_set_visible(p, enabled && (more || depth_used));
+		slot_key(k, sizeof(k), slot_idx, "invert");
+		const bool inverted = settings && obs_data_get_bool(settings, k);
+		p = obs_properties_get(props, k);
+		if (p)
+			obs_property_set_visible(p, enabled && (more || inverted));
+		slot_key(k, sizeof(k), slot_idx, "rate_divider");
+		const bool slowed = settings && obs_data_get_int(settings, k) > 1;
+		p = obs_properties_get(props, k);
+		if (p)
+			obs_property_set_visible(p, enabled && (more || slowed));
+	}
 	char key[64];
 	for (size_t k = 0; k < sizeof(k_always_when_enabled) / sizeof(k_always_when_enabled[0]); k++) {
 		slot_key(key, sizeof(key), slot_idx, k_always_when_enabled[k]);
@@ -1157,7 +1187,7 @@ static void refresh_modulator_properties_visibility(struct vs_modulator_filter *
 		const int sig = (int)obs_data_get_int(settings, key);
 		const bool is_custom = (sig == (int)VS_SIG_CUSTOM_HZ);
 
-		set_slot_inner_controls_visible(props, i, enabled, is_custom);
+		set_slot_inner_controls_visible(props, settings, i, enabled, is_custom);
 
 		char tf_key[64], ts_key[64], df_key[64];
 		slot_key(tf_key, sizeof(tf_key), i, "target_filter");
@@ -1359,6 +1389,9 @@ static obs_properties_t *modulator_get_properties(void *data)
 	vs_properties_add_panic_status(props, vs_fader_bridge_is_panic_active());
 	vs_audio_tap_add_status_property_for_source(props, f ? f->context : NULL);
 	vs_properties_add_info(props, "vs_modulator_ownership", obs_module_text("Modulator.Binding.Ownership"));
+	obs_property_t *p_more =
+		obs_properties_add_bool(props, S_MOD_SHOW_MORE, obs_module_text("VisualSidechain.More"));
+	obs_property_set_modified_callback2(p_more, slot_modified_cb, f);
 
 	/* Probe Midi Fadester once for the entire Properties build instead of 8x across slots */
 	vs_fader_bridge_poll_once();
@@ -1492,6 +1525,7 @@ static obs_properties_t *modulator_get_properties(void *data)
 		obs_data_release(cur_settings);
 	}
 
+	vs_properties_add_version(props);
 	return props;
 }
 

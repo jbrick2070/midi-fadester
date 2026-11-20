@@ -202,6 +202,7 @@ static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_s
 	in.enabled = s.enabled;
 	in.addr_type = s.addr.type;
 	in.target_type = s.target_type;
+	in.auto_follow = s.auto_follow;
 	in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
 	in.source_a_name = s.source_a_name;
 	in.source_b_name = s.source_b_name;
@@ -398,9 +399,9 @@ public:
 		  adv_catalog_(mfd_ui_catalog_create())
 	{
 		setObjectName(QStringLiteral("mfdSettingsDialog"));
-		setWindowTitle(mfdFill(mfdText("Dialog.WindowTitle", "Midi Fadester %1 (commit %2, built %3)"),
-				       {QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
-					QString::fromUtf8(PLUGIN_BUILT_AT)}));
+		/* the version only: the commit and the build time are on the Advanced tab's last line (mfdAdvAbout) */
+		setWindowTitle(mfdFill(mfdText("Dialog.WindowTitle", "Midi Fadester %1"),
+				       {QString::fromUtf8(PLUGIN_VERSION)}));
 		/* 1380 x 660 where it fits; on a 1080p laptop at 150 % (1280 x 720 points) or smaller the dialog is cut to
 		 * the screen, and the strips scroll sideways (F-12). */
 		QScreen *scr = parent ? parent->screen() : QGuiApplication::primaryScreen();
@@ -433,26 +434,27 @@ public:
 		auto *fr_lay = new QHBoxLayout(first_run_banner_);
 		fr_lay->setContentsMargins(12, 8, 12, 8);
 		fr_lay->setSpacing(10);
-		auto *fr_lbl = new QLabel(
-			mfdText("Dialog.FirstRun.Text",
-				"Start with the usual layout? Crossfader switches scenes, Master is Desktop Audio volume. "
-				"Change anything by clicking a strip."),
-			first_run_banner_);
+		/* a notice, not a question: the layout is already applied (mfd_engine_apply_first_run_layout); the text is
+		 * set in refresh_from_engine, from what Master really got */
+		auto *fr_lbl = new QLabel(first_run_banner_);
+		first_run_text_ = fr_lbl;
 		fr_lbl->setObjectName(QStringLiteral("mfdFirstRunText"));
 		fr_lbl->setWordWrap(true);
 		fr_lbl->setStyleSheet(
 			QStringLiteral("color: #e0f2fe; font-weight: bold; background: transparent; border: none;"));
-		auto *btn_fr_yes = new QPushButton(mfdText("Dialog.FirstRun.Yes", "Yes"), first_run_banner_);
+		auto *btn_fr_yes = new QPushButton(mfdText("Dialog.FirstRun.Yes", "OK"), first_run_banner_);
 		btn_fr_yes->setObjectName(QStringLiteral("mfdFirstRunYesBtn"));
 		btn_fr_yes->setCursor(Qt::PointingHandCursor);
 		btn_fr_yes->setStyleSheet(QStringLiteral(
 			"QPushButton { background-color: #0284c7; color: #ffffff; font-weight: bold; padding: 6px 18px; border-radius: 5px; border: 1px solid #38bdf8; }"));
 		auto *btn_fr_custom =
-			new QPushButton(mfdText("Dialog.FirstRun.Custom", "I'll set it up"), first_run_banner_);
+			new QPushButton(mfdText("Dialog.FirstRun.Custom", "Start empty"), first_run_banner_);
 		btn_fr_custom->setObjectName(QStringLiteral("mfdFirstRunCustomBtn"));
 		btn_fr_custom->setCursor(Qt::PointingHandCursor);
+		/* small and quiet: it clears every strip, and asks first */
 		btn_fr_custom->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: #1e293b; color: #e2e8f0; font-weight: bold; padding: 6px 14px; border-radius: 5px; border: 1px solid #475569; }"));
+			"QPushButton { background-color: transparent; color: #93c5fd; font-size: 11px; padding: 4px 8px; border-radius: 5px; border: 1px solid #1e3a5f; } "
+			"QPushButton:hover { color: #e0f2fe; border-color: #38bdf8; }"));
 		fr_lay->addWidget(fr_lbl, 1);
 		fr_lay->addWidget(btn_fr_yes);
 		fr_lay->addWidget(btn_fr_custom);
@@ -460,10 +462,18 @@ public:
 		root->addWidget(first_run_banner_);
 
 		connect(btn_fr_yes, &QPushButton::clicked, this, [this]() {
-			mfd_engine_accept_first_run_usual_layout(eng_);
+			mfd_engine_acknowledge_first_run(eng_); /* no strip changes: only the notice goes */
 			refresh_from_engine();
 		});
 		connect(btn_fr_custom, &QPushButton::clicked, this, [this]() {
+			if (!confirm(mfdText("Dialog.FirstRun.Custom", "Start empty"),
+				     mfdText("Dialog.FirstRun.ConfirmText",
+					     "Clear all 18 strips? The crossfader, the faders, Master and the FX knobs "
+					     "lose their jobs, and the faders no longer fill themselves from the scene on "
+					     "air."),
+				     mfdText("Dialog.FirstRun.Custom", "Start empty"))) {
+				return;
+			}
 			mfd_engine_decline_first_run_usual_layout(eng_);
 			refresh_from_engine();
 		});
@@ -534,30 +544,31 @@ public:
 		stream_deck_companion_card_ = new QFrame(this);
 		stream_deck_companion_card_->setObjectName(QStringLiteral("mfdStreamDeckCompanionCard"));
 		stream_deck_companion_card_->setStyleSheet(QStringLiteral(
-			"QFrame#mfdStreamDeckCompanionCard { background-color: #172554; border: 1px solid #6366f1; "
-			"border-radius: 6px; }"));
+			"QFrame#mfdStreamDeckCompanionCard { background-color: transparent; border: none; }"));
+		/* one quiet line with a link and a cross: another product's notice must not be as loud as this one's own
+		 * (U1-10) */
 		auto *sd_lay = new QHBoxLayout(stream_deck_companion_card_);
-		sd_lay->setContentsMargins(12, 8, 12, 8);
-		sd_lay->setSpacing(10);
+		sd_lay->setContentsMargins(4, 0, 4, 0);
+		sd_lay->setSpacing(8);
 		auto *sd_copy = new QWidget(stream_deck_companion_card_);
-		auto *sd_copy_lay = new QVBoxLayout(sd_copy);
+		auto *sd_copy_lay = new QHBoxLayout(sd_copy);
 		sd_copy_lay->setContentsMargins(0, 0, 0, 0);
-		sd_copy_lay->setSpacing(2);
+		sd_copy_lay->setSpacing(8);
 		auto *sd_title = new QLabel(mfdText("Dialog.StreamDeck.Title", "Use a Stream Deck?"), sd_copy);
 		sd_title->setObjectName(QStringLiteral("mfdStreamDeckCompanionTitle"));
-		sd_title->setStyleSheet(
-			QStringLiteral("color: #eef2ff; font-weight: bold; background: transparent; border: none;"));
+		sd_title->setStyleSheet(QStringLiteral(
+			"color: #cbd5e1; font-weight: bold; background: transparent; border: none; font-size: 12px;"));
 		auto *sd_text =
 			new QLabel(mfdText("Dialog.StreamDeck.Text",
 					   "Fadester for OBS adds touch controls, live meters, crossfader control, and "
-					   "auto-fades to the same Midi Fadester slots."),
+					   "auto-fades to the same Midi Fadester strips."),
 				   sd_copy);
 		sd_text->setObjectName(QStringLiteral("mfdStreamDeckCompanionText"));
 		sd_text->setWordWrap(true);
 		sd_text->setStyleSheet(
-			QStringLiteral("color: #c7d2fe; background: transparent; border: none; font-size: 12px;"));
+			QStringLiteral("color: #94a3b8; background: transparent; border: none; font-size: 12px;"));
 		sd_copy_lay->addWidget(sd_title);
-		sd_copy_lay->addWidget(sd_text);
+		sd_copy_lay->addWidget(sd_text, 1);
 		sd_lay->addWidget(sd_copy, 1);
 
 		auto *btn_sd_learn = new QPushButton(mfdText("Dialog.StreamDeck.Learn", "Learn about Fadester for OBS"),
@@ -566,19 +577,20 @@ public:
 		btn_sd_learn->setProperty("destinationUrl", stream_deck_companion_url());
 		btn_sd_learn->setCursor(Qt::PointingHandCursor);
 		btn_sd_learn->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: #4f46e5; color: #ffffff; font-weight: bold; border: 1px solid #818cf8; "
-			"border-radius: 5px; padding: 5px 12px; } QPushButton:hover { background-color: #6366f1; }"));
+			"QPushButton { background-color: transparent; color: #93c5fd; border: none; text-decoration: underline; "
+			"font-size: 12px; padding: 2px 4px; } QPushButton:hover { color: #e0f2fe; }"));
 		sd_lay->addWidget(btn_sd_learn);
 
 		auto *btn_sd_dismiss =
-			new QPushButton(mfdText("Dialog.StreamDeck.Hide", "Hide"), stream_deck_companion_card_);
+			new QPushButton(QString::fromUtf8("\xC3\x97"), stream_deck_companion_card_); /* a cross */
 		btn_sd_dismiss->setObjectName(QStringLiteral("mfdBtnStreamDeckDismiss"));
+		btn_sd_dismiss->setAccessibleName(mfdText("Dialog.StreamDeck.Hide", "Hide"));
 		btn_sd_dismiss->setToolTip(mfdText("Dialog.StreamDeck.HideTip",
 						   "Hide this card. The Fadester for OBS link stays available below."));
 		btn_sd_dismiss->setCursor(Qt::PointingHandCursor);
 		btn_sd_dismiss->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: transparent; color: #c7d2fe; border: 1px solid #6366f1; "
-			"border-radius: 5px; padding: 5px 10px; } QPushButton:hover { color: #ffffff; border-color: #a5b4fc; }"));
+			"QPushButton { background-color: transparent; color: #94a3b8; border: none; font-size: 14px; "
+			"padding: 0px 6px; } QPushButton:hover { color: #ffffff; }"));
 		sd_lay->addWidget(btn_sd_dismiss);
 		stream_deck_companion_card_->hide();
 		root->addWidget(stream_deck_companion_card_);
@@ -663,9 +675,28 @@ public:
 		}
 
 		/* Top banners */
+		/* One bar at a time (U1-10): the first-run notice, else the no-layout notice, else Studio Mode, else the
+		 * Stream Deck line. Three at once were a question, a warning and an advert before any content. */
 		first_run_banner_->setVisible(snap_.first_run_offer_pending);
+		if (snap_.first_run_offer_pending) {
+			const struct mfd_fader_slot &master = snap_.slots[9];
+			const bool has_master = master.enabled && master.target_type == MFD_TARGET_AUDIO_VOLUME &&
+						master.source_a_name[0] != '\0';
+			const QString text =
+				has_master
+					? mfdFill(mfdText("Dialog.FirstRun.Text",
+							  "Set up for you: the crossfader switches scenes, faders 1 to "
+							  "8 follow the scene on air, and Master is the volume of %1. "
+							  "Click a strip to change it."),
+						  {QString::fromUtf8(master.source_a_name)})
+					: mfdText("Dialog.FirstRun.TextNoMaster",
+						  "Set up for you: the crossfader switches scenes, and faders 1 to 8 "
+						  "follow the scene on air. Click a strip to change it.");
+			if (first_run_text_->text() != text) {
+				first_run_text_->setText(text);
+			}
+		}
 		refresh_no_layout_banner();
-		stream_deck_companion_card_->setVisible(!snap_.stream_deck_companion_dismissed);
 
 		size_t active_tbar_slots = 0U;
 		bool can_finish_any_tbar = false;
@@ -678,8 +709,12 @@ public:
 				}
 			}
 		}
-		studio_note_widget_->setVisible(
-			mfd_should_show_studio_mode_note(snap_.studio_mode_active, active_tbar_slots));
+		const bool notice_showing = snap_.first_run_offer_pending || !no_layout_banner_->isHidden();
+		const bool studio_note = !notice_showing &&
+					 mfd_should_show_studio_mode_note(snap_.studio_mode_active, active_tbar_slots);
+		studio_note_widget_->setVisible(studio_note);
+		stream_deck_companion_card_->setVisible(!snap_.stream_deck_companion_dismissed && !notice_showing &&
+							!studio_note);
 
 		refresh_strips_tab();
 		refresh_advanced_tab(can_finish_any_tbar);
@@ -763,7 +798,7 @@ private:
 		z1_name_label_->setStyleSheet(QStringLiteral("color: #f8fafc; font-size: 13px; font-weight: bold;"));
 		z1_lay->addWidget(z1_name_label_);
 
-		z1_dot_label_ = new QLabel(QStringLiteral("\xE2\x97\x8F"), zone1);
+		z1_dot_label_ = new QLabel(QString::fromUtf8("\xE2\x97\x8F"), zone1);
 		z1_dot_label_->setObjectName(QStringLiteral("mfdControllerDot"));
 		z1_lay->addWidget(z1_dot_label_);
 
@@ -825,6 +860,16 @@ private:
 		z1_btn_show_ctrl_->setCursor(Qt::PointingHandCursor);
 		z1_btn_show_ctrl_->setStyleSheet(z1_btn_style);
 		z1_lay->addWidget(z1_btn_show_ctrl_);
+
+		/* the show screen, one click from the first tab (it was a button on the Advanced tab, U1-01) */
+		auto *z1_btn_show_desk = new QPushButton(mfdText("Dialog.ShowDesk", "Show Fadester Desk"), zone1);
+		z1_btn_show_desk->setObjectName(QStringLiteral("mfdBtnShowDesk"));
+		z1_btn_show_desk->setToolTip(
+			mfdText("Dialog.ShowDesk.Tip", "The APC40 on screen, for the show. Also in OBS's Docks menu."));
+		z1_btn_show_desk->setCursor(Qt::PointingHandCursor);
+		z1_btn_show_desk->setStyleSheet(z1_btn_style);
+		z1_lay->addWidget(z1_btn_show_desk);
+		connect(z1_btn_show_desk, &QPushButton::clicked, this, []() { mfd_desk_dock_show(); });
 
 		lay->addWidget(zone1);
 
@@ -1156,7 +1201,7 @@ private:
 		root->addLayout(telemetry_bar);
 
 		auto *applies_note = new QLabel(mfdText("Dialog.Advanced.AppliesAtOnce",
-							"Changes on this page take effect at once and are saved."),
+							"Changes on this page apply at once and are saved."),
 						adv_tab);
 		applies_note->setObjectName(QStringLiteral("mfdAdvAppliesAtOnce"));
 		applies_note->setWordWrap(true);
@@ -1165,13 +1210,12 @@ private:
 
 		/* APC40 mkII VJ pads (core/vj-pads.h): on/off, the fade time and what each pad row does. */
 		auto *vj_bar = new QHBoxLayout();
-		vj_check_ = new QCheckBox(mfdText("Dialog.VjPads", "APC40 mkII pads: blend modes, flash and fades"),
-					  adv_tab);
+		vj_check_ = new QCheckBox(mfdText("Dialog.VjPads", "Use the APC40 pads"), adv_tab);
 		vj_check_->setObjectName(QStringLiteral("mfdAdvVjCheck"));
 		vj_check_->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		vj_bar->addWidget(vj_check_);
 		vj_bar->addSpacing(12);
-		auto *lbl_vj_fade = new QLabel(mfdText("Dialog.VjFadeTime", "Pad fade time:"), adv_tab);
+		auto *lbl_vj_fade = new QLabel(mfdText("Dialog.VjFadeTime", "Source fade time:"), adv_tab);
 		lbl_vj_fade->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		vj_bar->addWidget(lbl_vj_fade);
 		vj_fade_spin_ = new QSpinBox(adv_tab);
@@ -1182,45 +1226,16 @@ private:
 		vj_bar->addWidget(vj_fade_spin_);
 		vj_bar->addStretch(1);
 		root->addLayout(vj_bar);
-		auto *vj_legend = new QLabel(
-			mfdText("Dialog.VjPadsLegend",
-				"Columns 1–8 are the sources of the scene on air, bottom layer first: empty faders fill "
-				"themselves and follow the scene; a fader you set yourself stays. Bottom pad row: blend punch "
-				"(Shift + pad: next punch mode). Row 2: flash while held (Shift: blackout). Row 3: fade out and "
-				"back (Shift: snap). Row 4: show or hide the source (Shift: wake it). Row 5: pad 1 (yellow) cuts "
-				"Preview to Program; pads 2–8 fade it in time with the beat, from 8 bars down to 1/2 beat. Clip "
-				"Stop: that "
-				"column back to its own blend (Shift: pin the column to its source). Stop All "
-				"Clips: Clean, every effect off and every source back to its own blend (Shift: fade every layer "
-				"out)."),
+		/* the dock's video speed rows act only with Fadester Companion and VJster running: off unless asked for */
+		desk_video_check_ = new QCheckBox(
+			mfdText("Dialog.DeskVideo",
+				"Show video speed controls on the dock (needs Fadester Companion and VJster)"),
 			adv_tab);
-		vj_legend->setObjectName(QStringLiteral("mfdAdvVjLegend"));
-		vj_legend->setWordWrap(true);
-		vj_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		root->addWidget(vj_legend);
-		auto *vj_speed_legend = new QLabel(
-			mfdText("Dialog.VjSpeedLegend",
-				"Video speed (with Fadester Companion and VJster running): the Tempo knob makes the video 0.05x "
-				"faster or slower per click (Shift + Tempo: 0.25x), Nudge − / + 0.25x slower or faster, Tap Tempo "
-				"back to 1x, Play plays or pauses it. It goes through VJster because an OBS media source restarts "
-				"when its speed changes."),
-			adv_tab);
-		vj_speed_legend->setObjectName(QStringLiteral("mfdAdvVjSpeedLegend"));
-		vj_speed_legend->setWordWrap(true);
-		vj_speed_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		root->addWidget(vj_speed_legend);
-		auto *vj_scene_legend = new QLabel(
-			mfdText("Dialog.VjScenesLegend",
-				"Scene Launch 1–5: the first five scenes in the Scenes list. Press once for Preview, again to "
-				"fade it to Program; Shift + button sends it straight to Program. Program red, Preview green. "
-				"Session: Program fades to black, and back on the next press. Cue Level: transition "
-				"length (Shift: pad fade time). Record: Visual Sidechain panic or restore. Metronome: its tap "
-				"tempo (Shift: lock the BPM). Shift + Tap Tempo: back to its downbeat."),
-			adv_tab);
-		vj_scene_legend->setObjectName(QStringLiteral("mfdAdvVjScenesLegend"));
-		vj_scene_legend->setWordWrap(true);
-		vj_scene_legend->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-		root->addWidget(vj_scene_legend);
+		desk_video_check_->setObjectName(QStringLiteral("mfdAdvDeskVideoCheck"));
+		desk_video_check_->setStyleSheet(QStringLiteral("color: #e2e8f0;"));
+		root->addWidget(desk_video_check_);
+		/* what each pad row does is one click away on the dock itself (its "?" button, U1-09): three paragraphs here left the
+		 * strip table three rows */
 		auto *vj_fill_bar = new QHBoxLayout();
 		auto *btn_vj_fill =
 			new QPushButton(mfdText("Dialog.VjFill", "Fill empty faders from the scene on air"), adv_tab);
@@ -1233,15 +1248,6 @@ private:
 		vj_fill_bar->addWidget(vj_fill_result_, 1);
 		root->addLayout(vj_fill_bar);
 		connect(btn_vj_fill, &QPushButton::clicked, this, [this]() { fill_faders_from_scene(); });
-		/* 0.8.0: the dock that mirrors the desk, one click away (it starts hidden in OBS's Docks menu) */
-		auto *btn_show_desk = new QPushButton(
-			mfdText("Dialog.ShowDesk",
-				"Show the Fadester Desk dock (the APC40 on screen; also in the Docks menu)"),
-			adv_tab);
-		btn_show_desk->setObjectName(QStringLiteral("mfdAdvShowDesk"));
-		root->addWidget(btn_show_desk);
-		connect(btn_show_desk, &QPushButton::clicked, this, []() { mfd_desk_dock_show(); });
-
 		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 				if (snap_.slots[i].enabled && snap_.slots[i].target_type == MFD_TARGET_TBAR &&
@@ -1324,6 +1330,17 @@ private:
 		footer->addWidget(btn_close);
 		root->addLayout(footer);
 
+		/* for support: which build this is (the title bar shows the version only) */
+		auto *about =
+			new QLabel(mfdFill(mfdText("Dialog.About", "Midi Fadester %1 (commit %2, built %3)"),
+					   {QString::fromUtf8(PLUGIN_VERSION), QString::fromUtf8(PLUGIN_GIT_COMMIT),
+					    QString::fromUtf8(PLUGIN_BUILT_AT)}),
+				   adv_tab);
+		about->setObjectName(QStringLiteral("mfdAdvAbout"));
+		about->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		about->setStyleSheet(QStringLiteral("QLabel#mfdAdvAbout { color: #64748b; font-size: 11px; }"));
+		root->addWidget(about);
+
 		connect(btn_import, &QPushButton::clicked, this, [this]() {
 			const QString path = QFileDialog::getOpenFileName(
 				this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"), QString(),
@@ -1331,20 +1348,7 @@ private:
 			if (path.isEmpty()) {
 				return;
 			}
-			if (mfd_engine_import_config_file_and_reopen(eng_, path.toUtf8().constData())) {
-				mfd_engine_save_global_config(eng_);
-				mfd_engine_notify_state_changed(eng_);
-				populate_device_combos();
-				last_adv_topology_rev_ = ~0ULL;
-				refresh_from_engine();
-			} else {
-				QMessageBox::warning(
-					this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
-					mfdFill(mfdText("Dialog.Import.Failed",
-							"Could not read %1. It is not a Midi Fadester settings "
-							"file, or it is damaged. Nothing was changed."),
-						{QDir::toNativeSeparators(path)}));
-			}
+			import_config(path);
 		});
 
 		connect(btn_export, &QPushButton::clicked, this, [this]() {
@@ -1388,6 +1392,21 @@ private:
 			const auto chosen_prof = profile_combo_ ? static_cast<enum mfd_controller_profile>(
 									  profile_combo_->currentData().toInt())
 								: snap_.active_profile;
+			/* one click here removes every job on every strip, in the middle of a show if the dialog is open:
+			 * it asks first (U1-18) */
+			const struct mfd_controller_profile_def *chosen_def = mfd_profile_get_def(chosen_prof);
+			const bool generic = !chosen_def || chosen_def->id == MFD_PROFILE_GENERIC;
+			if (!confirm(btn_defaults_->text(),
+				     generic ? mfdText("Dialog.Clear.Confirm",
+						       "Clear all 18 strips? The jobs you gave them are removed.")
+					     : mfdFill(mfdText("Dialog.Reset.Confirm",
+							       "Reset all 18 strips to the %1 layout? The jobs you gave "
+							       "them are removed."),
+						       {QString::fromUtf8(mfd_profile_ui_short_name(chosen_def))}),
+				     generic ? mfdText("Dialog.Clear.Yes", "Clear")
+					     : mfdText("Dialog.Reset.Yes", "Reset"))) {
+				return;
+			}
 			mfd_engine_select_profile(eng_, chosen_prof, true);
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
@@ -1407,6 +1426,13 @@ private:
 			}
 		});
 
+		connect(desk_video_check_, &QCheckBox::toggled, this, [this](bool checked) {
+			if (!rebuilding_adv_table_) {
+				mfd_engine_set_desk_video_controls(eng_, checked);
+				mfd_engine_save_global_config(eng_);
+				mfd_desk_dock_refresh();
+			}
+		});
 		connect(vj_check_, &QCheckBox::toggled, this, [this](bool checked) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_vj_buttons(eng_, checked, vj_fade_spin_->value());
@@ -1487,8 +1513,7 @@ private:
 			}
 			cb->blockSignals(true);
 			cb->clear();
-			cb->addItem(mfdText("Dialog.Device.AutoDetect", "(Auto-Detect Known Controller / First Port)"),
-				    QStringLiteral(""));
+			cb->addItem(mfdText("Dialog.Device.AutoDetect", "Automatic"), QStringLiteral(""));
 			int select_idx = 0;
 			for (size_t i = 0U; i < count; ++i) {
 				const QString name = QString::fromUtf8(devs[i].name);
@@ -1550,6 +1575,38 @@ private:
 		controller_view_dlg_->refresh_from_snapshot(snap_);
 		controller_view_dlg_->show();
 		controller_view_dlg_->raise();
+	}
+
+	/* Import replaces every strip's job and control: it asks first (U1-18). Public to the test through the button's
+	 * path only; the file dialog is the one part a test cannot drive. */
+	void import_config(const QString &path)
+	{
+		if (!confirm(mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
+			     mfdFill(mfdText("Dialog.Import.Confirm",
+					     "Replace the whole set-up with %1? Every strip's job and control is replaced. "
+					     "Export first to keep the current one."),
+				     {QDir::toNativeSeparators(path)}),
+			     mfdText("Dialog.Import.Yes", "Import"))) {
+			return;
+		}
+		if (mfd_engine_import_config_file_and_reopen(eng_, path.toUtf8().constData())) {
+			mfd_engine_save_global_config(eng_);
+			mfd_engine_notify_state_changed(eng_);
+			populate_device_combos();
+			last_adv_topology_rev_ = ~0ULL;
+			refresh_from_engine();
+		} else {
+			QMessageBox::warning(this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
+					     mfdFill(mfdText("Dialog.Import.Failed",
+							     "Could not read %1. It is not a Midi Fadester settings "
+							     "file, or it is damaged. Nothing was changed."),
+						     {QDir::toNativeSeparators(path)}));
+		}
+	}
+
+	bool confirm(const QString &window, const QString &question, const QString &do_it)
+	{
+		return mfdConfirm(this, window, question, do_it);
 	}
 
 	/* Shown while the open desk's name matches no ready layout and a layout for another desk is in use (the
@@ -1660,7 +1717,7 @@ private:
 			if (btn_clean_all_fx_->styleSheet() != clean_style) {
 				btn_clean_all_fx_->setStyleSheet(clean_style);
 			}
-			btn_clean_all_fx_->setEnabled(eligible_fx >= 0);
+			btn_clean_all_fx_->setEnabled(eligible_fx > 0); /* nothing to clean: it says so by being grey */
 		}
 
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -1985,6 +2042,11 @@ private:
 			vj_check_->blockSignals(true);
 			vj_check_->setChecked(mfd_engine_vj_buttons_enabled(eng_));
 			vj_check_->blockSignals(false);
+			if (desk_video_check_) {
+				desk_video_check_->blockSignals(true);
+				desk_video_check_->setChecked(mfd_engine_desk_video_controls(eng_));
+				desk_video_check_->blockSignals(false);
+			}
 			if (!vj_fade_spin_->hasFocus()) {
 				vj_fade_spin_->blockSignals(true);
 				vj_fade_spin_->setValue(mfd_engine_vj_fade_ms(eng_));
@@ -2044,7 +2106,7 @@ private:
 			auto *btn_learn = new QPushButton(QString::fromUtf8(mfd_learn_button_text(false)), bind_widget);
 			btn_learn->setObjectName(QStringLiteral("mfdAdvLearn_%1").arg(row));
 			btn_learn->setMinimumWidth(106);
-			auto *btn_clear = new QPushButton(QStringLiteral("\xC3\x97"), bind_widget);
+			auto *btn_clear = new QPushButton(QString::fromUtf8("\xC3\x97"), bind_widget);
 			btn_clear->setObjectName(QStringLiteral("mfdAdvClear_%1").arg(row));
 			btn_clear->setFixedWidth(26);
 			btn_clear->setToolTip(
@@ -2455,10 +2517,10 @@ private:
 		if (snap_.studio_mode_active) {
 			const QString prev_nm = (snap_.preview_scene_name[0] != '\0')
 							? QString::fromUtf8(snap_.preview_scene_name)
-							: QStringLiteral("\xE2\x80\x94");
+							: QString::fromUtf8("\xE2\x80\x94");
 			const QString prog_nm = (snap_.program_scene_name[0] != '\0')
 							? QString::fromUtf8(snap_.program_scene_name)
-							: QStringLiteral("\xE2\x80\x94");
+							: QString::fromUtf8("\xE2\x80\x94");
 			set_label_text_and_style(
 				studio_status_label_,
 				mfdFill(mfdText("Dialog.StudioModeOn",
@@ -2600,6 +2662,7 @@ private:
 	QString adv_edit_error_;
 
 	QWidget *first_run_banner_ = nullptr;
+	QLabel *first_run_text_ = nullptr;
 	QWidget *no_layout_banner_ = nullptr;
 	QLabel *no_layout_text_ = nullptr;
 	QString no_layout_dismissed_for_;
@@ -2652,6 +2715,7 @@ private:
 	QDoubleSpinBox *tau_spin_ = nullptr;
 	QCheckBox *flip_check_ = nullptr;
 	QCheckBox *vj_check_ = nullptr;
+	QCheckBox *desk_video_check_ = nullptr;
 	QSpinBox *vj_fade_spin_ = nullptr;
 	QLabel *vj_fill_result_ = nullptr;
 
@@ -2714,10 +2778,22 @@ static std::atomic<bool> g_ui_refresh_queued{false};
 static MfdUiDispatcher *g_ui_dispatcher = nullptr;
 static QPointer<MfdSettingsDialog> g_dialog;
 
+/* The Fadester Desk dock shows itself once, the first time an APC40 mkII is open: after OBS has finished loading (its
+ * dock layout is restored by then), on the UI thread. An installation that already has settings never gets it. */
+static void show_desk_the_first_time()
+{
+	/* the usual layout too, without a question (U1-02): the settings dialog then says what was set up */
+	mfd_engine_apply_first_run_layout(mfd_engine_get());
+	if (mfd_engine_desk_first_show_due(mfd_engine_get()) && mfd_desk_dock_show()) {
+		mfd_engine_desk_first_show_done(mfd_engine_get()); /* only once it really showed */
+	}
+}
+
 void MfdUiDispatcher::on_drain()
 {
 	g_ui_refresh_queued.store(false);
 	mfd_engine_flush_pending_ui_work(mfd_engine_get());
+	show_desk_the_first_time();
 	if (g_dialog) {
 		g_dialog->refresh_from_engine();
 	}
@@ -2755,6 +2831,7 @@ static void on_midi_ports_changed()
 		g_dialog->on_hardware_ports_changed();
 		g_dialog->refresh_from_engine();
 	}
+	show_desk_the_first_time(); /* an APC40 plugged in after OBS started */
 	mfd_desk_dock_refresh();
 }
 
@@ -2786,9 +2863,21 @@ static void queue_midi_ports_changed()
 }
 #endif
 
+static void open_settings_from_dock()
+{
+	mfd_ui_show_settings();
+}
+
 static void on_tools_menu_clicked(void *unused)
 {
 	UNUSED_PARAMETER(unused);
+	mfd_ui_show_settings();
+}
+
+} // namespace
+
+void mfd_ui_show_settings(void)
+{
 	QWidget *main_win = static_cast<QWidget *>(obs_frontend_get_main_window());
 	if (!g_dialog) {
 		g_dialog = new MfdSettingsDialog(mfd_engine_get(), main_win);
@@ -2800,8 +2889,6 @@ static void on_tools_menu_clicked(void *unused)
 	g_dialog->raise();
 	g_dialog->activateWindow();
 }
-
-} // namespace
 
 QDialog *mfd_ui_create_settings_dialog(struct mfd_engine *eng, QWidget *parent)
 {
@@ -2821,6 +2908,7 @@ void mfd_ui_init(void)
 
 	obs_frontend_add_tools_menu_item(obs_module_text("ToolsMenuTitle"), on_tools_menu_clicked, nullptr);
 	mfd_desk_dock_init(); /* before OBS restores the dock layout */
+	mfd_desk_dock_set_settings_opener(open_settings_from_dock);
 
 	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
 #ifdef _WIN32
@@ -2837,6 +2925,7 @@ void mfd_ui_init(void)
 
 void mfd_ui_shutdown(void)
 {
+	mfd_desk_dock_set_settings_opener(nullptr);
 	mfd_desk_dock_shutdown();
 	mfd_engine_set_ui_notify_fn(mfd_engine_get(), nullptr, nullptr);
 

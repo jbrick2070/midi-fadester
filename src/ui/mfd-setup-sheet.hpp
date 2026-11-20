@@ -56,6 +56,10 @@ private:
 	struct mfd_ui_snapshot snap_ {};
 	uint64_t last_topology_rev_ = 0ULL;
 	int slot_index_ = 0;
+	QLabel *step3_prompt_ = nullptr;
+	bool auto_learn_tried_ = false; /* step 3 starts Learn by itself once per opening, on a strip with no control */
+	bool was_learning_ = false;
+	bool got_control_ = false; /* Learn caught a control in this opening */
 	bool committed_or_unassigned_ = false;
 	bool updating_widgets_ = false;
 

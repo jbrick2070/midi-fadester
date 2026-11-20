@@ -339,6 +339,41 @@ static void test_flash_guard_defaults_and_live_color_filter_cap(void)
 	obs_properties_t *g1_content = obs_property_group_content(grp1);
 	obs_property_t *fg_prop = obs_properties_get(g1_content, "slot_1_flash_guard");
 	assert(fg_prop && obs_property_get_type(fg_prop) == OBS_PROPERTY_BOOL && obs_property_visible(fg_prop));
+	{
+		/* U1-16: a slot opens on the few controls most people need. The rest waits behind "More settings", each
+		 * shown anyway while it is in use; Flash Guard, the photosensitivity guard, is never hidden. */
+		static const char *const first[] = {"slot_1_target_filter", "slot_1_target_setting", "slot_1_signal",
+						    "slot_1_amount_pct",    "slot_1_min_value",      "slot_1_max_value",
+						    "slot_1_flash_guard"};
+		static const char *const later[] = {"slot_1_depth_fader", "slot_1_depth_reset", "slot_1_invert",
+						    "slot_1_rate_divider"};
+		obs_property_t *more = obs_properties_get(props, "mod_show_more");
+		assert(more && obs_property_get_type(more) == OBS_PROPERTY_BOOL && obs_property_visible(more));
+		for (size_t i = 0; i < sizeof(first) / sizeof(first[0]); i++)
+			assert(obs_property_visible(obs_properties_get(props, first[i])));
+		for (size_t i = 0; i < sizeof(later) / sizeof(later[0]); i++)
+			assert(!obs_property_visible(obs_properties_get(props, later[i])));
+
+		obs_data_t *s = obs_source_get_settings(mod);
+		obs_data_set_bool(s, "slot_1_invert", true); /* in use: shown without the switch */
+		obs_source_update(mod, s);
+		obs_properties_t *p2 = obs_source_properties(mod);
+		assert(obs_property_visible(obs_properties_get(p2, "slot_1_invert")));
+		assert(!obs_property_visible(obs_properties_get(p2, "slot_1_rate_divider")));
+		obs_properties_destroy(p2);
+
+		obs_data_set_bool(s, "slot_1_invert", false);
+		obs_data_set_bool(s, "mod_show_more", true);
+		obs_source_update(mod, s);
+		p2 = obs_source_properties(mod);
+		for (size_t i = 0; i < sizeof(later) / sizeof(later[0]); i++)
+			assert(obs_property_visible(obs_properties_get(p2, later[i])));
+		assert(obs_property_visible(obs_properties_get(p2, "slot_1_flash_guard")));
+		obs_properties_destroy(p2);
+		obs_data_set_bool(s, "mod_show_more", false);
+		obs_source_update(mod, s);
+		obs_data_release(s);
+	}
 	obs_property_t *sig_prop = obs_properties_get(g1_content, "slot_1_signal");
 	assert(sig_prop);
 	bool found_kick_safe = false, found_snare_safe = false, found_flux_safe = false;

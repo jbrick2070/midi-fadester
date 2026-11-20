@@ -720,8 +720,24 @@ static void test_geometry_shader_control_contract(void)
 				       sizeof(tunnel_controls) / sizeof(tunnel_controls[0]));
 }
 
+/* The Shader Filter keeps its Custom Band controls in view, whatever "More settings" says, while the band is set to
+ * anything but a new filter's values (shader-filter.c, refresh_shader_more_visibility). */
+static void test_custom_band_in_use(void)
+{
+	assert(VS_SHADER_CUSTOM_MODE_DEFAULT == 0); /* VS_HZ_MODE_AVERAGE */
+	assert(!vs_shader_custom_band_in_use(60.0, 150.0, 0));
+	assert(!vs_shader_custom_band_in_use(60.004, 149.996, 0)); /* a stored value's rounding */
+	assert(vs_shader_custom_band_in_use(65.0, 150.0, 0));
+	assert(vs_shader_custom_band_in_use(55.0, 150.0, 0));
+	assert(vs_shader_custom_band_in_use(60.0, 2000.0, 0));
+	assert(vs_shader_custom_band_in_use(60.0, 145.0, 0));
+	assert(vs_shader_custom_band_in_use(60.0, 150.0, 1));
+	assert(vs_shader_custom_band_in_use(60.0, 150.0, 2));
+}
+
 int main(void)
 {
+	test_custom_band_in_use();
 #ifdef _WIN32
 	_set_error_mode(_OUT_TO_STDERR);
 	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);

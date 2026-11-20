@@ -3810,9 +3810,60 @@ void mfd_engine_start_setup_learn(struct mfd_engine *eng)
 	}
 	eng->learning_slot_index = -1;
 	eng->setup_session.learning = true;
+	eng->setup_session.learn_auto = false;
 	mfd_midi_parser_start_learn(&eng->midi_parser);
 	mfd_engine_mark_ui_dirty(eng, true);
 	mfd_engine_unlock(eng);
+}
+
+void mfd_engine_start_setup_learn_auto(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (!eng->setup_session.active) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->learning_slot_index = -1;
+	eng->setup_session.learning = true;
+	eng->setup_session.learn_auto = true;
+	eng->setup_session.auto_moves = 0;
+	eng->setup_session.auto_addr.type = MFD_MIDI_NONE;
+	mfd_midi_parser_start_learn(&eng->midi_parser);
+	mfd_engine_mark_ui_dirty(eng, true);
+	mfd_engine_unlock(eng);
+}
+
+/* Learn that started by itself must not take a stray message: a pad pressed, a fader brushed, a controller that sends
+ * something on its own. It takes a fader or knob that is being moved: three messages in a row from the same CC or
+ * pitch bend, each with a new value. The fine half of a 14-bit pair (CC n + 32 after CC n) does not break the run.
+ * Caller holds the engine lock. True when this message completes such a run. */
+static bool setup_auto_learn_take_locked(struct mfd_engine *eng, const struct mfd_midi_addr *addr, int raw)
+{
+	struct mfd_setup_session *s = &eng->setup_session;
+	if (addr->type != MFD_MIDI_CC && addr->type != MFD_MIDI_PITCH_BEND) {
+		s->auto_moves = 0; /* a button */
+		return false;
+	}
+	bool same = s->auto_moves > 0 && s->auto_addr.type == addr->type && s->auto_addr.channel == addr->channel &&
+		    (addr->type == MFD_MIDI_PITCH_BEND || s->auto_addr.number == addr->number);
+	if (!same && s->auto_moves > 0 && addr->type == MFD_MIDI_CC && s->auto_addr.type == MFD_MIDI_CC &&
+	    s->auto_addr.channel == addr->channel && s->auto_addr.number < 32U &&
+	    addr->number == (uint8_t)(s->auto_addr.number + 32U)) {
+		return false; /* its fine half */
+	}
+	if (same) {
+		if (raw != s->auto_last_raw) {
+			++s->auto_moves;
+		}
+	} else {
+		s->auto_addr = *addr;
+		s->auto_moves = 1;
+	}
+	s->auto_last_raw = raw;
+	return s->auto_moves >= 3;
 }
 
 void mfd_engine_cancel_setup_learn(struct mfd_engine *eng)
@@ -3823,6 +3874,7 @@ void mfd_engine_cancel_setup_learn(struct mfd_engine *eng)
 	mfd_engine_lock(eng);
 	if (eng->setup_session.learning) {
 		eng->setup_session.learning = false;
+		eng->setup_session.learn_auto = false;
 		if (eng->learning_slot_index < 0) {
 			mfd_midi_parser_cancel_learn(&eng->midi_parser);
 		}
@@ -4148,6 +4200,80 @@ static bool sg_get_source_volume(const struct mfd_engine *eng, const char *sourc
 	return true;
 }
 
+/* Master (slot 9) becomes the volume of OBS's Desktop Audio, when OBS has that source. Caller holds the engine lock.
+ * Returns true when Master was assigned. */
+static bool first_run_assign_master_locked(struct mfd_engine *eng)
+{
+	bool assigned = false;
+	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
+	if (!cat) {
+		return false;
+	}
+	mfd_engine_get_ui_catalog(eng, cat);
+	/* Output channels 1 and 2 are OBS's Desktop Audio and Desktop Audio 2. Injected scene-graph ops without
+	 * get_output_source_name (headless tests) find none, and Master stays unassigned. */
+	for (uint32_t channel = 1U; channel <= 2U && !assigned; ++channel) {
+		char desktop_name[MFD_SOURCE_NAME_MAX];
+		if (!sg_output_source_name(eng, channel, desktop_name, sizeof(desktop_name))) {
+			continue;
+		}
+		for (size_t i = 0U; i < cat->audio_count; ++i) {
+			if (strcmp(cat->audio_sources[i].name, desktop_name) == 0) {
+				struct mfd_fader_slot *master = &eng->fader_slots[9];
+				master->enabled = true;
+				snprintf(master->source_a_name, sizeof(master->source_a_name), "%s",
+					 cat->audio_sources[i].name);
+				master->source_b_name[0] = '\0';
+				master->scene_name[0] = '\0';
+				mfd_engine_reset_slot_mode_state(eng, master, MFD_TARGET_AUDIO_VOLUME);
+				assigned = true;
+				break;
+			}
+		}
+	}
+	mfd_ui_catalog_destroy(cat);
+	return assigned;
+}
+
+void mfd_engine_apply_first_run_layout(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	bool pending = eng->frontend_finished_loading && !eng->first_run_offer_dismissed &&
+		       !eng->first_run_layout_applied && eng->apc40_controller_detected &&
+		       strcmp(effective_profile_name(eng), MFD_DEFAULT_PROFILE_NAME) == 0;
+	if (!pending) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->first_run_layout_applied = true;
+	/* only a Master with no job: a strip the user (or an import) already set is theirs */
+	if (eng->fader_slots[9].target_type == MFD_TARGET_UNASSIGNED && first_run_assign_master_locked(eng)) {
+		mfd_engine_bump_slot_rev(eng, 9);
+		mfd_engine_reevaluate_slots(eng, false);
+		mfd_engine_notify_state_changed(eng);
+	}
+	mfd_engine_mark_ui_dirty(eng, false);
+	unlock_and_persist_global_config(eng);
+}
+
+void mfd_engine_acknowledge_first_run(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	if (eng->first_run_offer_dismissed) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->first_run_offer_dismissed = true;
+	mfd_engine_mark_ui_dirty(eng, false);
+	unlock_and_persist_global_config(eng);
+}
+
 void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 {
 	if (!eng) {
@@ -4156,36 +4282,10 @@ void mfd_engine_accept_first_run_usual_layout(struct mfd_engine *eng)
 	mfd_engine_lock(eng);
 	mfd_engine_cancel_setup_session(eng);
 	mfd_engine_load_apc40_defaults(eng);
-
-	struct mfd_ui_catalog *cat = mfd_ui_catalog_create();
-	if (cat) {
-		mfd_engine_get_ui_catalog(eng, cat);
-		/* Output channels 1 and 2 are OBS's Desktop Audio and Desktop Audio 2. Injected scene-graph ops without
-		 * get_output_source_name (headless tests) find none, and Master stays unassigned. */
-		bool assigned = false;
-		for (uint32_t channel = 1U; channel <= 2U && !assigned; ++channel) {
-			char desktop_name[MFD_SOURCE_NAME_MAX];
-			if (!sg_output_source_name(eng, channel, desktop_name, sizeof(desktop_name))) {
-				continue;
-			}
-			for (size_t i = 0U; i < cat->audio_count; ++i) {
-				if (strcmp(cat->audio_sources[i].name, desktop_name) == 0) {
-					struct mfd_fader_slot *master = &eng->fader_slots[9];
-					master->enabled = true;
-					snprintf(master->source_a_name, sizeof(master->source_a_name), "%s",
-						 cat->audio_sources[i].name);
-					master->source_b_name[0] = '\0';
-					master->scene_name[0] = '\0';
-					mfd_engine_reset_slot_mode_state(eng, master, MFD_TARGET_AUDIO_VOLUME);
-					assigned = true;
-					break;
-				}
-			}
-		}
-		mfd_ui_catalog_destroy(cat);
-	}
+	(void)first_run_assign_master_locked(eng);
 
 	eng->first_run_offer_dismissed = true;
+	eng->first_run_layout_applied = true;
 	/* The usual layout empties the eight strips: they fill from the scene on air again. */
 	eng->vj_autofill_done = false;
 	eng->vj_autofill_pending = true;
@@ -4220,6 +4320,7 @@ void mfd_engine_decline_first_run_usual_layout(struct mfd_engine *eng)
 		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 	}
 	eng->first_run_offer_dismissed = true;
+	eng->first_run_layout_applied = true;
 	eng->vj_autofill_done = true; /* the user will set the strips up: never fill them from the scene */
 	eng->vj_autofill_pending = false;
 	mfd_engine_bump_slot_rev(eng, -1);
@@ -6113,6 +6214,48 @@ bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng)
 	return eng && !eng->vj_disabled;
 }
 
+void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	eng->desk_video_controls = shown;
+	mfd_engine_mark_ui_dirty(eng, false);
+	mfd_engine_unlock(eng);
+}
+
+bool mfd_engine_desk_video_controls(const struct mfd_engine *eng)
+{
+	return eng && eng->desk_video_controls;
+}
+
+bool mfd_engine_desk_first_show_due(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return false;
+	}
+	mfd_engine_lock(eng);
+	bool due = !eng->desk_dock_shown && eng->frontend_finished_loading && eng->midi_dev.is_open &&
+		   mfd_is_apc40_mk2_name(eng->midi_dev.opened_name);
+	mfd_engine_unlock(eng);
+	return due;
+}
+
+void mfd_engine_desk_first_show_done(struct mfd_engine *eng)
+{
+	if (!eng) {
+		return;
+	}
+	mfd_engine_lock(eng);
+	bool changed = !eng->desk_dock_shown;
+	eng->desk_dock_shown = true;
+	mfd_engine_unlock(eng);
+	if (changed) {
+		mfd_engine_save_global_config(eng);
+	}
+}
+
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
 {
 	return vj_effective_fade_ms(eng);
@@ -6846,6 +6989,16 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 		st->single_layer = layer_fader && mfd_engine_is_slot_writable(eng, sl); /* as vj_fadeable */
 		st->source_missing = layer_fader && !st->single_layer;
 		st->level = sl->last_applied_val;
+		/* as the settings dialog's strip card (mfd_ui_format_strip_presentation): only once the fader's position
+		 * has been seen */
+		st->pickup = sl->enabled && sl->target_type != MFD_TARGET_UNASSIGNED && sl->takeover.has_last_fader &&
+			     sl->takeover.state == MFD_TAKEOVER_WAITING && sl->takeover.hint != MFD_HINT_NONE;
+		if (st->pickup) {
+			bool rev = sl->takeover.polarity_reversed;
+			st->pickup_target = rev ? 1.0f - sl->takeover.target_obs : sl->takeover.target_obs;
+			st->pickup_up = rev ? sl->takeover.hint == MFD_HINT_MOVE_DOWN
+					    : sl->takeover.hint == MFD_HINT_MOVE_UP;
+		}
 		st->follows = sl->auto_follow;
 		/* Shift + top pad: pins a strip on a single layer, unpins a pinned one (even empty) (vj_run_locked). */
 		st->can_pin_toggle = (sl->enabled && sl->target_type == MFD_TARGET_SINGLE_LAYER &&
@@ -6860,6 +7013,7 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 	out->crossfader = eng->fader_slots[0].last_applied_val;
 	out->vs_panic = eng->vs_panic;
 	out->blackout = mfd_blackout_is_on();
+	out->video_controls = eng->desk_video_controls;
 	out->vs_panic_known = eng->vs_panic_known;
 	out->vs_last_failed = eng->vs_last_failed;
 	mfd_engine_unlock(eng);
@@ -7094,8 +7248,14 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 			/* The APC40's Tempo and Cue Level knobs are endless and send steps, not a position: bound to a
 			 * strip they would throw it between 0 and 100 %. Keep listening for another control. */
 			mfd_midi_parser_start_learn(&eng->midi_parser);
+		} else if (got_learned && eng->setup_session.active && eng->setup_session.learning &&
+			   eng->setup_session.learn_auto &&
+			   !setup_auto_learn_take_locked(eng, &learned, (int)dec.raw_value)) {
+			mfd_midi_parser_start_learn(
+				&eng->midi_parser); /* not a control being moved yet: keep listening */
 		} else if (got_learned) {
 			if (eng->setup_session.active && eng->setup_session.learning) {
+				eng->setup_session.learn_auto = false;
 				eng->setup_session.candidate_addr = learned;
 				mfd_engine_lookup_persisted_calibration(eng, effective_profile_name(eng), &learned,
 									&eng->setup_session.candidate_cal);
@@ -8321,6 +8481,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		mfd_engine_lock(eng);
 		vj_restore_loaded_punches_locked(eng);
 		eng->frontend_finished_loading = true;
+		mfd_engine_mark_ui_dirty(eng, false); /* the UI thread looks once more: the dock's first show (U1-01) */
 		refresh_apc40_detected_locked(eng);
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
@@ -8802,8 +8963,11 @@ bool mfd_engine_export_config_file(struct mfd_engine *eng, const char *filepath)
 	obs_data_set_double(data, "smooth_tau_ms", (double)eng->smooth_tau_ms);
 	obs_data_set_bool(data, "tbar_bidirectional_flip", eng->tbar_bidirectional_flip);
 	obs_data_set_bool(data, "first_run_offer_dismissed", eng->first_run_offer_dismissed);
+	obs_data_set_bool(data, "first_run_layout_applied", eng->first_run_layout_applied);
 	obs_data_set_bool(data, "stream_deck_companion_dismissed", eng->stream_deck_companion_dismissed);
 	obs_data_set_bool(data, "vj_buttons_enabled", !eng->vj_disabled);
+	obs_data_set_bool(data, "desk_video_controls", eng->desk_video_controls);
+	obs_data_set_bool(data, "desk_dock_shown", eng->desk_dock_shown);
 	obs_data_set_int(data, "vj_fade_ms", vj_effective_fade_ms(eng));
 	obs_data_set_bool(data, "vj_autofill_done", eng->vj_autofill_done);
 	obs_data_array_t *punch = obs_data_array_create();
@@ -8873,6 +9037,19 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		/* Upgrading from 0.1.x global.json without first_run_offer_dismissed: never prompt to reset */
 		eng->first_run_offer_dismissed = true;
 	}
+	if (user_file) {
+		/* A file the user picked in Import is a set-up they chose: whatever it says (an export from a new install
+		 * says "not yet"), the first-run layout is never applied on top of it, so Import never gives Master a job
+		 * by surprise. */
+		eng->first_run_layout_applied = true;
+	} else if (obs_data_has_user_value(data, "first_run_layout_applied")) {
+		eng->first_run_layout_applied = obs_data_get_bool(data, "first_run_layout_applied");
+	} else {
+		/* The plugin's own settings from before this key: this is not a first run, whatever the old offer's
+		 * state. An update never gives Master a job by itself, in the middle of someone's show set-up; the
+		 * notice still shows while the old offer was never answered, and leaves Master out of its sentence. */
+		eng->first_run_layout_applied = true;
+	}
 	if (obs_data_has_user_value(data, "stream_deck_companion_dismissed")) {
 		eng->stream_deck_companion_dismissed = obs_data_get_bool(data, "stream_deck_companion_dismissed");
 	} else if (!user_file) {
@@ -8881,6 +9058,25 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 	}
 	if (obs_data_has_user_value(data, "vj_buttons_enabled")) {
 		eng->vj_disabled = !obs_data_get_bool(data, "vj_buttons_enabled");
+	}
+	if (obs_data_has_user_value(data, "desk_video_controls")) {
+		eng->desk_video_controls = obs_data_get_bool(data, "desk_video_controls");
+	} else if (!user_file) {
+		/* The plugin's own settings from before this key (0.9.0 and older showed the rows always): keep them, so
+		 * an update never takes a control away from a dock in use. A new install has no file and starts without. */
+		eng->desk_video_controls = true;
+	}
+	if (user_file) {
+		/* Import never opens the dock by surprise: a file without the key counts as shown, and a file that says
+		 * "not shown yet" does not undo a dock this installation has already shown. */
+		if (!obs_data_has_user_value(data, "desk_dock_shown") || obs_data_get_bool(data, "desk_dock_shown")) {
+			eng->desk_dock_shown = true;
+		}
+	} else if (obs_data_has_user_value(data, "desk_dock_shown")) {
+		eng->desk_dock_shown = obs_data_get_bool(data, "desk_dock_shown");
+	} else {
+		/* settings from before this key: the user has lived with the dock where it is; never open it for them */
+		eng->desk_dock_shown = true;
 	}
 	if (obs_data_has_user_value(data, "vj_fade_ms")) {
 		long long ms = obs_data_get_int(data, "vj_fade_ms");

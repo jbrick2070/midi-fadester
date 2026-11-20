@@ -950,3 +950,12 @@ bool vs_shader_validate_builtin_file(const char *file_path, char *err_buf, size_
 	vs_shader_parse_result_free(&res);
 	return true;
 }
+
+bool vs_shader_custom_band_in_use(double low_hz, double high_hz, long long mode)
+{
+	/* the sliders move in 5 Hz steps: anything a hand set differs by far more than this */
+	const double eps = 0.01;
+	return low_hz < VS_SHADER_CUSTOM_LOW_HZ_DEFAULT - eps || low_hz > VS_SHADER_CUSTOM_LOW_HZ_DEFAULT + eps ||
+	       high_hz < VS_SHADER_CUSTOM_HIGH_HZ_DEFAULT - eps || high_hz > VS_SHADER_CUSTOM_HIGH_HZ_DEFAULT + eps ||
+	       mode != VS_SHADER_CUSTOM_MODE_DEFAULT;
+}

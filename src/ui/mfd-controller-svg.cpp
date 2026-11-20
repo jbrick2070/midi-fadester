@@ -277,9 +277,7 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 				   .arg(grid_w));
 		svg.append(svg_text(
 			QStringLiteral("x='46' y='76' fill='#94a3b8' %1 font-size='11.5' font-weight='bold'").arg(font),
-			elide_px(mfdText("Map.ClipPads", "Clip launch pads (for desk orientation \xE2\x80\x94 "
-							 "Midi Fadester uses the faders below)"),
-				 12, true, grid_w - 20)));
+			elide_px(mfdText("Map.ClipPads", "Pads: see the Fadester Desk dock."), 12, true, grid_w - 20)));
 		svg.append(QStringLiteral("<rect x='%1' y='60' width='88' height='74' rx='6' fill='#0d1526' "
 					  "stroke='#1e293b' stroke-width='1'/>")
 				   .arg(scene_x));
@@ -635,7 +633,7 @@ QByteArray mfd_make_apc40_desk_svg(const struct mfd_ui_snapshot &snap)
 MfdControllerViewDialog::MfdControllerViewDialog(QWidget *parent) : QDialog(parent)
 {
 	setObjectName(QStringLiteral("mfdControllerSvgDialog"));
-	setWindowTitle(mfdText("Map.WindowTitle", "Midi Fadester \xE2\x80\x94 Controller"));
+	setWindowTitle(mfdWindowTitle(mfdText("Map.WindowTitle", "Controller")));
 	resize(960, 560);
 	setStyleSheet(QStringLiteral("QDialog { background-color: #0b1120; color: #f8fafc; }"));
 

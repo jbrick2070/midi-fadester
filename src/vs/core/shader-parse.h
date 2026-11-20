@@ -93,6 +93,15 @@ enum vs_shader_error vs_shader_ExpandAndParse(const char *source_text, const cha
  */
 bool vs_shader_validate_builtin_file(const char *file_path, char *err_buf, size_t err_cap);
 
+/* The Shader Filter's Custom Band as a new filter has it: 60 to 150 Hz, mode 0 (average energy). */
+#define VS_SHADER_CUSTOM_LOW_HZ_DEFAULT 60.0
+#define VS_SHADER_CUSTOM_HIGH_HZ_DEFAULT 150.0
+#define VS_SHADER_CUSTOM_MODE_DEFAULT 0
+
+/* True when the Custom Band is set to something other than a new filter's values: it is in use, so its three controls
+ * stay in view whatever the "More settings" switch says. */
+bool vs_shader_custom_band_in_use(double low_hz, double high_hz, long long mode);
+
 #ifdef __cplusplus
 }
 #endif

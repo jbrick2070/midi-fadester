@@ -52,6 +52,7 @@ struct mfd_ui_strip_input {
 	bool enabled;
 	enum mfd_midi_msg_type addr_type;
 	enum mfd_target_type target_type;
+	bool auto_follow; /* a fader the plugin filled from the scene on air: it moves to the new scene's source */
 	const char *scene_name;
 	const char *source_a_name;
 	const char *source_b_name;

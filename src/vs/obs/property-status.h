@@ -9,7 +9,11 @@
 #include <obs-module.h>
 #include <util/dstr.h>
 
+#include <stdio.h>
 #include <string.h>
+
+#include "plugin-support.h"
+#include "text.h"
 
 /* Qt auto-detects rich text in info labels. Escape user-supplied names and
  * explicitly wrap the text so names containing '<' or '&' remain literal. */
@@ -51,6 +55,19 @@ static inline void vs_properties_add_panic_status(obs_properties_t *props, bool 
 		return;
 	obs_property_t *row = vs_properties_add_info(props, "vs_panic_status", obs_module_text("Panic.Active"));
 	obs_property_text_set_info_type(row, OBS_TEXT_INFO_WARNING);
+}
+
+/* The last row of every Visual Sidechain Properties window: which Midi Fadester it belongs to (every window shows the
+ * version). */
+static inline void vs_properties_add_version(obs_properties_t *props)
+{
+	if (!props)
+		return;
+	char line[160];
+	snprintf(line, sizeof(line),
+		 vs_text_format("VisualSidechain.PartOf", "Visual Sidechain, part of Midi Fadester %s"),
+		 PLUGIN_VERSION);
+	vs_properties_add_info(props, "vs_version", line);
 }
 
 static inline const char *vs_property_string_choice_name(obs_property_t *property, const char *value)
