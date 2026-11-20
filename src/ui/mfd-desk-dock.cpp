@@ -65,13 +65,13 @@ QString rowName(int r)
 		return mfdText("Desk.RowSceneFade",
 			       "Cut, then fade Preview on air over 32, 16, 8, 4, 2, 1 or \xC2\xBD beats");
 	case 1:
-		return mfdText("Desk.RowShow", "Show / hide (Shift: wake)");
+		return mfdText("Desk.RowShow", "Show / hide (Shift: show at 100 %)");
 	case 2:
-		return mfdText("Desk.RowFade", "Fade (Shift: snap)");
+		return mfdText("Desk.RowFade", "Fade out and back (Shift: cut out)");
 	case 3:
-		return mfdText("Desk.RowFlash", "Flash (Shift: blackout)");
+		return mfdText("Desk.RowFlash", "Flash while held (Shift: dark while held)");
 	default:
-		return mfdText("Desk.RowBlend", "Blend punch");
+		return mfdText("Desk.RowBlend", "Blend (Shift: next blend)");
 	}
 }
 
@@ -83,13 +83,14 @@ QString rowShortName(int r, bool shift = false)
 		case 0:
 			return mfdText("Desk.RowSceneFadeShort", "Fade, beats"); /* Shift changes nothing here */
 		case 1:
-			return mfdText("Desk.RowWakeShort", "Wake");
+			return mfdText("Desk.RowWakeShort", "Show at 100 %");
 		case 2:
-			return mfdText("Desk.RowSnapShort", "Snap");
+			return mfdText("Desk.RowSnapShort", "Cut out");
 		case 3:
-			return mfdText("Desk.RowBlackoutShort", "Blackout");
+			return mfdText("Desk.RowDarkShort",
+				       "Dark (hold)"); /* Blackout names the Program blackout only */
 		default:
-			return mfdText("Desk.RowPunchModeShort", "Punch mode");
+			return mfdText("Desk.RowPunchModeShort", "Next blend");
 		}
 	}
 	switch (r) {
@@ -98,11 +99,11 @@ QString rowShortName(int r, bool shift = false)
 	case 1:
 		return mfdText("Desk.RowShowShort", "Show / hide");
 	case 2:
-		return mfdText("Desk.RowFadeShort", "Fade");
+		return mfdText("Desk.RowFadeShort", "Fade out");
 	case 3:
 		return mfdText("Desk.RowFlashShort", "Flash");
 	default:
-		return mfdText("Desk.RowBlendShort", "Blend punch");
+		return mfdText("Desk.RowBlendShort", "Blend");
 	}
 }
 
@@ -119,6 +120,19 @@ QString sceneFadePadText(int column, bool capped)
 		return QStringLiteral("20s");
 	}
 	return QString::fromUtf8(k_beats[std::min(column, 7) - 1]);
+}
+
+/* The scene buttons' tooltip in Studio Mode: the key that sends a scene straight on air is Command on a Mac (Qt's
+ * ControlModifier there). */
+QString sceneTipStudio()
+{
+#ifdef __APPLE__
+	return mfdText("Desk.SceneTip.StudioMac",
+		       "Click: to Preview; click again: fade it on air. Cmd-click: straight on air.");
+#else
+	return mfdText("Desk.SceneTip.Studio",
+		       "Click: to Preview; click again: fade it on air. Ctrl-click: straight on air.");
+#endif
 }
 
 QString rgbCss(uint32_t rgb)
@@ -508,8 +522,8 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	auto *scene_row = new QHBoxLayout();
 	scene_row->setSpacing(4);
 	for (int j = 0; j < (int)MFD_VJ_SCENES; ++j) {
-		QPushButton *b = makeButton(
-			mfdFill(mfdText("Desk.SceneButton", "Scene Launch %1"), {QString::number(j + 1)}), 60, 28);
+		QPushButton *b =
+			makeButton(mfdFill(mfdText("Desk.SceneButton", "Scene %1"), {QString::number(j + 1)}), 60, 28);
 		scenes_[j] = b;
 		b->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); /* a long name never widens the dock */
 		connect(b, &QPushButton::pressed, this, [this, j, b]() {
@@ -579,15 +593,15 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 			grid->addWidget(b, grid_row, i + 1, Qt::AlignVCenter);
 		}
 	}
-	auto *clip_name = new QLabel(mfdText("Desk.RowClipStopShort", "Clip Stop"), this);
-	clip_name->setToolTip(
-		mfdText("Desk.RowClipStopTip", "Clip Stop: back to its own blend (Shift: pin the column)"));
+	auto *clip_name = new QLabel(mfdText("Desk.RowClipStopShort", "Reset"), this);
+	clip_name->setToolTip(mfdText("Desk.RowClipStopTip",
+				      "Reset: this column back to its own blend (Shift: pin the column). On the "
+				      "APC40: Clip Stop."));
 	clip_name->setMaximumWidth(160); /* room for long languages and the wider macOS font */
 	grid->addWidget(clip_name, kRows + 2, 0);
 	for (int i = 0; i < kStrips; ++i) {
-		QPushButton *b = makeButton(mfdFill(mfdText("Desk.ClipStopName", "Clip Stop, column %1"),
-						    {QString::number(i + 1)}),
-					    30, 14);
+		QPushButton *b = makeButton(
+			mfdFill(mfdText("Desk.ClipStopName", "Reset, column %1"), {QString::number(i + 1)}), 30, 14);
 		clip_stops_[i] = b;
 		connect(b, &QPushButton::pressed, this, [this, i, b]() {
 			if (!physical(b)) {
@@ -605,12 +619,16 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		grid->addWidget(b, kRows + 2, i + 1);
 	}
 
-	/* Stop All, Shift (latched for the next pad), Session: added after the grid below */
+	/* Reset all and Shift (latched for the next pad) belong to the pads and go with them; Fade and Blackout stand in
+	 * their own row below, Fade the wider of the two. Two rows, so no label has to be cut short in any language. */
+	auto *pad_row = new QHBoxLayout();
 	auto *transport = new QHBoxLayout();
-	stop_all_ = makeButton(mfdText("Desk.StopAllTip", "Stop All: every effect off and every source back to its own "
-							  "blend. With Shift: fade every source out."),
-			       80, 24);
-	stop_all_->setText(mfdText("Desk.StopAllShort", "Stop All"));
+	stop_all_ =
+		makeButton(mfdText("Desk.StopAllTip", "Reset all: every effect off and every source back to its own "
+						      "blend. With Shift: fade every source out. On the "
+						      "APC40: Stop All Clips."),
+			   80, 24);
+	stop_all_->setText(mfdText("Desk.StopAllShort", "Reset all"));
 	connect(stop_all_, &QPushButton::pressed, this, [this]() {
 		if (!physical(stop_all_)) {
 			return;
@@ -626,7 +644,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	shift_ = makeButton(mfdText("Desk.Shift", "Shift for the next pad"), 60, 24);
 	shift_->setText(mfdText("Desk.ShiftShort", "Shift"));
 	shift_->setCheckable(true);
-	session_ = makeButton(mfdText("Desk.Session", "Fade Preview to Program"), 70, 24);
+	session_ = makeButton(mfdText("Desk.Session", "Fade Preview on air"), 70, 24);
 	session_->setObjectName(QStringLiteral("mfdDeskFadeBtn"));
 	session_->setText(mfdText("Desk.SessionShort", "Fade"));
 	connect(session_, &QPushButton::clicked, this, [this]() {
@@ -635,7 +653,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		}
 	});
 	blackout_btn_ = makeButton(mfdText("Desk.Blackout",
-					   "Blackout: Program fades to black; again, back (Session on the desk)"),
+					   "Blackout: the audience sees black; again: back. On the APC40: Session."),
 				   70, 24);
 	blackout_btn_->setObjectName(QStringLiteral("mfdDeskBlackoutBtn"));
 	blackout_btn_->setText(mfdText("Desk.RowBlackoutShort", "Blackout"));
@@ -644,11 +662,11 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 			mfd_engine_desk_blackout(eng_); /* always reachable, so a blackout can always be ended */
 		}
 	});
-	transport->addWidget(stop_all_);
-	transport->addWidget(shift_);
-	transport->addWidget(session_);
+	pad_row->addWidget(stop_all_);
+	pad_row->addWidget(shift_);
+	transport->addWidget(session_, 2);
 	transport->addSpacing(12); /* Blackout stands apart from Fade, the most used button */
-	transport->addWidget(blackout_btn_);
+	transport->addWidget(blackout_btn_, 1);
 
 	/* fader levels (read-only), under their columns */
 	auto *fader_name = new QLabel(mfdText("Desk.Faders", "Faders"), this);
@@ -664,6 +682,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		grid->addWidget(bar, kRows + 3, i + 1, Qt::AlignHCenter);
 	}
 	root->addWidget(grid_box_);
+	root->addLayout(pad_row);
 	root->addLayout(transport);
 	xfader_ = new QProgressBar(this);
 	xfader_->setRange(0, 1000);
@@ -694,15 +713,22 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 	vs_row->addStretch(1);
 	root->addLayout(vs_row);
 	auto *vs_buttons = new QHBoxLayout();
-	vs_panic_ = makeButton(mfdText("Desk.VsPanic", "Panic / Restore (Record)"), 70, 24);
+	vs_panic_ = makeButton(mfdText("Desk.VsPanic",
+				       "Panic: all Visual Sidechain effects off; again: on again. On the APC40: "
+				       "Record."),
+			       70, 24);
 	vs_panic_->setObjectName(QStringLiteral("mfdDeskPanicBtn"));
 	vs_panic_->setText(mfdText("Desk.VsPanicShort", "Panic"));
-	vs_tap_ = makeButton(mfdText("Desk.VsTap", "Tap tempo (Metronome)"), 50, 24);
+	vs_tap_ = makeButton(mfdText("Desk.VsTap", "Tap the tempo. On the APC40: Metronome."), 50, 24);
 	vs_tap_->setText(mfdText("Desk.VsTapShort", "Tap"));
-	vs_lock_ = makeButton(mfdText("Desk.VsLock", "Lock or unlock the tempo (Shift + Metronome)"), 50, 24);
-	vs_lock_->setText(mfdText("Desk.VsLockShort", "Lock"));
-	vs_downbeat_ = makeButton(mfdText("Desk.VsDownbeat", "Downbeat now (Shift + Tap Tempo)"), 70, 24);
-	vs_downbeat_->setText(mfdText("Desk.VsDownbeatShort", "Downbeat"));
+	vs_lock_ = makeButton(mfdText("Desk.VsLock",
+				      "Hold the BPM, or let it follow the music again. On the APC40: Shift + "
+				      "Metronome."),
+			      50, 24);
+	vs_lock_->setText(mfdText("Desk.VsLockShort", "Hold BPM"));
+	vs_downbeat_ =
+		makeButton(mfdText("Desk.VsDownbeat", "Now is beat 1. On the APC40: Shift + Tap Tempo."), 70, 24);
+	vs_downbeat_->setText(mfdText("Desk.VsDownbeatShort", "Beat 1"));
 	const std::pair<QPushButton *, enum mfd_vj_command_kind> vs[] = {{vs_panic_, MFD_VJ_CMD_VS_PANIC},
 									 {vs_tap_, MFD_VJ_CMD_VS_TAP},
 									 {vs_lock_, MFD_VJ_CMD_VS_LOCK},
@@ -739,7 +765,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 					       "scroll wheel or the arrow keys)"));
 	speed_dial_->setToolTip(speed_dial_->accessibleName());
 	vj_row->addWidget(speed_dial_);
-	vj_play_ = makeButton(mfdText("Desk.VjsterPlayTip", "Play or pause the video (Play)"), 70, 24);
+	vj_play_ = makeButton(mfdText("Desk.VjsterPlayTip", "Play or pause the video. On the APC40: Play."), 70, 24);
 	vj_play_->setText(mfdText("Desk.VjsterPlay", "Play / Pause"));
 	connect(vj_play_, &QPushButton::pressed, this, [this]() {
 		if (physical(vj_play_)) {
@@ -755,7 +781,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		double rate = k_presets[k];
 		QString label = QString::number(rate) + QStringLiteral("x");
 		QPushButton *b = makeButton(
-			rate == 1.0 ? mfdText("Desk.VjsterReset", "Back to 1x (Tap Tempo)")
+			rate == 1.0 ? mfdText("Desk.VjsterReset", "Back to 1x. On the APC40: Tap Tempo.")
 				    : mfdFill(mfdText("Desk.VjsterPresetTip",
 						      "Ask VJster for %1 (Fadester Companion 0.1.17 or later)"),
 					      {label}),
@@ -869,7 +895,7 @@ void MfdDeskDock::pressNote(uint8_t channel, uint8_t note, bool on, bool shift)
 {
 	enum mfd_desk_press_result r = mfd_engine_desk_press(eng_, channel, note, on, shift, nullptr);
 	if (on && r == MFD_DESK_REJECTED) {
-		sayStatus(mfdText("Desk.Ignored", "That button cannot act now (see its tooltip)."), false);
+		sayStatus(mfdText("Desk.Ignored", "Not available right now."), false);
 	}
 	refresh();
 }
@@ -901,7 +927,7 @@ void MfdDeskDock::pressPad(int row, int strip, bool on)
 		holding_[strip] = true;
 		hold_epoch_[strip] = epoch;
 	} else if (r == MFD_DESK_REJECTED) {
-		sayStatus(mfdText("Desk.Ignored", "That button cannot act now (see its tooltip)."), false);
+		sayStatus(mfdText("Desk.Ignored", "Not available right now."), false);
 	}
 	if (shift && !hold_row) {
 		shift_->setChecked(false); /* Shift is for the next pad only; a blackout keeps it until let go */
@@ -971,7 +997,7 @@ void MfdDeskDock::refresh()
 	double beat_pos = vs_loaded_ && beat_index > 0 ? (double)beat_index + beat_phase
 						       : (double)clock_.elapsed() / 1000.0 * (bpm_value_ / 60.0);
 
-	setLabel(title_, mfdFill(mfdText("Desk.Title", "Fadester Desk \xE2\x80\x94 Midi Fadester %1 \xC2\xB7 %2"),
+	setLabel(title_, mfdFill(mfdText("Desk.Title", "%2 \xC2\xB7 Midi Fadester %1"),
 				 {QString::fromUtf8(PLUGIN_VERSION),
 				  view_.desk_connected ? mfdText("Desk.DeskOn", "APC40 mkII connected")
 						       : mfdText("Desk.DeskOff", "no APC40 mkII")}));
@@ -998,7 +1024,7 @@ void MfdDeskDock::refresh()
 		setLabel(row_names_[r], rowShortName(r, shift));
 	}
 	setButtonText(stop_all_, shift ? mfdText("Desk.StopAllFadeShort", "Fade all out")
-				       : mfdText("Desk.StopAllShort", "Stop All"));
+				       : mfdText("Desk.StopAllShort", "Reset all"));
 	QString program = QString::fromUtf8(view_.program);
 	QString preview = QString::fromUtf8(view_.preview);
 	const QString none = QStringLiteral("\xE2\x80\x94");
@@ -1017,8 +1043,9 @@ void MfdDeskDock::refresh()
 	}
 	timing_->setVisible(obs_initialized());
 	if (obs_initialized()) {
-		setLabel(timing_, mfdFill(mfdText("Desk.Timing", "Transition %1 ms \xC2\xB7 Pad fade %2 s"),
-					  {QString::number(obs_frontend_get_transition_duration()),
+		/* one unit for both: seconds */
+		setLabel(timing_, mfdFill(mfdText("Desk.Timing", "Transition %1 s \xC2\xB7 Source fade %2 s"),
+					  {QString::number(obs_frontend_get_transition_duration() / 1000.0, 'f', 1),
 					   QString::number(view_.fade_ms / 1000.0, 'f', 1)}));
 	}
 
@@ -1040,17 +1067,17 @@ void MfdDeskDock::refresh()
 								     std::max(40, scenes_[j]->width() - 8));
 		shown.replace(QLatin1Char('&'), QStringLiteral("&&"));
 		setButtonText(scenes_[j], shown);
-		QString what =
-			!view_.studio_mode
-				? mfdText("Desk.SceneTip.Program", "Click: put this scene on air.")
-				: mfdText("Desk.SceneTip.Studio",
-					  "Click: to Preview; click again: fade it to Program. Ctrl-click: straight on air.");
+		QString what = !view_.studio_mode ? mfdText("Desk.SceneTip.Program", "Click: put this scene on air.")
+						  : sceneTipStudio();
 		bool can = pads_on && exists && !view_.tbar_busy && !view_.scene_owned[j];
-		setTip(scenes_[j], !exists ? mfdText("Desk.Tip.NoScene", "No scene here.")
-				   : view_.tbar_busy
-					   ? mfdText("Desk.Tip.Throw", "Waits while the crossfader is thrown.")
-				   : view_.scene_owned[j] ? mfdText("Desk.Tip.Owned", "A fader learned this button.")
-							  : name + QStringLiteral("\n") + what);
+		setTip(scenes_[j],
+		       !exists           ? mfdText("Desk.Tip.NoScene", "No scene here.")
+		       : view_.tbar_busy ? mfdText("Desk.Tip.Throw", "Waits while the crossfader is thrown.")
+		       : view_.scene_owned[j]
+			       ? mfdText("Desk.Tip.Owned",
+					 "This button is assigned to a strip. Clear it in Tools, Midi Fadester: Set up "
+					 "or Advanced.")
+			       : name + QStringLiteral("\n") + what);
 		paintButton(scenes_[j], ledColor(led, beat_pos, 0x22C55EU), can);
 	}
 
@@ -1075,7 +1102,10 @@ void MfdDeskDock::refresh()
 			bool can = pads_on && !st.owned[cell];
 			QString why;
 			if (st.owned[cell]) {
-				why = mfdText("Desk.Tip.Owned", "A fader learned this button.");
+				why = mfdText(
+					"Desk.Tip.Owned",
+					"This button is assigned to a strip. Clear it in Tools, Midi Fadester: Set up "
+					"or Advanced.");
 			} else if (cell == MFD_DESK_RESTART) {
 				/* the top row: scene fades, whatever the column holds */
 				can = can && view_.take_ready && !view_.tbar_busy;
@@ -1100,7 +1130,9 @@ void MfdDeskDock::refresh()
 				why = st.source_missing
 					      ? mfdText("Desk.Tip.SourceMissing",
 							"Its source is not in the scene right now.")
-					      : mfdText("Desk.Tip.SingleLayer", "Needs a Layer Opacity fader.");
+					      : mfdText("Desk.Tip.SingleLayer",
+							"Give this column's fader the job Show or hide a layer to use "
+							"this pad.");
 			}
 			if (!why.isEmpty()) {
 				setTip(pads_[r][i], why);
@@ -1154,8 +1186,7 @@ void MfdDeskDock::refresh()
 		/* no estimate yet (no audio): no number, rather than the animation's 120 */
 		setLabel(bpm_, bpm_valid_ ? QStringLiteral("%1 BPM").arg(bpm_value_, 0, 'f', 1)
 					  : QStringLiteral("\xE2\x80\x94 BPM"));
-		setLabel(lock_,
-			 locked ? mfdText("Desk.Locked", "tempo locked") : mfdText("Desk.Unlocked", "following"));
+		setLabel(lock_, locked ? mfdText("Desk.Locked", "held") : mfdText("Desk.Unlocked", "auto"));
 	}
 	int step = vs_loaded_ ? (int)(((beat_index % 4) + 4) % 4) : -1;
 	bool fresh = beat_index != last_beat_index_ && beat_phase < 0.25;
@@ -1183,8 +1214,9 @@ void MfdDeskDock::refresh()
 		setCss(panic_, QStringLiteral("color: #f8fafc; background-color: #b91c1c; font-weight: bold; "
 					      "padding: 4px;"));
 	} else if (view_.vs_last_failed) {
-		setLabel(panic_, mfdText("Desk.VsNoAnswer",
-					 "Visual Sidechain did not answer (it needs obs-websocket switched on)."));
+		setLabel(panic_,
+			 mfdText("Desk.VsNoAnswer", "Visual Sidechain did not answer. Turn on the server in Tools, "
+						    "WebSocket Server Settings."));
 		setCss(panic_, QStringLiteral("color: #fde68a; padding: 2px;"));
 	} else {
 		setLabel(panic_, QString());

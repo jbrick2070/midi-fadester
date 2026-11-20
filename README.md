@@ -293,25 +293,28 @@ sources. A fader you set yourself never moves, and neither does a column you pin
 the scene on air** fills empty faders the same way at any time. A newly filled fader starts with the layer as it is
 (100 % at first) and picks up when you move it through that level, so a fader at the bottom never blacks a layer out.
 
-| Control | What it does |
-| --- | --- |
-| Bottom row, column *k* | **Blend punch:** the source between its own blend in the scene (Normal, or say Screen on an overlay) and its punch mode (Screen at first, or the next mode when Screen is its own). |
-| Shift + bottom row pad | **Next punch mode** for that column: Lighten, Screen, Additive, Multiply, Subtract. A column already blending switches straight to it. |
-| Row 2 | **Flash** the source to 100 % while you hold the pad; the fader keeps its place underneath. With Shift: **blackout**, 0 % while held. |
-| Row 3 | **Fade** the source out over the pad fade time; press again to fade it back. With Shift: **snap** to 0 % and back, at once. |
-| Row 4 | **Show or hide** the source (its eye in OBS). With Shift: **wake** it: shown, 100 %, its own blend. |
-| Row 5 (top) | Pad 1 (yellow): **cut** the scene in Preview to Program at once. Pads 2 to 8: **scene fades**, long to short: Preview fades to Program over 8 bars, 4 bars, 2 bars, 1 bar, 2 beats, 1 beat or ½ beat (16 s down to 0.25 s at 120 BPM). The tempo is Visual Sidechain's, 120 BPM when it has none. Pad 2 is a slow roll for a big change. OBS allows at most 20 s, so below 96 BPM the 8-bar pad lasts 20 s. The cut is a 50 ms move with your transition, which reads as a cut. Shift changes nothing on this row. Your own transition length is put back straight after; Cut and Stinger keep their own timing. Studio Mode only. |
-| Clip Stop *k* | **Column clean:** that source back to its own blend, a held flash or blackout let go. With Shift: **pin** the column to its source (it stays when the scene changes); again, it follows the scene again. Pinning works on a column with no source yet. |
-| Stop All Clips | **Clean:** every effect off (Clean / All FX Off) and every source back to its own blend. With Shift: **fade every source out**. |
-| Scene Launch 1–5 | The first five scenes in OBS's Scenes list, top first. Press once: the scene goes to **Preview**. Press the scene in Preview again: it **fades** to Program with the transition. The scene already on air does nothing, so there is always something to fade to. With Shift (or outside Studio Mode): **straight to Program**, skipping Preview. Both use your OBS transition and its length. |
-| Session | **Blackout:** Program fades to black over the transition length (at least 0.3 s), on top of everything, whatever is on air; press again to fade it back. Nothing is added to your scenes. Blinks while black. |
-| Cue Level knob | **Transition length**, 50 ms per click. With Shift: the **pad fade time**. |
-| Tempo knob | **Video speed** 0.05x faster or slower per click; with Shift held, 0.25x. |
-| Nudge − / Nudge + | **Video speed** 0.25x slower / faster. |
-| Tap Tempo | **Video speed back to 1x.** With Shift: Visual Sidechain **back to the downbeat**. |
-| Play | **Play or pause the video.** |
-| Record | Visual Sidechain **Panic**; press again to **Restore**. Blinks while panicked. |
-| Metronome | Visual Sidechain **tap tempo**. With Shift: **lock or unlock** its BPM. |
+| On the APC40 | On the Fadester Desk dock | What it does |
+| --- | --- | --- |
+| Bottom row, column *k* | **Blend** | The source between its own blend in the scene (Normal, or say Screen on an overlay) and its other blend (Screen at first, or the next one when Screen is its own). |
+| Shift + bottom row pad | **Next blend** | The next blend for that column: Lighten, Screen, Additive, Multiply, Subtract. A column already blending switches straight to it. |
+| Row 2 | **Flash** | The source at 100 % while you hold the pad; the fader keeps its place underneath. With Shift, **Dark (hold)**: 0 % while held. |
+| Row 3 | **Fade out** | The source fades out over the source fade time; press again to fade it back. With Shift, **Cut out**: to 0 % and back, at once. |
+| Row 4 | **Show / hide** | Shows or hides the source (its eye in OBS). With Shift, **Show at 100 %**: shown, 100 %, its own blend. |
+| Row 5 (top) | **Fade, beats**: ✂ 32 16 8 4 2 1 ½ | Pad 1 (yellow, ✂): **cut** the scene in Preview on air at once. Pads 2 to 8: **fade** Preview on air over 32, 16, 8, 4, 2, 1 or ½ beats (16 s down to 0.25 s at 120 BPM). The tempo is Visual Sidechain's, 120 BPM when it has none. The 32 pad is a slow roll for a big change. OBS allows at most 20 s, so below 96 BPM the 32 pad lasts 20 s and the dock prints 20s on it. The cut is a 50 ms move with your transition, which reads as a cut. Shift changes nothing on this row. Your own transition length is put back straight after; Cut and Stinger keep their own timing. Studio Mode only. |
+| Clip Stop *k* | **Reset** | That source back to its own blend, a held Flash or Dark let go. With Shift: **pin** the column to its source (it stays when the scene changes); again, it follows the scene again. Pinning works on a column with no source yet. |
+| Stop All Clips | **Reset all** | Every effect off (Clean / All FX Off) and every source back to its own blend. With Shift, **Fade all out**: every source fades out. |
+| Scene Launch 1–5 | The five scene buttons | The first five scenes in OBS's Scenes list, top first. Press once: the scene goes to **Preview**. Press the scene in Preview again: it **fades** on air with the transition. The scene already on air does nothing, so there is always something to fade to. With Shift (Ctrl-click on the dock, Cmd-click on a Mac), or outside Studio Mode: **straight on air**, skipping Preview. Both use your OBS transition and its length. |
+| Session | **Blackout** | Program fades to black over the transition length (at least 0.3 s), on top of everything, whatever is on air; press again (**End blackout** on the dock) to fade it back. Nothing is added to your scenes. Blinks while black. |
+| Cue Level knob | (the timing line) | **Transition length**, 50 ms per click. With Shift: the **source fade time**. |
+| Tempo knob | The speed dial | **Video speed** 0.05x faster or slower per click; with Shift held, 0.25x. |
+| Nudge − / Nudge + | | **Video speed** 0.25x slower / faster. |
+| Tap Tempo | **1x** | **Video speed back to 1x.** With Shift, **Beat 1**: Visual Sidechain counts from beat 1 now. |
+| Play | **Play / Pause** | **Play or pause the video.** |
+| Record | **Panic**, then **Restore** | Visual Sidechain **Panic**: all its effects off; press again to **Restore**. Blinks while panicked. |
+| Metronome | **Tap** | Visual Sidechain **tap tempo**. With Shift, **Hold BPM**: hold its BPM, or let it follow the music again. |
+
+The dock's words say what a button does; the APC40 keeps the words printed on it, and each dock button's tooltip names
+its hardware button (*On the APC40: Clip Stop*).
 
 **Lights.** Scenes: Program red, Preview pulsing from dim to bright green, other scenes dim blue, no scene dark. Sources:
 dim white at their own blend, the blend colour when punched (Lighten azure, Screen yellow, Additive orange, Multiply violet, Subtract magenta),

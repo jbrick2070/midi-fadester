@@ -2045,8 +2045,37 @@ int main(int argc, char **argv)
 		capture_and_verify_png(desk, screenshot_dir, QStringLiteral("13-desk-dock.png"));
 		/* what it shows: the version, and a live pad on a column with a source (column 1, Show / hide) */
 		auto *desk_title = desk->findChild<QLabel *>(QStringLiteral("mfdDeskTitle"));
-		REQUIRE(desk_title && desk_title->text().startsWith(QStringLiteral("Fadester Desk")) &&
-			desk_title->text().contains(QStringLiteral("APC40 mkII")));
+		/* the dock's own title bar says Fadester Desk; this line starts with what matters and holds the version */
+		REQUIRE(desk_title && desk_title->text().startsWith(QStringLiteral("APC40 mkII connected")) &&
+			desk_title->text().contains(QStringLiteral("Midi Fadester ") +
+						    QString::fromUtf8(PLUGIN_VERSION)));
+		{
+			/* U1-05, U1-12: the dock says what a button does, not what is printed on the APC40; the hardware's
+			 * name is in the tooltip, with a lead-in */
+			QStringList texts;
+			for (QLabel *l : desk->findChildren<QLabel *>()) {
+				texts << l->text();
+			}
+			for (QPushButton *b : desk->findChildren<QPushButton *>()) {
+				texts << b->text();
+			}
+			for (const char *old_word :
+			     {"Clip Stop", "Stop All", "Blend punch", "Lock", "Downbeat", "Scene fade"}) {
+				REQUIRE(!texts.contains(QString::fromUtf8(old_word)));
+			}
+			for (const char *new_word :
+			     {"Reset", "Reset all", "Blend", "Hold BPM", "Beat 1", "Fade out", "Fade"}) {
+				REQUIRE(texts.contains(QString::fromUtf8(new_word)));
+			}
+			REQUIRE(texts.count(QStringLiteral("Fade")) == 1);     /* one Fade: Preview on air */
+			REQUIRE(texts.count(QStringLiteral("Blackout")) == 1); /* one Blackout: Program to black */
+			REQUIRE(desk->findChild<QPushButton *>(QStringLiteral("mfdDeskBlackoutBtn"))
+					->toolTip()
+					.endsWith(QStringLiteral("On the APC40: Session.")));
+			REQUIRE(desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPanicBtn"))
+					->toolTip()
+					.endsWith(QStringLiteral("On the APC40: Record.")));
+		}
 		auto *show_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_0"));
 		REQUIRE(show_pad && show_pad->isEnabled());
 		auto *empty_pad = desk->findChild<QPushButton *>(QStringLiteral("mfdDeskPad_1_7"));
