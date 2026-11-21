@@ -2766,10 +2766,14 @@ static int test_vj_fill_follow_and_desk(void)
 	/* A newly filled strip starts at 100 % and waits for its fader to pick up: nothing is written yet. */
 	REQUIRE(fake_sg_find_source(&sg, "A1")->opacity_writes == 0);
 
-	/* 2. Program changes: following strips move to its sources; strips without one empty out. */
+	/* 2. Program changes: following strips move to its sources; strips without one empty out. A strip's "Also fade
+	 * audio" goes with it to the new source (QA2 R2-S01). */
+	eng->fader_slots[1].audio_follows_video = true;
 	vj_program(eng, "Scene A", "Scene B");
 	REQUIRE(vj_strip_is(eng, 1, "Scene B", "B1") && vj_strip_is(eng, 2, "Scene B", "B2") &&
 		vj_strip_is(eng, 3, NULL, NULL) && eng->fader_slots[3].auto_follow);
+	REQUIRE(eng->fader_slots[1].audio_follows_video && !eng->fader_slots[2].audio_follows_video);
+	eng->fader_slots[1].audio_follows_video = false; /* as before, for the steps that follow */
 	REQUIRE(eng->vj.has_layer == 0x03U);
 
 	/* 3. Shift + Clip Stop pins a column: it keeps its source; the others move on and skip that source. */

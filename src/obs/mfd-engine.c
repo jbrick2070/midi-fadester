@@ -6989,6 +6989,10 @@ static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *sce
 	}
 	int strip = k - 1;
 	uint8_t b = (uint8_t)(1U << (unsigned)strip);
+	/* A layer strip that follows the scene on air keeps the user's "Also fade audio" when it moves to another source,
+	 * as Set up does; a strip that held another kind of job starts without it. */
+	const bool keep_afv = s->audio_follows_video && (s->target_type == MFD_TARGET_SINGLE_LAYER ||
+							 s->target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	vj_leave_source_locked(eng, strip);
 	if (s->vj_flash_held) {
 		s->vj_flash_held = false;
@@ -7015,6 +7019,7 @@ static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *sce
 		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 		return true;
 	}
+	s->audio_follows_video = keep_afv;
 	snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
 	snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", source);
 	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
