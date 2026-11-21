@@ -3644,16 +3644,31 @@ static int test_vj_fill_follow_and_desk(void)
 			/* a crossfader throw, and OBS still loading: refused */
 			mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", saved_apc40);
 			enum mfd_tbar_state saved_tbar = eng->fader_slots[0].tbar_state;
-			bool tbar_slot = eng->fader_slots[0].enabled &&
-					 eng->fader_slots[0].target_type == MFD_TARGET_TBAR;
+			enum mfd_target_type saved_tbar_job = eng->fader_slots[0].target_type;
+			bool saved_tbar_on = eng->fader_slots[0].enabled;
 			g_vj_cmd_count = 0;
-			if (tbar_slot) {
-				eng->fader_slots[0].tbar_state = MFD_TBAR_THROWING;
-				REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
-				eng->fader_slots[0].tbar_state = saved_tbar;
-			}
+			eng->fader_slots[0].enabled = true; /* the test's own T-bar strip, whatever came before */
+			eng->fader_slots[0].target_type = MFD_TARGET_TBAR;
+			eng->fader_slots[0].tbar_state = MFD_TBAR_THROWING;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			eng->fader_slots[0].tbar_state = MFD_TBAR_IDLE;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) ==
+				MFD_DESK_ACCEPTED); /* the throw was the reason */
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW);
+			g_vj_cmd_count = 0;
+			eng->fader_slots[0].tbar_state = saved_tbar;
+			eng->fader_slots[0].target_type = saved_tbar_job;
+			eng->fader_slots[0].enabled = saved_tbar_on;
 			mfd_engine_set_test_frontend_state(eng, false, true, "Scene A", "Scene B", saved_apc40);
 			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			/* QA-S01: refused while OBS loads on the pads' own path too (the APC40 open, its pads acting) */
+			eng->midi_dev.is_open = true;
+			mfd_engine_get_desk_view(eng, false, v);
+			REQUIRE(v->pads == MFD_DESK_PADS_ON && !v->learn_or_setup && !v->finished_loading);
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			REQUIRE(mfd_engine_desk_scene(eng, 0, true) == MFD_DESK_REJECTED);
+			eng->midi_dev.is_open = false;
 			mfd_engine_flush_pending_ui_work(eng);
 			REQUIRE(g_vj_cmd_count == 0);
 			mfd_engine_set_test_frontend_state(eng, true, saved_studio, saved_preview, saved_program,

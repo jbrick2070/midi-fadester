@@ -7608,6 +7608,10 @@ enum mfd_desk_press_result mfd_engine_desk_scene(struct mfd_engine *eng, int sce
 		return MFD_DESK_REJECTED;
 	}
 	mfd_engine_lock(eng);
+	if (!eng->frontend_finished_loading) { /* on every path, the pads' own too (QA-S01) */
+		mfd_engine_unlock(eng);
+		return MFD_DESK_REJECTED;
+	}
 	bool pads_act = vj_active(eng) && !eng->setup_session.active && eng->learning_slot_index < 0;
 	if (pads_act) {
 		/* the desk's own button: Shift held on the desk, a strip that learned it and its light all as before */
@@ -7616,7 +7620,7 @@ enum mfd_desk_press_result mfd_engine_desk_scene(struct mfd_engine *eng, int sce
 					     NULL);
 	}
 	enum mfd_desk_press_result r = MFD_DESK_REJECTED;
-	if (eng->frontend_finished_loading && scene < eng->cached_scene_count && !vj_tbar_busy_locked(eng)) {
+	if (scene < eng->cached_scene_count && !vj_tbar_busy_locked(eng)) {
 		uint32_t drops = eng->vj_cmd_drops;
 		vj_scene_locked(eng, scene, direct);
 		if (eng->vj_cmd_drops == drops) { /* a dropped command did nothing */

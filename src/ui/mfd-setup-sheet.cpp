@@ -1042,9 +1042,11 @@ struct mfd_setup_candidate MfdSetupSheetDialog::build_candidate() const
 	cand.enabled = true;
 	cand.target_type = chosen_mode_;
 	cand.curve = chosen_curve_;
+	/* The saved choice is kept unless the user unticks it (QA-S04): a layer that has no audio at this moment (a source
+	 * not in OBS yet) must not switch "Also fade audio" off behind the user's back when they change something else.
+	 * It only changes with the box, which is shown whenever the choice is on. */
 	cand.audio_follows_video =
-		(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX || chosen_mode_ == MFD_TARGET_SINGLE_LAYER) &&
-		chosen_layers_have_audio() && chosen_afv_;
+		(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX || chosen_mode_ == MFD_TARGET_SINGLE_LAYER) && chosen_afv_;
 	cand.apply_tbar_bidir = (chosen_mode_ == MFD_TARGET_TBAR);
 	cand.tbar_bidirectional_flip = chosen_tbar_bidir_;
 
@@ -1709,8 +1711,9 @@ void MfdSetupSheetDialog::update_step3_controls()
 	}
 	feel_desc_label_->setText(QString::fromUtf8(mfd_ui_curve_plain_description(chosen_curve_)));
 
+	/* shown for layers with audio, and whenever the choice is on, so a kept choice is never out of sight */
 	const bool show_afv = (chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX || chosen_mode_ == MFD_TARGET_SINGLE_LAYER) &&
-			      chosen_layers_have_audio();
+			      (chosen_layers_have_audio() || chosen_afv_);
 	chk_also_fade_audio_->setVisible(show_afv);
 	chk_also_fade_audio_->setChecked(chosen_afv_);
 

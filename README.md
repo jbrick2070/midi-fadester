@@ -114,7 +114,7 @@ A strip can also be **Not used**. Its MIDI control stays assigned, so you can gi
 
 Good to know:
 
-- Layer fades and mixes work through a filter the plugin adds to the source. OBS lists it in the source's Filters as `__midi_fadester_opacity__` (its type is *Midi Fadester — Layer Opacity*); leave it there. Your own filters are not touched, and at 100 % the filter skips its GPU pass.
+- Layer fades and mixes work through a filter the plugin adds to the source. OBS lists it in the source's Filters as `__midi_fadester_opacity__` (its type is *Midi Fadester fade (leave on)*); leave it there. OBS does not offer this type in its add-filter menu: it only shows in the Filters of a source the plugin faded. Your own filters are not touched, and at 100 % the filter skips its GPU pass.
 - A layer faded to 0 % keeps running. A media source keeps playing, so it can fade back in at once. Tick **Also fade audio** in step 3 of Set up if its sound should follow.
 - The filter sits on the source, not on the scene item. If the same source appears in two scenes, it fades in both; Set up warns you when that is the case. For a layer that should fade in one scene only, copy the source and use **Paste (Duplicate)**, not **Paste (Reference)**, in the other scene.
 - One setting of one filter can be driven by one slot at a time. Set up refuses a second binding to the same setting.
@@ -171,7 +171,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 - **Change controller** on the Strips screen picks the MIDI port and the layout. The plugin picks the APC40 mkII's port by itself when it sees one.
 - **Show controller** opens a live picture of the desk with each fader's position, job and state, so you can see which physical fader does what (faders, master and crossfader; the FX knobs are not drawn).
 - A desk without a horizontal crossfader can give **Switch scenes** to any vertical fader. Layouts for desks without a crossfader or master turn those two slots off.
-- **Reverse direction** on the Advanced tab flips a control that runs the wrong way.
+- **Reverse** on the Advanced tab (**Reverse direction** in step 3 of Set up) flips a control that runs the wrong way.
 - Adding a desk is one entry in `src/core/apc40-profile.c`.
 
 ![Show controller: the APC40 mkII desk with live positions](docs/screenshots/08-show-controller-svg.png)

@@ -164,8 +164,6 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
 }
 
-/* Answers the next confirmation box (the settings dialog's and the Set up sheet's "mfdConfirmBox"): its named button, or
- * Cancel. Queued, so it runs inside the box's own event loop; what the box said is handed back for the test to read. */
 /* what the dock asked OBS to do with a scene (the engine hands each command to this instead of OBS) */
 static struct mfd_vj_command g_dock_cmds[8];
 static int g_dock_cmd_count = 0;
@@ -177,6 +175,8 @@ static void dock_fake_run_command(const struct mfd_vj_command *cmd, void *user_d
 	}
 }
 
+/* Answers the next confirmation box (the settings dialog's and the Set up sheet's "mfdConfirmBox"): its named button, or
+ * Cancel. Queued, so it runs inside the box's own event loop; what the box said is handed back for the test to read. */
 static QString g_confirm_text;
 static QString g_confirm_title;
 static int g_confirm_seen = 0;
@@ -1688,6 +1688,57 @@ int main(int argc, char **argv)
 		REQUIRE(!eng.fader_slots[1].invert);
 	}
 
+	/* QA-S04: Set up keeps "Also fade audio" as it was saved. Fader 1 mixes two layers that have no audio at this
+	 * moment (as a source missing from an old collection); Edit..., another Feel, Done: still on, and shown so it
+	 * can be unticked. Only unticking it switches it off. */
+	{
+		REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+		const bool was_afv = eng.fader_slots[1].audio_follows_video;
+		const enum mfd_crossfade_curve was_curve = eng.fader_slots[1].curve;
+		const QString job1 = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text();
+		mfd_engine_lock(&eng);
+		eng.fader_slots[1].audio_follows_video = true;
+		mfd_engine_unlock(&eng);
+		auto to_step3 = [&]() {
+			must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_1"))->click();
+			pump_ui();
+			REQUIRE(!sheet->isHidden());
+			while (stack->currentIndex() < 2) {
+				const int at = stack->currentIndex();
+				must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+				pump_ui();
+				REQUIRE(stack->currentIndex() == at + 1);
+			}
+		};
+		to_step3();
+		auto *afv_box = must_find<QCheckBox>(sheet, QStringLiteral("mfdChkAlsoFadeAudio"));
+		auto *feel = must_find<QComboBox>(sheet, QStringLiteral("mfdComboFeel"));
+		REQUIRE(!afv_box->isHidden() && afv_box->isChecked());
+		const enum mfd_crossfade_curve other_curve = was_curve == MFD_CURVE_LINEAR ? MFD_CURVE_COSINE
+											   : MFD_CURVE_LINEAR;
+		feel->setCurrentIndex(feel->findData(static_cast<int>(other_curve)));
+		pump_ui();
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(eng.fader_slots[1].curve == other_curve);
+		REQUIRE(eng.fader_slots[1].audio_follows_video); /* the saved choice survived another change */
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text() == job1);
+		to_step3();
+		REQUIRE(!afv_box->isHidden() && afv_box->isChecked());
+		afv_box->setChecked(false);
+		feel->setCurrentIndex(feel->findData(static_cast<int>(was_curve)));
+		pump_ui();
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(!eng.fader_slots[1].audio_follows_video && eng.fader_slots[1].curve == was_curve);
+		mfd_engine_lock(&eng);
+		eng.fader_slots[1].audio_follows_video = was_afv;
+		mfd_engine_unlock(&eng);
+		pump_ui();
+	}
+
 	/* Edit... on Strip 4 opens Set up on that strip; nothing changes in the engine until Done. Volume on Mic/Aux,
 	 * capture screenshot, verify the table's sentence and the Strips tab reflect it */
 	{
@@ -2597,6 +2648,13 @@ int main(int argc, char **argv)
 				REQUIRE(g_dock_cmd_count == 1 && g_dock_cmds[0].kind == MFD_VJ_CMD_PREVIEW &&
 					std::strcmp(g_dock_cmds[0].scene, "Q&A") == 0);
 				REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
+				/* the scene on air: nothing is asked of OBS, and the status line says why */
+				g_dock_cmd_count = 0;
+				scene_air->click();
+				pump_ui();
+				mfd_engine_flush_pending_ui_work(&eng);
+				REQUIRE(g_dock_cmd_count == 0);
+				REQUIRE(status->text() == QStringLiteral("That scene is on air already."));
 				/* with the APC40 back and Learn running, the grid stays and so do the scene buttons */
 				eng.midi_dev.is_open = true;
 				const int was_learning = eng.learning_slot_index;

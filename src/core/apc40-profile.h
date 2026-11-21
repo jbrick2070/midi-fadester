@@ -106,9 +106,6 @@ bool mfd_target_mode_from_string(const char *str, enum mfd_target_type *out_targ
 const char *mfd_curve_to_string(enum mfd_crossfade_curve curve);
 bool mfd_curve_from_string(const char *str, enum mfd_crossfade_curve *out_curve);
 
-void mfd_row_controls_for_target(enum mfd_target_type target, bool *out_show_source_a, bool *out_show_source_b,
-				 bool *out_show_curve, bool *out_show_afv);
-
 #ifdef __cplusplus
 }
 #endif

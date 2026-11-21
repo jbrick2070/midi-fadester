@@ -683,8 +683,14 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 			/* Ctrl-click (Cmd on a Mac): straight to Program, as Shift + Scene Launch on the desk */
 			bool direct = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
 			/* by the mouse it needs no APC40: it only sets Preview and Program (U1-06 c) */
+			const bool on_air = j < view_.scene_count && view_.program[0] != '\0' &&
+					    std::strcmp(view_.scenes[j], view_.program) == 0;
 			if (mfd_engine_desk_scene(eng_, j, direct) == MFD_DESK_REJECTED) {
 				sayStatus(mfdText("Desk.Ignored", "Not available right now."), false);
+			} else if (on_air) {
+				/* the engine leaves the scene on air as it is: say so, or the click looks lost. Over a standing
+				 * reason for a few seconds: with no APC40 that reason is always there. */
+				sayStatus(mfdText("Desk.SceneOnAir", "That scene is on air already."), true);
 			}
 			refresh();
 		});
