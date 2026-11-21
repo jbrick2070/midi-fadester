@@ -1296,8 +1296,9 @@ static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seco
 		}
 	}
 
-	/* Not drawn: the flash limiters still step, with nothing over the threshold, so their envelopes fall and no
-	 * hit is asked of the shared clock (the same call the Panic path makes). */
+	/* Not drawn: the flash-limited slots still step, with nothing over the threshold, so their envelopes fall and no
+	 * hit is asked of the shared clock. Every other slot keeps the live signal (vs_mod_slot_input_signal), so the
+	 * first frame after a cut back to this source shows the live value, not the empty one (QA2-B01). */
 	const bool on_screen = vs_render_watch_tick(&f->render_watch);
 	float signals[VS_MOD_MAX_SLOTS];
 	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
@@ -1310,7 +1311,8 @@ static void modulator_tick_with_lookup(struct vs_modulator_filter *f, float seco
 		const float raw_sig = vs_analyzer_get_signal(&f->tap.analyzer, &f->tap.current_frame, cfg->signal_id,
 							     cfg->custom_low_hz, cfg->custom_high_hz, cfg->custom_mode);
 		signals[i] = vs_mod_slot_filter_signal(cfg, &f->slot_state[i], NULL, frame_token,
-						       on_screen ? raw_sig : 0.0f, seconds, false);
+						       vs_mod_slot_input_signal(cfg, raw_sig, on_screen), seconds,
+						       false);
 	}
 
 	/* Evaluate all 8 slots and batch dirty writes by distinct target_filter so each target filter

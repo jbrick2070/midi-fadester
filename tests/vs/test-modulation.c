@@ -431,6 +431,29 @@ static void test_off_screen_filter_takes_no_flash(void)
 	assert(hits_shown >= 6); /* 8 kicks in 4 s, at most 3 flashes a second */
 }
 
+/* QA2-B01: only a slot held to the flash clock goes quiet while its source is not drawn; a Level slot on a blur keeps
+ * the live signal, so a cut back to the source shows the live value on its first frame. */
+static void test_off_screen_keeps_unguarded_slots_live(void)
+{
+	struct vs_mod_slot_config cfg;
+	vs_mod_slot_default_config(&cfg);
+	cfg.enabled = true;
+	snprintf(cfg.target_filter, sizeof(cfg.target_filter), "Blur");
+	snprintf(cfg.target_filter_id, sizeof(cfg.target_filter_id), "nvidia_blur_filter");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "intensity");
+	cfg.signal_id = VS_SIG_LEVEL;
+	assert(!vs_mod_slot_uses_flash_clock(&cfg));
+	assert(vs_mod_slot_input_signal(&cfg, 0.7f, false) == 0.7f);
+	assert(vs_mod_slot_input_signal(&cfg, 0.7f, true) == 0.7f);
+
+	snprintf(cfg.target_filter_id, sizeof(cfg.target_filter_id), "color_filter");
+	snprintf(cfg.target_setting, sizeof(cfg.target_setting), "brightness");
+	cfg.signal_id = VS_SIG_KICK;
+	assert(vs_mod_slot_uses_flash_clock(&cfg));
+	assert(vs_mod_slot_input_signal(&cfg, 0.7f, false) == 0.0f);
+	assert(vs_mod_slot_input_signal(&cfg, 0.7f, true) == 0.7f);
+}
+
 int main(void)
 {
 #ifdef _WIN32
@@ -444,6 +467,7 @@ int main(void)
 	test_extreme_and_invalid_numeric_bounds();
 	test_modulation_flash_guard_caps_luminance_direction_changes();
 	test_off_screen_filter_takes_no_flash();
+	test_off_screen_keeps_unguarded_slots_live();
 	printf("test-modulation: all assertions passed\n");
 	return 0;
 }

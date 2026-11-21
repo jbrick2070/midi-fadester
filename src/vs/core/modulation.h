@@ -82,6 +82,9 @@ bool vs_mod_slot_uses_flash_clock(const struct vs_mod_slot_config *cfg);
 float vs_mod_slot_filter_signal(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state,
 				struct vs_flash_clock *clock, uint64_t frame_token, float raw_signal_01, float dt_sec,
 				bool panic_active);
+/* The signal a slot is fed this tick. A slot held to the flash clock gets nothing while its source is not drawn, so it
+ * asks the shared budget for no flash (D-05, QA-B04); every other slot follows the live signal, drawn or not. */
+float vs_mod_slot_input_signal(const struct vs_mod_slot_config *cfg, float raw_signal_01, bool on_screen);
 
 /*
  * Evaluates one modulation slot for the current video tick.
