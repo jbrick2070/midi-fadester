@@ -14,6 +14,7 @@
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
 #include "core/mfd-text.h"
+#include "core/ui-sentences.h"
 #include "ui/mfd-text-qt.hpp"
 #include <plugin-support.h>
 #include <obs-module.h>
@@ -1628,34 +1629,87 @@ int main(int argc, char **argv)
 	REQUIRE(tabs->currentIndex() == 1);
 
 	auto *table = must_find<QTableWidget>(dlg.get(), QStringLiteral("mfdAdvancedTable"));
-	auto *adv_help = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvHelpLabel"));
 	auto *stream_deck_companion = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckCompanion"));
-	REQUIRE(!adv_help->isHidden());
 	REQUIRE(stream_deck_companion->text() == QStringLiteral("Fadester for OBS..."));
 	REQUIRE(stream_deck_companion->toolTip() ==
 		QStringLiteral("Learn about the optional Fadester for OBS Stream Deck plugin."));
 	REQUIRE(stream_deck_companion->property("destinationUrl").toString() ==
 		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
-	REQUIRE(adv_help->text().contains(QStringLiteral("Switch scenes (T-bar):")));
-	REQUIRE(adv_help->text().contains(QStringLiteral("Mix two layers:")));
+	/* U1-17: the table is a map with one way in. Seven columns; the job is the strip's own sentence; no list, no
+	 * Finish now, no Refresh Sources and no help box on this tab. */
+	REQUIRE(table->columnCount() == 7);
+	REQUIRE(table->horizontalHeaderItem(0)->text() == QStringLiteral("On"));
+	REQUIRE(table->horizontalHeaderItem(1)->text() == QStringLiteral("Strip"));
+	REQUIRE(table->horizontalHeaderItem(2)->text() == QStringLiteral("MIDI Control"));
+	REQUIRE(table->horizontalHeaderItem(3)->text() == QStringLiteral("Reverse"));
 	REQUIRE(table->horizontalHeaderItem(4)->text() == QStringLiteral("What it does"));
-	REQUIRE(table->horizontalHeaderItem(5)->text() == QStringLiteral("Left"));
-	REQUIRE(table->horizontalHeaderItem(6)->text() == QStringLiteral("Right"));
-	REQUIRE(table->horizontalHeaderItem(7)->text() == QStringLiteral("Feel"));
-	REQUIRE(table->horizontalHeaderItem(8)->text() == QStringLiteral("Also fade audio"));
+	REQUIRE(table->horizontalHeaderItem(5)->text() == QStringLiteral("Output"));
+	REQUIRE(table->horizontalHeaderItem(6)->text().isEmpty());
+	REQUIRE(table->findChildren<QComboBox *>().isEmpty());
+	REQUIRE(dlg->findChild<QLabel *>(QStringLiteral("mfdAdvHelpLabel")) == nullptr);
+	REQUIRE(dlg->findChild<QPushButton *>(QStringLiteral("mfdAdvFinishBtn")) == nullptr);
+	REQUIRE(dlg->findChild<QPushButton *>(QStringLiteral("mfdBtnRefreshSources")) == nullptr);
+	for (int r = 0; r < MFD_MAX_FADER_SLOTS; ++r) {
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_%1").arg(r))->text() ==
+			must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_%1").arg(r))->text());
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_%1").arg(r));
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvLearn_%1").arg(r));
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvClear_%1").arg(r));
+	}
+	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))
+			->text()
+			.startsWith(QStringLiteral("Mixes ")));
 
-	auto *adv_mode1 = must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_1"));
-	REQUIRE(adv_mode1->currentData().toInt() == static_cast<int>(MFD_TARGET_TWO_SOURCE_MIX));
+	/* Reverse stays a switch in the table: it applies at once and keeps the strip's job */
+	{
+		auto *adv_inv1 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvInv_1"));
+		const QString job_before = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text();
+		REQUIRE(!adv_inv1->isChecked());
+		adv_inv1->setChecked(true);
+		pump_ui();
+		REQUIRE(eng.fader_slots[1].invert);
+		REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text() == job_before);
+		adv_inv1 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvInv_1"));
+		adv_inv1->setChecked(false);
+		pump_ui();
+		REQUIRE(!eng.fader_slots[1].invert);
+	}
 
-	/* Edit Strip 4 in Advanced -> Volume on Mic/Aux, capture screenshot, verify Strips tab reflects it */
-	auto *adv_mode4 = must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_4"));
-	adv_mode4->setCurrentIndex(adv_mode4->findData(static_cast<int>(MFD_TARGET_AUDIO_VOLUME)));
-	pump_ui();
-	auto *adv_left4 = must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvLeft_4"));
-	const int mic_idx = adv_left4->findData(QStringLiteral("Mic/Aux"));
-	REQUIRE(mic_idx >= 0);
-	adv_left4->setCurrentIndex(mic_idx);
-	pump_ui();
+	/* Edit... on Strip 4 opens Set up on that strip; nothing changes in the engine until Done. Volume on Mic/Aux,
+	 * capture screenshot, verify the table's sentence and the Strips tab reflect it */
+	{
+		const enum mfd_target_type job4_before = eng.fader_slots[4].target_type;
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_4"))->click();
+		pump_ui();
+		REQUIRE(!sheet->isHidden());
+		REQUIRE(stack->currentIndex() == 0);
+		char strip4_title[64] = {0};
+		mfd_ui_strip_title(4, eng.fader_slots[4].label, strip4_title, sizeof(strip4_title));
+		REQUIRE(must_find<QLabel>(sheet, QStringLiteral("mfdSetupTitle"))
+				->text()
+				.contains(QString::fromUtf8(strip4_title)));
+		must_find<QPushButton>(sheet, QStringLiteral("mfdCardVolume"))->click();
+		pump_ui();
+		REQUIRE(stack->currentIndex() == 1);
+		auto *combo_audio4 = must_find<QComboBox>(sheet, QStringLiteral("mfdComboAudioSource"));
+		const int mic_idx = combo_audio4->findData(QStringLiteral("Mic/Aux"));
+		REQUIRE(mic_idx >= 0);
+		combo_audio4->setCurrentIndex(mic_idx);
+		pump_ui();
+		REQUIRE(eng.fader_slots[4].target_type == job4_before); /* Set up's promise holds from this tab too */
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+		pump_ui();
+		REQUIRE(stack->currentIndex() == 2);
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(eng.fader_slots[4].target_type == MFD_TARGET_AUDIO_VOLUME);
+		REQUIRE(tabs->currentIndex() == 1);
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_4"))->text() ==
+			QStringLiteral("Volume: Mic/Aux"));
+	}
 
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("09-advanced-tab.png"));
 
@@ -1984,26 +2038,36 @@ int main(int argc, char **argv)
 	REQUIRE(tabs->currentIndex() == 1);
 	REQUIRE(table->rowCount() == 18);
 	REQUIRE(dlg->width() <= 1380);
-	REQUIRE(must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_10"))->currentData().toInt() ==
-		static_cast<int>(MFD_TARGET_FILTER_PARAM));
-	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvFilterSummary_10"))->text() ==
-		QStringLiteral("Blur: Blur Radius [0.0..40.0]"));
-	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvFeelLabel_10"))->text() == QStringLiteral("Linear"));
+	REQUIRE(eng.fader_slots[10].target_type == MFD_TARGET_FILTER_PARAM);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_10"))->text() ==
+		must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_10"))->text());
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_10"))->text().contains(QStringLiteral("Blur")));
 
-	/* Uncheck Off at 0% on row 10 -> lease detaches and restores Blur enabled == true immediately */
-	auto *adv_byp_10 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvFilterBypass_10"));
-	REQUIRE(adv_byp_10->isChecked());
-	adv_byp_10->setChecked(false);
-	pump_ui();
-	REQUIRE(blur_flt->enabled);
-
-	/* Click [Edit...] on row 10 -> opens Set up sheet for FX 1, then cancel */
-	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvFilterEdit_10"))->click();
+	/* Click [Edit...] on row 10 -> opens Set up for FX 1 on its filter page, where "Turn filter off at 0%" now lives.
+	 * Unticking it does nothing until Done; after Done the lease detaches and Blur is enabled again */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_10"))->click();
 	pump_ui();
 	REQUIRE(!sheet->isHidden());
-	must_find<QPushButton>(sheet, QStringLiteral("mfdSetupCancelBtn"))->click();
-	pump_ui();
-	REQUIRE(sheet->isHidden());
+	{
+		if (stack->currentIndex() == 0) {
+			must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+			pump_ui();
+		}
+		REQUIRE(stack->currentIndex() == 1);
+		auto *sheet_byp = must_find<QCheckBox>(sheet, QStringLiteral("mfdChkFilterBypass"));
+		REQUIRE(sheet_byp->isChecked());
+		sheet_byp->setChecked(false);
+		pump_ui();
+		REQUIRE(eng.fader_slots[10].filter_bypass_at_zero);
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+		pump_ui();
+		REQUIRE(stack->currentIndex() == 2);
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(!eng.fader_slots[10].filter_bypass_at_zero);
+		REQUIRE(blur_flt->enabled);
+	}
 
 	/* Configure disabled duplicate on FX 3 (row 12), then toggle On in Advanced -> banner surfaces single-writer error */
 	{
