@@ -252,30 +252,6 @@ int main(void)
 	REQUIRE(mfd_target_mode_from_string("filter_param", &parsed_target) &&
 		parsed_target == MFD_TARGET_FILTER_PARAM);
 
-	/* Row control visibility per Target Mode (Item 5 + R-FADE-4) */
-	bool show_a = true;
-	bool show_b = true;
-	bool show_curve = true;
-	bool show_afv = true;
-
-	mfd_row_controls_for_target(MFD_TARGET_UNASSIGNED, &show_a, &show_b, &show_curve, &show_afv);
-	REQUIRE(!show_a && !show_b && !show_curve && !show_afv);
-
-	mfd_row_controls_for_target(MFD_TARGET_TBAR, &show_a, &show_b, &show_curve, &show_afv);
-	REQUIRE(!show_a && !show_b && !show_curve && !show_afv);
-
-	mfd_row_controls_for_target(MFD_TARGET_SINGLE_LAYER, &show_a, &show_b, &show_curve, &show_afv);
-	REQUIRE(show_a && !show_b && !show_curve && show_afv);
-
-	mfd_row_controls_for_target(MFD_TARGET_AUDIO_VOLUME, &show_a, &show_b, &show_curve, &show_afv);
-	REQUIRE(show_a && !show_b && !show_curve && !show_afv);
-
-	mfd_row_controls_for_target(MFD_TARGET_TWO_SOURCE_MIX, &show_a, &show_b, &show_curve, &show_afv);
-	REQUIRE(show_a && show_b && show_curve && show_afv);
-
-	mfd_row_controls_for_target(MFD_TARGET_FILTER_PARAM, &show_a, &show_b, &show_curve, &show_afv);
-	REQUIRE(show_a && !show_b && !show_curve && !show_afv);
-
 	printf("test-apc40-profile: PASS\n");
 	return 0;
 }

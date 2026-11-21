@@ -95,7 +95,7 @@ On Windows you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 
    ![Set up, step 1 of 3: what should this control do?](docs/screenshots/05-setup-step1-cards.png)
 
-6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. When a desk has no ready layout but another desk's layout is in use, a blue bar at the top says so. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab also has a **Learn** button on every row; changes on that tab apply at once and are saved.
+6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. When a desk has no ready layout but another desk's layout is in use, a blue bar at the top says so. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab is a map of all 18 strips: each row shows the strip's MIDI control with **Learn** and **×**, what the strip does, its output, and an **Edit...** button that opens Set up on that strip. **On** and **Reverse** in a row, like the other switches on that tab, apply at once and are saved.
 
 The jobs are saved with the scene collection and the controller settings per Windows user; both come back the next time OBS starts.
 
@@ -114,8 +114,8 @@ A strip can also be **Not used**. Its MIDI control stays assigned, so you can gi
 
 Good to know:
 
-- Layer fades and mixes work through a filter the plugin adds to the source. OBS lists it in the source's Filters as `__midi_fadester_opacity__` (its type is *Midi Fadester — Layer Opacity*); leave it there. Your own filters are not touched, and at 100 % the filter skips its GPU pass.
-- A layer faded to 0 % keeps running. A media source keeps playing, so it can fade back in at once. Tick **Also fade audio** on the Advanced tab if its sound should follow.
+- Layer fades and mixes work through a filter the plugin adds to the source. OBS lists it in the source's Filters as `__midi_fadester_opacity__` (its type is *Midi Fadester fade (leave on)*); leave it there. OBS does not offer this type in its add-filter menu: it only shows in the Filters of a source the plugin faded. Your own filters are not touched, and at 100 % the filter skips its GPU pass.
+- A layer faded to 0 % keeps running. A media source keeps playing, so it can fade back in at once. Tick **Also fade audio** in step 3 of Set up if its sound should follow.
 - The filter sits on the source, not on the scene item. If the same source appears in two scenes, it fades in both; Set up warns you when that is the case. For a layer that should fade in one scene only, copy the source and use **Paste (Duplicate)**, not **Paste (Reference)**, in the other scene.
 - One setting of one filter can be driven by one slot at a time. Set up refuses a second binding to the same setting.
 
@@ -134,7 +134,7 @@ Both crossfade video, in two different styles.
 
 Watch the Program box (on the right in OBS's default layout). It never jumps; it only fades. At the end of a throw the Preview box switches to the old Program scene: that is OBS's default *Swap Preview/Program Scenes After Transitioning* setting lining up the next throw.
 
-**Mix two layers** is the DJ mixer. Put both sources, or two nested scenes, in one scene, and give a fader the job with Left and Right. The left end shows Left, the right end shows Right, and the middle shows both. There is no Preview and Program, and Studio Mode can stay off. The **Feel** column on the Advanced tab picks the curve; the Set up sheet offers all of them:
+**Mix two layers** is the DJ mixer. Put both sources, or two nested scenes, in one scene, and give a fader the job with Left and Right. The left end shows Left, the right end shows Right, and the middle shows both. There is no Preview and Program, and Studio Mode can stay off. **Feel** in step 3 of Set up picks the curve:
 
 | Curve | What you see |
 |---|---|
@@ -171,7 +171,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 - **Change controller** on the Strips screen picks the MIDI port and the layout. The plugin picks the APC40 mkII's port by itself when it sees one.
 - **Show controller** opens a live picture of the desk with each fader's position, job and state, so you can see which physical fader does what (faders, master and crossfader; the FX knobs are not drawn).
 - A desk without a horizontal crossfader can give **Switch scenes** to any vertical fader. Layouts for desks without a crossfader or master turn those two slots off.
-- **Reverse direction** on the Advanced tab flips a control that runs the wrong way.
+- **Reverse** on the Advanced tab (**Reverse direction** in step 3 of Set up) flips a control that runs the wrong way.
 - Adding a desk is one entry in `src/core/apc40-profile.c`.
 
 ![Show controller: the APC40 mkII desk with live positions](docs/screenshots/08-show-controller-svg.png)
@@ -259,7 +259,7 @@ The dialog says what is wrong in a sentence, next to the strip it concerns, and 
 | *Could not open APC40 mkII. Unplug and replug it, then press Reconnect.* | Windows refused the port for another reason. | Do that. |
 | *Studio Mode is off.* | Switch scenes needs Studio Mode. | **Turn on Studio Mode** on the strip, or the **Studio Mode** button in OBS's Controls dock. |
 | *No fader assigned. Click Set up and move the fader.* | The strip has a job but no MIDI control. | Do that and move the fader, or press **Learn** on the Advanced tab. |
-| *There is no ready layout for …* in a blue bar at the top | Midi Fadester has no layout for this desk, and the layout in use is for another desk, so the strips may not follow this desk's faders. | Learn each fader as the bar says. **OK** hides the bar until the window is opened again. |
+| *No ready layout for …* in a blue bar at the top | Midi Fadester has no layout for this desk, and the layout in use is for another desk, so the strips may not follow this desk's faders. | Learn each fader as the bar says. **OK** hides the bar until the window is opened again. |
 | *Scene Red was deleted.* / *Cam is no longer in scene Blue.* / *Color and Color 2 are not in the same scene.* | The scene or layer the job named is gone or moved. | **Set up** on the strip and pick again. Renames follow by themselves; only removals break a job. |
 | *Mic/Aux has no audio.* | A Volume job points at a source without sound. | Pick a source with audio. |
 | *Filter 'Blur' was removed from Cam. Re-add it in OBS Filters or click Set up.* / *Setting 'radius' is no longer available on 'Blur'.* | The filter or its setting is gone. | Re-add the filter in OBS, or **Set up** and pick another. |
@@ -357,7 +357,7 @@ obs-websocket `get_state` reply lists them under `vj_pads`, with the five scenes
 - **Fade** (Preview on air with your transition; it stays in place, greyed, when Studio Mode is off or Preview and Program are the same scene) and **Blackout** (it works with or without the APC40, so a blackout can always be ended; it reads **End blackout** while Program is black);
 - the crossfader, the transition length and source fade time, and Visual Sidechain's BPM, **Panic**, **Tap**, **Hold BPM** and **Beat 1**.
 
-Click a button and it does what the APC40's button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air; **Escape** lets go of anything held from the dock. Without an APC40, with the pads switched off or on another controller's layout, the pad grid is hidden and Fade, Blackout and the tempo buttons stay. The dock's text follows OBS's font size.
+Click a button and it does what the APC40's button does, while the APC40 mkII is connected: hold a Flash pad for as long as you hold the mouse; **Ctrl-click** (Cmd on a Mac) a scene to put it straight on air; **Escape** lets go of anything held from the dock. Without an APC40, with the pads switched off or on another controller's layout, the pad grid is hidden and the five scene buttons, Fade, Blackout and the tempo buttons stay: a scene button only sets Preview and Program, so it works from the mouse with no desk at all (while the APC40's pads are on, a scene button that a strip has learned stays that strip's). The dock's text follows OBS's font size.
 
 The **Video speed** rows are hidden until you tick **Show video speed controls on the dock** on the **Advanced** tab (an installation that already had settings keeps them). They drive the video speed through
 [Fadester Companion](https://github.com/jbrick2070/streamdeck-fadester): an endless speed dial (0.05x per notch, like the

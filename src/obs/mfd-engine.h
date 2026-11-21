@@ -813,6 +813,15 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 enum mfd_desk_press_result mfd_engine_desk_press(struct mfd_engine *eng, uint8_t channel, uint8_t note, bool on,
 						 bool shift, uint32_t *hold_epoch);
 
+/*
+ * A click on one of the dock's five scene buttons (U1-06 c). A scene button only sets Preview and Program, which needs
+ * no hardware: it works with or without an APC40, with the pads switched off, on another layout and while Learn or Set
+ * up runs. Once to Preview and again to fade it on air; direct, or outside Studio Mode, straight on air. While the
+ * APC40's pads act it is the Scene Launch button itself (mfd_engine_desk_press), so a button a strip learned stays
+ * that strip's. Refused while OBS loads, for a scene that is not there and during a crossfader throw.
+ */
+enum mfd_desk_press_result mfd_engine_desk_scene(struct mfd_engine *eng, int scene, bool direct);
+
 /* The dock's Fade button: Preview to Program with OBS's transition (Studio Mode), with or without an APC40. */
 void mfd_engine_desk_fade(struct mfd_engine *eng);
 

@@ -2766,10 +2766,14 @@ static int test_vj_fill_follow_and_desk(void)
 	/* A newly filled strip starts at 100 % and waits for its fader to pick up: nothing is written yet. */
 	REQUIRE(fake_sg_find_source(&sg, "A1")->opacity_writes == 0);
 
-	/* 2. Program changes: following strips move to its sources; strips without one empty out. */
+	/* 2. Program changes: following strips move to its sources; strips without one empty out. A strip's "Also fade
+	 * audio" goes with it to the new source (QA2 R2-S01). */
+	eng->fader_slots[1].audio_follows_video = true;
 	vj_program(eng, "Scene A", "Scene B");
 	REQUIRE(vj_strip_is(eng, 1, "Scene B", "B1") && vj_strip_is(eng, 2, "Scene B", "B2") &&
 		vj_strip_is(eng, 3, NULL, NULL) && eng->fader_slots[3].auto_follow);
+	REQUIRE(eng->fader_slots[1].audio_follows_video && !eng->fader_slots[2].audio_follows_video);
+	eng->fader_slots[1].audio_follows_video = false; /* as before, for the steps that follow */
 	REQUIRE(eng->vj.has_layer == 0x03U);
 
 	/* 3. Shift + Clip Stop pins a column: it keeps its source; the others move on and skip that source. */
@@ -3576,6 +3580,105 @@ static int test_vj_fill_follow_and_desk(void)
 		REQUIRE(mfd_engine_desk_vs(eng, MFD_VJ_CMD_VS_TAP) && !mfd_engine_desk_vs(eng, MFD_VJ_CMD_TAKE));
 		mfd_engine_flush_pending_ui_work(eng);
 		REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_VS_TAP);
+
+		/* 14e2. The scene buttons work from the mouse without the APC40 (U1-06 c): once to Preview, again to fade
+		 * it on air, direct straight on air, outside Studio Mode straight on air; the scene on air, a scene that
+		 * is not there, a crossfader throw and a loading OBS are refused or do nothing. The pad itself still
+		 * waits. */
+		{
+			char saved_preview[MFD_SOURCE_NAME_MAX];
+			char saved_program[MFD_SOURCE_NAME_MAX];
+			bool saved_studio = mfd_engine_is_studio_mode_active(eng);
+			bool saved_apc40 = eng->apc40_controller_detected;
+			snprintf(saved_preview, sizeof(saved_preview), "%s", eng->cached_preview_scene);
+			snprintf(saved_program, sizeof(saved_program), "%s", eng->cached_program_scene);
+			mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", saved_apc40);
+			g_vj_cmd_count = 0;
+			REQUIRE(mfd_engine_desk_press(eng, 0, 84, true, false, NULL) ==
+				MFD_DESK_REJECTED);                                         /* the pad */
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_ACCEPTED); /* Scene C: to Preview */
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_ACCEPTED); /* again: fade it on air */
+			REQUIRE(mfd_engine_desk_scene(eng, 0, true) == MFD_DESK_ACCEPTED); /* direct: straight on air */
+			REQUIRE(mfd_engine_desk_scene(eng, 1, false) ==
+				MFD_DESK_ACCEPTED); /* on air already: nothing */
+			REQUIRE(mfd_engine_desk_scene(eng, 3, false) == MFD_DESK_REJECTED); /* no fourth scene */
+			REQUIRE(mfd_engine_desk_scene(eng, -1, false) == MFD_DESK_REJECTED &&
+				mfd_engine_desk_scene(eng, (int)MFD_VJ_SCENES, false) == MFD_DESK_REJECTED);
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 3);
+			REQUIRE(g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW && strcmp(g_vj_cmds[0].scene, "Scene C") == 0);
+			REQUIRE(g_vj_cmds[1].kind == MFD_VJ_CMD_TAKE && strcmp(g_vj_cmds[1].scene, "Scene C") == 0);
+			REQUIRE(g_vj_cmds[2].kind == MFD_VJ_CMD_PROGRAM && strcmp(g_vj_cmds[2].scene, "Scene A") == 0);
+			/* the pads switched off, another strip's Learn running, a learned Scene Launch note: still the mouse's */
+			struct mfd_midi_addr scene_addr = eng->fader_slots[4].addr;
+			bool scene_enabled = eng->fader_slots[4].enabled;
+			eng->midi_dev.is_open = true;
+			eng->vj_disabled = true;
+			eng->learning_slot_index = 6;
+			eng->fader_slots[4].addr.type = MFD_MIDI_NOTE_ON;
+			eng->fader_slots[4].addr.channel = 0;
+			eng->fader_slots[4].addr.number = 84;
+			eng->fader_slots[4].addr.is_14bit = false;
+			eng->fader_slots[4].enabled = true;
+			mfd_engine_get_desk_view(eng, false, v);
+			REQUIRE(v->pads == MFD_DESK_PADS_BUTTONS_OFF && v->learn_or_setup && v->scene_owned[2]);
+			g_vj_cmd_count = 0;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_ACCEPTED);
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW);
+			/* with the pads acting, the button a strip learned stays that strip's, as on the desk */
+			eng->vj_disabled = false;
+			eng->learning_slot_index = -1;
+			g_vj_cmd_count = 0;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			eng->fader_slots[4].addr = scene_addr;
+			eng->fader_slots[4].enabled = scene_enabled;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_ACCEPTED); /* the desk's own path */
+			mfd_engine_desk_press(eng, 0, 84, false, false, NULL);
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW);
+			eng->midi_dev.is_open = false;
+			/* outside Studio Mode: straight on air */
+			mfd_engine_set_test_frontend_state(eng, true, false, "", "Scene B", saved_apc40);
+			g_vj_cmd_count = 0;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_ACCEPTED);
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PROGRAM &&
+				strcmp(g_vj_cmds[0].scene, "Scene C") == 0);
+			/* a crossfader throw, and OBS still loading: refused */
+			mfd_engine_set_test_frontend_state(eng, true, true, "Scene A", "Scene B", saved_apc40);
+			enum mfd_tbar_state saved_tbar = eng->fader_slots[0].tbar_state;
+			enum mfd_target_type saved_tbar_job = eng->fader_slots[0].target_type;
+			bool saved_tbar_on = eng->fader_slots[0].enabled;
+			g_vj_cmd_count = 0;
+			eng->fader_slots[0].enabled = true; /* the test's own T-bar strip, whatever came before */
+			eng->fader_slots[0].target_type = MFD_TARGET_TBAR;
+			eng->fader_slots[0].tbar_state = MFD_TBAR_THROWING;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			eng->fader_slots[0].tbar_state = MFD_TBAR_IDLE;
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) ==
+				MFD_DESK_ACCEPTED); /* the throw was the reason */
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 1 && g_vj_cmds[0].kind == MFD_VJ_CMD_PREVIEW);
+			g_vj_cmd_count = 0;
+			eng->fader_slots[0].tbar_state = saved_tbar;
+			eng->fader_slots[0].target_type = saved_tbar_job;
+			eng->fader_slots[0].enabled = saved_tbar_on;
+			mfd_engine_set_test_frontend_state(eng, false, true, "Scene A", "Scene B", saved_apc40);
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			/* QA-S01: refused while OBS loads on the pads' own path too (the APC40 open, its pads acting) */
+			eng->midi_dev.is_open = true;
+			mfd_engine_get_desk_view(eng, false, v);
+			REQUIRE(v->pads == MFD_DESK_PADS_ON && !v->learn_or_setup && !v->finished_loading);
+			REQUIRE(mfd_engine_desk_scene(eng, 2, false) == MFD_DESK_REJECTED);
+			REQUIRE(mfd_engine_desk_scene(eng, 0, true) == MFD_DESK_REJECTED);
+			eng->midi_dev.is_open = false;
+			mfd_engine_flush_pending_ui_work(eng);
+			REQUIRE(g_vj_cmd_count == 0);
+			mfd_engine_set_test_frontend_state(eng, true, saved_studio, saved_preview, saved_program,
+							   saved_apc40);
+			eng->vj_preview_asked[0] = '\0';
+		}
 		eng->midi_dev.is_open = true;
 
 		/* 14f. Shown: Visual Sidechain is asked at once, and the frame tick asks the UI to repaint (one request per

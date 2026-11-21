@@ -1535,10 +1535,6 @@ static void set_slot_inner_controls_visible(obs_properties_t *props, obs_data_t 
 		obs_property_t *p = obs_properties_get(props, k);
 		if (p)
 			obs_property_set_visible(p, enabled && (more || depth_used));
-		slot_key(k, sizeof(k), slot_idx, "depth_reset");
-		p = obs_properties_get(props, k);
-		if (p)
-			obs_property_set_visible(p, enabled && (more || depth_used));
 		slot_key(k, sizeof(k), slot_idx, "invert");
 		const bool inverted = settings && obs_data_get_bool(settings, k);
 		p = obs_properties_get(props, k);
@@ -1727,8 +1723,6 @@ static void refresh_modulator_properties_visibility(struct vs_modulator_filter *
 		}
 		slot_key(key, sizeof(key), i, "binding_status");
 		vs_property_info_set_text(obs_properties_get(props, key), summary);
-		slot_key(key, sizeof(key), i, "depth_reset");
-		obs_property_set_enabled(obs_properties_get(props, key), depth != VS_FADER_SLOT_NONE);
 	}
 }
 
@@ -1781,30 +1775,6 @@ static bool slot_modified_cb(void *priv, obs_properties_t *props, obs_property_t
 
 	refresh_modulator_properties_visibility(f, props, settings, repopulate_idx);
 	return true;
-}
-
-static bool depth_fader_reset_clicked(obs_properties_t *props, obs_property_t *property, void *data)
-{
-	struct vs_modulator_filter *f = (struct vs_modulator_filter *)data;
-	if (!f || !f->context || !property)
-		return false;
-	const char *name = obs_property_name(property);
-	for (uint32_t i = 0; i < VS_MOD_MAX_SLOTS; i++) {
-		char key[64];
-		slot_key(key, sizeof(key), i, "depth_reset");
-		if (strcmp(name, key) != 0)
-			continue;
-		obs_data_t *settings = obs_source_get_settings(f->context);
-		if (!settings)
-			return false;
-		slot_key(key, sizeof(key), i, "depth_fader");
-		obs_data_set_int(settings, key, VS_FADER_SLOT_NONE);
-		obs_source_update(f->context, settings);
-		refresh_modulator_properties_visibility(f, props, settings, -1);
-		obs_data_release(settings);
-		return true;
-	}
-	return false;
 }
 
 static void add_fader_slot_choices(obs_property_t *list, bool fadester_loaded, const char *none_label, int base_offset)
@@ -1970,9 +1940,6 @@ static obs_properties_t *modulator_get_properties(void *data)
 		add_fader_slot_choices(p_df, fadester_loaded, obs_module_text("Modulator.DepthFader.None"), 0);
 		obs_property_set_long_description(p_df, obs_module_text("Modulator.DepthFader.Tooltip"));
 		obs_property_set_modified_callback2(p_df, slot_modified_cb, f);
-		slot_key(key, sizeof(key), i, "depth_reset");
-		obs_properties_add_button2(grp, key, obs_module_text("Modulator.DepthFader.Reset"),
-					   depth_fader_reset_clicked, f);
 
 		slot_key(key, sizeof(key), i, "min_value");
 		snprintf(property_title, sizeof(property_title), "%s %u: %s",

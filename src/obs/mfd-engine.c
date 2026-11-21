@@ -6989,6 +6989,10 @@ static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *sce
 	}
 	int strip = k - 1;
 	uint8_t b = (uint8_t)(1U << (unsigned)strip);
+	/* A layer strip that follows the scene on air keeps the user's "Also fade audio" when it moves to another source,
+	 * as Set up does; a strip that held another kind of job starts without it. */
+	const bool keep_afv = s->audio_follows_video && (s->target_type == MFD_TARGET_SINGLE_LAYER ||
+							 s->target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	vj_leave_source_locked(eng, strip);
 	if (s->vj_flash_held) {
 		s->vj_flash_held = false;
@@ -7015,6 +7019,7 @@ static bool vj_point_strip_locked(struct mfd_engine *eng, int k, const char *sce
 		mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 		return true;
 	}
+	s->audio_follows_video = keep_afv;
 	snprintf(s->scene_name, sizeof(s->scene_name), "%s", scene);
 	snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", source);
 	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
@@ -7600,6 +7605,36 @@ bool mfd_engine_desk_vs(struct mfd_engine *eng, enum mfd_vj_command_kind kind)
 	bool ok = vj_queue_cmd_locked(eng, kind, NULL, NULL, 0);
 	mfd_engine_unlock(eng);
 	return ok;
+}
+
+enum mfd_desk_press_result mfd_engine_desk_scene(struct mfd_engine *eng, int scene, bool direct)
+{
+	if (!eng || scene < 0 || scene >= (int)MFD_VJ_SCENES) {
+		return MFD_DESK_REJECTED;
+	}
+	mfd_engine_lock(eng);
+	if (!eng->frontend_finished_loading) { /* on every path, the pads' own too (QA-S01) */
+		mfd_engine_unlock(eng);
+		return MFD_DESK_REJECTED;
+	}
+	bool pads_act = vj_active(eng) && !eng->setup_session.active && eng->learning_slot_index < 0;
+	if (pads_act) {
+		/* the desk's own button: Shift held on the desk, a strip that learned it and its light all as before */
+		mfd_engine_unlock(eng);
+		return mfd_engine_desk_press(eng, 0U, (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)scene), true, direct,
+					     NULL);
+	}
+	enum mfd_desk_press_result r = MFD_DESK_REJECTED;
+	if (scene < eng->cached_scene_count && !vj_tbar_busy_locked(eng)) {
+		uint32_t drops = eng->vj_cmd_drops;
+		vj_scene_locked(eng, scene, direct);
+		if (eng->vj_cmd_drops == drops) { /* a dropped command did nothing */
+			r = MFD_DESK_ACCEPTED;
+		}
+		mfd_engine_mark_ui_dirty(eng, false); /* under the lock: the unlock wakes the UI thread */
+	}
+	mfd_engine_unlock(eng);
+	return r;
 }
 
 void mfd_engine_desk_fade(struct mfd_engine *eng)

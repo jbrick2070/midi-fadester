@@ -95,43 +95,17 @@ static QString format_midi_addr(const struct mfd_midi_addr &addr)
 	}
 }
 
-static QStringList collect_live_obs_sources(bool require_video, bool require_audio)
-{
-	struct enum_ctx {
-		QStringList names;
-		bool req_video;
-		bool req_audio;
-	} ctx{QStringList{}, require_video, require_audio};
-
-	if (!obs_initialized()) {
-		return ctx.names;
-	}
-
-	obs_enum_sources(
-		[](void *data, obs_source_t *source) -> bool {
-			auto *c = static_cast<enum_ctx *>(data);
-			if (!source) {
-				return true;
-			}
-			const uint32_t flags = obs_source_get_output_flags(source);
-			if (c->req_video && (flags & OBS_SOURCE_VIDEO) == 0U) {
-				return true;
-			}
-			if (c->req_audio && (flags & OBS_SOURCE_AUDIO) == 0U) {
-				return true;
-			}
-			const char *name = obs_source_get_name(source);
-			if (name && *name && std::strncmp(name, "__mfd_", 6) != 0 &&
-			    std::strncmp(name, "__midi_fadester_", 16) != 0) {
-				c->names.append(QString::fromUtf8(name));
-			}
-			return true;
-		},
-		&ctx);
-
-	ctx.names.sort(Qt::CaseInsensitive);
-	return ctx.names;
-}
+/* the Advanced table's columns (U1-17) */
+enum {
+	kAdvColOn = 0,
+	kAdvColStrip,
+	kAdvColMidi,
+	kAdvColReverse,
+	kAdvColJob,
+	kAdvColOutput,
+	kAdvColEdit,
+	kAdvColumns,
+};
 
 static QWidget *make_centered_checkbox_cell(QWidget *parent, const QString &obj_name, bool checked,
 					    const QString &tooltip, QCheckBox **out_checkbox)
@@ -335,8 +309,7 @@ class MfdSettingsDialog final : public QDialog {
 public:
 	explicit MfdSettingsDialog(struct mfd_engine *eng, QWidget *parent = nullptr)
 		: QDialog(parent),
-		  eng_(eng ? eng : mfd_engine_get()),
-		  adv_catalog_(mfd_ui_catalog_create())
+		  eng_(eng ? eng : mfd_engine_get())
 	{
 		setObjectName(QStringLiteral("mfdSettingsDialog"));
 		/* the version only: the commit and the build time are on the Advanced tab's last line (mfdAdvAbout) */
@@ -591,8 +564,6 @@ public:
 		if (controller_view_dlg_) {
 			controller_view_dlg_->close();
 		}
-		mfd_ui_catalog_destroy(adv_catalog_);
-		adv_catalog_ = nullptr;
 	}
 
 	bool any_port_list_open() const
@@ -655,14 +626,10 @@ public:
 		refresh_no_layout_banner();
 
 		size_t active_tbar_slots = 0U;
-		bool can_finish_any_tbar = false;
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 			const struct mfd_fader_slot &s = snap_.slots[i];
 			if (s.enabled && s.target_type == MFD_TARGET_TBAR) {
 				++active_tbar_slots;
-				if (snap_.studio_mode_active && s.tbar_state == MFD_TBAR_THROWING) {
-					can_finish_any_tbar = true;
-				}
 			}
 		}
 		const bool notice_showing = snap_.first_run_offer_pending || !no_layout_banner_->isHidden();
@@ -673,7 +640,7 @@ public:
 							!studio_note);
 
 		refresh_strips_tab();
-		refresh_advanced_tab(can_finish_any_tbar);
+		refresh_advanced_tab();
 
 		if (setup_sheet_ && setup_sheet_->isVisible()) {
 			setup_sheet_->refresh_from_snapshot(snap_);
@@ -1122,13 +1089,8 @@ private:
 		studio_status_label_->setObjectName(QStringLiteral("mfdAdvStudioLabel"));
 		telemetry_bar->addWidget(studio_status_label_);
 
-		btn_finish_tbar_ = new QPushButton(mfdText("Dialog.FinishNow", "Finish now"), adv_tab);
-		btn_finish_tbar_->setObjectName(QStringLiteral("mfdAdvFinishBtn"));
-		btn_finish_tbar_->setEnabled(false);
-		telemetry_bar->addWidget(btn_finish_tbar_);
-
 		telemetry_bar->addSpacing(16);
-		auto *lbl_tau = new QLabel(mfdText("Dialog.Smoothing", "Smoothing (ms):"), adv_tab);
+		auto *lbl_tau = new QLabel(mfdText("Dialog.Smoothing", "Smoothing:"), adv_tab);
 		lbl_tau->setStyleSheet(QStringLiteral("color: #e2e8f0; font-weight: bold;"));
 		telemetry_bar->addWidget(lbl_tau);
 
@@ -1204,62 +1166,28 @@ private:
 		vj_fill_bar->addWidget(vj_fill_result_, 1);
 		root->addLayout(vj_fill_bar);
 		connect(btn_vj_fill, &QPushButton::clicked, this, [this]() { fill_faders_from_scene(); });
-		connect(btn_finish_tbar_, &QPushButton::clicked, this, [this]() {
-			for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
-				if (snap_.slots[i].enabled && snap_.slots[i].target_type == MFD_TARGET_TBAR &&
-				    snap_.slots[i].tbar_state == MFD_TBAR_THROWING) {
-					mfd_engine_finish_tbar_throw(eng_, i);
-					break;
-				}
-			}
-			refresh_from_engine();
-		});
-
-		table_ = new QTableWidget(MFD_MAX_FADER_SLOTS, 10, adv_tab);
+		/* A map of the 18 strips with one way in (U1-17): what a strip does is its own sentence, and Edit... opens Set up on
+		 * it. On and Reverse stay switches here: each is one yes-or-no that picks no job, source or range, and this page
+		 * says above the table that its changes apply at once. */
+		table_ = new QTableWidget(MFD_MAX_FADER_SLOTS, kAdvColumns, adv_tab);
 		table_->setObjectName(QStringLiteral("mfdAdvancedTable"));
 		table_->setHorizontalHeaderLabels({
 			mfdText("Dialog.Column.On", "On"),
 			mfdText("Dialog.Column.Strip", "Strip"),
 			mfdText("Dialog.Column.MidiControl", "MIDI Control"),
-			mfdText("Dialog.Column.Reverse", "Reverse direction"),
+			mfdText("Dialog.Column.Reverse", "Reverse"),
 			mfdText("Dialog.Column.WhatItDoes", "What it does"),
-			mfdText("Dialog.Column.Left", "Left"),
-			mfdText("Dialog.Column.Right", "Right"),
-			mfdText("Dialog.Column.Feel", "Feel"),
-			mfdText("Dialog.Column.AlsoFadeAudio", "Also fade audio"),
 			mfdText("Dialog.Column.Output", "Output"),
+			QString(),
 		});
-		table_->horizontalHeader()->setStretchLastSection(true);
-		table_->horizontalHeader()->setSectionResizeMode(9, QHeaderView::Stretch);
+		table_->horizontalHeader()->setStretchLastSection(false);
+		table_->horizontalHeader()->setSectionResizeMode(kAdvColJob, QHeaderView::Stretch);
 		table_->verticalHeader()->setVisible(false);
 		table_->verticalHeader()->setDefaultSectionSize(36);
 		table_->setAlternatingRowColors(true);
 		table_->setSelectionMode(QAbstractItemView::NoSelection);
 		table_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 		root->addWidget(table_, 1);
-
-		auto *hint = new QLabel(
-			mfdText("Dialog.Help.Tbar",
-				"<b style='color:#f8fafc;'>Switch scenes (T-bar):</b> Fades Preview &rarr; "
-				"Program from 0&ndash;100%. Reach the far end to finish, or return to the start "
-				"to cancel.") +
-				QStringLiteral("<br>") +
-				mfdText("Dialog.Help.Mix",
-					"<b style='color:#f8fafc;'>Mix two layers:</b> Crossfades Left and Right in one "
-					"scene (layer order is detected automatically).") +
-				QStringLiteral("<br>") +
-				mfdText("Dialog.Help.Filter",
-					"<b style='color:#f8fafc;'>Filter or effect setting:</b> Sweeps any numeric filter "
-					"or shader slider across a custom Clean &rarr; Max range (click <b>Edit...</b> to "
-					"pick filter, setting, and range)."),
-			adv_tab);
-		hint->setObjectName(QStringLiteral("mfdAdvHelpLabel"));
-		hint->setTextFormat(Qt::RichText);
-		hint->setWordWrap(true);
-		hint->setStyleSheet(QStringLiteral(
-			"QLabel#mfdAdvHelpLabel { background-color: #111827; color: #cbd5e1; font-size: 13px; "
-			"padding: 7px 12px; border: 1px solid #1e293b; border-radius: 5px; }"));
-		root->addWidget(hint);
 
 		auto *footer = new QHBoxLayout();
 		auto *btn_back_strips = new QPushButton(mfdText("Dialog.BackToStrips", "Back to Strips"), adv_tab);
@@ -1275,11 +1203,6 @@ private:
 		auto *btn_export = new QPushButton(mfdText("Dialog.Export", "Export..."), adv_tab);
 		btn_export->setObjectName(QStringLiteral("mfdBtnExport"));
 		footer->addWidget(btn_export);
-
-		auto *btn_refresh_sources =
-			new QPushButton(mfdText("Dialog.RefreshSources", "Refresh Sources"), adv_tab);
-		btn_refresh_sources->setObjectName(QStringLiteral("mfdBtnRefreshSources"));
-		footer->addWidget(btn_refresh_sources);
 
 		auto *btn_close = new QPushButton(mfdText("Dialog.Close", "Close"), adv_tab);
 		btn_close->setObjectName(QStringLiteral("mfdBtnClose"));
@@ -1408,10 +1331,6 @@ private:
 			}
 		});
 
-		connect(btn_refresh_sources, &QPushButton::clicked, this, [this]() {
-			last_adv_topology_rev_ = ~0ULL;
-			refresh_from_engine();
-		});
 		connect(btn_close, &QPushButton::clicked, this, &QDialog::accept);
 
 		main_tabs_->addTab(adv_tab, mfdText("Dialog.Advanced", "Advanced"));
@@ -1583,9 +1502,8 @@ private:
 		if (show) {
 			const QString text =
 				mfdFill(mfdText("Dialog.NoLayout.Text",
-						"There is no ready layout for %1. Click Set up under a strip. "
-						"In step 3, open Which hardware control?, press Learn and move "
-						"the fader."),
+						"No ready layout for %1. Click Set up under a strip and move the "
+						"control you want."),
 					{opened});
 			if (no_layout_text_->text() != text) {
 				no_layout_text_->setText(text);
@@ -1831,107 +1749,7 @@ private:
 		}
 	}
 
-	bool any_adv_combo_popup_open() const
-	{
-		for (int r = 0; r < MFD_MAX_FADER_SLOTS; ++r) {
-			if (adv_mode_combos_[r] && adv_mode_combos_[r]->view() &&
-			    adv_mode_combos_[r]->view()->isVisible()) {
-				return true;
-			}
-			if (adv_left_combos_[r] && adv_left_combos_[r]->view() &&
-			    adv_left_combos_[r]->view()->isVisible()) {
-				return true;
-			}
-			if (adv_right_combos_[r] && adv_right_combos_[r]->view() &&
-			    adv_right_combos_[r]->view()->isVisible()) {
-				return true;
-			}
-			if (adv_feel_combos_[r] && adv_feel_combos_[r]->view() &&
-			    adv_feel_combos_[r]->view()->isVisible()) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	static void populate_source_combo(QComboBox *combo, const QStringList &sources, const char *current_name)
-	{
-		combo->blockSignals(true);
-		combo->clear();
-		combo->addItem(mfdText("Dialog.Source.None", "(None)"), QStringLiteral(""));
-		const QString cur = QString::fromUtf8(current_name ? current_name : "");
-		int found_idx = 0;
-		for (int i = 0; i < sources.size(); ++i) {
-			combo->addItem(sources[i], sources[i]);
-			if (sources[i] == cur) {
-				found_idx = i + 1;
-			}
-		}
-		if (!cur.isEmpty() && found_idx == 0) {
-			combo->addItem(mfdFill(mfdText("Dialog.Source.Missing", "%1 (missing)"), {cur}), cur);
-			found_idx = combo->count() - 1;
-		}
-		combo->setCurrentIndex(found_idx);
-		combo->blockSignals(false);
-	}
-
-	void collect_advanced_source_lists(QStringList *out_video, QStringList *out_audio,
-					   QStringList *out_filter_hosts)
-	{
-		QStringList vids = collect_live_obs_sources(true, false);
-		QStringList auds = collect_live_obs_sources(false, true);
-		QStringList hosts = vids;
-		for (const QString &a : auds) {
-			if (!hosts.contains(a)) {
-				hosts.append(a);
-			}
-		}
-
-		if (adv_catalog_) {
-			mfd_engine_get_ui_catalog(eng_, adv_catalog_);
-			for (size_t si = 0U; si < adv_catalog_->scene_count; ++si) {
-				const struct mfd_ui_scene_entry &se = adv_catalog_->scenes[si];
-				const QString sc_nm = QString::fromUtf8(se.name);
-				if (!sc_nm.isEmpty() && !hosts.contains(sc_nm)) {
-					hosts.append(sc_nm);
-				}
-				for (size_t li = 0U; li < se.layer_count; ++li) {
-					const QString lnm = QString::fromUtf8(se.layers[li]);
-					if (!vids.contains(lnm)) {
-						vids.append(lnm);
-					}
-					if (!hosts.contains(lnm)) {
-						hosts.append(lnm);
-					}
-				}
-			}
-			for (size_t ai = 0U; ai < adv_catalog_->audio_count; ++ai) {
-				const QString anm = QString::fromUtf8(adv_catalog_->audio_sources[ai].name);
-				if (!auds.contains(anm)) {
-					auds.append(anm);
-				}
-				if (!hosts.contains(anm)) {
-					hosts.append(anm);
-				}
-			}
-			for (size_t hi = 0U; hi < adv_catalog_->filter_host_count; ++hi) {
-				const QString hnm = QString::fromUtf8(adv_catalog_->filter_hosts[hi].name);
-				if (!hnm.isEmpty() && !hosts.contains(hnm)) {
-					hosts.append(hnm);
-				}
-			}
-		}
-		vids.sort(Qt::CaseInsensitive);
-		auds.sort(Qt::CaseInsensitive);
-		hosts.sort(Qt::CaseInsensitive);
-		*out_video = vids;
-		*out_audio = auds;
-		if (out_filter_hosts) {
-			*out_filter_hosts = hosts;
-		}
-	}
-
-	void apply_advanced_row_edit(int row, const struct mfd_slot_config_edit &edit, bool force_rebuild = false)
+	void apply_advanced_row_edit(int row, const struct mfd_slot_config_edit &edit)
 	{
 		struct mfd_msg err_msg;
 		if (!mfd_engine_update_slot_config_msg(eng_, row, &edit, &err_msg)) {
@@ -1943,9 +1761,6 @@ private:
 			last_adv_topology_rev_ = ~0ULL;
 		} else {
 			adv_edit_error_.clear();
-			if (force_rebuild) {
-				last_adv_topology_rev_ = ~0ULL;
-			}
 		}
 		refresh_from_engine();
 	}
@@ -1958,7 +1773,7 @@ private:
 		edit.enabled = s.enabled;
 		edit.target_type = s.target_type;
 		edit.preserve_scene = preserve_scene;
-		edit.keep_layer = true; /* cleared by the job and source pickers, which change the layer */
+		edit.keep_layer = true; /* On and Reverse change neither the job nor the layer */
 		std::snprintf(edit.scene_name, sizeof(edit.scene_name), "%s", s.scene_name);
 		std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s", s.source_a_name);
 		std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s", s.source_b_name);
@@ -2025,11 +1840,6 @@ private:
 			}
 		}
 
-		QStringList video_sources;
-		QStringList audio_sources;
-		QStringList filter_host_sources;
-		collect_advanced_source_lists(&video_sources, &audio_sources, &filter_host_sources);
-
 		for (int row = 0; row < MFD_MAX_FADER_SLOTS; ++row) {
 			const struct mfd_fader_slot &slot = snap_.slots[row];
 
@@ -2046,7 +1856,7 @@ private:
 				edit.enabled = on;
 				apply_advanced_row_edit(row, edit);
 			});
-			table_->setCellWidget(row, 0, on_cell);
+			table_->setCellWidget(row, kAdvColOn, on_cell);
 
 			/* Column 1: Strip */
 			char st_title[64] = {0};
@@ -2056,7 +1866,7 @@ private:
 			lbl_name->setStyleSheet(QStringLiteral("font-weight: bold;"));
 			lbl_name->setToolTip(
 				mfdFill(mfdText("Dialog.Tip.SlotId", "Slot ID: %1"), {QString::fromUtf8(slot.id)}));
-			table_->setCellWidget(row, 1, lbl_name);
+			table_->setCellWidget(row, kAdvColStrip, lbl_name);
 
 			/* Column 2: MIDI Control */
 			auto *bind_widget = new QWidget(table_);
@@ -2094,7 +1904,7 @@ private:
 				mfd_engine_clear_slot_binding(eng_, row);
 				refresh_from_engine();
 			});
-			table_->setCellWidget(row, 2, bind_widget);
+			table_->setCellWidget(row, kAdvColMidi, bind_widget);
 
 			/* Column 3: Reverse direction */
 			QCheckBox *chk_inv = nullptr;
@@ -2111,277 +1921,47 @@ private:
 				edit.invert = inverted;
 				apply_advanced_row_edit(row, edit);
 			});
-			table_->setCellWidget(row, 3, inv_cell);
+			table_->setCellWidget(row, kAdvColReverse, inv_cell);
 
-			/* Column 4: What it does */
-			auto *target_combo = new QComboBox(table_);
-			target_combo->setObjectName(QStringLiteral("mfdAdvMode_%1").arg(row));
-			target_combo->addItem(mfdText("Target.NotUsed", "Not used"),
-					      static_cast<int>(MFD_TARGET_UNASSIGNED));
-			target_combo->addItem(mfdText("Target.Tbar", "Switch scenes (T-bar)"),
-					      static_cast<int>(MFD_TARGET_TBAR));
-			target_combo->addItem(mfdText("Target.Mix", "Mix two layers"),
-					      static_cast<int>(MFD_TARGET_TWO_SOURCE_MIX));
-			target_combo->addItem(mfdText("Target.Layer", "Show or hide a layer"),
-					      static_cast<int>(MFD_TARGET_SINGLE_LAYER));
-			target_combo->addItem(mfdText("Target.Volume", "Volume"),
-					      static_cast<int>(MFD_TARGET_AUDIO_VOLUME));
-			target_combo->addItem(mfdText("Target.Filter", "Filter or effect setting"),
-					      static_cast<int>(MFD_TARGET_FILTER_PARAM));
-			target_combo->addItem(mfdText("Target.MixMaster", "Whole mix"),
-					      static_cast<int>(MFD_TARGET_MIX_MASTER));
-			target_combo->setCurrentIndex(target_combo->findData(static_cast<int>(slot.target_type)));
-			adv_mode_combos_[row] = target_combo;
-			table_->setCellWidget(row, 4, target_combo);
+			/* Column 4: What it does, in the strip's own sentence (the one on its card) */
+			auto *lbl_job = new QLabel(table_);
+			lbl_job->setObjectName(QStringLiteral("mfdAdvJob_%1").arg(row));
+			lbl_job->setMargin(6);
+			lbl_job->setTextFormat(Qt::PlainText);
+			lbl_job->setMinimumWidth(220);
+			adv_job_labels_[row] = lbl_job;
+			table_->setCellWidget(row, kAdvColJob, lbl_job);
 
-			bool show_a = false;
-			bool show_b = false;
-			bool show_curve = false;
-			bool show_afv = false;
-			mfd_row_controls_for_target(slot.target_type, &show_a, &show_b, &show_curve, &show_afv);
-			const bool is_filter_param = (slot.target_type == MFD_TARGET_FILTER_PARAM);
-
-			/* Column 5: Left */
-			QComboBox *src_a_combo = nullptr;
-			if (show_a) {
-				src_a_combo = new QComboBox(table_);
-				src_a_combo->setObjectName(QStringLiteral("mfdAdvLeft_%1").arg(row));
-				src_a_combo->setMaximumWidth(175);
-				const QStringList &src_list =
-					(slot.target_type == MFD_TARGET_AUDIO_VOLUME)
-						? audio_sources
-						: (is_filter_param ? filter_host_sources : video_sources);
-				populate_source_combo(src_a_combo, src_list, slot.source_a_name);
-				table_->setCellWidget(row, 5, src_a_combo);
-			} else {
-				table_->setCellWidget(row, 5, new QWidget(table_));
-			}
-			adv_left_combos_[row] = src_a_combo;
-
-			/* Column 6: Right */
-			QComboBox *src_b_combo = nullptr;
-			if (show_b) {
-				src_b_combo = new QComboBox(table_);
-				src_b_combo->setObjectName(QStringLiteral("mfdAdvRight_%1").arg(row));
-				src_b_combo->setMaximumWidth(175);
-				populate_source_combo(src_b_combo, video_sources, slot.source_b_name);
-				table_->setCellWidget(row, 6, src_b_combo);
-			} else if (is_filter_param) {
-				auto *fcell = new QWidget(table_);
-				auto *flay = new QHBoxLayout(fcell);
-				flay->setContentsMargins(4, 2, 4, 2);
-				flay->setSpacing(4);
-
-				QString full_summary;
-				if (slot.filter_name[0] != '\0' && slot.filter_prop[0] != '\0') {
-					const QString fnm = QString::fromUtf8(slot.filter_name);
-					const QString plbl = (slot.filter_prop_label[0] != '\0')
-								     ? QString::fromUtf8(slot.filter_prop_label)
-								     : QString::fromUtf8(slot.filter_prop);
-					const int dec = slot.filter_prop_valid
-								? mfd_filter_decimals_for_step(slot.filter_prop_is_int,
-											       slot.filter_prop_step)
-								: 2;
-					full_summary =
-						mfdFill(mfdText("Dialog.FilterSummary", "%1: %2 [%3..%4]"),
-							{fnm, plbl, QString::number(slot.filter_from_val, 'f', dec),
-							 QString::number(slot.filter_to_val, 'f', dec)});
-				} else {
-					full_summary = mfdText("Dialog.ChooseFilter", "Choose filter...");
-				}
-
-				auto *lbl_fsum = new QLabel(full_summary, fcell);
-				lbl_fsum->setObjectName(QStringLiteral("mfdAdvFilterSummary_%1").arg(row));
-				lbl_fsum->setMaximumWidth(118);
-				lbl_fsum->setToolTip(mfdPlainTip(full_summary));
-				lbl_fsum->setStyleSheet(
-					(slot.filter_name[0] != '\0' && slot.filter_prop[0] != '\0')
-						? QStringLiteral("color: #7dd3fc; font-size: 11px; font-weight: bold;")
-						: QStringLiteral("color: #94a3b8; font-size: 11px;"));
-
-				auto *btn_fedit = new QPushButton(mfdText("Dialog.Edit", "Edit..."), fcell);
-				btn_fedit->setObjectName(QStringLiteral("mfdAdvFilterEdit_%1").arg(row));
-				btn_fedit->setCursor(Qt::PointingHandCursor);
-				btn_fedit->setStyleSheet(QStringLiteral(
-					"QPushButton { background-color: #1e293b; color: #e2e8f0; border: 1px solid #475569; "
-					"border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: bold; } "
-					"QPushButton:hover { border-color: #38bdf8; color: #ffffff; }"));
-				connect(btn_fedit, &QPushButton::clicked, this, [this, row]() {
-					adv_edit_error_.clear();
-					open_setup_for_slot(row);
-				});
-
-				flay->addWidget(lbl_fsum, 1);
-				flay->addWidget(btn_fedit);
-				table_->setCellWidget(row, 6, fcell);
-			} else {
-				table_->setCellWidget(row, 6, new QWidget(table_));
-			}
-			adv_right_combos_[row] = src_b_combo;
-
-			/* Column 7: Feel */
-			QComboBox *curve_combo = nullptr;
-			if (show_curve) {
-				curve_combo = new QComboBox(table_);
-				curve_combo->setObjectName(QStringLiteral("mfdAdvFeel_%1").arg(row));
-				curve_combo->setMaximumWidth(170);
-				curve_combo->addItem(mfdText("Curve.DipFree", "Dip-free"),
-						     static_cast<int>(MFD_CURVE_DIP_FREE));
-				curve_combo->addItem(mfdText("Curve.FullCenter", "Full at center"),
-						     static_cast<int>(MFD_CURVE_FULL_CENTER));
-				curve_combo->addItem(mfdText("Curve.EqualPower", "Equal power"),
-						     static_cast<int>(MFD_CURVE_COSINE));
-				curve_combo->addItem(mfdText("Curve.Linear", "Linear"),
-						     static_cast<int>(MFD_CURVE_LINEAR));
-				curve_combo->addItem(mfdText("Curve.Cut", "Cut"), static_cast<int>(MFD_CURVE_CUT));
-				curve_combo->setCurrentIndex(curve_combo->findData(static_cast<int>(slot.curve)));
-				table_->setCellWidget(row, 7, curve_combo);
-			} else if (is_filter_param) {
-				auto *lbl_lin = new QLabel(mfdText("Curve.Linear", "Linear"), table_);
-				lbl_lin->setObjectName(QStringLiteral("mfdAdvFeelLabel_%1").arg(row));
-				lbl_lin->setAlignment(Qt::AlignCenter);
-				lbl_lin->setStyleSheet(QStringLiteral("color: #94a3b8; font-size: 12px;"));
-				table_->setCellWidget(row, 7, lbl_lin);
-			} else {
-				table_->setCellWidget(row, 7, new QWidget(table_));
-			}
-			adv_feel_combos_[row] = curve_combo;
-
-			/* Column 8: Also fade audio / Off at 0% */
-			QCheckBox *chk_afv = nullptr;
-			QCheckBox *chk_flt_bypass = nullptr;
-			if (show_afv) {
-				QWidget *afv_cell = make_centered_checkbox_cell(
-					table_, QStringLiteral("mfdAdvAfv_%1").arg(row), slot.audio_follows_video,
-					mfdText("Dialog.Tip.Afv", "Also fade audio volume alongside layer opacity."),
-					&chk_afv);
-				table_->setCellWidget(row, 8, afv_cell);
-			} else if (is_filter_param) {
-				QWidget *byp_cell = make_centered_checkbox_cell(
-					table_, QStringLiteral("mfdAdvFilterBypass_%1").arg(row),
-					slot.filter_bypass_at_zero,
-					mfdText("Dialog.Tip.FilterBypass", "Turn filter off at 0% (saves GPU)."),
-					&chk_flt_bypass);
-				chk_flt_bypass->setText(mfdText("Dialog.FilterBypass", "Off at 0%"));
-				chk_flt_bypass->setStyleSheet(QStringLiteral("font-size: 11px; color: #cbd5e1;"));
-				table_->setCellWidget(row, 8, byp_cell);
-			} else {
-				table_->setCellWidget(row, 8, new QWidget(table_));
-			}
-
-			/* Column 9: Output */
+			/* Column 5: Output */
 			auto *out_bar = new QProgressBar(table_);
 			out_bar->setObjectName(QStringLiteral("mfdAdvOutput_%1").arg(row));
 			out_bar->setRange(0, 100);
 			out_bar->setValue(0);
 			out_bar->setTextVisible(true);
 			out_bar->setAlignment(Qt::AlignCenter);
-			out_bar->setMinimumWidth(165);
+			out_bar->setMinimumWidth(300);
 			output_bars_[row] = out_bar;
-			table_->setCellWidget(row, 9, out_bar);
+			table_->setCellWidget(row, kAdvColOutput, out_bar);
 
-			connect(target_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-				[this, target_combo, row](int) {
-					if (rebuilding_adv_table_) {
-						return;
-					}
-					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
-					edit.keep_layer = false;
-					const auto new_target =
-						static_cast<enum mfd_target_type>(target_combo->currentData().toInt());
-					edit.target_type = new_target;
-					if (new_target == MFD_TARGET_FILTER_PARAM &&
-					    snap_.slots[row].target_type != MFD_TARGET_FILTER_PARAM) {
-						edit.filter_name[0] = '\0';
-						edit.filter_prop[0] = '\0';
-						edit.has_filter_range = false;
-						edit.filter_from_val = 0.0;
-						edit.filter_to_val = 0.0;
-					}
-					apply_advanced_row_edit(row, edit, true);
-				});
-
-			if (src_a_combo) {
-				connect(src_a_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-					[this, src_a_combo, row](int) {
-						if (rebuilding_adv_table_) {
-							return;
-						}
-						struct mfd_slot_config_edit edit =
-							make_edit_from_snapshot_row(row, true);
-						edit.keep_layer = false;
-						const QByteArray utf8 = src_a_combo->currentData().toString().toUtf8();
-						const bool host_changed =
-							(std::strcmp(edit.source_a_name, utf8.constData()) != 0);
-						std::snprintf(edit.source_a_name, sizeof(edit.source_a_name), "%s",
-							      utf8.constData());
-						if (edit.target_type == MFD_TARGET_FILTER_PARAM && host_changed) {
-							edit.filter_name[0] = '\0';
-							edit.filter_prop[0] = '\0';
-							edit.has_filter_range = false;
-							edit.filter_from_val = 0.0;
-							edit.filter_to_val = 0.0;
-						}
-						apply_advanced_row_edit(row, edit,
-									edit.target_type == MFD_TARGET_FILTER_PARAM &&
-										host_changed);
-					});
-			}
-
-			if (src_b_combo) {
-				connect(src_b_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-					[this, src_b_combo, row](int) {
-						if (rebuilding_adv_table_) {
-							return;
-						}
-						struct mfd_slot_config_edit edit =
-							make_edit_from_snapshot_row(row, true);
-						edit.keep_layer = false;
-						const QByteArray utf8 = src_b_combo->currentData().toString().toUtf8();
-						std::snprintf(edit.source_b_name, sizeof(edit.source_b_name), "%s",
-							      utf8.constData());
-						apply_advanced_row_edit(row, edit);
-					});
-			}
-
-			if (curve_combo) {
-				connect(curve_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-					[this, curve_combo, row](int) {
-						if (rebuilding_adv_table_) {
-							return;
-						}
-						struct mfd_slot_config_edit edit =
-							make_edit_from_snapshot_row(row, true);
-						edit.curve = static_cast<enum mfd_crossfade_curve>(
-							curve_combo->currentData().toInt());
-						apply_advanced_row_edit(row, edit);
-					});
-			}
-
-			if (chk_afv) {
-				connect(chk_afv, &QCheckBox::toggled, this, [this, row](bool checked) {
-					if (rebuilding_adv_table_) {
-						return;
-					}
-					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
-					edit.audio_follows_video = checked;
-					apply_advanced_row_edit(row, edit);
-				});
-			}
-
-			if (chk_flt_bypass) {
-				connect(chk_flt_bypass, &QCheckBox::toggled, this, [this, row](bool checked) {
-					if (rebuilding_adv_table_) {
-						return;
-					}
-					struct mfd_slot_config_edit edit = make_edit_from_snapshot_row(row, true);
-					edit.filter_bypass_at_zero = checked;
-					apply_advanced_row_edit(row, edit);
-				});
-			}
+			/* Column 6: the one way in to a strip's job, source, range and feel */
+			auto *edit_cell = new QWidget(table_);
+			auto *edit_lay = new QHBoxLayout(edit_cell);
+			edit_lay->setContentsMargins(6, 2, 6, 2);
+			auto *btn_edit = new QPushButton(mfdText("Dialog.Edit", "Edit..."), edit_cell);
+			btn_edit->setObjectName(QStringLiteral("mfdAdvEdit_%1").arg(row));
+			btn_edit->setToolTip(mfdText("Dialog.Tip.Edit", "Open Set up for this strip."));
+			edit_lay->addWidget(btn_edit);
+			connect(btn_edit, &QPushButton::clicked, this, [this, row]() {
+				adv_edit_error_.clear();
+				open_setup_for_slot(row);
+			});
+			table_->setCellWidget(row, kAdvColEdit, edit_cell);
 		}
 
-		for (int c = 0; c < 9; ++c) {
+		for (int c = 0; c < kAdvColumns; ++c) {
+			if (c == kAdvColJob) {
+				continue; /* the sentence has the room that is left */
+			}
 			table_->resizeColumnToContents(c);
 		}
 		mfdPlainLabels(table_); /* the rows' labels are new */
@@ -2402,13 +1982,13 @@ private:
 		}
 	}
 
-	void refresh_advanced_tab(bool can_finish_tbar)
+	void refresh_advanced_tab()
 	{
 		/* The table (18 rows of widgets, two source enumerations and a catalog read) is rebuilt only while the
 		 * Advanced tab is the one shown (F-06). Hidden, it stays stale: last_adv_topology_rev_ is left alone, so
 		 * the refresh that a tab switch runs rebuilds it. A rebuild that was asked for outright (~0) is done. */
 		const bool adv_shown = !main_tabs_ || main_tabs_->currentIndex() == 1;
-		if (snap_.config_topology_rev != last_adv_topology_rev_ && !any_adv_combo_popup_open() &&
+		if (snap_.config_topology_rev != last_adv_topology_rev_ &&
 		    (adv_shown || last_adv_topology_rev_ == ~0ULL)) {
 			rebuild_table_rows();
 		}
@@ -2503,8 +2083,6 @@ private:
 					       "border: 1px solid #374151; border-radius: 4px; font-weight: bold; }"));
 		}
 
-		btn_finish_tbar_->setEnabled(can_finish_tbar);
-
 		char midi_buf[128] = {0};
 		mfd_format_last_midi_readout(snap_.has_last_midi, &snap_.last_midi_decoded, midi_buf, sizeof(midi_buf));
 		const QString midi_qstr = QString::fromUtf8(midi_buf);
@@ -2549,13 +2127,26 @@ private:
 				}
 			}
 
+			struct mfd_ui_strip_presentation sp;
+			mfd_ui_strip_presentation_from_slot(row, s, &sp);
+			if (adv_job_labels_[row]) {
+				const QString job = QString::fromUtf8(sp.assignment_sentence);
+				if (adv_job_labels_[row]->text() != job) {
+					adv_job_labels_[row]->setText(job);
+					adv_job_labels_[row]->setToolTip(mfdPlainTip(job));
+				}
+				const QString job_style = (s.enabled && s.target_type != MFD_TARGET_UNASSIGNED)
+								  ? QStringLiteral("color: #e2e8f0;")
+								  : QStringLiteral("color: #94a3b8;");
+				if (adv_job_labels_[row]->styleSheet() != job_style) {
+					adv_job_labels_[row]->setStyleSheet(job_style);
+				}
+			}
+
 			QProgressBar *bar = output_bars_[row];
 			if (!bar) {
 				continue;
 			}
-
-			struct mfd_ui_strip_presentation sp;
-			mfd_ui_strip_presentation_from_slot(row, s, &sp);
 
 			const int desired_pct = sp.bar_percent;
 			const QString pct_q = QString::number(desired_pct);
@@ -2572,8 +2163,8 @@ private:
 						? mfdFill(mfdText("Dialog.Output.PercentNotUsed", "%1% (Not used)"),
 							  {pct_q})
 						: mfdText("Target.NotUsed", "Not used");
-				desired_tip = mfdText("Dialog.Output.NotUsedTip",
-						      "Choose What it does to activate this strip.");
+				desired_tip =
+					mfdText("Dialog.Output.NotUsedTip", "Click Edit... to give this strip a job.");
 			} else if (!s.cached_available) {
 				desired_text = mfdFill(mfdText("Dialog.Output.PercentStatus", "%1% \xC2\xB7 %2"),
 						       {pct_q, QString::fromUtf8(sp.status_sentence)});
@@ -2622,7 +2213,6 @@ private:
 	bool owns_engine_notify_ = false;
 	std::atomic<bool> local_refresh_queued_{false};
 	struct mfd_ui_snapshot snap_ {};
-	struct mfd_ui_catalog *adv_catalog_ = nullptr;
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
 	bool last_midi_connected_ = false;
@@ -2676,7 +2266,6 @@ private:
 	QLabel *adv_beta_note_ = nullptr;
 	QLabel *conn_status_label_ = nullptr;
 	QLabel *studio_status_label_ = nullptr;
-	QPushButton *btn_finish_tbar_ = nullptr;
 	QLabel *last_midi_label_ = nullptr;
 	QComboBox *device_combo_ = nullptr;
 	QComboBox *profile_combo_ = nullptr;
@@ -2729,10 +2318,7 @@ private:
 	QPointer<QLabel> addr_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> learn_buttons_[MFD_MAX_FADER_SLOTS];
 	QPointer<QPushButton> clear_buttons_[MFD_MAX_FADER_SLOTS];
-	QPointer<QComboBox> adv_mode_combos_[MFD_MAX_FADER_SLOTS];
-	QPointer<QComboBox> adv_left_combos_[MFD_MAX_FADER_SLOTS];
-	QPointer<QComboBox> adv_right_combos_[MFD_MAX_FADER_SLOTS];
-	QPointer<QComboBox> adv_feel_combos_[MFD_MAX_FADER_SLOTS];
+	QPointer<QLabel> adv_job_labels_[MFD_MAX_FADER_SLOTS];
 	QPointer<QProgressBar> output_bars_[MFD_MAX_FADER_SLOTS];
 };
 

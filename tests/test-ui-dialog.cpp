@@ -14,6 +14,7 @@
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
 #include "core/mfd-text.h"
+#include "core/ui-sentences.h"
 #include "ui/mfd-text-qt.hpp"
 #include <plugin-support.h>
 #include <obs-module.h>
@@ -161,6 +162,17 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 	const uint32_t raw_msg = static_cast<uint32_t>(0xB0U | (ch & 0x0FU)) |
 				 (static_cast<uint32_t>(cc & 0x7FU) << 8) | (static_cast<uint32_t>(val & 0x7FU) << 16);
 	mfd_midi_queue_push(&eng->midi_queue, raw_msg, 0U);
+}
+
+/* what the dock asked OBS to do with a scene (the engine hands each command to this instead of OBS) */
+static struct mfd_vj_command g_dock_cmds[8];
+static int g_dock_cmd_count = 0;
+static void dock_fake_run_command(const struct mfd_vj_command *cmd, void *user_data)
+{
+	(void)user_data;
+	if (g_dock_cmd_count < 8) {
+		g_dock_cmds[g_dock_cmd_count++] = *cmd;
+	}
 }
 
 /* Answers the next confirmation box (the settings dialog's and the Set up sheet's "mfdConfirmBox"): its named button, or
@@ -1197,8 +1209,8 @@ int main(int argc, char **argv)
 	set_opened_desk("USB MIDI Keys");
 	REQUIRE(!nl_banner->isHidden());
 	REQUIRE(nl_text->text() ==
-		QStringLiteral("There is no ready layout for USB MIDI Keys. Click Set up under a strip. In "
-			       "step 3, open Which hardware control?, press Learn and move the fader."));
+		QStringLiteral("No ready layout for USB MIDI Keys. Click Set up under a strip and move the control "
+			       "you want."));
 	nl_ok->click();
 	pump_ui();
 	REQUIRE(nl_banner->isHidden());
@@ -1628,34 +1640,138 @@ int main(int argc, char **argv)
 	REQUIRE(tabs->currentIndex() == 1);
 
 	auto *table = must_find<QTableWidget>(dlg.get(), QStringLiteral("mfdAdvancedTable"));
-	auto *adv_help = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvHelpLabel"));
 	auto *stream_deck_companion = must_find<QPushButton>(dlg.get(), QStringLiteral("mfdBtnStreamDeckCompanion"));
-	REQUIRE(!adv_help->isHidden());
 	REQUIRE(stream_deck_companion->text() == QStringLiteral("Fadester for OBS..."));
 	REQUIRE(stream_deck_companion->toolTip() ==
 		QStringLiteral("Learn about the optional Fadester for OBS Stream Deck plugin."));
 	REQUIRE(stream_deck_companion->property("destinationUrl").toString() ==
 		QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester"));
-	REQUIRE(adv_help->text().contains(QStringLiteral("Switch scenes (T-bar):")));
-	REQUIRE(adv_help->text().contains(QStringLiteral("Mix two layers:")));
+	/* U1-17: the table is a map with one way in. Seven columns; the job is the strip's own sentence; no list, no
+	 * Finish now, no Refresh Sources and no help box on this tab. */
+	REQUIRE(table->columnCount() == 7);
+	REQUIRE(table->horizontalHeaderItem(0)->text() == QStringLiteral("On"));
+	REQUIRE(table->horizontalHeaderItem(1)->text() == QStringLiteral("Strip"));
+	REQUIRE(table->horizontalHeaderItem(2)->text() == QStringLiteral("MIDI Control"));
+	REQUIRE(table->horizontalHeaderItem(3)->text() == QStringLiteral("Reverse"));
 	REQUIRE(table->horizontalHeaderItem(4)->text() == QStringLiteral("What it does"));
-	REQUIRE(table->horizontalHeaderItem(5)->text() == QStringLiteral("Left"));
-	REQUIRE(table->horizontalHeaderItem(6)->text() == QStringLiteral("Right"));
-	REQUIRE(table->horizontalHeaderItem(7)->text() == QStringLiteral("Feel"));
-	REQUIRE(table->horizontalHeaderItem(8)->text() == QStringLiteral("Also fade audio"));
+	REQUIRE(table->horizontalHeaderItem(5)->text() == QStringLiteral("Output"));
+	REQUIRE(table->horizontalHeaderItem(6)->text().isEmpty());
+	REQUIRE(table->findChildren<QComboBox *>().isEmpty());
+	REQUIRE(dlg->findChild<QLabel *>(QStringLiteral("mfdAdvHelpLabel")) == nullptr);
+	REQUIRE(dlg->findChild<QPushButton *>(QStringLiteral("mfdAdvFinishBtn")) == nullptr);
+	REQUIRE(dlg->findChild<QPushButton *>(QStringLiteral("mfdBtnRefreshSources")) == nullptr);
+	for (int r = 0; r < MFD_MAX_FADER_SLOTS; ++r) {
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_%1").arg(r))->text() ==
+			must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_%1").arg(r))->text());
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_%1").arg(r));
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvLearn_%1").arg(r));
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvClear_%1").arg(r));
+	}
+	REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))
+			->text()
+			.startsWith(QStringLiteral("Mixes ")));
 
-	auto *adv_mode1 = must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_1"));
-	REQUIRE(adv_mode1->currentData().toInt() == static_cast<int>(MFD_TARGET_TWO_SOURCE_MIX));
+	/* Reverse stays a switch in the table: it applies at once and keeps the strip's job */
+	{
+		auto *adv_inv1 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvInv_1"));
+		const QString job_before = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text();
+		REQUIRE(!adv_inv1->isChecked());
+		adv_inv1->setChecked(true);
+		pump_ui();
+		REQUIRE(eng.fader_slots[1].invert);
+		REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text() == job_before);
+		adv_inv1 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvInv_1"));
+		adv_inv1->setChecked(false);
+		pump_ui();
+		REQUIRE(!eng.fader_slots[1].invert);
+	}
 
-	/* Edit Strip 4 in Advanced -> Volume on Mic/Aux, capture screenshot, verify Strips tab reflects it */
-	auto *adv_mode4 = must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_4"));
-	adv_mode4->setCurrentIndex(adv_mode4->findData(static_cast<int>(MFD_TARGET_AUDIO_VOLUME)));
-	pump_ui();
-	auto *adv_left4 = must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvLeft_4"));
-	const int mic_idx = adv_left4->findData(QStringLiteral("Mic/Aux"));
-	REQUIRE(mic_idx >= 0);
-	adv_left4->setCurrentIndex(mic_idx);
-	pump_ui();
+	/* QA-S04: Set up keeps "Also fade audio" as it was saved. Fader 1 mixes two layers that have no audio at this
+	 * moment (as a source missing from an old collection); Edit..., another Feel, Done: still on, and shown so it
+	 * can be unticked. Only unticking it switches it off. */
+	{
+		REQUIRE(eng.fader_slots[1].target_type == MFD_TARGET_TWO_SOURCE_MIX);
+		const bool was_afv = eng.fader_slots[1].audio_follows_video;
+		const enum mfd_crossfade_curve was_curve = eng.fader_slots[1].curve;
+		const QString job1 = must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text();
+		mfd_engine_lock(&eng);
+		eng.fader_slots[1].audio_follows_video = true;
+		mfd_engine_unlock(&eng);
+		auto to_step3 = [&]() {
+			must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_1"))->click();
+			pump_ui();
+			REQUIRE(!sheet->isHidden());
+			while (stack->currentIndex() < 2) {
+				const int at = stack->currentIndex();
+				must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+				pump_ui();
+				REQUIRE(stack->currentIndex() == at + 1);
+			}
+		};
+		to_step3();
+		auto *afv_box = must_find<QCheckBox>(sheet, QStringLiteral("mfdChkAlsoFadeAudio"));
+		auto *feel = must_find<QComboBox>(sheet, QStringLiteral("mfdComboFeel"));
+		REQUIRE(!afv_box->isHidden() && afv_box->isChecked());
+		const enum mfd_crossfade_curve other_curve = was_curve == MFD_CURVE_LINEAR ? MFD_CURVE_COSINE
+											   : MFD_CURVE_LINEAR;
+		feel->setCurrentIndex(feel->findData(static_cast<int>(other_curve)));
+		pump_ui();
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(eng.fader_slots[1].curve == other_curve);
+		REQUIRE(eng.fader_slots[1].audio_follows_video); /* the saved choice survived another change */
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_1"))->text() == job1);
+		to_step3();
+		REQUIRE(!afv_box->isHidden() && afv_box->isChecked());
+		afv_box->setChecked(false);
+		feel->setCurrentIndex(feel->findData(static_cast<int>(was_curve)));
+		pump_ui();
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(!eng.fader_slots[1].audio_follows_video && eng.fader_slots[1].curve == was_curve);
+		mfd_engine_lock(&eng);
+		eng.fader_slots[1].audio_follows_video = was_afv;
+		mfd_engine_unlock(&eng);
+		pump_ui();
+	}
+
+	/* Edit... on Strip 4 opens Set up on that strip; nothing changes in the engine until Done. Volume on Mic/Aux,
+	 * capture screenshot, verify the table's sentence and the Strips tab reflect it */
+	{
+		const enum mfd_target_type job4_before = eng.fader_slots[4].target_type;
+		must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_4"))->click();
+		pump_ui();
+		REQUIRE(!sheet->isHidden());
+		REQUIRE(stack->currentIndex() == 0);
+		char strip4_title[64] = {0};
+		mfd_ui_strip_title(4, eng.fader_slots[4].label, strip4_title, sizeof(strip4_title));
+		REQUIRE(must_find<QLabel>(sheet, QStringLiteral("mfdSetupTitle"))
+				->text()
+				.contains(QString::fromUtf8(strip4_title)));
+		must_find<QPushButton>(sheet, QStringLiteral("mfdCardVolume"))->click();
+		pump_ui();
+		REQUIRE(stack->currentIndex() == 1);
+		auto *combo_audio4 = must_find<QComboBox>(sheet, QStringLiteral("mfdComboAudioSource"));
+		const int mic_idx = combo_audio4->findData(QStringLiteral("Mic/Aux"));
+		REQUIRE(mic_idx >= 0);
+		combo_audio4->setCurrentIndex(mic_idx);
+		pump_ui();
+		REQUIRE(eng.fader_slots[4].target_type == job4_before); /* Set up's promise holds from this tab too */
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+		pump_ui();
+		REQUIRE(stack->currentIndex() == 2);
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(eng.fader_slots[4].target_type == MFD_TARGET_AUDIO_VOLUME);
+		REQUIRE(tabs->currentIndex() == 1);
+		REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_4"))->text() ==
+			QStringLiteral("Volume: Mic/Aux"));
+	}
 
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("09-advanced-tab.png"));
 
@@ -1984,26 +2100,36 @@ int main(int argc, char **argv)
 	REQUIRE(tabs->currentIndex() == 1);
 	REQUIRE(table->rowCount() == 18);
 	REQUIRE(dlg->width() <= 1380);
-	REQUIRE(must_find<QComboBox>(dlg.get(), QStringLiteral("mfdAdvMode_10"))->currentData().toInt() ==
-		static_cast<int>(MFD_TARGET_FILTER_PARAM));
-	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvFilterSummary_10"))->text() ==
-		QStringLiteral("Blur: Blur Radius [0.0..40.0]"));
-	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvFeelLabel_10"))->text() == QStringLiteral("Linear"));
+	REQUIRE(eng.fader_slots[10].target_type == MFD_TARGET_FILTER_PARAM);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_10"))->text() ==
+		must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_10"))->text());
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdAdvJob_10"))->text().contains(QStringLiteral("Blur")));
 
-	/* Uncheck Off at 0% on row 10 -> lease detaches and restores Blur enabled == true immediately */
-	auto *adv_byp_10 = must_find<QCheckBox>(dlg.get(), QStringLiteral("mfdAdvFilterBypass_10"));
-	REQUIRE(adv_byp_10->isChecked());
-	adv_byp_10->setChecked(false);
-	pump_ui();
-	REQUIRE(blur_flt->enabled);
-
-	/* Click [Edit...] on row 10 -> opens Set up sheet for FX 1, then cancel */
-	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvFilterEdit_10"))->click();
+	/* Click [Edit...] on row 10 -> opens Set up for FX 1 on its filter page, where "Turn filter off at 0%" now lives.
+	 * Unticking it does nothing until Done; after Done the lease detaches and Blur is enabled again */
+	must_find<QPushButton>(dlg.get(), QStringLiteral("mfdAdvEdit_10"))->click();
 	pump_ui();
 	REQUIRE(!sheet->isHidden());
-	must_find<QPushButton>(sheet, QStringLiteral("mfdSetupCancelBtn"))->click();
-	pump_ui();
-	REQUIRE(sheet->isHidden());
+	{
+		if (stack->currentIndex() == 0) {
+			must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+			pump_ui();
+		}
+		REQUIRE(stack->currentIndex() == 1);
+		auto *sheet_byp = must_find<QCheckBox>(sheet, QStringLiteral("mfdChkFilterBypass"));
+		REQUIRE(sheet_byp->isChecked());
+		sheet_byp->setChecked(false);
+		pump_ui();
+		REQUIRE(eng.fader_slots[10].filter_bypass_at_zero);
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupNextBtn"))->click();
+		pump_ui();
+		REQUIRE(stack->currentIndex() == 2);
+		must_find<QPushButton>(sheet, QStringLiteral("mfdSetupDoneBtn"))->click();
+		pump_ui();
+		REQUIRE(sheet->isHidden());
+		REQUIRE(!eng.fader_slots[10].filter_bypass_at_zero);
+		REQUIRE(blur_flt->enabled);
+	}
 
 	/* Configure disabled duplicate on FX 3 (row 12), then toggle On in Advanced -> banner surfaces single-writer error */
 	{
@@ -2501,6 +2627,52 @@ int main(int argc, char **argv)
 			REQUIRE(reconnect && reconnect->isVisible() && !grid->isVisible());
 			REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
 			REQUIRE(reconnect->mapTo(sd, QPoint(0, 0)).y() < fade->mapTo(sd, QPoint(0, 0)).y());
+
+			/* U1-06 (c): without the APC40 the scene buttons still work from the mouse: a click puts the scene in
+			 * Preview. They stay lit while Learn runs too (pads_on is false then, and the grid must not flash) */
+			{
+				const struct mfd_scene_graph_ops *was_ops = eng.scene_graph_ops;
+				struct mfd_scene_graph_ops ops_with_cmds = *was_ops;
+				ops_with_cmds.run_vj_command = dock_fake_run_command;
+				eng.scene_graph_ops = &ops_with_cmds;
+				auto *scene_c = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskScene_2"));
+				auto *scene_air = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskScene_0"));
+				auto *scene_none = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskScene_3"));
+				REQUIRE(scene_c && scene_air && scene_none);
+				REQUIRE(scene_c->isEnabled() && scene_air->isEnabled() && !scene_none->isEnabled());
+				REQUIRE(scene_c->toolTip().startsWith(QStringLiteral("Q&A")));
+				g_dock_cmd_count = 0;
+				scene_c->click();
+				pump_ui();
+				mfd_engine_flush_pending_ui_work(&eng);
+				REQUIRE(g_dock_cmd_count == 1 && g_dock_cmds[0].kind == MFD_VJ_CMD_PREVIEW &&
+					std::strcmp(g_dock_cmds[0].scene, "Q&A") == 0);
+				REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
+				/* the scene on air: nothing is asked of OBS, and the status line says why */
+				g_dock_cmd_count = 0;
+				scene_air->click();
+				pump_ui();
+				mfd_engine_flush_pending_ui_work(&eng);
+				REQUIRE(g_dock_cmd_count == 0);
+				REQUIRE(status->text() == QStringLiteral("That scene is on air already."));
+				/* with the APC40 back and Learn running, the grid stays and so do the scene buttons */
+				eng.midi_dev.is_open = true;
+				const int was_learning = eng.learning_slot_index;
+				eng.learning_slot_index = 6;
+				again();
+				REQUIRE(grid->isVisible() && !cut_pad->isEnabled());
+				REQUIRE(scene_c->isEnabled());
+				g_dock_cmd_count = 0;
+				scene_c->click();
+				pump_ui();
+				mfd_engine_flush_pending_ui_work(&eng);
+				REQUIRE(g_dock_cmd_count == 1);
+				eng.learning_slot_index = was_learning;
+				eng.vj_preview_asked[0] = '\0';
+				eng.scene_graph_ops = was_ops;
+				eng.midi_dev.is_open = false;
+				again();
+			}
 			eng.midi_dev.is_open = true;
 
 			sd->hide();
