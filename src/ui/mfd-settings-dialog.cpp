@@ -1222,8 +1222,9 @@ private:
 
 		connect(btn_import, &QPushButton::clicked, this, [this]() {
 			const QString path = QFileDialog::getOpenFileName(
-				this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"), QString(),
-				mfdText("Dialog.FileFilter.Json", "JSON Files (*.json);;All Files (*)"));
+				this,
+				mfdWindowTitle(mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration")),
+				QString(), mfdText("Dialog.FileFilter.Json", "JSON Files (*.json);;All Files (*)"));
 			if (path.isEmpty()) {
 				return;
 			}
@@ -1232,7 +1233,8 @@ private:
 
 		connect(btn_export, &QPushButton::clicked, this, [this]() {
 			const QString path = QFileDialog::getSaveFileName(
-				this, mfdText("Dialog.Export.Title", "Export Midi Fadester Configuration"),
+				this,
+				mfdWindowTitle(mfdText("Dialog.Export.Title", "Export Midi Fadester Configuration")),
 				QStringLiteral("midi-fadester-config.json"),
 				mfdText("Dialog.FileFilter.Json", "JSON Files (*.json);;All Files (*)"));
 			if (path.isEmpty()) {
@@ -1240,7 +1242,9 @@ private:
 			}
 			if (!mfd_engine_export_config_file(eng_, path.toUtf8().constData())) {
 				QMessageBox::warning(
-					this, mfdText("Dialog.Export.Title", "Export Midi Fadester Configuration"),
+					this,
+					mfdWindowTitle(
+						mfdText("Dialog.Export.Title", "Export Midi Fadester Configuration")),
 					mfdFill(mfdText("Dialog.Export.Failed",
 							"Could not write %1. Choose another folder and try again."),
 						{QDir::toNativeSeparators(path)}));
@@ -1477,11 +1481,13 @@ private:
 			last_adv_topology_rev_ = ~0ULL;
 			refresh_from_engine();
 		} else {
-			QMessageBox::warning(this, mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration"),
-					     mfdFill(mfdText("Dialog.Import.Failed",
-							     "Could not read %1. It is not a Midi Fadester settings "
-							     "file, or it is damaged. Nothing was changed."),
-						     {QDir::toNativeSeparators(path)}));
+			QMessageBox::warning(
+				this,
+				mfdWindowTitle(mfdText("Dialog.Import.Title", "Import Midi Fadester Configuration")),
+				mfdFill(mfdText("Dialog.Import.Failed",
+						"Could not read %1. It is not a Midi Fadester settings "
+						"file, or it is damaged. Nothing was changed."),
+					{QDir::toNativeSeparators(path)}));
 		}
 	}
 
