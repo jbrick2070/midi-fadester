@@ -674,6 +674,7 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 		QPushButton *b = makeButton(mfdFill(mfdText("Desk.SceneButton", "Scene %1"), {QString::number(j + 1)}),
 					    60, kButtonHeight);
 		scenes_[j] = b;
+		b->setObjectName(QStringLiteral("mfdDeskScene_%1").arg(j));
 		b->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); /* a long name never widens the dock */
 		connect(b, &QPushButton::pressed, this, [this, j, b]() {
 			if (!physical(b)) {
@@ -681,10 +682,12 @@ MfdDeskDock::MfdDeskDock(struct mfd_engine *eng, QWidget *parent) : QWidget(pare
 			}
 			/* Ctrl-click (Cmd on a Mac): straight to Program, as Shift + Scene Launch on the desk */
 			bool direct = QApplication::keyboardModifiers().testFlag(Qt::ControlModifier);
-			pressNote(0U, (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)j), true, direct);
+			/* by the mouse it needs no APC40: it only sets Preview and Program (U1-06 c) */
+			if (mfd_engine_desk_scene(eng_, j, direct) == MFD_DESK_REJECTED) {
+				sayStatus(mfdText("Desk.Ignored", "Not available right now."), false);
+			}
+			refresh();
 		});
-		connect(b, &QPushButton::released, this,
-			[this, j]() { pressNote(0U, (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)j), false, false); });
 		scene_row->addWidget(b);
 	}
 	root->addLayout(scene_row);
@@ -1308,15 +1311,19 @@ void MfdDeskDock::refresh()
 		setButtonText(scenes_[j], shown);
 		QString what = !view_.studio_mode ? mfdText("Desk.SceneTip.Program", "Click: put this scene on air.")
 						  : sceneTipStudio();
-		bool can = pads_on && exists && !view_.tbar_busy && !view_.scene_owned[j];
+		/* The scene buttons work from the mouse without the APC40 (U1-06 c): they key off OBS having loaded, the
+		 * scene being there and no crossfader throw, never off pads_on, which is also false while loading and
+		 * while Learn or Set up runs. Only while the APC40's pads act does a button a strip learned stay that
+		 * strip's, as on the desk. */
+		bool owned = view_.scene_owned[j] && view_.pads == MFD_DESK_PADS_ON && !view_.learn_or_setup;
+		bool can = view_.finished_loading && exists && !view_.tbar_busy && !owned;
 		setTip(scenes_[j],
 		       !exists           ? mfdText("Desk.Tip.NoScene", "No scene here.")
 		       : view_.tbar_busy ? mfdText("Desk.Tip.Throw", "Waits while the crossfader is thrown.")
-		       : view_.scene_owned[j]
-			       ? mfdText("Desk.Tip.Owned",
-					 "This button is assigned to a strip. Clear it in Tools, Midi Fadester: Set up "
-					 "or Advanced.")
-			       : name + QStringLiteral("\n") + what);
+		       : owned           ? mfdText("Desk.Tip.Owned",
+						   "This button is assigned to a strip. Clear it in Tools, Midi Fadester: Set up "
+							     "or Advanced.")
+					 : name + QStringLiteral("\n") + what);
 		paintButton(scenes_[j], ledColor(led, beat_pos, 0x22C55EU), can);
 	}
 

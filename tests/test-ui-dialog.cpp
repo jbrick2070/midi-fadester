@@ -166,6 +166,17 @@ static void push_midi_cc(struct mfd_engine *eng, uint8_t ch, uint8_t cc, uint8_t
 
 /* Answers the next confirmation box (the settings dialog's and the Set up sheet's "mfdConfirmBox"): its named button, or
  * Cancel. Queued, so it runs inside the box's own event loop; what the box said is handed back for the test to read. */
+/* what the dock asked OBS to do with a scene (the engine hands each command to this instead of OBS) */
+static struct mfd_vj_command g_dock_cmds[8];
+static int g_dock_cmd_count = 0;
+static void dock_fake_run_command(const struct mfd_vj_command *cmd, void *user_data)
+{
+	(void)user_data;
+	if (g_dock_cmd_count < 8) {
+		g_dock_cmds[g_dock_cmd_count++] = *cmd;
+	}
+}
+
 static QString g_confirm_text;
 static QString g_confirm_title;
 static int g_confirm_seen = 0;
@@ -2565,6 +2576,45 @@ int main(int argc, char **argv)
 			REQUIRE(reconnect && reconnect->isVisible() && !grid->isVisible());
 			REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
 			REQUIRE(reconnect->mapTo(sd, QPoint(0, 0)).y() < fade->mapTo(sd, QPoint(0, 0)).y());
+
+			/* U1-06 (c): without the APC40 the scene buttons still work from the mouse: a click puts the scene in
+			 * Preview. They stay lit while Learn runs too (pads_on is false then, and the grid must not flash) */
+			{
+				const struct mfd_scene_graph_ops *was_ops = eng.scene_graph_ops;
+				struct mfd_scene_graph_ops ops_with_cmds = *was_ops;
+				ops_with_cmds.run_vj_command = dock_fake_run_command;
+				eng.scene_graph_ops = &ops_with_cmds;
+				auto *scene_c = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskScene_2"));
+				auto *scene_air = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskScene_0"));
+				auto *scene_none = sd->findChild<QPushButton *>(QStringLiteral("mfdDeskScene_3"));
+				REQUIRE(scene_c && scene_air && scene_none);
+				REQUIRE(scene_c->isEnabled() && scene_air->isEnabled() && !scene_none->isEnabled());
+				REQUIRE(scene_c->toolTip().startsWith(QStringLiteral("Q&A")));
+				g_dock_cmd_count = 0;
+				scene_c->click();
+				pump_ui();
+				mfd_engine_flush_pending_ui_work(&eng);
+				REQUIRE(g_dock_cmd_count == 1 && g_dock_cmds[0].kind == MFD_VJ_CMD_PREVIEW &&
+					std::strcmp(g_dock_cmds[0].scene, "Q&A") == 0);
+				REQUIRE(status->text() == QStringLiteral("Connect the APC40 mkII to use the pads."));
+				/* with the APC40 back and Learn running, the grid stays and so do the scene buttons */
+				eng.midi_dev.is_open = true;
+				const int was_learning = eng.learning_slot_index;
+				eng.learning_slot_index = 6;
+				again();
+				REQUIRE(grid->isVisible() && !cut_pad->isEnabled());
+				REQUIRE(scene_c->isEnabled());
+				g_dock_cmd_count = 0;
+				scene_c->click();
+				pump_ui();
+				mfd_engine_flush_pending_ui_work(&eng);
+				REQUIRE(g_dock_cmd_count == 1);
+				eng.learning_slot_index = was_learning;
+				eng.vj_preview_asked[0] = '\0';
+				eng.scene_graph_ops = was_ops;
+				eng.midi_dev.is_open = false;
+				again();
+			}
 			eng.midi_dev.is_open = true;
 
 			sd->hide();

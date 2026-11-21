@@ -7602,6 +7602,32 @@ bool mfd_engine_desk_vs(struct mfd_engine *eng, enum mfd_vj_command_kind kind)
 	return ok;
 }
 
+enum mfd_desk_press_result mfd_engine_desk_scene(struct mfd_engine *eng, int scene, bool direct)
+{
+	if (!eng || scene < 0 || scene >= (int)MFD_VJ_SCENES) {
+		return MFD_DESK_REJECTED;
+	}
+	mfd_engine_lock(eng);
+	bool pads_act = vj_active(eng) && !eng->setup_session.active && eng->learning_slot_index < 0;
+	if (pads_act) {
+		/* the desk's own button: Shift held on the desk, a strip that learned it and its light all as before */
+		mfd_engine_unlock(eng);
+		return mfd_engine_desk_press(eng, 0U, (uint8_t)(MFD_VJ_NOTE_SCENE + (unsigned)scene), true, direct,
+					     NULL);
+	}
+	enum mfd_desk_press_result r = MFD_DESK_REJECTED;
+	if (eng->frontend_finished_loading && scene < eng->cached_scene_count && !vj_tbar_busy_locked(eng)) {
+		uint32_t drops = eng->vj_cmd_drops;
+		vj_scene_locked(eng, scene, direct);
+		if (eng->vj_cmd_drops == drops) { /* a dropped command did nothing */
+			r = MFD_DESK_ACCEPTED;
+		}
+		mfd_engine_mark_ui_dirty(eng, false); /* under the lock: the unlock wakes the UI thread */
+	}
+	mfd_engine_unlock(eng);
+	return r;
+}
+
 void mfd_engine_desk_fade(struct mfd_engine *eng)
 {
 	if (!eng) {
