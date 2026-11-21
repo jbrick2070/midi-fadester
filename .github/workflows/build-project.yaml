@@ -183,6 +183,35 @@ jobs:
           path: ${{ github.workspace }}/.ccache
           key: ${{ runner.os }}-ccache-${{ needs.check-event.outputs.config }}
 
+  macos-asan:
+    # H-04: the same test programs as the build job runs, built with AddressSanitizer (MIDI_FADESTER_SANITIZE). The
+    # tests drive the engine with stand-ins for OBS, so a use after free or an overrun there passes an ordinary run by
+    # luck; here it fails. Not a gate: a failure shows on this job and does not fail the workflow or hold a release.
+    name: Tests under AddressSanitizer (macOS) 🧪
+    runs-on: macos-26
+    needs: check-event
+    continue-on-error: true
+    defaults:
+      run:
+        shell: zsh --no-rcs --errexit --pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Build and Run Tests with AddressSanitizer 🧪
+        run: |
+          : Build and Run Tests with AddressSanitizer 🧪
+          if (( ${+RUNNER_DEBUG} )) setopt XTRACE
+
+          typeset -gx CODESIGN_IDENT='-'
+          typeset -gx NSUnbufferedIO=YES
+          cmake --preset macos-ci -B build_asan \
+            -DMIDI_FADESTER_SANITIZE=ON -DENABLE_CCACHE=OFF -DCMAKE_OSX_ARCHITECTURES=arm64
+          cmake --build build_asan --config RelWithDebInfo --parallel
+          ctest --test-dir build_asan -C RelWithDebInfo --output-on-failure --no-tests=error
+
   ubuntu-build:
     name: Build for Ubuntu 🐧
     # midi-fadester is Windows-only (REQUIREMENTS R-PLAT-1); remove this line to re-enable

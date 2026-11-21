@@ -10,7 +10,7 @@ on:
         options:
           - build
 permissions:
-  contents: write
+  contents: read
 jobs:
   check-and-build:
     if: inputs.job == 'build'

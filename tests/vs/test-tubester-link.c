@@ -53,8 +53,6 @@ static void test_init(void)
 	assert(!tub_link_init(&l, "short"));
 	assert(!tub_link_init(&l, "0123456789abcdef0123456789abcdeg"));
 	assert(!tub_link_init(&l, "0123456789abcdef0123456789abcdef0"));
-	assert(tub_link_next_gen(&l) == 1);
-	assert(tub_link_next_gen(&l) == 2);
 	/* a link whose init failed accepts nothing, not even a report with no token at all */
 	assert(!tub_link_init(&l, "short"));
 	assert(accept(&l, report("", "p", 0, 1, "hello-ok", NULL), SEC) == TUB_REPORT_BAD_TOKEN);
@@ -148,9 +146,9 @@ static void test_report_read(void)
 	assert(tub_report_read(d, &r));
 	assert(r.duration == 122.56);
 	assert(strcmp(r.incarnation, "page1") == 0 && r.gen == 3 && r.seq == 7);
-	assert(strcmp(r.event, "playing") == 0 && strcmp(r.src, "reel.mp4") == 0);
+	assert(strcmp(r.event, "playing") == 0);
 	assert(r.current_time == 12.5 && r.rate == 1.5 && r.ready_state == 4 && r.video_width == 1920);
-	assert(r.video_height == 1080 && !r.paused && !r.ended && !r.no_picture && r.error_code == 0);
+	assert(!r.paused && !r.ended && !r.no_picture && r.error_code == 0);
 	obs_data_release(d);
 	/* missing fields and negative numbers are refused; long strings are cut, never overrun */
 	/* a length the page could not know (a stream, a broken file) reads 0 */
@@ -169,13 +167,31 @@ static void test_report_read(void)
 	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"gen\":-4,\"ev\":\"tick\"}");
 	assert(!tub_report_read(d, &r));
 	obs_data_release(d);
+	/* E-06: a generation or sequence number that is not a whole number is refused (1e99 converts differently on
+	 * each kind of processor); a position below 0, a huge position and a huge rate are brought into range */
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"gen\":1e99,\"ev\":\"tick\"}");
+	assert(!tub_report_read(d, &r));
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1.5,\"ev\":\"tick\"}");
+	assert(!tub_report_read(d, &r));
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":\"1\",\"ev\":\"tick\"}");
+	assert(!tub_report_read(d, &r));
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"ev\":\"tick\",\"ct\":-1,\"rate\":1e30,\"dur\":1e30}");
+	assert(tub_report_read(d, &r));
+	assert(r.current_time == 0.0 && r.rate == TUB_REPORT_MAX_RATE && r.duration == TUB_REPORT_MAX_SECONDS);
+	obs_data_release(d);
+	d = obs_data_create_from_json("{\"inc\":\"p\",\"seq\":1,\"ev\":\"tick\",\"ct\":1e30,\"rate\":-2}");
+	assert(tub_report_read(d, &r));
+	assert(r.current_time == TUB_REPORT_MAX_SECONDS && r.rate == 0.0);
+	obs_data_release(d);
 	char body[2048];
 	snprintf(body, sizeof(body), "{\"inc\":\"%0400d\",\"seq\":1,\"ev\":\"%0100d\",\"src\":\"%0600d\"}", 1, 2, 3);
 	d = obs_data_create_from_json(body);
 	assert(tub_report_read(d, &r));
 	assert(strlen(r.incarnation) == TUB_INCARNATION_MAX - 1);
 	assert(strlen(r.event) == 15);
-	assert(strlen(r.src) == TUB_SRC_MAX - 1);
 	obs_data_release(d);
 	assert(!tub_report_read(NULL, &r));
 	printf("  test_report_read: PASS\n");
@@ -185,7 +201,7 @@ static void test_accept_ordering(void)
 {
 	struct tub_link l;
 	assert(tub_link_init(&l, TOKEN));
-	uint64_t gen = tub_link_next_gen(&l);
+	uint64_t gen = ++l.gen;
 	assert(gen == 1);
 
 	/* the first report links the page */
@@ -208,7 +224,7 @@ static void test_accept_ordering(void)
 	assert(tub_link_state(&l, 12 * SEC) == TUB_STATE_PLAYING);
 
 	/* a newer tape was commanded: reports from the old tape keep the link alive but do not set state */
-	gen = tub_link_next_gen(&l);
+	gen = ++l.gen;
 	assert(gen == 2);
 	assert(accept(&l, report(TOKEN, "page1", 1, 3, "ended", "\"ended\":true"), 13 * SEC) ==
 	       TUB_REPORT_OLD_GENERATION);
@@ -255,7 +271,7 @@ static void test_page_outlives_filter(void)
 	       TUB_REPORT_NEW_PAGE);
 	assert(l.gen == 5);
 	/* the next tape command carries 6, which the page will not ignore as old */
-	assert(tub_link_next_gen(&l) == 6);
+	assert(++l.gen == 6);
 	assert(accept(&l, report(TOKEN, "old-page", 5, 401, "playing", "\"rs\":4,\"vw\":1280"), 2 * SEC) ==
 	       TUB_REPORT_OLD_GENERATION);
 	assert(accept(&l, report(TOKEN, "old-page", 6, 402, "playing", "\"rs\":4,\"vw\":1280"), 3 * SEC) ==
@@ -303,7 +319,7 @@ static void test_states(void)
 {
 	struct tub_link l;
 	assert(tub_link_init(&l, TOKEN));
-	tub_link_next_gen(&l);
+	++l.gen;
 	assert(accept(&l, report(TOKEN, "p", 1, 1, "hello-ok", NULL), SEC) == TUB_REPORT_NEW_PAGE);
 	assert(tub_link_state(&l, SEC) == TUB_STATE_READY);
 	assert(accept(&l, report(TOKEN, "p", 1, 2, "loadedmetadata", "\"rs\":1,\"vw\":640,\"paused\":true"), SEC) ==
@@ -461,6 +477,31 @@ static void test_command_safety(void)
 	printf("  test_command_safety: PASS\n");
 }
 
+/* H-07: which deck a command goes to, on the code that ships (tub_deck_choose is what deck-filter.c calls). */
+static void test_deck_choice(void)
+{
+	const struct tub_deck_candidate decks[] = {
+		{"Screen A", "deck-aaaa", false}, /* 0: a second filter on Screen A */
+		{"Screen A", "deck-bbbb", true},  /* 1: the owner on Screen A */
+		{"Screen B", "deck-cccc", true},  /* 2 */
+		{"", "deck-dddd", true},          /* 3: its source is not known yet */
+		{"deck-cccc", "deck-eeee", false} /* 4: a source that is named like another deck's id */
+	};
+	const size_t n = sizeof(decks) / sizeof(decks[0]);
+	assert(tub_deck_choose("Screen A", decks, n) == 1); /* the owner, though it comes second */
+	assert(tub_deck_choose("Screen B", decks, n) == 2);
+	assert(tub_deck_choose("deck-aaaa", decks, n) == 0); /* by deck id */
+	assert(tub_deck_choose("deck-dddd", decks, n) == 3);
+	assert(tub_deck_choose("deck-cccc", decks, n) == 4); /* a source name wins over a deck id */
+	assert(tub_deck_choose("Screen C", decks, n) == n);  /* nobody */
+	assert(tub_deck_choose("", decks, n) == n);          /* an empty name never means the deck without a source */
+	assert(tub_deck_choose(NULL, decks, n) == n);
+	assert(tub_deck_choose("Screen A", decks, 1) == 0); /* a non-owner is taken when it is the only one there */
+	assert(tub_deck_choose("Screen A", NULL, 0) == 0);
+	const struct tub_deck_candidate twins[] = {{"Cam", "deck-1", false}, {"Cam", "deck-2", false}};
+	assert(tub_deck_choose("Cam", twins, 2) == 0); /* of equals, the first */
+}
+
 int main(void)
 {
 	printf("test-tubester-link\n");
@@ -473,6 +514,7 @@ int main(void)
 	test_states();
 	test_commands();
 	test_command_safety();
+	test_deck_choice();
 	printf("test-tubester-link: ALL PASS\n");
 	return 0;
 }

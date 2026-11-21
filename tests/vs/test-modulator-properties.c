@@ -84,9 +84,12 @@ static struct obs_source_info test_av_input = {
 	.get_height = test_input_get_size,
 };
 
+static int g_color_filter_properties_built;
+
 static obs_properties_t *test_color_filter_properties(void *unused)
 {
 	(void)unused;
+	g_color_filter_properties_built++;
 	obs_properties_t *p = obs_properties_create();
 	obs_properties_add_float_slider(p, "brightness", "Brightness", -1.0, 1.0, 0.01);
 	obs_properties_add_float_slider(p, "opacity", "Opacity", 0.0, 1.0, 0.01);
@@ -387,12 +390,144 @@ static void test_flash_guard_defaults_and_live_color_filter_cap(void)
 			found_flux_safe = true;
 	}
 	assert(found_kick_safe && found_snare_safe && found_flux_safe);
+	{
+		/* U1-16: the named signals come first, then the 32 bands and the 18 faders, each under a header row that
+		 * cannot be chosen. Every other row can be, and every signal keeps the value it is saved as. */
+		const size_t n = obs_property_list_item_count(sig_prop);
+		size_t headers = 0, band_header = n, fader_header = n, first_band = n, first_fader = n, kick = n;
+		for (size_t i = 0; i < n; i++) {
+			const long long v = obs_property_list_item_int(sig_prop, i);
+			if (obs_property_list_item_disabled(sig_prop, i)) {
+				headers++;
+				if (band_header == n)
+					band_header = i;
+				else
+					fader_header = i;
+				assert(v < 0);
+				continue;
+			}
+			if (v == (long long)VS_SIG_SPECTRUM_BAND_0)
+				first_band = i;
+			else if (v == (long long)VS_SIG_FADER_CROSSFADER)
+				first_fader = i;
+			else if (v == (long long)VS_SIG_KICK)
+				kick = i;
+		}
+		assert(headers == 2 && kick < band_header);
+		assert(first_band == band_header + 1 && first_fader == fader_header + 1 && band_header < fader_header);
+		assert(n == 14 + 1 + VS_SPECTRUM_BANDS + 1 + VS_FADER_SLOT_COUNT);
+	}
 	obs_properties_destroy(props);
 
 	obs_source_filter_remove(parent, mod);
 	obs_source_filter_remove(parent, cc);
 	obs_source_release(mod);
 	obs_source_release(cc);
+	obs_source_release(parent);
+}
+
+/* D-17: two slots that move settings of one filter build that filter's Properties once for both, and a second look
+ * within the reuse time builds none. */
+static void test_target_properties_built_once_for_slots_that_share_a_filter(void)
+{
+	obs_source_t *parent = obs_source_create("vs_test_video_input", "vs-d17-parent", NULL, NULL);
+	obs_source_t *cc = obs_source_create("color_filter", "Color Correction", NULL, NULL);
+	obs_data_t *s = obs_data_create();
+	obs_data_set_bool(s, "slot_1_enabled", true);
+	obs_data_set_string(s, "slot_1_target_filter", "Color Correction");
+	obs_data_set_string(s, "slot_1_target_setting", "brightness");
+	obs_data_set_bool(s, "slot_2_enabled", true);
+	obs_data_set_string(s, "slot_2_target_filter", "Color Correction");
+	obs_data_set_string(s, "slot_2_target_setting", "opacity");
+	obs_source_t *mod = obs_source_create("visual_sidechain_modulator_filter", "Mod", s, NULL);
+	obs_data_release(s);
+	assert(parent && cc && mod);
+	obs_source_filter_add(parent, cc);
+	int before = g_color_filter_properties_built;
+	obs_source_filter_add(parent, mod); /* once on its source, the modulator looks at its targets */
+	assert(g_color_filter_properties_built - before == 1);
+	before = g_color_filter_properties_built;
+	obs_source_load(mod);
+	assert(g_color_filter_properties_built == before);
+
+	obs_source_filter_remove(parent, mod);
+	obs_source_filter_remove(parent, cc);
+	obs_source_release(mod);
+	obs_source_release(cc);
+	obs_source_release(parent);
+}
+
+static double filter_double(obs_source_t *filter, const char *setting)
+{
+	obs_data_t *s = obs_source_get_settings(filter);
+	const double v = obs_data_get_double(s, setting);
+	obs_data_release(s);
+	return v;
+}
+
+/* QA-B01, QA-B02: one modulator moves a setting on each of two filters. One of them is renamed. Switching the
+ * modulator off must put both real values back: the renamed filter is found by the record that names it, not by the
+ * first sibling that carries this modulator's id (the other target does too, and it comes first in the walk), and the
+ * walk over the records lets go of each item once. Before the fix "Color 2" kept its modulated value, its baseline
+ * went to "Blur", and a record item was freed twice. */
+static void test_rename_is_followed_to_the_renamed_filter_only(void)
+{
+	obs_source_t *parent = obs_source_create("vs_test_video_input", "vs-rename-parent", NULL, NULL);
+	obs_source_t *color = obs_source_create("color_filter", "Color", NULL, NULL);
+	obs_source_t *blur = obs_source_create("color_filter", "Blur", NULL, NULL);
+	obs_data_t *s = obs_data_create();
+	obs_data_set_bool(s, "slot_1_enabled", true);
+	obs_data_set_string(s, "slot_1_target_filter", "Color");
+	obs_data_set_string(s, "slot_1_target_setting", "opacity");
+	obs_data_set_int(s, "slot_1_signal", (long long)VS_SIG_LEVEL);
+	obs_data_set_double(s, "slot_1_amount_pct", 100.0);
+	obs_data_set_double(s, "slot_1_min_value", 0.25);
+	obs_data_set_double(s, "slot_1_max_value", 1.0);
+	obs_data_set_bool(s, "slot_2_enabled", true);
+	obs_data_set_string(s, "slot_2_target_filter", "Blur");
+	obs_data_set_string(s, "slot_2_target_setting", "opacity");
+	obs_data_set_int(s, "slot_2_signal", (long long)VS_SIG_LEVEL);
+	obs_data_set_double(s, "slot_2_amount_pct", 100.0);
+	obs_data_set_double(s, "slot_2_min_value", 0.5);
+	obs_data_set_double(s, "slot_2_max_value", 1.0);
+	obs_source_t *mod = obs_source_create("visual_sidechain_modulator_filter", "Mod", s, NULL);
+	obs_data_release(s);
+	assert(parent && color && blur && mod);
+	/* libobs puts a new filter at the front of its list and walks the list from the back: the filter added first
+	 * is met first. So "Blur", which also carries this modulator's id, is met before the renamed filter. */
+	obs_source_filter_add(parent, blur);
+	obs_source_filter_add(parent, color);
+	obs_source_filter_add(parent, mod);
+
+	/* silence: each slot rests at its From value, which is not the filter's own 0 */
+	void *data = obs_obj_get_data(mod);
+	for (int i = 0; i < 4; i++)
+		vs_modulator_filter_info.video_tick(data, 1.0f / 60.0f);
+	assert(fabs(filter_double(color, "opacity") - 0.25) < 1e-9);
+	assert(fabs(filter_double(blur, "opacity") - 0.5) < 1e-9);
+
+	obs_source_set_name(color, "Color 2");
+	obs_source_set_enabled(mod, false); /* puts every real value back, looking each target up by name */
+	assert(fabs(filter_double(color, "opacity")) < 1e-9);
+	assert(fabs(filter_double(blur, "opacity")) < 1e-9);
+	obs_data_t *ms = obs_source_get_settings(mod);
+	assert(strcmp(obs_data_get_string(ms, "slot_1_target_filter"), "Color 2") == 0);
+	assert(strcmp(obs_data_get_string(ms, "slot_2_target_filter"), "Blur") == 0);
+	obs_data_release(ms);
+	/* the real values are back, so neither filter carries a record any more */
+	obs_data_t *priv = obs_source_get_private_settings(color);
+	assert(!obs_data_has_user_value(priv, "visual_sidechain_modulated"));
+	obs_data_release(priv);
+	priv = obs_source_get_private_settings(blur);
+	assert(!obs_data_has_user_value(priv, "visual_sidechain_modulated"));
+	obs_data_release(priv);
+
+	obs_source_filter_remove(parent, mod);
+	obs_source_filter_remove(parent, blur);
+	obs_source_filter_remove(parent, color);
+	obs_source_release(mod);
+	obs_source_release(blur);
+	obs_source_release(color);
 	obs_source_release(parent);
 }
 
@@ -442,6 +577,8 @@ int main(void)
 	test_deferred_named_configure_leaves_attach_to_retry();
 	test_audio_tap_live_status_property();
 	test_flash_guard_defaults_and_live_color_filter_cap();
+	test_target_properties_built_once_for_slots_that_share_a_filter();
+	test_rename_is_followed_to_the_renamed_filter_only();
 	obs_shutdown();
 	puts("test-modulator-properties: all assertions passed");
 	return 0;

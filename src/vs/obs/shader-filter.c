@@ -87,9 +87,18 @@ struct vs_user_uniform_binding {
 	bool image_loaded;
 };
 
+/* Shader time starts over after this many seconds (9.1 hours; a power of two, so whole seconds stay exact). A float
+ * resolves 2 ms there: 8 steps per frame at 60 fps. The one phase jump at the wrap is the price of a clock that
+ * runs at the right speed for as long as OBS is up. */
+#define VS_SHADER_TIME_WRAP_SEC 32768.0
+
 struct vs_shader_filter {
 	obs_source_t *context;
 	struct vs_audio_tap tap;
+	/* Graphics thread only. Whether this filter is being drawn (D-05, D-11). */
+	struct vs_render_watch render_watch;
+	bool on_screen;         /* the last tick's answer */
+	bool custom_band_stale; /* the tick skipped the custom band: the first draw reads it */
 
 	/* Requests from other threads to the graphics thread, the only one that compiles or touches the tap */
 	volatile bool reload_requested;      /* Reload & Recompile: the next update compiles */
@@ -197,7 +206,10 @@ struct vs_shader_filter {
 	uint32_t feedback_height;
 	enum gs_color_space feedback_space;
 
-	float elapsed_time;
+	/* Seconds since the filter was made, kept in a double and wrapped (D-13). As a float that only grows, the 1/60 s
+	 * added per frame is rounded to the float's step: after 18 hours the clock ran 6 % slow, and after six days it
+	 * stopped. The shaders get a float below VS_SHADER_TIME_WRAP_SEC, where a frame is always many steps. */
+	double elapsed_time;
 	float rand_f;
 	float rand_instance_f;
 	float rand_activation_f;
@@ -653,6 +665,16 @@ static void compile_shader(struct vs_shader_filter *sf, obs_data_t *settings)
 		dstr_replace(&err_text, "(null) (", "(");
 		bfree(gs_err);
 		gs_err = err_text.array;
+	}
+	if (sf->effect &&
+	    (!gs_effect_get_technique(sf->effect, "Draw") || !gs_effect_get_param_by_name(sf->effect, "image"))) {
+		/* D-15: an effect that compiles but has no "Draw" technique or no "image" texture (a full effect that
+		 * names them differently) draws nothing, and libobs logs an error for it on every frame. It counts as
+		 * not compiled, with a line that says what is missing. */
+		gs_effect_destroy(sf->effect);
+		sf->effect = NULL;
+		bfree(gs_err);
+		gs_err = bstrdup(obs_module_text("Shader.Error.NoDrawOrImage"));
 	}
 	if (sf->effect) {
 		/* Resolve the host percent controls against the new shader's parameters before their values are read;
@@ -1128,12 +1150,25 @@ static void shader_filter_video_tick(void *data, float seconds)
 			obs_data_release(s);
 		}
 	}
+	/* A filter that is not being drawn still analyses its audio (the beat stays locked for the cut to its scene,
+	 * and Track 1 feeds the dock's signals), but it uploads no texture and works out no custom band (D-11), and it
+	 * takes no flash from the shared budget (D-05). */
+	sf->on_screen = vs_render_watch_tick(&sf->render_watch);
+	sf->tap.upload_paused = !sf->on_screen;
 	vs_audio_tap_tick(&sf->tap, sf->context, seconds);
 
-	sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame, VS_SIG_CUSTOM_HZ,
-							 sf->custom_low_hz, sf->custom_high_hz, sf->custom_mode);
+	if (sf->on_screen && sf->p_audio_custom_band) {
+		sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame,
+								 VS_SIG_CUSTOM_HZ, sf->custom_low_hz,
+								 sf->custom_high_hz, sf->custom_mode);
+		sf->custom_band_stale = false;
+	} else {
+		sf->custom_band_stale = true;
+	}
 
-	sf->elapsed_time += seconds;
+	sf->elapsed_time += (double)seconds;
+	if (sf->elapsed_time >= VS_SHADER_TIME_WRAP_SEC)
+		sf->elapsed_time -= VS_SHADER_TIME_WRAP_SEC;
 	sf->rand_f = next_unit_rand();
 
 	const uint64_t elapsed_ns = (uint64_t)(seconds * 1e9f);
@@ -1166,7 +1201,9 @@ static void shader_filter_video_tick(void *data, float seconds)
 										    faders, fadester_loaded)
 						     : (float)VS_FLASH_RATE_DEFAULT_HZ;
 	const bool panic = vs_fader_bridge_is_panic_active();
-	const bool can_admit = (!panic && (!sf->context || obs_source_enabled(sf->context)) && mix > 0.0f);
+	/* Only a filter that is on screen with a compiled shader may take a flash (D-05). */
+	const bool can_admit = (!panic && (!sf->context || obs_source_enabled(sf->context)) && mix > 0.0f &&
+				sf->on_screen && sf->effect != NULL);
 	uint64_t frame_token = obs_get_video_frame_time();
 	if (frame_token == 0 &&
 	    (sf->uses_flash_envelope || sf->uses_kick_safe || sf->uses_snare_safe || sf->uses_flux_safe)) {
@@ -1242,11 +1279,11 @@ static void bind_all_shader_uniforms(struct vs_shader_filter *sf, uint32_t cx, u
 		gs_effect_set_vec2(sf->p_uv_pixel_interval, &uv_pixel_interval);
 
 	if (sf->p_elapsed_time)
-		gs_effect_set_float(sf->p_elapsed_time, sf->elapsed_time);
+		gs_effect_set_float(sf->p_elapsed_time, (float)sf->elapsed_time);
 	if (sf->p_loops)
-		gs_effect_set_float(sf->p_loops, floorf(sf->elapsed_time));
+		gs_effect_set_float(sf->p_loops, (float)floor(sf->elapsed_time));
 	if (sf->p_loop_second)
-		gs_effect_set_float(sf->p_loop_second, fmodf(sf->elapsed_time, 1.0f));
+		gs_effect_set_float(sf->p_loop_second, (float)fmod(sf->elapsed_time, 1.0));
 	if (sf->p_rand_f)
 		gs_effect_set_float(sf->p_rand_f, sf->rand_f);
 	if (sf->p_rand_instance_f)
@@ -1474,6 +1511,17 @@ static void shader_filter_video_render(void *data, gs_effect_t *effect)
 {
 	(void)effect;
 	struct vs_shader_filter *sf = (struct vs_shader_filter *)data;
+
+	/* Being drawn: the next tick counts this filter as on screen. What the off-screen ticks skipped is caught up
+	 * here, so the first frame after a cut draws with this frame's audio. */
+	vs_render_watch_mark_rendered(&sf->render_watch);
+	vs_audio_tap_upload_if_stale(&sf->tap);
+	if (sf->custom_band_stale && sf->p_audio_custom_band) {
+		sf->current_custom_band = vs_analyzer_get_signal(&sf->tap.analyzer, &sf->tap.current_frame,
+								 VS_SIG_CUSTOM_HZ, sf->custom_low_hz,
+								 sf->custom_high_hz, sf->custom_mode);
+		sf->custom_band_stale = false;
+	}
 
 	if (vs_fader_bridge_should_shader_passthrough(sf->panic_passthrough, sf->effect != NULL)) {
 		obs_source_skip_video_filter(sf->context);

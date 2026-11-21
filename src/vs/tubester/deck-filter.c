@@ -46,6 +46,7 @@
 #include "tubester/deck-filter.h"
 #include "tubester/command.h"
 #include "tubester/deck-link.h"
+#include "tubester/http-parse.h"
 #include "tubester/listener.h"
 #include "tubester/random.h"
 #include "tubester/speed.h"
@@ -78,7 +79,7 @@
 #define TUB_REGISTER_RETRY_MIN_NS 1000000000ULL
 #define TUB_REGISTER_RETRY_MAX_NS 30000000000ULL
 /* One deck per Browser source; as many sources as the listener has decks */
-#define TUB_OWNERS_MAX 64
+#define TUB_OWNERS_MAX TUB_DECKS_MAX
 #define TUB_DECKS_EVENT_INTERVAL_NS 33333333ULL
 #define S_SPEED_FADER_STATUS "tubester_speed_fader_status"
 #define S_SPEED_FADER_CLEAR "tubester_speed_fader_clear"
@@ -184,6 +185,8 @@ struct tub_deck_filter {
 	uint64_t last_rate_sent_ns;
 	int rate_mismatch_streak;
 	bool rate_repair_logged;
+	bool watchdog_logged; /* the "stopped moving" line was written for the stall the tape is in (E-08) */
+	double watchdog_logged_at;
 	uint64_t last_play_sent_ns; /* the last command that set the play state: a tape, a play or a pause */
 	int play_mismatch_streak;
 	bool play_repair_logged;
@@ -580,10 +583,17 @@ static void on_report(void *deck, obs_data_t *report, uint64_t now_ns)
 				f->decks_event_dirty = true;
 			}
 		}
+		if (f->watchdog_logged && fabs(f->link.last.current_time - f->watchdog_logged_at) > 1.0)
+			f->watchdog_logged = false; /* the tape moved on: the next stall is news again */
 		if (strcmp(f->link.last.event, "watchdog") == 0) {
-			obs_log(LOG_WARNING,
-				"tape deck %s: the tape had stopped moving; recovered with a seek (R-DCK-8)",
-				f->deck_id);
+			/* The page reports this every 1.5 s for as long as a tape stays stuck: one line per stall (E-08) */
+			if (!f->watchdog_logged) {
+				f->watchdog_logged = true;
+				f->watchdog_logged_at = f->link.last.current_time;
+				obs_log(LOG_WARNING,
+					"tape deck %s: the tape had stopped moving; recovered with a seek (R-DCK-8)",
+					f->deck_id);
+			}
 		} else if (strcmp(f->link.last.event, "error") == 0) {
 			obs_log(LOG_WARNING, "tape deck %s: the page cannot play this file (media error %d)",
 				f->deck_id, f->link.last.error_code);
@@ -1986,6 +1996,7 @@ enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tu
 		obs_weak_source_t *filter;
 		obs_weak_source_t *parent;
 		char deck_id[TUB_DECK_ID_CHARS + 2];
+		char source_name[256];
 		enum deck_role role;
 	} candidates[TUB_OWNERS_MAX];
 	size_t count = 0;
@@ -2009,31 +2020,26 @@ enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tu
 	}
 	pthread_mutex_unlock(&g_decks_mutex);
 
-	size_t chosen = TUB_OWNERS_MAX;
-	int best_rank = 0; /* 3: source + owner, 2: source + non-owner, 1: deck_id */
-	char chosen_source[256] = "";
-
+	/* The names are read here; which deck the name means is decided by tub_deck_choose (command.c), which the
+	 * tests run (H-07). */
+	struct tub_deck_candidate named[TUB_OWNERS_MAX];
 	for (size_t i = 0; i < count; i++) {
-		const char *source_name = "";
+		candidates[i].source_name[0] = '\0';
 		obs_source_t *parent_src = candidates[i].parent ? obs_weak_source_get_source(candidates[i].parent)
 								: NULL;
 		if (parent_src && obs_source_get_name(parent_src))
-			source_name = obs_source_get_name(parent_src);
-
-		int rank = 0;
-		if (source_name[0] != '\0' && strcmp(source_name, deck_target) == 0)
-			rank = (candidates[i].role == ROLE_OWNER) ? 3 : 2;
-		else if (strcmp(candidates[i].deck_id, deck_target) == 0)
-			rank = 1;
-
-		if (rank > best_rank) {
-			best_rank = rank;
-			chosen = i;
-			snprintf(chosen_source, sizeof(chosen_source), "%s", source_name);
-		}
+			snprintf(candidates[i].source_name, sizeof(candidates[i].source_name), "%s",
+				 obs_source_get_name(parent_src));
 		if (parent_src)
 			obs_source_release(parent_src);
+		named[i].source_name = candidates[i].source_name;
+		named[i].deck_id = candidates[i].deck_id;
+		named[i].owner = (candidates[i].role == ROLE_OWNER);
 	}
+	const size_t chosen = tub_deck_choose(deck_target, named, count);
+	char chosen_source[256] = "";
+	if (chosen < count)
+		snprintf(chosen_source, sizeof(chosen_source), "%s", candidates[chosen].source_name);
 
 	obs_source_t *filter_source = NULL;
 	if (chosen < count && candidates[chosen].filter)

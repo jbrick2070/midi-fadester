@@ -92,6 +92,29 @@ size_t vs_baseline_restore_all(struct vs_baseline_table *table, vs_baseline_appl
 size_t vs_baseline_restore_filter(struct vs_baseline_table *table, const char *filter_name,
 				  vs_baseline_apply_fn apply_cb, void *user_data);
 
+/* The target filter was renamed: its baselines follow it (D-07). Returns how many entries moved. */
+size_t vs_baseline_rename_filter(struct vs_baseline_table *table, const char *old_name, const char *new_name);
+
+/*
+ * Who may modulate a setting (D-08, D-09). While a modulator moves a setting it leaves a record on the target filter
+ * itself: its own id and the setting's real value. The record travels with the filter (a copy carries it), so the
+ * next modulator to arrive can tell what it meets.
+ */
+enum vs_target_claim {
+	VS_CLAIM_FREE = 0, /* no record: take it */
+	VS_CLAIM_MINE,     /* this modulator's own record, for a setting it holds a baseline for */
+	VS_CLAIM_ORPHAN,   /* a record that was not written for this filter: its modulator is not on this source, or it
+			      is this modulator's but for a setting it holds no baseline for. Either way a copied
+			      filter. Put the real value back, then take it */
+	VS_CLAIM_TAKEN,    /* another modulator on this source moves it: leave it alone */
+};
+enum vs_target_claim vs_baseline_claim(bool has_record, bool owner_is_self, bool owner_on_this_source,
+				       bool self_holds_baseline);
+
+/* Forgets one entry without writing anything to the target (the setting is another modulator's now). Returns true
+ * when there was one. */
+bool vs_baseline_forget_entry(struct vs_baseline_table *table, const char *filter_name, const char *setting_name);
+
 /*
  * Pre-save hook (R-MOD-6): restores all active targets to their original
  * unmodulated baseline values so OBS serializes clean baseline settings into

@@ -6,6 +6,7 @@
 
 #include "core/apc40-palette.h"
 #include "obs/mfd-vendor-api.h"
+#include "obs/mfd-blackout.h"
 #include "core/mixer-math.h"
 #include "core/tbar-logic.h"
 #include "core/mfd-text.h"
@@ -664,10 +665,27 @@ static bool fake_op_enum_source_filters(const char *source_name, bool *out_is_sc
 	return true;
 }
 
+static int g_fake_props_calls; /* how often a filter's properties were built (A-03) */
+
+/* C-07: a stand-in for the T-bar driver's parked command. */
+static bool g_fake_tbar_parked;
+static int g_fake_tbar_asked;
+static int g_fake_tbar_retried;
+static bool fake_tbar_deferred(bool run)
+{
+	if (!run) {
+		++g_fake_tbar_asked;
+		return g_fake_tbar_parked;
+	}
+	++g_fake_tbar_retried;
+	return g_fake_tbar_parked;
+}
+
 static obs_properties_t *fake_op_create_filter_properties(const char *source_name, const char *filter_name,
 							  void *user_data)
 {
 	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	++g_fake_props_calls;
 	struct fake_sg_filter *f = fake_sg_find_filter(sg, source_name, filter_name);
 	if (!f) {
 		return NULL;
@@ -1128,7 +1146,7 @@ static int test_config_abort_and_movement_errors(void)
 			expected = "Studio Mode is off.";
 		} else {
 			mfd_engine_begin_setup_session(eng, 0);
-			expected = "Strip is currently paused while Set up is open.";
+			expected = "This strip is paused while Set up is open.";
 		}
 		mfd_engine_reevaluate_slots(eng, false);
 		int driver_calls = g_mock_tbar_calls;
@@ -3244,6 +3262,45 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_flush_pending_ui_work(eng);
 	}
 
+	/* B-04: which control drives a strip, its 14-bit flag and its learned range are the user's, not the scene
+	 * collection's. Loading a collection that was saved with other addresses keeps the current ones and takes only
+	 * the jobs; an installation with no settings file yet still reads its addresses from the collection. */
+	{
+		obs_data_t *sd = obs_data_create();
+		mfd_engine_collection_save_callback_for_test(eng, sd, true); /* saved with the addresses as they are */
+		const struct mfd_midi_addr saved_addr = eng->fader_slots[2].addr;
+		const struct mfd_control_calibration saved_cal = eng->fader_slots[2].cal;
+		const enum mfd_target_type saved_target = eng->fader_slots[2].target_type;
+		char saved_source[MFD_SOURCE_NAME_MAX];
+		snprintf(saved_source, sizeof(saved_source), "%s", eng->fader_slots[2].source_a_name);
+		const bool was_known = eng->user_midi_layout_known;
+
+		/* the user learns another control and sets its range */
+		eng->fader_slots[2].addr = (struct mfd_midi_addr){MFD_MIDI_CC, 3U, 77U, false};
+		mfd_calibration_set(&eng->fader_slots[2].cal, false, 5, 100);
+		eng->user_midi_layout_known = true;
+		mfd_engine_collection_save_callback_for_test(eng, sd, false);
+		REQUIRE(eng->fader_slots[2].addr.type == MFD_MIDI_CC && eng->fader_slots[2].addr.channel == 3U &&
+			eng->fader_slots[2].addr.number == 77U && !eng->fader_slots[2].addr.is_14bit);
+		REQUIRE(eng->fader_slots[2].cal.cal_min == 5 && eng->fader_slots[2].cal.cal_max == 100);
+		REQUIRE(eng->fader_slots[2].target_type == saved_target);
+		REQUIRE(strcmp(eng->fader_slots[2].source_a_name, saved_source) == 0); /* the job is the collection's */
+
+		eng->user_midi_layout_known =
+			false; /* no settings file yet: the collection's addresses are all there is */
+		mfd_engine_collection_save_callback_for_test(eng, sd, false);
+		REQUIRE(eng->fader_slots[2].addr.type == saved_addr.type &&
+			eng->fader_slots[2].addr.channel == saved_addr.channel &&
+			eng->fader_slots[2].addr.number == saved_addr.number);
+		REQUIRE(eng->fader_slots[2].cal.cal_min == saved_cal.cal_min &&
+			eng->fader_slots[2].cal.cal_max == saved_cal.cal_max);
+		eng->user_midi_layout_known = was_known;
+		mfd_engine_frontend_event_for_test(eng, OBS_FRONTEND_EVENT_FINISHED_LOADING);
+		obs_data_release(sd);
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
+	}
+
 	/* 12l. A blend changed with the mouse (OBS sends no signal for it) is taken as the source's own at the next desk
 	 * press: Clean keeps it. */
 	{
@@ -3529,16 +3586,51 @@ static int test_vj_fill_follow_and_desk(void)
 		mfd_engine_set_desk_visible(eng, true);
 		REQUIRE(eng->vj_vs_poll_pending && eng->desk_visible);
 		eng->desk_frame_sec = 0.0f;
-		uint64_t rev0 = eng->telemetry_rev;
+		uint64_t rev0 = eng->desk_frame_rev;
 		mfd_engine_tick(eng, 0.01f);
 		REQUIRE(eng->desk_frame_sec > 0.0f); /* not yet 1/30 s */
+		uint64_t tele0 = eng->telemetry_rev;
+		uint64_t topo0 = eng->config_topology_rev;
 		mfd_engine_tick(eng, 0.03f);
-		REQUIRE(eng->telemetry_rev > rev0 && eng->desk_frame_sec == 0.0f);
+		REQUIRE(eng->desk_frame_rev > rev0 && eng->desk_frame_sec == 0.0f);
+		/* F-08: the dock frame clock is not a change for the settings window, which refreshes on these two */
+		REQUIRE(eng->telemetry_rev == tele0 && eng->config_topology_rev == topo0);
+		{
+			uint64_t t1 = 0U, t2 = 0U, t3 = 0U;
+			mfd_engine_get_ui_revs(eng, &t1, &t2, &t3);
+			REQUIRE(t1 == topo0 && t2 == tele0 && t3 == eng->desk_frame_rev);
+		}
 		mfd_engine_set_desk_visible(eng, false);
 		mfd_engine_flush_pending_ui_work(eng);
 		eng->desk_frame_sec = 0.0f;
 		mfd_engine_tick(eng, 0.05f);
 		REQUIRE(eng->desk_frame_sec == 0.0f); /* hidden: no repaint requests counted */
+
+		/* C-07: a parked T-bar command is retried from the video tick, with no timer. The tick only asks whether
+		 * one is parked; every 25 ms of ticks it has the UI thread's flush run the retry. */
+		eng->tbar_deferred = fake_tbar_deferred;
+		g_fake_tbar_parked = false;
+		g_fake_tbar_asked = 0;
+		g_fake_tbar_retried = 0;
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_tick(eng, 0.016f);
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_asked == 2 && g_fake_tbar_retried == 0); /* nothing parked: nothing retried */
+		g_fake_tbar_parked = true;
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(!eng->tbar_deferred_due); /* 16 ms: not yet */
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_retried == 0);
+		mfd_engine_tick(eng, 0.016f);
+		REQUIRE(eng->tbar_deferred_due); /* 32 ms */
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_retried == 1 && !eng->tbar_deferred_due);
+		mfd_engine_flush_pending_ui_work(eng);
+		REQUIRE(g_fake_tbar_retried == 1); /* one retry per request */
+		g_fake_tbar_parked = false;
+		mfd_engine_tick(eng, 0.05f);
+		REQUIRE(!eng->tbar_deferred_due && eng->tbar_deferred_wait_sec == 0.0f);
+		eng->tbar_deferred = NULL;
 		/* 14i. What Visual Sidechain's answers do to the dock's panic state. */
 		eng->vs_panic_known = false;
 		eng->vs_last_failed = false;
@@ -3613,6 +3705,188 @@ static int test_vj_fill_follow_and_desk(void)
 	return 0;
 }
 
+/* ---- Blackout (H-03): the fade and the press, apart from OBS ---------------------------------------------- */
+
+static int test_blackout_logic(void)
+{
+	/* a fade is never faster than 300 ms, whatever the pad's fade time */
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(1000) - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(300) - (1000.0f / 300.0f)) < 1e-5f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(50) - (1000.0f / 300.0f)) < 1e-5f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(0) - (1000.0f / 300.0f)) < 1e-5f);
+	REQUIRE(fabsf(mfd_blackout_rate_for_ms(-5) - (1000.0f / 300.0f)) < 1e-5f);
+
+	/* to black over 1 s at 60 fps: it rises every frame, ends at exactly 1 and stays there */
+	float level = 0.0f;
+	const float rate = mfd_blackout_rate_for_ms(1000);
+	for (int frame = 0; frame < 59; ++frame) {
+		const float next = mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f);
+		REQUIRE(next > level && next < 1.0f);
+		level = next;
+	}
+	level = mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f);
+	level = mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f);
+	REQUIRE(level == 1.0f);
+	REQUIRE(mfd_blackout_next_level(level, true, rate, 1.0f / 60.0f) == 1.0f);
+
+	/* pressed again half-way, it turns round from where it is: no jump */
+	level = 0.5f;
+	const float back = mfd_blackout_next_level(level, false, rate, 1.0f / 60.0f);
+	REQUIRE(back < level && fabsf(level - back - (1.0f / 60.0f)) < 1e-5f);
+	REQUIRE(mfd_blackout_next_level(0.005f, false, rate, 1.0f / 60.0f) == 0.0f); /* never below clear */
+	REQUIRE(mfd_blackout_next_level(0.0f, false, rate, 1.0f / 60.0f) == 0.0f);
+	/* a frame of no length, or a bad one, moves nothing */
+	REQUIRE(mfd_blackout_next_level(0.4f, true, rate, 0.0f) == 0.4f);
+	REQUIRE(mfd_blackout_next_level(0.4f, true, rate, -1.0f) == 0.4f);
+
+	/* The press. Outside OBS nothing is attached, so the level stays 0, but "on" is what was asked for: the
+	 * Session lamp and the dock's bar follow it. A second press asks for clear again. */
+	mfd_blackout_init();
+	mfd_blackout_reset();
+	REQUIRE(!mfd_blackout_is_on());
+	REQUIRE(mfd_blackout_last_failure() == MFD_BLACKOUT_OK);
+	mfd_blackout_toggle(1000);
+	REQUIRE(mfd_blackout_is_on());
+	REQUIRE(mfd_blackout_level() == 0.0f);
+	mfd_blackout_tick(0.5f); /* no OBS: nothing on air, nothing moves */
+	REQUIRE(mfd_blackout_level() == 0.0f);
+	mfd_blackout_toggle(1000);
+	REQUIRE(!mfd_blackout_is_on());
+	mfd_blackout_toggle(1000);
+	REQUIRE(mfd_blackout_is_on());
+	mfd_blackout_reset(); /* a scene collection change, or OBS closing: clear at once */
+	REQUIRE(!mfd_blackout_is_on() && mfd_blackout_level() == 0.0f);
+	REQUIRE(mfd_blackout_last_failure() == MFD_BLACKOUT_OK);
+	return 0;
+}
+
+/* ---- Pass 2: layer strips and their sources (B-05, B-07, Reverse direction) ---------------------------------- */
+
+static bool pass2_get_opacity(const char *source_name, float *out_alpha_01, void *user_data)
+{
+	struct fake_scene_graph *sg = (struct fake_scene_graph *)user_data;
+	struct fake_sg_source *src = fake_sg_find_source(sg, source_name);
+	if (!src) {
+		return false;
+	}
+	*out_alpha_01 = src->opacity_writes > 0 ? src->last_opacity : 1.0f; /* never written: the filter's 100 % */
+	return true;
+}
+
+static int test_pass2_layer_bindings(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "X", false);
+	fake_sg_add_source(&sg, "Y", false);
+	fake_sg_add_source(&sg, "Z", false);
+	fake_sg_add_scene(&sg, "First");
+	fake_sg_scene_add_item(&sg, "First", "X");
+	fake_sg_scene_add_item(&sg, "First", "Y");
+	fake_sg_add_scene(&sg, "Second");
+	fake_sg_scene_add_item(&sg, "Second", "Y");
+	fake_sg_scene_add_item(&sg, "Second", "Z");
+	fake_sg_add_scene(&sg, "Third");
+	fake_sg_scene_add_item(&sg, "Third", "Z");
+
+	struct mfd_scene_graph_ops ops = g_fake_sg_ops;
+	ops.get_opacity = pass2_get_opacity;
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	mfd_midi_parser_init(&eng->midi_parser);
+	mfd_midi_queue_init(&eng->midi_queue);
+	eng->learning_slot_index = -1;
+	mfd_engine_load_apc40_defaults(eng);
+	mfd_engine_set_smooth_tau_ms(eng, 0.0f);
+	char err[160] = {0};
+
+	/* B-05: a layer strip with no scene of its own acts on the scene on air when that scene holds its source, and
+	 * on the first scene that holds it otherwise. */
+	struct mfd_slot_config_edit e;
+	memset(&e, 0, sizeof(e));
+	e.enabled = true;
+	e.target_type = MFD_TARGET_SINGLE_LAYER;
+	e.preserve_scene = true;
+	snprintf(e.source_a_name, sizeof(e.source_a_name), "%s", "Y");
+	REQUIRE(mfd_engine_update_slot_config(eng, 3, &e));
+	REQUIRE(eng->fader_slots[3].scene_name[0] == '\0');
+	REQUIRE(strcmp(eng->fader_slots[3].resolved_scene_name, "First") == 0); /* nothing on air: the first found */
+	snprintf(eng->cached_program_scene, sizeof(eng->cached_program_scene), "%s", "Second");
+	mfd_engine_reevaluate_slots(eng, false);
+	REQUIRE(strcmp(eng->fader_slots[3].resolved_scene_name, "Second") == 0);
+	snprintf(eng->cached_program_scene, sizeof(eng->cached_program_scene), "%s", "First");
+	mfd_engine_reevaluate_slots(eng, false);
+	REQUIRE(strcmp(eng->fader_slots[3].resolved_scene_name, "First") == 0);
+	snprintf(eng->cached_program_scene, sizeof(eng->cached_program_scene), "%s", "Third"); /* Y is not in it */
+	mfd_engine_reevaluate_slots(eng, false);
+	REQUIRE(strcmp(eng->fader_slots[3].resolved_scene_name, "First") == 0);
+	REQUIRE(eng->fader_slots[3].cached_available);
+
+	/* B-07: strip 2 fades X out, then is given Z, which stands at 30 %. X goes back to 100 % (no strip is left to
+	 * raise it), and the strip starts at Z's 30 % waiting for its fader, instead of keeping X's 0 %. */
+	snprintf(e.source_a_name, sizeof(e.source_a_name), "%s", "X");
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(mfd_engine_set_slot_value(eng, 2, 0.0f, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity) < 1e-6f);
+	fake_sg_find_source(&sg, "Z")->last_opacity = 0.30f;
+	fake_sg_find_source(&sg, "Z")->opacity_writes = 1U;
+	snprintf(e.source_a_name, sizeof(e.source_a_name), "%s", "Z");
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(eng->fader_slots[2].last_applied_val - 0.30f) < 1e-6f);
+	REQUIRE(eng->fader_slots[2].takeover.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "Z")->last_opacity - 0.30f) < 1e-6f); /* Z itself is not moved */
+
+	/* A source another strip still drives is left alone: strips 2 and 4 both on Z, strip 2 moves to X. */
+	REQUIRE(mfd_engine_update_slot_config(eng, 4, &e));
+	snprintf(e.source_a_name, sizeof(e.source_a_name), "%s", "X");
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "Z")->last_opacity - 0.30f) < 1e-6f);
+
+	/* "Not used" on the last strip that drives a source puts it back too. */
+	REQUIRE(mfd_engine_unassign_slot_preserve_addr(eng, 4));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "Z")->last_opacity - 1.0f) < 1e-6f);
+
+	/* Reverse direction: strip 2 (channel 2, CC 7) is engaged at 100/127. Switching Reverse mirrors what the
+	 * fader stands for; the output stays where it is until the fader picks it up again, it does not jump. */
+	push_midi_cc(eng, 1, 7, 127);
+	push_midi_cc(eng, 1, 7, 100);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(eng->fader_slots[2].takeover.state == MFD_TAKEOVER_ENGAGED);
+	REQUIRE(fabsf(eng->fader_slots[2].last_applied_val - (100.0f / 127.0f)) < 1e-4f);
+	e.invert = true;
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(eng->fader_slots[2].takeover.state == MFD_TAKEOVER_WAITING);
+	push_midi_cc(eng, 1, 7, 101);
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(fabsf(eng->fader_slots[2].last_applied_val - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - (100.0f / 127.0f)) < 1e-4f);
+
+	/* QA-A01: switching the strip off parks it. Its source stays at the level it has on air (it was put back to
+	 * 100 % as if the strip had left it), and switching it on again changes nothing either: the strip waits for
+	 * its fader at that level. */
+	const int x_writes = fake_sg_find_source(&sg, "X")->opacity_writes;
+	e.enabled = false;
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(!eng->fader_slots[2].enabled);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(fake_sg_find_source(&sg, "X")->opacity_writes == x_writes);
+	e.enabled = true;
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(fabsf(eng->fader_slots[2].last_applied_val - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(eng->fader_slots[2].takeover.state == MFD_TAKEOVER_WAITING);
+	/* a strip that is off and is then given another source did leave the first one... but it was not driving it,
+	 * so nothing is put back; "Not used" on a strip that is on still puts its source back */
+	REQUIRE(mfd_engine_unassign_slot_preserve_addr(eng, 2));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - 1.0f) < 1e-6f);
+
+	graph_test_engine_free(eng, sh);
+	return 0;
+}
+
 int main(void)
 {
 	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
@@ -3640,6 +3914,8 @@ int main(void)
 	REQUIRE(test_fold_stops_at_rename_or_removal() == 0);
 	REQUIRE(test_enable_toggle_survives_overflow() == 0);
 	REQUIRE(test_vj_pads_drive_layers() == 0);
+	REQUIRE(test_pass2_layer_bindings() == 0);
+	REQUIRE(test_blackout_logic() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
 	fake_sg_add_source(&fake_sg, "Cam 1", true);
@@ -4101,6 +4377,19 @@ int main(void)
 		0);
 	calldata_free(&cd);
 
+	/* 9a-2. C-05: a call without "value" is refused; it does not take the strip to 0 %. */
+	{
+		const float before_val = eng.fader_slots[1].last_applied_val;
+		calldata_init(&cd);
+		calldata_set_string(&cd, "slot", "fader_1");
+		REQUIRE(proc_handler_call(fake_ph, "midi_fadester_set_fader_value", &cd));
+		REQUIRE(!calldata_bool(&cd, "ok"));
+		REQUIRE(strcmp(calldata_string(&cd, "reason"), "Missing required 'value' parameter (0.0 to 1.0).") ==
+			0);
+		REQUIRE(eng.fader_slots[1].last_applied_val == before_val);
+		calldata_free(&cd);
+	}
+
 	/* 9b. Valid midi_fadester_set_fader_value emits midi_fadester_fader_changed signal without dead VS proc call */
 	calldata_init(&cd);
 	calldata_set_string(&cd, "slot", "fader_1");
@@ -4170,6 +4459,15 @@ int main(void)
 	obs_data_release(res);
 
 	/* 10a-1: Two-source crossfade (fader_1, Ch 0 CC 7): linear to physical end (92%/95% linear & unparked, >= 97% parks linearly) */
+	/* B-06: Loop 3 lies above Cam 1 and both are at 100 %, so Program shows Loop 3 and the strip starts at 100 %
+	 * (source B), not at 0 %. The fader picks up there. */
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
+	REQUIRE(fabsf(eng.fader_slots[1].last_alpha_b - 1.0f) < 1e-6f);
+	/* The rail audit below starts from 0 %, as when source A is the upper layer. */
+	mfd_smoother_reset(&eng.fader_slots[1].smoother, 0.0f);
+	mfd_takeover_init(&eng.fader_slots[1].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	mfd_takeover_set_two_rail_mode(&eng.fader_slots[1].takeover, true);
+	eng.fader_slots[1].last_applied_val = 0.0f;
 	push_midi_cc(&eng, 0, 7, 0);
 	push_midi_cc(&eng, 0, 7, 64);
 	push_midi_cc(&eng, 0, 7, 117); /* 117/127 = 0.9213 (< 0.97): must stay linear ~0.9213 and NOT park! */
@@ -4809,7 +5107,45 @@ int main(void)
 	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
 	REQUIRE(eng.fader_slots[1].cal.cal_max == 127);
 
+	/* G-02: on a layout made for a desk (here the APC40 mkII's) CC 7 and CC 39 are never read as one control. */
+	for (int k = 0; k < 4; ++k) {
+		push_midi_cc(&eng, 0, 7, 32);
+		push_midi_cc(&eng, 0, 39, 0);
+	}
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!eng.fader_slots[1].addr.is_14bit);
+	REQUIRE(eng.fader_slots[1].cal.cal_max == 127);
+
+	/* On the Generic layout the desk is unknown: a run of pairs is a 14-bit control, one pair is not yet. */
+	REQUIRE(eng.midi_parser.cc_lsb_independent[0][7]); /* a known layout: CC 39 is its own control */
+	REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_GENERIC, false));
+	eng.fader_slots[1].takeover.state = MFD_TAKEOVER_ENGAGED;
+	push_midi_cc(&eng, 0, 7, 32);
+	push_midi_cc(&eng, 0, 39, 0);
+	mfd_engine_tick(&eng, 0.016f);
+	REQUIRE(!eng.fader_slots[1].addr.is_14bit);
+	{
+		/* B-11: the table of "own 7-bit control" CCs is rebuilt when what it is built from changes (here the
+		 * layout, then one strip's address), and only then: a mark put in by hand outlives a tick in which
+		 * nothing changed, and goes with the next real change. */
+		REQUIRE(!eng.midi_parser.cc_lsb_independent[0][7] && eng.midi_parser.lsb_table_built);
+		const struct mfd_midi_addr was = eng.fader_slots[17].addr;
+		eng.fader_slots[17].addr.type = MFD_MIDI_CC;
+		eng.fader_slots[17].addr.channel = 2U;
+		eng.fader_slots[17].addr.number = 40U;
+		eng.fader_slots[17].addr.is_14bit = false;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.midi_parser.cc_lsb_independent[2][8]);
+		eng.midi_parser.cc_lsb_independent[5][5] = true;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(eng.midi_parser.cc_lsb_independent[5][5]);
+		eng.fader_slots[17].addr = was;
+		mfd_engine_tick(&eng, 0.016f);
+		REQUIRE(!eng.midi_parser.cc_lsb_independent[2][8] && !eng.midi_parser.cc_lsb_independent[5][5]);
+	}
 	/* Send 14-bit 25% (v14 = 4096 -> MSB = 32, LSB = 0) on Ch 1 CC 7 / CC 39 */
+	push_midi_cc(&eng, 0, 7, 32);
+	push_midi_cc(&eng, 0, 39, 0);
 	push_midi_cc(&eng, 0, 7, 32);
 	push_midi_cc(&eng, 0, 39, 0);
 	mfd_engine_tick(&eng, 0.016f);
@@ -5735,7 +6071,8 @@ int main(void)
 
 	/*
 	 * 16. 0.2.0 Step 1 Engine Contracts:
-	 *     - 16a: Deleted audio source ("Mic/Aux was deleted.") vs silent source ("Silent Card has no audio.")
+	 *     - 16a: Deleted audio source ("Mic/Aux was deleted. Click Set up to choose another.") vs silent source
+	 *            ("Silent Card has no audio.")
 	 *     - 16b: Heap-allocated atomic UI catalog & snapshot sorting/stacking/dB units
 	 *     - 16c: Setup session broadcast isolation, candidate_invert, [Not used] address preservation,
 	 *            Learn mutual exclusion & multi-slot collision transfer
@@ -5767,7 +6104,7 @@ int main(void)
 		char rsn_del[160] = {0};
 		mfd_engine_get_slot_status(&eng, &eng.fader_slots[3], NULL, 0U, &avail_del, rsn_del, sizeof(rsn_del));
 		REQUIRE(!avail_del);
-		REQUIRE(strcmp(rsn_del, "Mic/Aux was deleted.") == 0);
+		REQUIRE(strcmp(rsn_del, "Mic/Aux was deleted. Click Set up to choose another.") == 0);
 	}
 	vol_writes_before = fake_sg.total_volume_writes;
 	push_midi_cc(&eng, 2, 7, 77);
@@ -5975,7 +6312,7 @@ int main(void)
 	obs_data_release(res);
 
 	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
-	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	REQUIRE(strstr(commit_err, "changed from somewhere else") != NULL);
 	/* base_slot_rev refreshed on first conflict notice, so pressing Done a second time succeeds */
 	REQUIRE(mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
 
@@ -5985,7 +6322,7 @@ int main(void)
 	mfd_engine_handle_source_rename(&eng, "Color 2", "Color Two");
 	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color Two");
 	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
-	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	REQUIRE(strstr(commit_err, "changed from somewhere else") != NULL);
 	fake_sg_rename(&fake_sg, "Color Two", "Color 2");
 	mfd_engine_handle_source_rename(&eng, "Color Two", "Color 2");
 	snprintf(cand.source_b_name, sizeof(cand.source_b_name), "Color 2");
@@ -6000,7 +6337,7 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 	REQUIRE(!mfd_engine_commit_setup_session(&eng, &cand, commit_err, sizeof(commit_err)));
-	REQUIRE(strstr(commit_err, "changed externally") != NULL);
+	REQUIRE(strstr(commit_err, "changed from somewhere else") != NULL);
 	mfd_engine_cancel_setup_session(&eng);
 
 	/* Mid-setup precondition invalidation: layer removed from scene before pressing Done */
@@ -6664,7 +7001,7 @@ int main(void)
 		obs_data_set_string(req, "filter_prop", "mode"); /* OBS_PROPERTY_LIST */
 		mfd_vendor_handle_set_slot(req, res, &eng);
 		REQUIRE(obs_data_has_user_value(res, "error"));
-		REQUIRE(strstr(obs_data_get_string(res, "comment"), "not a numeric") != NULL);
+		REQUIRE(strstr(obs_data_get_string(res, "comment"), "is not a number") != NULL);
 		obs_data_release(req);
 		obs_data_release(res);
 
@@ -6801,6 +7138,48 @@ int main(void)
 		REQUIRE(!eng.fader_slots[11].enabled && eng.slot_config_rev[11] == disabled_dup_rev);
 		obs_data_release(req);
 		obs_data_release(res);
+
+		/* C-05: the other typed fields too. A number sent as a string would be read as 0, a bool as false. */
+		{
+			static const char *const number_fields[] = {"cal_min", "cal_max", "from_val", "to_val"};
+			static const char *const bool_fields[] = {"afv", "bypass_at_zero"};
+			char want[96];
+			for (size_t k = 0U; k < sizeof(number_fields) / sizeof(number_fields[0]); ++k) {
+				req = obs_data_create();
+				res = obs_data_create();
+				obs_data_set_string(req, "slot", "fx_2");
+				obs_data_set_string(req, number_fields[k], "10");
+				mfd_vendor_handle_set_slot(req, res, &eng);
+				snprintf(want, sizeof(want), "Parameter '%s' must be a number.", number_fields[k]);
+				REQUIRE(strcmp(obs_data_get_string(res, "error"), want) == 0);
+				REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+				REQUIRE(eng.slot_config_rev[11] == disabled_dup_rev);
+				obs_data_release(req);
+				obs_data_release(res);
+			}
+			for (size_t k = 0U; k < sizeof(bool_fields) / sizeof(bool_fields[0]); ++k) {
+				req = obs_data_create();
+				res = obs_data_create();
+				obs_data_set_string(req, "slot", "fx_2");
+				obs_data_set_string(req, bool_fields[k], "true");
+				mfd_vendor_handle_set_slot(req, res, &eng);
+				snprintf(want, sizeof(want), "Parameter '%s' must be a boolean.", bool_fields[k]);
+				REQUIRE(strcmp(obs_data_get_string(res, "error"), want) == 0);
+				REQUIRE(eng.slot_config_rev[11] == disabled_dup_rev);
+				obs_data_release(req);
+				obs_data_release(res);
+			}
+			/* reset_fx with "ms":"2000" is refused: read as 0 it would clear every FX strip at once */
+			const double radius_before = obs_data_get_double(flt_blur->settings, "radius");
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "ms", "2000");
+			mfd_vendor_handle_reset_fx(req, res, &eng);
+			REQUIRE(strcmp(obs_data_get_string(res, "error"), "Parameter 'ms' must be a number.") == 0);
+			REQUIRE(obs_data_get_double(flt_blur->settings, "radius") == radius_before);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
 
 		/* Legacy target-mode edits still autoenable when no enabled override is supplied. */
 		req = obs_data_create();
@@ -7081,6 +7460,128 @@ int main(void)
 		flt_blur->float_max_override = 50.0;
 		mfd_engine_handle_filter_properties_updated(&eng, "Color", "Blur");
 		REQUIRE(eng.fader_slots[10].cached_available);
+
+		/* A-03 / B-09: a re-check reuses the properties it read; it builds none when no filter changed. */
+		{
+			int calls = g_fake_props_calls;
+			const bool was_initialized = eng.initialized;
+			eng.initialized = true; /* queued scene-graph changes are drained only by a running engine */
+			mfd_engine_reevaluate_slots(&eng, true);
+			mfd_engine_report_scene_graph_change(&eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
+			mfd_engine_tick(&eng, 0.016f);
+			REQUIRE(g_fake_props_calls == calls);
+			REQUIRE(eng.fader_slots[10].cached_available);
+
+			/* On the video thread a filter change builds nothing either: the strip goes on with what it knew
+			 * and the UI thread's flush reads the properties, with no engine lock held, then re-checks. */
+			eng.filter_meta_defer_for_test = true;
+			flt_blur->float_max_override = 30.0; /* fx_1's to_val 50 is outside now */
+			mfd_engine_report_scene_graph_change(&eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
+			mfd_engine_tick(&eng, 0.016f);
+			REQUIRE(g_fake_props_calls == calls);
+			REQUIRE(eng.fader_slots[10].cached_available); /* the last known range */
+			REQUIRE(eng.filter_meta_refresh_pending);
+			mfd_engine_flush_pending_ui_work(&eng);
+			REQUIRE(g_fake_props_calls > calls);
+			REQUIRE(!eng.filter_meta_refresh_pending);
+			REQUIRE(!eng.fader_slots[10].cached_available);
+			REQUIRE(strstr(eng.fader_slots[10].cached_reason, "outside") != NULL);
+
+			calls = g_fake_props_calls;
+			mfd_engine_tick(&eng, 0.016f);
+			mfd_engine_flush_pending_ui_work(&eng);
+			REQUIRE(g_fake_props_calls == calls); /* read once, not on every flush */
+
+			/* The filter says its range is back: the UI thread reads it again and the strip works. */
+			flt_blur->float_max_override = 50.0;
+			mfd_engine_report_scene_graph_change(&eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
+			mfd_engine_tick(&eng, 0.016f);
+			mfd_engine_flush_pending_ui_work(&eng);
+			REQUIRE(eng.fader_slots[10].cached_available);
+			eng.filter_meta_defer_for_test = false;
+			eng.initialized = was_initialized;
+		}
+
+		/* QA-A03: the Set up sheet's check of a Filter Setting candidate reads the filter's properties once, before
+		 * it takes the engine lock, and judges the range from what it read. */
+		{
+			struct mfd_setup_candidate fc;
+			memset(&fc, 0, sizeof(fc));
+			fc.slot_index = 11; /* fx_2, which holds this setting: no other strip does */
+			fc.enabled = true;
+			fc.target_type = MFD_TARGET_FILTER_PARAM;
+			snprintf(fc.source_a_name, sizeof(fc.source_a_name), "%s", "Color");
+			snprintf(fc.filter_name, sizeof(fc.filter_name), "%s", "Blur");
+			snprintf(fc.filter_prop, sizeof(fc.filter_prop), "%s", "passes");
+			fc.filter_from_val = 1.0;
+			fc.filter_to_val = 3.0;
+			struct mfd_msg fmsg;
+			int calls = g_fake_props_calls;
+			REQUIRE(mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(g_fake_props_calls == calls + 1);
+			fc.filter_to_val = 900.0;
+			REQUIRE(!mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(strcmp(mfd_msg_slug(fmsg.code), "range_outside_limits") == 0);
+			snprintf(fc.filter_prop, sizeof(fc.filter_prop), "%s", "no_such_setting");
+			REQUIRE(!mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(strcmp(mfd_msg_slug(fmsg.code), "setting_not_found") == 0);
+			snprintf(fc.filter_name, sizeof(fc.filter_name), "%s", "No Such Filter");
+			calls = g_fake_props_calls;
+			REQUIRE(!mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(strcmp(mfd_msg_slug(fmsg.code), "filter_not_found") == 0);
+			/* a thread that may not run a filter's code reads nothing ahead; the check still answers */
+			eng.filter_meta_defer_for_test = true;
+			snprintf(fc.filter_name, sizeof(fc.filter_name), "%s", "Blur");
+			snprintf(fc.filter_prop, sizeof(fc.filter_prop), "%s", "passes");
+			fc.filter_to_val = 3.0;
+			REQUIRE(mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			eng.filter_meta_defer_for_test = false;
+		}
+
+		/* QA-A04: the source a Filter Setting strip uses is deleted, and a source of the same name comes back with
+		 * a same-named filter of a smaller range. No filter signal reaches the strip for it, so the strip must not
+		 * go on with the range it read from the first one. */
+		{
+			const struct mfd_fader_slot saved = eng.fader_slots[17];
+			fake_sg_add_source(&fake_sg, "Comes Back", false);
+			struct fake_sg_filter *first = fake_sg_add_filter(
+				&fake_sg, "Comes Back", "Blur", "blur_filter_v2", true, FAKE_SCHEMA_BLUR_GROUPED);
+			REQUIRE(first != NULL);
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "fx_8");
+			obs_data_set_string(req, "target_mode", "filter_param");
+			obs_data_set_string(req, "source_a", "Comes Back");
+			obs_data_set_string(req, "filter_name", "Blur");
+			obs_data_set_string(req, "filter_prop", "radius");
+			obs_data_set_double(req, "from_val", 0.0);
+			obs_data_set_double(req, "to_val", 50.0);
+			obs_data_set_bool(req, "enabled", true);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(!obs_data_has_user_value(res, "error"));
+			obs_data_release(req);
+			obs_data_release(res);
+			REQUIRE(eng.fader_slots[17].cached_available);
+
+			fake_sg_remove_source(&fake_sg, "Comes Back");
+			mfd_engine_reevaluate_slots(&eng, true);
+			REQUIRE(!eng.fader_slots[17].cached_available);
+			REQUIRE(strstr(eng.fader_slots[17].cached_reason, "was deleted") != NULL);
+
+			fake_sg_add_source(&fake_sg, "Comes Back", false);
+			struct fake_sg_filter *second = fake_sg_add_filter(
+				&fake_sg, "Comes Back", "Blur", "blur_filter_v2", true, FAKE_SCHEMA_BLUR_GROUPED);
+			REQUIRE(second != NULL);
+			second->float_max_override = 20.0; /* the strip's 0..50 no longer fits */
+			mfd_engine_reevaluate_slots(&eng, true);
+			REQUIRE(!eng.fader_slots[17].cached_available);
+			REQUIRE(strstr(eng.fader_slots[17].cached_reason, "outside") != NULL);
+
+			REQUIRE(mfd_engine_unassign_slot_preserve_addr(&eng, 17));
+			fake_sg_remove_source(&fake_sg, "Comes Back");
+			eng.fader_slots[17] = saved;
+			mfd_engine_reevaluate_slots(&eng, true);
+		}
 
 		/* 8. Profile switch apc40mk2 -> apcminimk2 -> apc40mk2 preserves fx_1..fx_8 enabled & bindings */
 		REQUIRE(mfd_engine_select_profile(&eng, MFD_PROFILE_APC_MINI_MK2, false));
@@ -7478,6 +7979,10 @@ int main(void)
 			disc_eng->studio_mode_override_set = true;
 			disc_eng->studio_mode_override = true;
 			mfd_engine_load_apc40_defaults(disc_eng);
+			/* H-13: a port name no machine has. With no name the hot-plug rescan below would open the first real
+			 * MIDI input of the machine the test runs on, and its callback would outlive this engine. */
+			snprintf(disc_eng->configured_device_name, sizeof(disc_eng->configured_device_name), "%s",
+				 "__mfd_test_no_such_port__");
 
 			g_mock_tbar_aborts = 0;
 			g_mock_tbar_completions = 0;
@@ -7559,6 +8064,8 @@ int main(void)
 				REQUIRE(!strict_contract);
 			}
 
+			REQUIRE(disc_eng->midi_dev.handle == NULL); /* no real port was opened */
+			mfd_winmm_close(&disc_eng->midi_dev);
 			mfd_engine_destroy_mutex(disc_eng);
 			free(disc_eng);
 			if (mf_div) {

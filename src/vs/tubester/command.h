@@ -52,6 +52,19 @@ char *tub_command_seek(double seconds);
 char *tub_command_play(double start_seconds);
 char *tub_command_pause(void);
 
+/*
+ * Which deck a command meant for deck_target goes to (H-07: the rule, apart from OBS, so that it is tested on the code
+ * that ships). A deck is named by the source it sits on or by its deck id. A source name wins over a deck id; of two
+ * decks on the named source the owner wins (the one that holds the Browser source's page); of equals the first.
+ * Returns the index of the chosen deck, or count when no deck answers to the name.
+ */
+struct tub_deck_candidate {
+	const char *source_name; /* the source the deck's filter sits on; "" when unknown */
+	const char *deck_id;
+	bool owner;
+};
+size_t tub_deck_choose(const char *deck_target, const struct tub_deck_candidate *candidates, size_t count);
+
 /* True when text the writer produced may be spliced into page code: it is one object, and it holds no raw U+2028,
  * U+2029, CR or LF (JSON escapes are fine). It does not parse the text, so it is a guard on the writer's output, not a
  * validator for arbitrary strings. */

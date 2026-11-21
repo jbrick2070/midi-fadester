@@ -10,14 +10,24 @@ function(_check_dependencies_windows)
   set(arch ${CMAKE_VS_PLATFORM_NAME})
   set(platform windows-${arch})
 
-  set(_shared_deps "C:/Users/jeffr/Documents/obs-playlister/.deps")
+  # A dependency folder shared with another checkout, only when asked for (H-15): empty by default, so a fresh clone
+  # downloads and checks the versions and hashes in buildspec.json. It used to be one developer's path, taken without
+  # a word whenever it existed. Set -DMIDI_FADESTER_SHARED_DEPS=<folder> (or the environment variable of that name).
+  set(
+    MIDI_FADESTER_SHARED_DEPS
+    "$ENV{MIDI_FADESTER_SHARED_DEPS}"
+    CACHE PATH
+    "A .deps folder of another checkout to build against instead of downloading (must hold the obs-deps of buildspec.json)"
+  )
+  set(_shared_deps "${MIDI_FADESTER_SHARED_DEPS}")
   if(
-    NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.deps/cmake/libobsConfig.cmake"
+    _shared_deps
+    AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.deps/cmake/libobsConfig.cmake"
     AND EXISTS "${_shared_deps}/cmake/libobsConfig.cmake"
     AND EXISTS "${_shared_deps}/obs-deps-2026-10-23-${arch}"
     AND EXISTS "${_shared_deps}/obs-deps-qt6-2026-10-23-${arch}"
   )
-    message(STATUS "Using read-only local OBS 33 dependency cache from ${_shared_deps}")
+    message(WARNING "Building against the shared dependency folder ${_shared_deps} (MIDI_FADESTER_SHARED_DEPS)")
     list(
       APPEND
       CMAKE_PREFIX_PATH

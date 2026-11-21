@@ -52,8 +52,30 @@ jobs:
               echo 'prerelease=true' >> $GITHUB_OUTPUT
               echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
               ;;
-            *) echo 'validTag=false' >> $GITHUB_OUTPUT ;;
+            *)
+              # H-08: a tag that is not a version (v0.9.1, for one) built everything and released nothing, green
+              echo "::error::Tag '${GITHUB_REF_NAME}' is not a version (0.9.1, 0.9.1-beta1, 0.9.1-rc1)."
+              exit 1
+              ;;
           esac
+
+      - name: Check Out buildspec.json 🛒
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: buildspec.json
+          sparse-checkout-cone-mode: false
+
+      - name: Check Tag Against buildspec.json ☑️
+        run: |
+          : Check Tag Against buildspec.json ☑️
+          # H-08: the files, the installer and the plugin take their version from buildspec.json; the release takes
+          # its name from the tag. They must be the same version.
+          spec_version="$(jq -r '.version' buildspec.json)"
+          # a pre-release tag (0.9.1-beta1) may sit on the plain version (0.9.1)
+          if [[ "${GITHUB_REF_NAME}" != "${spec_version}" && "${GITHUB_REF_NAME}" != "${spec_version}"-* ]]; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' does not match buildspec.json version '${spec_version}'."
+            exit 1
+          fi
 
       - name: Download Build Artifacts 📥
         uses: actions/download-artifact@v4

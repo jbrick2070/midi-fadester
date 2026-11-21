@@ -18,6 +18,7 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 class QStackedWidget;
+class QVBoxLayout;
 class QWidget;
 
 class MfdSetupSheetDialog final : public QDialog {
@@ -27,7 +28,6 @@ public:
 
 	void open_for_slot(int slot_index);
 	void refresh_from_snapshot(const struct mfd_ui_snapshot &snap);
-	int current_slot_index() const { return slot_index_; }
 	void reject() override;
 
 protected:
@@ -43,12 +43,31 @@ private:
 	void repopulate_step2_pickers();
 	void repopulate_layer_combos_for_scene();
 	void repopulate_filter_combos_for_host(bool preserve_range);
+	void disable_filter_range_controls();
+	/* the constructor's four parts (F-16) */
+	void build_step1_page();
+	void build_step2_page();
+	void build_step2_tbar_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step2_layer_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step2_volume_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step2_filter_box(QWidget *page2, QVBoxLayout *p2_lay);
+	void build_step3_page();
+	void build_footer(QVBoxLayout *root);
 	void repopulate_prop_combo_for_filter(bool preserve_range);
 	void configure_spinboxes_for_prop(bool preserve_range);
 	void update_step2_notes_and_validation();
 	void update_step3_controls();
 	void update_footer_buttons();
 	void on_done_clicked();
+	/* The engine's verdict on the choices as they stand, asked again only when a choice or the topology revision
+	 * has changed (F-07): the sheet is refreshed on every engine change, and for a filter setting each check
+	 * builds the filter's whole property set. */
+	bool validate_cached(const struct mfd_setup_candidate &cand, struct mfd_msg *out_msg);
+	bool valid_cache_set_ = false;
+	bool valid_cache_ok_ = false;
+	uint64_t valid_cache_rev_ = 0ULL;
+	struct mfd_setup_candidate valid_cache_cand_ {};
+	struct mfd_msg valid_cache_msg_ {};
 
 	struct mfd_engine *eng_ = nullptr;
 	struct mfd_ui_catalog *catalog_ = nullptr;

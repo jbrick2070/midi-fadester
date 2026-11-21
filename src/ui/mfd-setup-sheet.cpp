@@ -41,20 +41,6 @@ static QString msg_text(const struct mfd_msg &msg)
 	return QString::fromUtf8(text);
 }
 
-/* QProgressBar::setFormat reads %p, %v and %m; a filled name or value must never form one. */
-static QString progress_format(const QString &text)
-{
-	QString out = text;
-	for (qsizetype i = out.size() - 2; i >= 0; --i) {
-		const QChar next = out.at(i + 1);
-		if (out.at(i) == QLatin1Char('%') &&
-		    (next == QLatin1Char('p') || next == QLatin1Char('v') || next == QLatin1Char('m'))) {
-			out.insert(i + 1, QChar(0x2060)); /* word joiner: invisible, breaks the pair */
-		}
-	}
-	return out;
-}
-
 static QString format_plain_midi_addr(const struct mfd_midi_addr &addr)
 {
 	switch (addr.type) {
@@ -157,7 +143,16 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	stack_->setObjectName(QStringLiteral("mfdSetupStack"));
 	root->addWidget(stack_, 1);
 
-	/* --- Page 0: Step 1 ("What should this control do?") --- */
+	build_step1_page();
+	build_step2_page();
+	build_step3_page();
+	build_footer(root);
+	mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10) */
+}
+
+/* Page 0, step 1: "What should this control do?" */
+void MfdSetupSheetDialog::build_step1_page()
+{
 	auto *page1 = new QWidget(stack_);
 	auto *p1_lay = new QVBoxLayout(page1);
 	p1_lay->setContentsMargins(0, 0, 0, 0);
@@ -247,8 +242,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	});
 
 	stack_->addWidget(page1);
+}
 
-	/* --- Page 1: Step 2 ("Which?") --- */
+/* Page 1, step 2: "Which?", one box for each kind of job */
+void MfdSetupSheetDialog::build_step2_page()
+{
 	auto *page2 = new QWidget(stack_);
 	auto *p2_lay = new QVBoxLayout(page2);
 	p2_lay->setContentsMargins(0, 0, 0, 0);
@@ -265,7 +263,17 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	step2_master_mix_info_->setWordWrap(true);
 	p2_lay->addWidget(step2_master_mix_info_);
 
-	/* Step 2: Switch scenes box */
+	build_step2_tbar_box(page2, p2_lay);
+	build_step2_layer_box(page2, p2_lay);
+	build_step2_volume_box(page2, p2_lay);
+	build_step2_filter_box(page2, p2_lay);
+
+	stack_->addWidget(page2);
+}
+
+/* Step 2, Switch scenes: nothing to choose, only Studio Mode to turn on */
+void MfdSetupSheetDialog::build_step2_tbar_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_tbar_box_ = new QWidget(page2);
 	auto *tbar_box_lay = new QVBoxLayout(step2_tbar_box_);
 	tbar_box_lay->setContentsMargins(12, 12, 12, 12);
@@ -291,8 +299,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	});
 	tbar_box_lay->addWidget(step2_turn_on_studio_btn_);
 	p2_lay->addWidget(step2_tbar_box_);
+}
 
-	/* Step 2: Mix two layers / Show or hide a layer box */
+/* Step 2, Mix two layers and Show or hide a layer: the scene and its layers */
+void MfdSetupSheetDialog::build_step2_layer_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_scene_box_ = new QWidget(page2);
 	auto *sc_lay = new QVBoxLayout(step2_scene_box_);
 	sc_lay->setContentsMargins(0, 0, 0, 0);
@@ -363,8 +374,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	sc_lay->addWidget(shared_layer_note_);
 
 	p2_lay->addWidget(step2_scene_box_);
+}
 
-	/* Step 2: Volume box */
+/* Step 2, Volume: the audio source */
+void MfdSetupSheetDialog::build_step2_volume_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_audio_box_ = new QWidget(page2);
 	auto *aud_lay = new QVBoxLayout(step2_audio_box_);
 	aud_lay->setContentsMargins(0, 0, 0, 0);
@@ -388,8 +402,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	row_aud->addWidget(combo_audio_, 1);
 	aud_lay->addLayout(row_aud);
 	p2_lay->addWidget(step2_audio_box_);
+}
 
-	/* Step 2: Filter or effect setting box */
+/* Step 2, Filter or effect setting: where the filter is, which setting, and its range */
+void MfdSetupSheetDialog::build_step2_filter_box(QWidget *page2, QVBoxLayout *p2_lay)
+{
 	step2_filter_box_ = new QWidget(page2);
 	auto *flt_lay = new QVBoxLayout(step2_filter_box_);
 	flt_lay->setContentsMargins(0, 0, 0, 0);
@@ -603,10 +620,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 			update_step2_notes_and_validation();
 		}
 	});
+}
 
-	stack_->addWidget(page2);
-
-	/* --- Page 2: Step 3 (move the control; OBS waits for Done) --- */
+/* Page 2, step 3: move the control; OBS waits for Done */
+void MfdSetupSheetDialog::build_step3_page()
+{
 	auto *page3 = new QWidget(stack_);
 	auto *p3_lay = new QVBoxLayout(page3);
 	p3_lay->setContentsMargins(0, 0, 0, 0);
@@ -783,8 +801,11 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 
 	p3_lay->addStretch(1);
 	stack_->addWidget(page3);
+}
 
-	/* --- Footer --- */
+/* The line and the Cancel, Back, Next and Done buttons under the pages */
+void MfdSetupSheetDialog::build_footer(QVBoxLayout *root)
+{
 	auto *sep = new QFrame(this);
 	sep->setFrameShape(QFrame::HLine);
 	sep->setStyleSheet(QStringLiteral("color: #1e293b;"));
@@ -987,6 +1008,30 @@ void MfdSetupSheetDialog::refresh_from_snapshot(const struct mfd_ui_snapshot &sn
 	}
 	update_step3_controls();
 	update_footer_buttons();
+}
+
+/* A style sheet is set only when it differs: Qt re-polishes the widget on every setStyleSheet (F-07). */
+static void set_style_if_changed(QWidget *w, const QString &style)
+{
+	if (w && w->styleSheet() != style) {
+		w->setStyleSheet(style);
+	}
+}
+
+bool MfdSetupSheetDialog::validate_cached(const struct mfd_setup_candidate &cand, struct mfd_msg *out_msg)
+{
+	/* build_candidate() starts from a zeroed struct, so two equal sets of choices compare equal byte for byte */
+	if (!valid_cache_set_ || valid_cache_rev_ != snap_.config_topology_rev ||
+	    std::memcmp(&valid_cache_cand_, &cand, sizeof(cand)) != 0) {
+		valid_cache_cand_ = cand;
+		valid_cache_rev_ = snap_.config_topology_rev;
+		valid_cache_ok_ = mfd_engine_validate_setup_candidate_msg(eng_, &cand, &valid_cache_msg_);
+		valid_cache_set_ = true;
+	}
+	if (out_msg) {
+		*out_msg = valid_cache_msg_;
+	}
+	return valid_cache_ok_;
 }
 
 struct mfd_setup_candidate MfdSetupSheetDialog::build_candidate() const
@@ -1240,12 +1285,7 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 			combo_filter_name_->setEnabled(false);
 			combo_filter_prop_->clear();
 			combo_filter_prop_->setEnabled(false);
-			spin_filter_from_->setEnabled(false);
-			spin_filter_to_->setEnabled(false);
-			btn_use_current_from_->setEnabled(false);
-			btn_use_current_to_->setEnabled(false);
-			chk_filter_bypass_->setEnabled(false);
-			lbl_filter_limits_note_->clear();
+			disable_filter_range_controls();
 			step2_empty_filter_note_->setText(
 				mfdText("Setup.NoFilterHosts",
 					"No sources or scenes have filters yet. Right-click a source or scene in OBS, "
@@ -1256,6 +1296,17 @@ void MfdSetupSheetDialog::repopulate_step2_pickers()
 
 	updating_widgets_ = false;
 	update_step2_notes_and_validation();
+}
+
+/* No setting is chosen (no filter host, no filter, or no numeric setting): nothing to set a range on (F-15). */
+void MfdSetupSheetDialog::disable_filter_range_controls()
+{
+	spin_filter_from_->setEnabled(false);
+	spin_filter_to_->setEnabled(false);
+	btn_use_current_from_->setEnabled(false);
+	btn_use_current_to_->setEnabled(false);
+	chk_filter_bypass_->setEnabled(false);
+	lbl_filter_limits_note_->clear();
 }
 
 void MfdSetupSheetDialog::repopulate_filter_combos_for_host(bool preserve_range)
@@ -1273,12 +1324,7 @@ void MfdSetupSheetDialog::repopulate_filter_combos_for_host(bool preserve_range)
 		chosen_filter_prop_.clear();
 		combo_filter_name_->setEnabled(false);
 		combo_filter_prop_->setEnabled(false);
-		spin_filter_from_->setEnabled(false);
-		spin_filter_to_->setEnabled(false);
-		btn_use_current_from_->setEnabled(false);
-		btn_use_current_to_->setEnabled(false);
-		chk_filter_bypass_->setEnabled(false);
-		lbl_filter_limits_note_->clear();
+		disable_filter_range_controls();
 		step2_empty_filter_note_->setText(
 			mfdFill(mfdText("Setup.NoFiltersOnHost",
 					"No filters were found on '%1'. Add a filter in OBS Filters first."),
@@ -1325,12 +1371,7 @@ void MfdSetupSheetDialog::repopulate_prop_combo_for_filter(bool preserve_range)
 	if (!fe || fe->prop_count == 0U) {
 		chosen_filter_prop_.clear();
 		combo_filter_prop_->setEnabled(false);
-		spin_filter_from_->setEnabled(false);
-		spin_filter_to_->setEnabled(false);
-		btn_use_current_from_->setEnabled(false);
-		btn_use_current_to_->setEnabled(false);
-		chk_filter_bypass_->setEnabled(false);
-		lbl_filter_limits_note_->clear();
+		disable_filter_range_controls();
 		step2_empty_filter_note_->setText(
 			mfdFill(mfdText("Setup.NoNumericSettings",
 					"Filter '%1' has no numeric settings that Midi Fadester can sweep."),
@@ -1373,12 +1414,7 @@ void MfdSetupSheetDialog::configure_spinboxes_for_prop(bool preserve_range)
 
 	const struct mfd_filter_prop_info *pi = find_selected_filter_prop();
 	if (!pi) {
-		spin_filter_from_->setEnabled(false);
-		spin_filter_to_->setEnabled(false);
-		btn_use_current_from_->setEnabled(false);
-		btn_use_current_to_->setEnabled(false);
-		chk_filter_bypass_->setEnabled(false);
-		lbl_filter_limits_note_->clear();
+		disable_filter_range_controls();
 		updating_widgets_ = prev_upd;
 		return;
 	}
@@ -1494,13 +1530,13 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 		if (studio_on) {
 			step2_tbar_info_->setText(mfdText("Setup.StudioModeOn",
 							  "Studio Mode is on. Ready to fade Preview into Program."));
-			step2_tbar_info_->setStyleSheet(
-				QStringLiteral("color: #6ee7b7; font-size: 14px; font-weight: bold;"));
+			set_style_if_changed(step2_tbar_info_,
+					     QStringLiteral("color: #6ee7b7; font-size: 14px; font-weight: bold;"));
 			step2_turn_on_studio_btn_->hide();
 		} else {
 			step2_tbar_info_->setText(mfdText("Msg.StudioModeOff", "Studio Mode is off."));
-			step2_tbar_info_->setStyleSheet(
-				QStringLiteral("color: #fde68a; font-size: 14px; font-weight: bold;"));
+			set_style_if_changed(step2_tbar_info_,
+					     QStringLiteral("color: #fde68a; font-size: 14px; font-weight: bold;"));
 			step2_turn_on_studio_btn_->show();
 		}
 	}
@@ -1566,7 +1602,7 @@ void MfdSetupSheetDialog::update_step2_notes_and_validation()
 		    !chosen_filter_prop_.isEmpty()) {
 			struct mfd_setup_candidate cand = build_candidate();
 			struct mfd_msg rsn;
-			if (!mfd_engine_validate_setup_candidate_msg(eng_, &cand, &rsn) && rsn.code != MFD_MSG_NONE) {
+			if (!validate_cached(cand, &rsn) && rsn.code != MFD_MSG_NONE) {
 				filter_validation_refusal_->setText(msg_text(rsn));
 				filter_validation_refusal_->show();
 			} else {
@@ -1650,20 +1686,20 @@ void MfdSetupSheetDialog::update_step3_controls()
 						   chosen_filter_bypass_, true, sim_disp, sizeof(sim_disp));
 		const QStringList values = {QString::number(meter_pct), QString::fromUtf8(sim_disp)};
 		if (snap_.setup.has_candidate_input) {
-			candidate_meter_->setFormat(progress_format(
+			candidate_meter_->setFormat(mfdProgressFormat(
 				mfdFill(mfdText("Setup.MeterTestValue", "Hardware test: %1% \xC2\xB7 %2"), values)));
 		} else {
-			candidate_meter_->setFormat(progress_format(mfdFill(
+			candidate_meter_->setFormat(mfdProgressFormat(mfdFill(
 				mfdText("Setup.MeterWaitValue", "Move the control to test it (%1% \xC2\xB7 %2)"),
 				values)));
 		}
 	} else if (snap_.setup.has_candidate_input) {
-		candidate_meter_->setFormat(progress_format(
+		candidate_meter_->setFormat(mfdProgressFormat(
 			mfdFill(mfdText("Setup.MeterTest", "Hardware test: %1%"), {QString::number(meter_pct)})));
 	} else {
 		candidate_meter_->setFormat(
-			progress_format(mfdFill(mfdText("Setup.MeterWait", "Move the control to test it (%1%)"),
-						{QString::number(meter_pct)})));
+			mfdProgressFormat(mfdFill(mfdText("Setup.MeterWait", "Move the control to test it (%1%)"),
+						  {QString::number(meter_pct)})));
 	}
 
 	feel_box_->setVisible(chosen_mode_ == MFD_TARGET_TWO_SOURCE_MIX);
@@ -1717,15 +1753,18 @@ void MfdSetupSheetDialog::update_step3_controls()
 	}
 	if (snap_.setup.learning) {
 		btn_setup_learn_->setText(mfdText("Setup.LearnListening", "Move control... (Cancel)"));
-		btn_setup_learn_->setStyleSheet(
+		set_style_if_changed(
+			btn_setup_learn_,
 			QStringLiteral("QPushButton { background-color: #b45309; color: #ffffff; font-weight: bold; "
 				       "border-radius: 5px; padding: 6px 12px; }"));
 		hw_panel_->show();
 	} else {
 		btn_setup_learn_->setText(mfdText("Learn.Button", "Learn"));
-		btn_setup_learn_->setStyleSheet(QStringLiteral(
-			"QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; "
-			"border-radius: 5px; padding: 6px 12px; font-weight: bold; }"));
+		set_style_if_changed(
+			btn_setup_learn_,
+			QStringLiteral(
+				"QPushButton { background-color: #1e293b; color: #f8fafc; border: 1px solid #475569; "
+				"border-radius: 5px; padding: 6px 12px; font-weight: bold; }"));
 	}
 
 	int owners[MFD_MAX_FADER_SLOTS] = {0};
@@ -1768,8 +1807,7 @@ void MfdSetupSheetDialog::update_footer_buttons()
 		btn_next_->setEnabled(true);
 	} else if (page == 1) {
 		struct mfd_setup_candidate cand = build_candidate();
-		char rsn[160] = {0};
-		const bool valid = mfd_engine_validate_setup_candidate(eng_, &cand, rsn, sizeof(rsn));
+		const bool valid = validate_cached(cand, nullptr);
 		btn_next_->setEnabled(valid);
 	} else {
 		btn_done_->setEnabled(true);

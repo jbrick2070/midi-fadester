@@ -2,6 +2,16 @@
 # Copyright (C) 2026 Jeffrey A. Brick
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# H-04: the test programs can be built with AddressSanitizer (Clang and GCC). They run the engine, the parsers and the
+# listener against stand-ins for OBS; under the sanitizer a use after free or an overrun in them fails the test instead
+# of passing by luck. Only the tests are instrumented, never the plugin. macOS CI runs them this way in a job of its
+# own that does not gate the build (.github/workflows/build-project.yaml, macos-asan).
+option(MIDI_FADESTER_SANITIZE "Build the test programs with AddressSanitizer" OFF)
+if(MIDI_FADESTER_SANITIZE AND NOT MSVC)
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address)
+endif()
+
 if(OS_MACOS)
   # Test executables live outside OBS.app and need the development frameworks and dylibs.
   set(CMAKE_SKIP_RPATH FALSE)
@@ -193,57 +203,16 @@ endif()
 add_test(NAME test-midi-send COMMAND midi-send --self-test)
 set_tests_properties(test-midi-send PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
 
-set(
-  _production_guard_files
-  "${CMAKE_SOURCE_DIR}/src/plugin-main.c"
-  "${_core}/midi-types.h"
-  "${_core}/midi-queue.h"
-  "${_core}/midi-queue.c"
-  "${_core}/midi-parser.h"
-  "${_core}/midi-parser.c"
-  "${_core}/smoother.h"
-  "${_core}/smoother.c"
-  "${_core}/takeover.h"
-  "${_core}/takeover.c"
-  "${_core}/mixer-math.h"
-  "${_core}/mixer-math.c"
-  "${_core}/apc40-profile.h"
-  "${_core}/apc40-profile.c"
-  "${_core}/tbar-logic.h"
-  "${_core}/tbar-logic.c"
-  "${_core}/vj-pads.h"
-  "${_core}/vj-pads.c"
-  "${_core}/apc40-palette.c"
-  "${_core}/filter-math.h"
-  "${_core}/filter-math.c"
-  "${_core}/ui-sentences.h"
-  "${_core}/slot-messages.h"
-  "${_core}/mfd-text.h"
-  "${_core}/ui-sentences.c"
-  "${_core}/slot-messages.c"
-  "${_core}/mfd-text.c"
-  "${CMAKE_SOURCE_DIR}/src/midi/winmm-device.h"
-  "${_midi_backend}"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.h"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-layer-filter.c"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.h"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-engine.c"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-blackout.c"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.h"
-  "${CMAKE_SOURCE_DIR}/src/obs/mfd-vendor-api.c"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.hpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-text-qt.cpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-svg-canvas.hpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.hpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-controller-svg.cpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.hpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-setup-sheet.cpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.hpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-settings-dialog.cpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.hpp"
-  "${CMAKE_SOURCE_DIR}/src/ui/mfd-desk-dock.cpp"
-  "${CMAKE_SOURCE_DIR}/src/vs/vs-conflict.c"
-  "${CMAKE_SOURCE_DIR}/src/core/apc40-palette.h"
+# Every source file of the plugin, by pattern, so that a new file is covered without anyone adding it here (H-11): the
+# hand-kept list had left out mfd-tbar.cpp, the one file that used a timer, and nearly all of src/vs. The live
+# self-test harness inside "#ifdef MFD_ENABLE_SELF_TEST" is the test's only exception, and it skips just that text.
+file(
+  GLOB_RECURSE _production_guard_files
+  CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/src/*.c"
+  "${CMAKE_SOURCE_DIR}/src/*.h"
+  "${CMAKE_SOURCE_DIR}/src/*.cpp"
+  "${CMAKE_SOURCE_DIR}/src/*.hpp"
 )
 
 add_executable(test-shader-syntax test-shader-syntax.c)
@@ -252,6 +221,27 @@ add_test(
   COMMAND test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect" ${_production_guard_files}
 )
 set_tests_properties(test-shader-syntax PROPERTIES ENVIRONMENT_MODIFICATION "${_test_environment}")
+
+# The guard's one exception, the self-test block, is blanked exactly: a timer inside it passes, a timer outside it fails,
+# and the directive's words in a comment open no block.
+add_test(
+  NAME test-shader-syntax-guard-inside
+  COMMAND
+    test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/guard-timer-inside.c"
+)
+foreach(_fixture IN ITEMS guard-timer-outside guard-comment-trap)
+  add_test(
+    NAME test-shader-syntax-${_fixture}
+    COMMAND
+      test-shader-syntax "${CMAKE_SOURCE_DIR}/data/effects/mfd_layer_mixer.effect"
+      "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_fixture}.c"
+  )
+  set_tests_properties(
+    test-shader-syntax-${_fixture}
+    PROPERTIES PASS_REGULAR_EXPRESSION "forbidden token 'QTimer' found in .*${_fixture}\\.c"
+  )
+endforeach()
 
 add_test(
   NAME check-locale-keys
@@ -293,13 +283,13 @@ foreach(
   set_tests_properties(check-locale-keys-${_name} PROPERTIES PASS_REGULAR_EXPRESSION "${_expected}")
 endforeach()
 
-# every translation matches en-US.ini (R-I18N-5), and the eleven languages of R-I18N-4 are all there. A good file with
+# every translation matches en-US.ini (R-I18N-5), and the twelve languages of R-I18N-4 are all there. A good file with
 # awkward characters must pass, and each kind of fault must be caught (check-locale-files-bad.cmake)
 add_test(
   NAME check-locale-files
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale"
-    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR,nl-NL" -P
+    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR,nl-NL,it-IT" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
 )
 add_test(

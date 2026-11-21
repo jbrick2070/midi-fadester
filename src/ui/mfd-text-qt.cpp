@@ -10,8 +10,33 @@
 
 #include <plugin-support.h>
 
+#include <QLabel>
+#include <QList>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QTextDocument>
+#include <QWidget>
+
+void mfdPlainLabels(QWidget *root)
+{
+	if (!root) {
+		return;
+	}
+	const QList<QLabel *> labels = root->findChildren<QLabel *>();
+	for (QLabel *label : labels) {
+		if (label->textFormat() == Qt::AutoText) {
+			label->setTextFormat(Qt::PlainText);
+		}
+	}
+}
+
+QString mfdPlainTip(const QString &tip)
+{
+	if (!Qt::mightBeRichText(tip)) {
+		return tip;
+	}
+	return QStringLiteral("<qt>") + tip.toHtmlEscaped() + QStringLiteral("</qt>");
+}
 
 QString mfdText(const char *key, const char *english)
 {
@@ -35,6 +60,21 @@ QString mfdFill(const QString &text, const QStringList &values)
 			continue;
 		}
 		out.append(c);
+	}
+	return out;
+}
+
+QString mfdProgressFormat(const QString &text)
+{
+	QString out;
+	out.reserve(text.size() + 4);
+	for (qsizetype i = 0; i < text.size(); ++i) {
+		out.append(text.at(i));
+		if (text.at(i) == QLatin1Char('%') && i + 1 < text.size() &&
+		    (text.at(i + 1) == QLatin1Char('p') || text.at(i + 1) == QLatin1Char('v') ||
+		     text.at(i + 1) == QLatin1Char('m'))) {
+			out.append(QChar(0x2060));
+		}
 	}
 	return out;
 }

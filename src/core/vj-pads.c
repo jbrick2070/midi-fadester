@@ -35,7 +35,7 @@ static const uint8_t k_fade_green[MFD_VJ_STRIPS] = {13U /* the cut: yellow */, 2
 
 static const uint8_t k_blend_color[MFD_VJ_BLEND_COUNT] = {
 	COLOR_WHITE_DIM, /* Normal: dim white, an idle source */
-	37U,             /* Lighten: azure */
+	COLOR_AZURE,     /* Lighten */
 	13U,             /* Screen: yellow */
 	9U,              /* Additive: orange */
 	53U,             /* Multiply: violet */

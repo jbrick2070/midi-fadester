@@ -26,11 +26,13 @@
 #include <util/base.h>
 #define LISTENER_LOG(level, ...) blog(level, "[visual-sidechain] tape deck " __VA_ARGS__)
 
-#define TUB_DECK_ID_MAX 64
-#define TUB_DECKS_MAX 64
 #define TUB_HEADERS_MAX 8192
 /* A whole request, headers and body, must arrive within this time; a page posts a few hundred bytes at once. */
 #define TUB_CONNECTION_DEADLINE_NS 1500000000ULL
+/* A connection that has sent no byte at all by this time is closed (E-02). A page sends its request with the connect,
+ * so only a client that is not a deck page waits in silence; a row of such clients, each holding this one thread for
+ * the full 1.5 s, would keep every deck's reports out for longer than the 3 s link timeout. */
+#define TUB_FIRST_BYTE_DEADLINE_NS 150000000ULL
 /* Longest single wait, so a stop is seen within this time even in the middle of a request. */
 #define TUB_POLL_US 200000
 
@@ -113,13 +115,15 @@ static int recv_by(tub_socket_t client, char *dst, size_t want, uint64_t deadlin
 static void handle_connection(tub_socket_t client)
 {
 	tub_socket_set_timeout(client, SO_SNDTIMEO, 1000);
-	uint64_t deadline = os_gettime_ns() + TUB_CONNECTION_DEADLINE_NS;
+	const uint64_t start = os_gettime_ns();
+	uint64_t deadline = start + TUB_CONNECTION_DEADLINE_NS;
 
 	size_t cap = TUB_HEADERS_MAX + TUB_HTTP_BODY_MAX;
 	char *buf = bmalloc(cap);
 	size_t have = 0, headers_len = 0;
 	while (have < TUB_HEADERS_MAX) {
-		int n = recv_by(client, buf + have, TUB_HEADERS_MAX - have, deadline);
+		int n = recv_by(client, buf + have, TUB_HEADERS_MAX - have,
+				have == 0 ? start + TUB_FIRST_BYTE_DEADLINE_NS : deadline);
 		if (n <= 0)
 			break;
 		have += (size_t)n;

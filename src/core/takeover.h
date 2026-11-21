@@ -15,7 +15,6 @@ extern "C" {
 #endif
 
 #define MFD_DEFAULT_PICKUP_THRESHOLD 0.015f
-#define MFD_THROW_COMPLETE_THRESHOLD 0.90f
 #define MFD_TWO_RAIL_UPPER_PARK_THRESHOLD 0.97f
 #define MFD_TWO_RAIL_LOWER_PARK_THRESHOLD 0.03f
 #define MFD_PARKED_UNPARK_HYSTERESIS 0.08f
@@ -65,16 +64,8 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 void mfd_takeover_notify_tbar_completed(struct mfd_takeover *t);
 void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail, float applied_val);
 void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val);
-float mfd_takeover_throw_to_mix_value(const struct mfd_takeover *t, float throw_progress);
-float mfd_takeover_mix_to_throw_progress(const struct mfd_takeover *t, float mix_value);
 
 int mfd_calibrated_percent(float calibrated_norm);
-int mfd_takeover_format_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type, float applied_val,
-				   float alpha_a, float alpha_b, float db_val, char *out_text, size_t text_size);
-int mfd_takeover_format_calibrated_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type,
-					      float calibrated_norm, bool available, const char *reason, float alpha_a,
-					      float alpha_b, float db_val, char *out_text, size_t text_size);
-
 #ifdef __cplusplus
 }
 #endif

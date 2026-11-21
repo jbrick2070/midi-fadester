@@ -36,6 +36,11 @@ struct vs_audio_tap {
 	char source_name[256];
 	volatile bool react_when_muted; /* Audio callback reads via os_atomic_load_bool(). */
 	bool upload_gpu_textures;
+	/* The owner is not being drawn: the tick analyses as always (the beat must stay locked for the moment the
+	 * scene is cut to) but uploads no texture (D-11). textures_stale then says the GPU copies are behind;
+	 * vs_audio_tap_upload_if_stale brings them up to date before the first draw. */
+	bool upload_paused;
+	bool textures_stale;
 
 	bool raw_cb_active;
 	size_t active_mix_idx;
@@ -43,6 +48,7 @@ struct vs_audio_tap {
 	bool source_cb_active;
 	bool warned_attachment_failure;
 	float retry_accum_sec;
+	float rename_check_accum_sec; /* a Named Source is asked for its name once a second (D-16) */
 	/* Set by a caller holding a lock that the frontend's save takes after the sources lock: configure then records a
 	 * Named Source target without looking it up, and the 1 s retry attaches it (see vs_audio_tap_named_lookup). */
 	bool defer_named_attach;
@@ -76,6 +82,8 @@ void vs_audio_tap_configure(struct vs_audio_tap *tap, obs_source_t *filter_sourc
 void vs_audio_tap_detach_parent(struct vs_audio_tap *tap);
 
 void vs_audio_tap_tick(struct vs_audio_tap *tap, obs_source_t *filter_source, float seconds);
+/* Graphics thread. Uploads the spectrum and FFT textures if a paused tick left them behind. */
+void vs_audio_tap_upload_if_stale(struct vs_audio_tap *tap);
 
 /* The Named Source that this tick's once-a-second retry will look up, found by the caller outside a lock that the
  * frontend's save takes after the sources lock (the Audio Modulator's mutex): obs_get_source_by_name takes the sources
@@ -98,10 +106,8 @@ void vs_audio_tap_tick_with_lookup(struct vs_audio_tap *tap, obs_source_t *filte
 void vs_audio_tap_get_defaults(obs_data_t *settings);
 void vs_audio_tap_update_from_settings(struct vs_audio_tap *tap, obs_source_t *filter_source, obs_data_t *settings);
 /* Adds the tap status warning row at the current position (top-level) so it stays visible when the
- * analysis group sits at the bottom of a panel. vs_audio_tap_add_properties then skips adding it again. */
-void vs_audio_tap_add_status_property(obs_properties_t *props);
+ * analysis group sits at the bottom of a panel. vs_audio_tap_add_properties_with_tap then skips adding it again. */
 void vs_audio_tap_add_status_property_for_source(obs_properties_t *props, obs_source_t *filter_source);
-void vs_audio_tap_add_properties(obs_properties_t *props, obs_source_t *filter_source);
 void vs_audio_tap_add_properties_with_tap(obs_properties_t *props, obs_source_t *filter_source,
 					  struct vs_audio_tap *tap);
 

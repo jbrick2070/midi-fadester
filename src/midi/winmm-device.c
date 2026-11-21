@@ -257,7 +257,8 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 	snprintf(dev->opened_name, sizeof(dev->opened_name), "%s", chosen_name);
 
 	HMIDIIN hmi = NULL;
-	MMRESULT res = midiInOpen(&hmi, winmm_id, (DWORD_PTR)winmm_in_proc, (DWORD_PTR)dev, CALLBACK_FUNCTION);
+	struct mfd_winmm_device *cb_dev = dev->callback_owner ? dev->callback_owner : dev;
+	MMRESULT res = midiInOpen(&hmi, winmm_id, (DWORD_PTR)winmm_in_proc, (DWORD_PTR)cb_dev, CALLBACK_FUNCTION);
 	if (res != MMSYSERR_NOERROR) {
 		dev->error_operation = MFD_WINMM_OP_OPEN;
 		dev->error_code = (uint32_t)res;
@@ -283,6 +284,7 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 		/* midiInClose sends MIM_CLOSE, which sets this flag; the device was never open, so clear it or the
 		 * engine re-polls MIDI on every frame. */
 		os_atomic_store_bool(&dev->device_closed_unexpectedly, false);
+		os_atomic_store_bool(&cb_dev->device_closed_unexpectedly, false);
 		dev->error_kind = MFD_WINMM_ERR_OPEN_FAILED;
 		dev->error_operation = MFD_WINMM_OP_START;
 		dev->error_code = (uint32_t)start_res;
@@ -325,7 +327,7 @@ const char *mfd_winmm_error_slug(enum mfd_winmm_error_kind kind)
 	}
 }
 
-bool mfd_winmm_check_health(struct mfd_winmm_device *dev)
+bool mfd_winmm_is_present(const struct mfd_winmm_device *dev)
 {
 	if (!dev || !dev->is_open) {
 		return false;
@@ -333,27 +335,10 @@ bool mfd_winmm_check_health(struct mfd_winmm_device *dev)
 
 	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
 	size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
-	bool found = false;
 	for (size_t i = 0U; i < count; ++i) {
 		if (strcmp(list[i].name, dev->opened_name) == 0) {
-			found = true;
-			break;
+			return true;
 		}
 	}
-
-	if (!found || os_atomic_load_bool(&dev->device_closed_unexpectedly)) {
-		char lost_name[MFD_MIDI_DEV_NAME_MAX];
-		snprintf(lost_name, sizeof(lost_name), "%s", dev->opened_name);
-		mfd_winmm_close(dev);
-		dev->error_kind = MFD_WINMM_ERR_DISCONNECTED;
-		dev->error_operation = MFD_WINMM_OP_NONE;
-		dev->error_code = 0U;
-		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", lost_name);
-		snprintf(dev->last_error, sizeof(dev->last_error),
-			 "MIDI device '%s' was disconnected. Reconnect USB cable and click Reconnect.", lost_name);
-		obs_log(LOG_WARNING, "%s", dev->last_error);
-		return false;
-	}
-
-	return true;
+	return false;
 }

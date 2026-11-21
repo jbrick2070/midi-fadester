@@ -243,11 +243,73 @@ static void test_custom_hz_zero_after_audio_stops(void)
 	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_PEAK) > 0.8f);
 
 	/* The source stops (a paused Parent or Named Source tap gets no more callbacks): the ring keeps its last window
-	 * and each step reruns the FFT on it. More than 50 ms without audio, the band reads exactly 0 (R-ANA-7). */
-	for (int i = 0; i < 4; i++)
+	 * and each step reruns the FFT on it. Two block lengths without audio (this block was 85 ms), the band reads
+	 * exactly 0 (R-ANA-7, G-01). */
+	for (int i = 0; i < 12; i++)
 		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
 	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_AVERAGE) == 0.0f);
 	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_PEAK) == 0.0f);
+	vs_analyzer_free(&ana);
+}
+
+/* G-01: a source that hands over 4096-sample blocks (FLAC: one every 85 ms) is not starved between two of them. The
+ * level and the custom band hold on every video frame; with the old fixed 50 ms they fell on two or three frames of
+ * every five. Short blocks keep the 50 ms rule. */
+static void test_long_audio_blocks_do_not_pump(void)
+{
+	struct vs_analyzer_config cfg;
+	struct vs_analyzer ana;
+	struct vs_audio_frame frame;
+	static float samples[4096];
+	vs_analyzer_default_config(&cfg);
+	assert(vs_analyzer_init(&ana, &cfg));
+	uint64_t n = 0;
+	float min_level = 1.0e9f;
+	float min_band = 1.0e9f;
+	for (int block = 0; block < 40; block++) {
+		for (size_t i = 0; i < 4096; i++, n++)
+			samples[i] = 0.5f * sinf(6.28318530717958647692f * 440.0f * (float)n / 48000.0f);
+		vs_analyzer_push_mono(&ana, samples, 4096, n);
+		for (int f = 0; f < 5; f++) { /* 5 frames at 60 fps = 83 ms per block */
+			vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+			if (block >= 10) { /* once the envelopes have settled */
+				const float band = vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f,
+									  460.0f, VS_HZ_MODE_AVERAGE);
+				assert(!ana.starved);
+				if (frame.level < min_level)
+					min_level = frame.level;
+				if (band < min_band)
+					min_band = band;
+			}
+		}
+	}
+	assert(min_band > 0.0f);
+	assert(min_level > 0.5f * frame.level); /* no dip toward 0 between blocks */
+	/* G-06: 40 blocks over 200 video frames: the FFTs ran once per block, not once per frame */
+	assert(ana.fft_runs == 40u);
+	/* the stream stops: starved after two block lengths (170 ms), not at once and not never */
+	for (int f = 0; f < 6; f++)
+		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame); /* 183 ms since the last block's first frame */
+	assert(!ana.starved || ana.time_since_audio_sec > 0.170f);
+	for (int f = 0; f < 12; f++)
+		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+	assert(ana.starved);
+	assert(vs_analyzer_get_signal(&ana, &frame, VS_SIG_CUSTOM_HZ, 420.0f, 460.0f, VS_HZ_MODE_AVERAGE) == 0.0f);
+	vs_analyzer_free(&ana);
+
+	/* 800-sample blocks (17 ms): starved 50 ms after the last one, as before. */
+	assert(vs_analyzer_init(&ana, &cfg));
+	for (int block = 0; block < 30; block++) {
+		vs_analyzer_push_mono(&ana, samples, 800, (uint64_t)(block + 1));
+		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame);
+		assert(!ana.starved);
+	}
+	for (int f = 0; f < 2; f++)
+		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame); /* 33 ms: not yet */
+	assert(!ana.starved);
+	for (int f = 0; f < 3; f++)
+		vs_analyzer_step(&ana, 1.0f / 60.0f, &frame); /* 83 ms */
+	assert(ana.starved);
 	vs_analyzer_free(&ana);
 }
 
@@ -436,6 +498,7 @@ int main(void)
 	test_wav_dynamic_range_and_silence();
 	test_custom_hz_flux_after_analyzer_step();
 	test_custom_hz_zero_after_audio_stops();
+	test_long_audio_blocks_do_not_pump();
 	test_aligned_windows_with_delayed_startup();
 	test_silence_freezes_beat_and_resume_restores_phase();
 	printf("test-analyzer: all WAV fixture assertions passed\n");

@@ -1235,7 +1235,11 @@ int main(int argc, char **argv)
 	capture_and_verify_png(dlg.get(), screenshot_dir, QStringLiteral("02-studio-mode-off.png"));
 
 	/* Click Crossfader's [Turn on Studio Mode] button */
+	REQUIRE(!eng.studio_mode_override); /* off until the button is pressed */
 	strip0_action->click();
+	/* H-10: the click itself must have asked OBS for Studio Mode (the stand-in records the request in the engine),
+	 * before the test plays OBS's answer below */
+	REQUIRE(eng.studio_mode_override_set && eng.studio_mode_override);
 	mfd_engine_set_test_frontend_state(&eng, true, true, "Blue", "Red", true);
 	pump_ui();
 	REQUIRE(studio_banner->isHidden());
@@ -1274,6 +1278,12 @@ int main(int argc, char **argv)
 	}
 
 	/* Drive live MIDI into strips 0, 1, 2, 3, and 9 (crossing initial Soft Takeover targets first) */
+	/* Color 2 lies above Color, so the mix strip starts at 100 % (B-06). This walk-through starts it from 0 %. */
+	REQUIRE(std::fabs(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-6f);
+	mfd_smoother_reset(&eng.fader_slots[1].smoother, 0.0f);
+	mfd_takeover_init(&eng.fader_slots[1].takeover, 0.0f, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	mfd_takeover_set_two_rail_mode(&eng.fader_slots[1].takeover, true);
+	eng.fader_slots[1].last_applied_val = 0.0f;
 	push_midi_cc(&eng, 0, 7, 0);    /* Strip 1 pickup at 0% */
 	push_midi_cc(&eng, 0, 7, 61);   /* Strip 1 (Ch 1 CC 7): 48% */
 	push_midi_cc(&eng, 1, 7, 127);  /* Strip 2 pickup at 100% */
@@ -1295,6 +1305,13 @@ int main(int argc, char **argv)
 		QStringLiteral("Mixes Color and Color 2 in Red"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_1"))->text() ==
 		QStringLiteral("Color 100%, Color 2 48%"));
+	/* F-10: a label that carries scene and source names shows them as plain text, and a tooltip built from a name
+	 * that looks like a tag is shown letter for letter */
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_1"))->textFormat() == Qt::PlainText);
+	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_1"))->textFormat() == Qt::PlainText);
+	REQUIRE(mfdPlainTip(QStringLiteral("Cam 1")) == QStringLiteral("Cam 1"));
+	REQUIRE(mfdPlainTip(QStringLiteral("Shows <b>Cam</b>")) ==
+		QStringLiteral("<qt>Shows &lt;b&gt;Cam&lt;/b&gt;</qt>"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripAssignLabel_2"))->text() ==
 		QStringLiteral("Shows or hides Cam in Blue"));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripState_2"))->text() ==
@@ -1413,7 +1430,7 @@ int main(int argc, char **argv)
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_5"))->text() ==
 		QStringLiteral("Scene OldScene was deleted."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_6"))->text() ==
-		QStringLiteral("Guest Mic was deleted."));
+		QStringLiteral("Guest Mic was deleted. Click Set up to choose another."));
 	REQUIRE(must_find<QLabel>(dlg.get(), QStringLiteral("mfdStripStatus_7"))->text() ==
 		QStringLiteral("Title Card has no audio."));
 
@@ -1557,7 +1574,7 @@ int main(int argc, char **argv)
 	pump_ui();
 	REQUIRE(!sheet->isHidden());
 	REQUIRE(!err_banner->isHidden());
-	REQUIRE(err_banner->text().contains(QStringLiteral("changed externally")));
+	REQUIRE(err_banner->text().contains(QStringLiteral("changed from somewhere else")));
 
 	btn_done->click();
 	pump_ui();

@@ -73,12 +73,13 @@ static const char *template_for(enum mfd_msg_code code, bool translate)
 	case MFD_MSG_LAYER_NOT_IN_ANY_SCENE:
 		return mfd_text_or_english(translate, "Msg.LayerNotInAnyScene", "%1 is not in any scene.");
 	case MFD_MSG_SOURCE_DELETED:
-		return mfd_text_or_english(translate, "Msg.SourceDeleted", "%1 was deleted.");
+		return mfd_text_or_english(translate, "Msg.SourceDeleted",
+					   "%1 was deleted. Click Set up to choose another.");
 	case MFD_MSG_NO_AUDIO:
 		return mfd_text_or_english(translate, "Msg.NoAudio", "%1 has no audio.");
 	case MFD_MSG_FILTER_RESERVED:
 		return mfd_text_or_english(translate, "Msg.FilterReserved",
-					   "Filter '%1' is reserved by Midi Fadester and cannot be bound directly.");
+					   "Midi Fadester uses filter '%1' itself. Choose another filter.");
 	case MFD_MSG_FILTER_REMOVED:
 		return mfd_text_or_english(
 			translate, "Msg.FilterRemoved",
@@ -88,13 +89,12 @@ static const char *template_for(enum mfd_msg_code code, bool translate)
 			translate, "Msg.SettingUnavailable",
 			"Setting '%1' is no longer available on '%2'. Click Set up to choose another setting.");
 	case MFD_MSG_SETTING_NOT_NUMERIC:
-		return mfd_text_or_english(
-			translate, "Msg.SettingNotNumeric",
-			"Setting '%1' on '%2' is not a numeric setting. Choose a float or integer filter property.");
+		return mfd_text_or_english(translate, "Msg.SettingNotNumeric",
+					   "Setting '%1' on '%2' is not a number. Choose a setting that is a number.");
 	case MFD_MSG_RANGE_OUTSIDE_LIMITS:
 		return mfd_text_or_english(
 			translate, "Msg.RangeOutsideLimits",
-			"Range [%1, %2] is outside '%3' limits [%4, %5]. Click Set up to update the range.");
+			"The range %1 to %2 is outside what '%3' allows (%4 to %5). Click Set up to change the range.");
 	case MFD_MSG_INVALID_STRIP:
 		return mfd_text_or_english(translate, "Msg.InvalidStrip", "Invalid strip index.");
 	case MFD_MSG_MISSING_SOURCE_A:
@@ -118,17 +118,15 @@ static const char *template_for(enum mfd_msg_code code, bool translate)
 					   "Filter '%1' not found on '%2'. Add the filter in OBS Filters first.");
 	case MFD_MSG_FILTER_NO_PROPERTIES:
 		return mfd_text_or_english(translate, "Msg.FilterNoProperties",
-					   "Filter '%1' on '%2' exposes no configurable properties.");
+					   "Filter '%1' on '%2' has no settings to control.");
 	case MFD_MSG_SETTING_NOT_FOUND:
-		return mfd_text_or_english(
-			translate, "Msg.SettingNotFound",
-			"Setting '%1' not found on filter '%2'. Query get_catalog to list numeric settings.");
+		return mfd_text_or_english(translate, "Msg.SettingNotFound", "Filter '%2' has no setting '%1'.");
 	case MFD_MSG_RANGE_NOT_FINITE:
-		return mfd_text_or_english(translate, "Msg.RangeNotFinite",
-					   "'from_val' and 'to_val' must be finite numbers.");
+		return mfd_text_or_english(translate, "Msg.RangeNotFinite", "Both ends of the range must be numbers.");
 	case MFD_MSG_RANGE_EMPTY:
-		return mfd_text_or_english(translate, "Msg.RangeEmpty",
-					   "'from_val' and 'to_val' must differ so the control has a range to sweep.");
+		return mfd_text_or_english(
+			translate, "Msg.RangeEmpty",
+			"The two ends of the range must differ, so the control has something to move.");
 	case MFD_MSG_CHOOSE_SCENE_TWO_LAYERS:
 		return mfd_text_or_english(translate, "Msg.ChooseSceneTwoLayers",
 					   "Choose a scene with at least two layers.");
@@ -136,15 +134,14 @@ static const char *template_for(enum mfd_msg_code code, bool translate)
 		return mfd_text_or_english(translate, "Msg.ChooseSceneOneLayer",
 					   "Choose a scene with at least one layer.");
 	case MFD_MSG_SETUP_NOT_ACTIVE:
-		return mfd_text_or_english(translate, "Msg.SetupNotActive",
-					   "Setup session is no longer active for this strip.");
+		return mfd_text_or_english(translate, "Msg.SetupNotActive", "Set up is no longer open for this strip.");
 	case MFD_MSG_CHANGED_EXTERNALLY:
 		return mfd_text_or_english(
 			translate, "Msg.ChangedExternally",
-			"This strip was changed externally while Set up was open. Review and press Done again.");
+			"This strip was changed from somewhere else while Set up was open. Check it and press Done again.");
 	case MFD_MSG_STRIP_PAUSED_IN_SETUP:
 		return mfd_text_or_english(translate, "Msg.StripPausedInSetup",
-					   "Strip is currently paused while Set up is open.");
+					   "This strip is paused while Set up is open.");
 	case MFD_MSG_ENGINE_NOT_INITIALIZED:
 		return mfd_text_or_english(translate, "Msg.EngineNotInitialized", "Engine is not initialized.");
 	case MFD_MSG_INVALID_FADE_MS:

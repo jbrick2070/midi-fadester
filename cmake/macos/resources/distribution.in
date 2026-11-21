@@ -6,11 +6,12 @@
         customize="never"
         allow-external-scripts="no" />
     <domains enable_currentUserHome="true" enable_anywhere="false" enable_localSystem="false" />
-    <title>@CMAKE_PROJECT_NAME@</title>
+    <title>Midi Fadester</title>
+    <conclusion file="conclusion.html" mime-type="text/html" />
     <choices-outline>
         <line choice="obs-plugin" />
     </choices-outline>
-    <choice id="obs-plugin" title="@CMAKE_PROJECT_NAME@" description="">
+    <choice id="obs-plugin" title="Midi Fadester" description="">
         <pkg-ref id="@MACOS_BUNDLEID@" />
     </choice>
     <pkg-ref id="@MACOS_BUNDLEID@" version="@CMAKE_PROJECT_VERSION@">#@CMAKE_PROJECT_NAME@.pkg</pkg-ref>

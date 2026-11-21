@@ -12,6 +12,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dbt.h>
 #endif
 
 #include "ui/mfd-settings-dialog.hpp"
@@ -161,23 +162,6 @@ static QString output_bar_stylesheet(const QString &chunk_hex, const QString &bo
 		.arg(chunk_hex, border_hex);
 }
 
-/* QProgressBar::setFormat reads %p, %v and %m; a word joiner after any such "%" keeps a filled name or a
- * translation from turning into a format code. */
-static QString progress_format_text(const QString &text)
-{
-	QString out;
-	out.reserve(text.size() + 4);
-	for (qsizetype i = 0; i < text.size(); ++i) {
-		out.append(text.at(i));
-		if (text.at(i) == QLatin1Char('%') && i + 1 < text.size() &&
-		    (text.at(i + 1) == QLatin1Char('p') || text.at(i + 1) == QLatin1Char('v') ||
-		     text.at(i + 1) == QLatin1Char('m'))) {
-			out.append(QChar(0x2060));
-		}
-	}
-	return out;
-}
-
 static QString stream_deck_companion_url()
 {
 	return QStringLiteral("https://github.com/jbrick2070/streamdeck-fadester");
@@ -186,46 +170,6 @@ static QString stream_deck_companion_url()
 static void open_stream_deck_companion_url()
 {
 	QDesktopServices::openUrl(QUrl(stream_deck_companion_url()));
-}
-
-static void build_strip_presentation_from_slot(int idx, const struct mfd_fader_slot &s,
-					       struct mfd_ui_strip_presentation *out)
-{
-	char disp_buf[64] = {0};
-	mfd_engine_format_slot_display_value_ex(&s, s.last_applied_val, true, disp_buf, sizeof(disp_buf));
-
-	struct mfd_ui_strip_input in;
-	std::memset(&in, 0, sizeof(in));
-	in.slot_index = idx;
-	in.slot_label = s.label;
-	in.is_horizontal = (idx == 0);
-	in.enabled = s.enabled;
-	in.addr_type = s.addr.type;
-	in.target_type = s.target_type;
-	in.auto_follow = s.auto_follow;
-	in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
-	in.source_a_name = s.source_a_name;
-	in.source_b_name = s.source_b_name;
-	in.filter_name = s.filter_name;
-	in.filter_prop = s.filter_prop;
-	in.filter_prop_label = s.filter_prop_label;
-	in.display_value = disp_buf;
-	in.available = s.cached_available;
-	in.reason = s.cached_reason;
-	in.reason_msg = &s.cached_reason_msg;
-	in.raw_norm = s.last_raw_norm;
-	in.applied_val = s.last_applied_val;
-	in.alpha_a = s.last_alpha_a;
-	in.alpha_b = s.last_alpha_b;
-	in.audio_db = mfd_deflection_to_db(s.last_applied_val);
-	in.auto_fade_active = s.auto_fade_active;
-	in.tbar_state = s.tbar_state;
-	in.takeover_state = s.takeover.state;
-	in.takeover_hint = s.takeover.hint;
-	in.has_last_fader = s.takeover.has_last_fader;
-	in.polarity_reversed = s.takeover.polarity_reversed;
-	in.target_obs = s.takeover.target_obs;
-	mfd_ui_format_strip_presentation(&in, out);
 }
 
 class MfdStripBarWidget final : public QWidget {
@@ -262,10 +206,6 @@ public:
 		setProperty("fxStyle", is_fx_style_);
 		update();
 	}
-
-	int bar_percent() const { return bar_pct_; }
-	bool showing_pickup() const { return show_pickup_; }
-	QString arrow_glyph() const { return arrow_glyph_; }
 
 protected:
 	void paintEvent(QPaintEvent *event) override
@@ -633,6 +573,7 @@ public:
 		}
 
 		populate_device_combos();
+		mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10); the help text stays rich */
 		refresh_from_engine();
 	}
 
@@ -654,7 +595,25 @@ public:
 		adv_catalog_ = nullptr;
 	}
 
-	void on_hardware_ports_changed() { populate_device_combos(); }
+	bool any_port_list_open() const
+	{
+		const bool z1_open = zone1_device_combo_ && zone1_device_combo_->view() &&
+				     zone1_device_combo_->view()->isVisible();
+		const bool adv_open = device_combo_ && device_combo_->view() && device_combo_->view()->isVisible();
+		return z1_open || adv_open;
+	}
+
+	/* A MIDI device came or went. A port list that is dropped down is not refilled under the pointer (F-05): the
+	 * refill waits for the next refresh after it closes. */
+	void on_hardware_ports_changed()
+	{
+		if (any_port_list_open()) {
+			ports_refill_pending_ = true;
+			return;
+		}
+		ports_refill_pending_ = false;
+		populate_device_combos();
+	}
 
 	void refresh_from_engine()
 	{
@@ -663,13 +622,10 @@ public:
 		}
 		mfd_engine_get_ui_snapshot(eng_, &snap_);
 
-		if (snap_.midi_connected != last_midi_connected_) {
-			last_midi_connected_ = snap_.midi_connected;
-			const bool z1_open = zone1_device_combo_ && zone1_device_combo_->view() &&
-					     zone1_device_combo_->view()->isVisible();
-			const bool adv_open = device_combo_ && device_combo_->view() &&
-					      device_combo_->view()->isVisible();
-			if (!z1_open && !adv_open) {
+		if (snap_.midi_connected != last_midi_connected_ || ports_refill_pending_) {
+			if (!any_port_list_open()) {
+				last_midi_connected_ = snap_.midi_connected;
+				ports_refill_pending_ = false;
 				populate_device_combos();
 			}
 		}
@@ -1412,9 +1368,15 @@ private:
 			refresh_from_engine();
 		});
 
+		/* F-06: each step applies at once, but the settings file is written once, when the edit is done (focus
+		 * leaves the box or Enter). Holding the arrow no longer writes the file many times a second. */
 		connect(tau_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double val) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_smooth_tau_ms(eng_, static_cast<float>(val));
+			}
+		});
+		connect(tau_spin_, &QDoubleSpinBox::editingFinished, this, [this]() {
+			if (!rebuilding_adv_table_) {
 				mfd_engine_save_global_config(eng_);
 			}
 		});
@@ -1439,10 +1401,10 @@ private:
 				mfd_engine_save_global_config(eng_);
 			}
 		});
+		/* the engine asks for the save itself (once, at the next flush): no second write here (F-06) */
 		connect(vj_fade_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int ms) {
 			if (!rebuilding_adv_table_) {
 				mfd_engine_set_vj_buttons(eng_, vj_check_->isChecked(), ms);
-				mfd_engine_save_global_config(eng_);
 			}
 		});
 
@@ -1734,7 +1696,7 @@ private:
 			strip_cards_[i]->setVisible(show_strip);
 
 			struct mfd_ui_strip_presentation sp;
-			build_strip_presentation_from_slot(i, s, &sp);
+			mfd_ui_strip_presentation_from_slot(i, s, &sp);
 			strip_bottom_actions_[i] = sp.bottom_action;
 
 			QString border_hex = QStringLiteral("#1e293b");
@@ -1790,7 +1752,7 @@ private:
 			const QString assign_q = QString::fromUtf8(sp.assignment_sentence);
 			if (strip_assign_labels_[i]->text() != assign_q) {
 				strip_assign_labels_[i]->setText(assign_q);
-				strip_assign_btns_[i]->setToolTip(assign_q);
+				strip_assign_btns_[i]->setToolTip(mfdPlainTip(assign_q));
 			}
 			const QString assign_lbl_style =
 				sp.dimmed
@@ -2231,7 +2193,7 @@ private:
 				auto *lbl_fsum = new QLabel(full_summary, fcell);
 				lbl_fsum->setObjectName(QStringLiteral("mfdAdvFilterSummary_%1").arg(row));
 				lbl_fsum->setMaximumWidth(118);
-				lbl_fsum->setToolTip(full_summary);
+				lbl_fsum->setToolTip(mfdPlainTip(full_summary));
 				lbl_fsum->setStyleSheet(
 					(slot.filter_name[0] != '\0' && slot.filter_prop[0] != '\0')
 						? QStringLiteral("color: #7dd3fc; font-size: 11px; font-weight: bold;")
@@ -2422,6 +2384,7 @@ private:
 		for (int c = 0; c < 9; ++c) {
 			table_->resizeColumnToContents(c);
 		}
+		mfdPlainLabels(table_); /* the rows' labels are new */
 		last_adv_topology_rev_ = snap_.config_topology_rev;
 		rebuilding_adv_table_ = false;
 	}
@@ -2441,7 +2404,12 @@ private:
 
 	void refresh_advanced_tab(bool can_finish_tbar)
 	{
-		if (snap_.config_topology_rev != last_adv_topology_rev_ && !any_adv_combo_popup_open()) {
+		/* The table (18 rows of widgets, two source enumerations and a catalog read) is rebuilt only while the
+		 * Advanced tab is the one shown (F-06). Hidden, it stays stale: last_adv_topology_rev_ is left alone, so
+		 * the refresh that a tab switch runs rebuilds it. A rebuild that was asked for outright (~0) is done. */
+		const bool adv_shown = !main_tabs_ || main_tabs_->currentIndex() == 1;
+		if (snap_.config_topology_rev != last_adv_topology_rev_ && !any_adv_combo_popup_open() &&
+		    (adv_shown || last_adv_topology_rev_ == ~0ULL)) {
 			rebuild_table_rows();
 		}
 
@@ -2587,7 +2555,7 @@ private:
 			}
 
 			struct mfd_ui_strip_presentation sp;
-			build_strip_presentation_from_slot(row, s, &sp);
+			mfd_ui_strip_presentation_from_slot(row, s, &sp);
 
 			const int desired_pct = sp.bar_percent;
 			const QString pct_q = QString::number(desired_pct);
@@ -2637,15 +2605,15 @@ private:
 			if (bar->value() != desired_pct) {
 				bar->setValue(desired_pct);
 			}
-			desired_text = progress_format_text(desired_text);
+			desired_text = mfdProgressFormat(desired_text);
 			if (bar->format() != desired_text) {
 				bar->setFormat(desired_text);
 			}
 			if (bar->styleSheet() != desired_style) {
 				bar->setStyleSheet(desired_style);
 			}
-			if (bar->toolTip() != desired_tip) {
-				bar->setToolTip(desired_tip);
+			if (bar->toolTip() != mfdPlainTip(desired_tip)) {
+				bar->setToolTip(mfdPlainTip(desired_tip));
 			}
 		}
 	}
@@ -2658,6 +2626,7 @@ private:
 	uint64_t last_adv_topology_rev_ = ~0ULL;
 	bool rebuilding_adv_table_ = false;
 	bool last_midi_connected_ = false;
+	bool ports_refill_pending_ = false; /* ports changed while a port list was dropped down (F-05) */
 	bool showing_fx_bank_ = false;
 	QString adv_edit_error_;
 
@@ -2775,6 +2744,10 @@ public:
 
 static std::mutex g_ui_bridge_mu;
 static std::atomic<bool> g_ui_refresh_queued{false};
+static std::atomic<bool> g_ports_changed_queued{false};
+/* The engine change counters as the settings window last saw them (F-08). */
+static uint64_t g_dialog_seen_topology_rev = ~0ULL;
+static uint64_t g_dialog_seen_telemetry_rev = ~0ULL;
 static MfdUiDispatcher *g_ui_dispatcher = nullptr;
 static QPointer<MfdSettingsDialog> g_dialog;
 
@@ -2794,7 +2767,16 @@ void MfdUiDispatcher::on_drain()
 	g_ui_refresh_queued.store(false);
 	mfd_engine_flush_pending_ui_work(mfd_engine_get());
 	show_desk_the_first_time();
-	if (g_dialog) {
+	/* The engine wakes this about 30 times a second while the dock is visible, for the dock's pulsing pads. The
+	 * settings window is refreshed only when something it shows has changed (F-08), not on every dock frame. */
+	uint64_t topology_rev = 0U;
+	uint64_t telemetry_rev = 0U;
+	mfd_engine_get_ui_revs(mfd_engine_get(), &topology_rev, &telemetry_rev, nullptr);
+	const bool dialog_changed = topology_rev != g_dialog_seen_topology_rev ||
+				    telemetry_rev != g_dialog_seen_telemetry_rev;
+	g_dialog_seen_topology_rev = topology_rev;
+	g_dialog_seen_telemetry_rev = telemetry_rev;
+	if (g_dialog && dialog_changed) {
 		g_dialog->refresh_from_engine();
 	}
 	mfd_desk_dock_refresh();
@@ -2826,6 +2808,7 @@ static void ui_notify_bridge_cb(void *unused)
 /* A MIDI device was plugged in or out: re-check the open port and refresh the dialog's port list. */
 static void on_midi_ports_changed()
 {
+	g_ports_changed_queued.store(false);
 	mfd_engine_poll_midi_health_on_ui_thread(mfd_engine_get());
 	if (g_dialog) {
 		g_dialog->on_hardware_ports_changed();
@@ -2833,6 +2816,21 @@ static void on_midi_ports_changed()
 	}
 	show_desk_the_first_time(); /* an APC40 plugged in after OBS started */
 	mfd_desk_dock_refresh();
+}
+
+/*
+ * One queued re-check for a burst of device messages (F-05). Windows sends WM_DEVICECHANGE to every top-level window
+ * and several times per plug or unplug, and CoreMIDI sends one notification per object: the first one queues a call on
+ * the UI thread and the rest are dropped until it has run. No timer (the rule in tests/test-shader-syntax.c).
+ */
+static void queue_midi_ports_changed()
+{
+	if (!g_ui_dispatcher || g_ports_changed_queued.exchange(true)) {
+		return;
+	}
+	if (!QMetaObject::invokeMethod(g_ui_dispatcher, on_midi_ports_changed, Qt::QueuedConnection)) {
+		g_ports_changed_queued.store(false);
+	}
 }
 
 #ifdef _WIN32
@@ -2846,8 +2844,12 @@ public:
 		}
 		if (eventType == "windows_generic_MSG" || eventType == "windows_dispatcher_MSG") {
 			const auto *msg = static_cast<const MSG *>(message);
-			if (msg->message == WM_DEVICECHANGE) {
-				on_midi_ports_changed();
+			/* Only the events that can add or remove a MIDI port: a device tree change, an arrival, a
+			 * completed removal. Queries, pending removals and custom events are not looked at. */
+			if (msg->message == WM_DEVICECHANGE &&
+			    (msg->wParam == DBT_DEVNODES_CHANGED || msg->wParam == DBT_DEVICEARRIVAL ||
+			     msg->wParam == DBT_DEVICEREMOVECOMPLETE)) {
+				queue_midi_ports_changed();
 			}
 		}
 		return false;
@@ -2855,12 +2857,6 @@ public:
 };
 
 static MfdDeviceChangeFilter *g_dev_change_filter = nullptr;
-#else
-static void queue_midi_ports_changed()
-{
-	if (g_ui_dispatcher)
-		QMetaObject::invokeMethod(g_ui_dispatcher, on_midi_ports_changed, Qt::QueuedConnection);
-}
 #endif
 
 static void open_settings_from_dock()
@@ -2910,7 +2906,12 @@ void mfd_ui_init(void)
 	mfd_desk_dock_init(); /* before OBS restores the dock layout */
 	mfd_desk_dock_set_settings_opener(open_settings_from_dock);
 
-	if (!qEnvironmentVariableIsSet("MFD_SELF_TEST")) {
+#ifdef MFD_ENABLE_SELF_TEST
+	const bool self_test = qgetenv("MFD_SELF_TEST") == "1"; /* a build with the harness, asked to run it (H-02) */
+#else
+	const bool self_test = false;
+#endif
+	if (!self_test) {
 #ifdef _WIN32
 		if (QCoreApplication::instance() && !g_dev_change_filter) {
 			g_dev_change_filter = new MfdDeviceChangeFilter();

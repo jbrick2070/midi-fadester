@@ -2,6 +2,11 @@
 # Copyright (C) 2026 Jeffrey A. Brick
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# The analyzer test makes its own WAV files (sine, kick and snare patterns) and reads them back. They are written
+# into the build tree (H-12): in the source tree a run rewrote tracked files, and on a platform whose math library
+# rounds one sample differently that made the checkout "dirty".
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wav-fixtures")
+
 if(OS_MACOS)
   # Test executables live outside OBS.app and find libobs.framework and the obs-deps dylibs in .deps at run time.
   set(CMAKE_SKIP_RPATH FALSE)
@@ -44,7 +49,7 @@ function(visual_sidechain_add_test short_name)
   target_compile_definitions(
     ${name}
     PRIVATE
-      "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/fixtures\""
+      "VS_TEST_FIXTURES_DIR=\"${CMAKE_CURRENT_BINARY_DIR}/wav-fixtures\""
       "VS_SHADERS_DIR=\"${CMAKE_SOURCE_DIR}/data/shaders\""
   )
   target_link_libraries(${name} PRIVATE OBS::libobs)
@@ -197,14 +202,14 @@ set_tests_properties(
   PROPERTIES PASS_REGULAR_EXPRESSION "Shader\.Error\.FileNotFound: the English in .*locale-format-mismatch\.c"
 )
 
-# Every translation matches en-US.ini (R-I18N-4): the real files with the eleven required languages, a file full of
+# Every translation matches en-US.ini (R-I18N-4): the real files with the twelve required languages, a file full of
 # awkward characters must pass, and each kind of fault must be caught (check-locale-files-bad.cmake)
 add_test(
   NAME vs-check-locale-files
   COMMAND
     "${CMAKE_COMMAND}" "-DLOCALE_DIR=${CMAKE_SOURCE_DIR}/data/locale" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
-    # the eleven languages of R-I18N-3: a missing file fails
-    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR,nl-NL" -P
+    # the twelve languages of R-I18N-4: a missing file fails
+    "-DREQUIRED_LOCALES=zh-CN,es-ES,pt-BR,ru-RU,ja-JP,de-DE,fr-FR,ko-KR,zh-TW,tr-TR,nl-NL,it-IT" -P
     "${CMAKE_CURRENT_SOURCE_DIR}/check-locale-files.cmake"
 )
 add_test(

@@ -12,6 +12,7 @@
 #include "baseline.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define VS_USER_EDIT_FLOAT_TOL 1e-3
@@ -159,6 +160,41 @@ bool vs_baseline_reconcile_int(struct vs_baseline_table *table, const char *filt
 	e->original_float = (double)current_target_val;
 	e->last_written_int = current_target_val;
 	e->last_written_float = (double)current_target_val;
+	return true;
+}
+
+size_t vs_baseline_rename_filter(struct vs_baseline_table *table, const char *old_name, const char *new_name)
+{
+	if (!table || !old_name || !new_name || old_name[0] == '\0' || new_name[0] == '\0' ||
+	    strcmp(old_name, new_name) == 0)
+		return 0;
+	size_t moved = 0;
+	for (size_t i = 0; i < VS_MAX_BASELINE_ENTRIES; i++) {
+		struct vs_baseline_entry *e = &table->entries[i];
+		if (e->in_use && strcmp(e->filter_name, old_name) == 0) {
+			snprintf(e->filter_name, sizeof(e->filter_name), "%s", new_name);
+			moved++;
+		}
+	}
+	return moved;
+}
+
+enum vs_target_claim vs_baseline_claim(bool has_record, bool owner_is_self, bool owner_on_this_source,
+				       bool self_holds_baseline)
+{
+	if (!has_record)
+		return VS_CLAIM_FREE;
+	if (owner_is_self)
+		return self_holds_baseline ? VS_CLAIM_MINE : VS_CLAIM_ORPHAN;
+	return owner_on_this_source ? VS_CLAIM_TAKEN : VS_CLAIM_ORPHAN;
+}
+
+bool vs_baseline_forget_entry(struct vs_baseline_table *table, const char *filter_name, const char *setting_name)
+{
+	struct vs_baseline_entry *e = find_mutable(table, filter_name, setting_name);
+	if (!e)
+		return false;
+	memset(e, 0, sizeof(*e));
 	return true;
 }
 

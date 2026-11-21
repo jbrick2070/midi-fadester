@@ -474,7 +474,7 @@ int main(void)
 		"Scene Red was deleted.",
 		"Color and Color 2 are not in the same scene.",
 		"Color is not in any scene.",
-		"Mic/Aux was deleted.",
+		"Mic/Aux was deleted. Click Set up to choose another.",
 		"Mic/Aux has no audio.",
 	};
 	for (size_t ri = 0U; ri < sizeof(red_reasons) / sizeof(red_reasons[0]); ++ri) {
@@ -679,7 +679,7 @@ int main(void)
 
 	/* Filter precondition failure sentences on FX 1 */
 	const char *filter_red_reasons[] = {
-		"Cam 1 was deleted.",
+		"Cam 1 was deleted. Click Set up to choose another.",
 		"Filter 'Blur' is no longer on Cam 1.",
 		"Setting 'radius' is missing or not numeric on filter 'Blur'.",
 		"Range [0, 200] is outside filter 'Blur' setting 'Radius' limits [0, 100].",
@@ -767,6 +767,47 @@ int main(void)
 	REQUIRE(mfd_msg_slug(MFD_MSG_NONE)[0] == '\0');
 	for (int code = 1; code < (int)MFD_MSG_CODE_COUNT; ++code) {
 		REQUIRE(mfd_msg_slug((enum mfd_msg_code)code)[0] != '\0');
+	}
+
+	/* Step 7: the reasons are in plain words, with no request field or script name in them; the vendor API's error
+	 * codes for the same reasons stay as they were, since scripts match on those */
+	{
+		static const struct {
+			enum mfd_msg_code code;
+			const char *slug;
+			const char *english;
+		} reworded[] = {
+			{MFD_MSG_FILTER_RESERVED, "filter_reserved",
+			 "Midi Fadester uses filter 'A' itself. Choose another filter."},
+			{MFD_MSG_SETTING_NOT_NUMERIC, "setting_not_numeric",
+			 "Setting 'A' on 'B' is not a number. Choose a setting that is a number."},
+			{MFD_MSG_RANGE_OUTSIDE_LIMITS, "range_outside_limits",
+			 "The range A to B is outside what 'C' allows (D to E). Click Set up to change the range."},
+			{MFD_MSG_FILTER_NO_PROPERTIES, "filter_no_properties",
+			 "Filter 'A' on 'B' has no settings to control."},
+			{MFD_MSG_SETTING_NOT_FOUND, "setting_not_found", "Filter 'B' has no setting 'A'."},
+			{MFD_MSG_RANGE_NOT_FINITE, "range_not_finite", "Both ends of the range must be numbers."},
+			{MFD_MSG_RANGE_EMPTY, "range_empty",
+			 "The two ends of the range must differ, so the control has something to move."},
+			{MFD_MSG_SETUP_NOT_ACTIVE, "setup_not_active", "Set up is no longer open for this strip."},
+			{MFD_MSG_CHANGED_EXTERNALLY, "changed_externally",
+			 "This strip was changed from somewhere else while Set up was open. Check it and press Done again."},
+			{MFD_MSG_STRIP_PAUSED_IN_SETUP, "strip_paused_in_setup",
+			 "This strip is paused while Set up is open."},
+		};
+		static const char *const script_words[] = {"from_val", "to_val",  "get_catalog", "float",
+							   "integer",  "session", "externally"};
+		for (size_t i = 0U; i < sizeof(reworded) / sizeof(reworded[0]); ++i) {
+			struct mfd_msg plain;
+			mfd_msg_set(&plain, reworded[i].code, "A", "B", "C", "D", "E");
+			char plain_text[200];
+			mfd_msg_format_english(&plain, plain_text, sizeof(plain_text));
+			REQUIRE(strcmp(plain_text, reworded[i].english) == 0);
+			REQUIRE(strcmp(mfd_msg_slug(reworded[i].code), reworded[i].slug) == 0);
+			for (size_t w = 0U; w < sizeof(script_words) / sizeof(script_words[0]); ++w) {
+				REQUIRE(strstr(plain_text, script_words[w]) == NULL);
+			}
+		}
 	}
 
 	/* Default labels: stored empty (or a legacy English default) show the short title; a typed label as typed */

@@ -28,6 +28,35 @@ static pthread_mutex_t g_flash_clock_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct vs_flash_clock g_process_flash_clock;
 static uint64_t g_fallback_frame_seq = 0;
 
+void vs_render_watch_reset(struct vs_render_watch *w)
+{
+	if (!w)
+		return;
+	w->rendered_since_tick = false;
+	w->ticks_since_render = 0U;
+	w->ever_rendered = false;
+}
+
+void vs_render_watch_mark_rendered(struct vs_render_watch *w)
+{
+	if (w)
+		w->rendered_since_tick = true;
+}
+
+bool vs_render_watch_tick(struct vs_render_watch *w)
+{
+	if (!w)
+		return false;
+	if (w->rendered_since_tick) {
+		w->rendered_since_tick = false;
+		w->ever_rendered = true;
+		w->ticks_since_render = 0U;
+	} else if (w->ticks_since_render < 255U) {
+		++w->ticks_since_render;
+	}
+	return w->ever_rendered && w->ticks_since_render <= VS_RENDER_WATCH_GRACE_TICKS;
+}
+
 void vs_flash_clock_reset(struct vs_flash_clock *clock)
 {
 	if (clock)

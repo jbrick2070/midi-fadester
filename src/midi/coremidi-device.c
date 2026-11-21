@@ -319,7 +319,7 @@ bool mfd_winmm_open_by_name(struct mfd_winmm_device *dev, const char *device_nam
 
 	OSStatus st = ensure_client() ? noErr : (OSStatus)kMIDINoConnection;
 	if (st == noErr) {
-		struct mfd_winmm_device *target = dev;
+		struct mfd_winmm_device *target = dev->callback_owner ? dev->callback_owner : dev;
 		struct mfd_coremidi_port *port_state = p;
 		st = MIDIInputPortCreateWithProtocol(g_client, CFSTR("Midi Fadester In"), kMIDIProtocol_1_0, &p->port,
 						     ^(const MIDIEventList *evtlist, void *src_ref) {
@@ -386,7 +386,7 @@ const char *mfd_winmm_error_slug(enum mfd_winmm_error_kind kind)
 	}
 }
 
-bool mfd_winmm_check_health(struct mfd_winmm_device *dev)
+bool mfd_winmm_is_present(const struct mfd_winmm_device *dev)
 {
 	if (!dev || !dev->is_open) {
 		return false;
@@ -405,25 +405,10 @@ bool mfd_winmm_check_health(struct mfd_winmm_device *dev)
 	/* An unplugged USB device's endpoint can linger offline; treat offline as gone. */
 	if (found && dev->handle) {
 		SInt32 offline = 0;
-		struct mfd_coremidi_port *p = (struct mfd_coremidi_port *)dev->handle;
+		const struct mfd_coremidi_port *p = (const struct mfd_coremidi_port *)dev->handle;
 		if (MIDIObjectGetIntegerProperty(p->source, kMIDIPropertyOffline, &offline) == noErr && offline) {
 			found = false;
 		}
 	}
-
-	if (!found || os_atomic_load_bool(&dev->device_closed_unexpectedly)) {
-		char lost_name[MFD_MIDI_DEV_NAME_MAX];
-		snprintf(lost_name, sizeof(lost_name), "%s", dev->opened_name);
-		mfd_winmm_close(dev);
-		dev->error_kind = MFD_WINMM_ERR_DISCONNECTED;
-		dev->error_operation = MFD_WINMM_OP_NONE;
-		dev->error_code = 0U;
-		snprintf(dev->error_device_name, sizeof(dev->error_device_name), "%s", lost_name);
-		snprintf(dev->last_error, sizeof(dev->last_error),
-			 "MIDI device '%s' was disconnected. Reconnect USB cable and click Reconnect.", lost_name);
-		obs_log(LOG_WARNING, "%s", dev->last_error);
-		return false;
-	}
-
-	return true;
+	return found;
 }

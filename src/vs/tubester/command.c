@@ -11,12 +11,35 @@
 
 #include "tubester/command.h"
 #include "tubester/deck-link.h"
+#include "tubester/http-parse.h"
 #include "tubester/speed.h"
 
 #include <obs-data.h>
 #include <util/bmem.h>
 #include <math.h>
 #include <string.h>
+
+size_t tub_deck_choose(const char *deck_target, const struct tub_deck_candidate *candidates, size_t count)
+{
+	if (!deck_target || deck_target[0] == '\0' || !candidates)
+		return count;
+	size_t chosen = count;
+	int best_rank = 0; /* 3: source + owner, 2: source + non-owner, 1: deck id */
+	for (size_t i = 0; i < count; i++) {
+		const char *source_name = candidates[i].source_name ? candidates[i].source_name : "";
+		const char *deck_id = candidates[i].deck_id ? candidates[i].deck_id : "";
+		int rank = 0;
+		if (source_name[0] != '\0' && strcmp(source_name, deck_target) == 0)
+			rank = candidates[i].owner ? 3 : 2;
+		else if (strcmp(deck_id, deck_target) == 0)
+			rank = 1;
+		if (rank > best_rank) {
+			best_rank = rank;
+			chosen = i;
+		}
+	}
+	return chosen;
+}
 
 bool tub_command_is_safe(const char *json)
 {
@@ -49,7 +72,7 @@ static char *finish(obs_data_t *data)
 
 static bool is_plain_id(const char *s)
 {
-	if (!s || !*s || strlen(s) > 64)
+	if (!s || !*s || strlen(s) > TUB_DECK_ID_MAX)
 		return false;
 	for (; *s; s++) {
 		char c = *s;

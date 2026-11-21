@@ -181,6 +181,13 @@ bool vs_mod_slot_uses_flash_clock(const struct vs_mod_slot_config *cfg)
 	return false;
 }
 
+float vs_mod_slot_input_signal(const struct vs_mod_slot_config *cfg, float raw_signal_01, bool on_screen)
+{
+	if (!on_screen && cfg && vs_mod_slot_uses_flash_clock(cfg))
+		return 0.0f;
+	return raw_signal_01;
+}
+
 float vs_mod_slot_filter_signal(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state,
 				struct vs_flash_clock *clock, uint64_t frame_token, float raw_signal_01, float dt_sec,
 				bool panic_active)

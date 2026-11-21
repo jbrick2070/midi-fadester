@@ -18,7 +18,9 @@ void mfd_tbar_init(void);
 void mfd_tbar_shutdown(void);
 
 /*
- * Safe, timer-free Studio Mode T-bar driver callback registered with mfd_engine (R-TBAR-SM).
+ * Safe, timer-free Studio Mode T-bar driver callback registered with mfd_engine (R-TBAR-SM). A command that has to
+ * wait for a transition to end is retried from the engine's video tick (mfd_engine_set_tbar_deferred_fn), not by a
+ * timer.
  * Returns false and populates out_err if Studio Mode is active but "slider-tbar" is missing.
  */
 bool mfd_tbar_driver_apply(enum mfd_tbar_state state, float t_norm, bool force_complete, bool force_abort,

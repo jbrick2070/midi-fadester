@@ -26,6 +26,38 @@ static signal_handler_t *g_bridge_sh = NULL;
 static mfd_vendor_event_sink_fn g_event_sink = NULL;
 static void *g_event_sink_user_data = NULL;
 static volatile bool g_vendor_shutting_down = false;
+
+/* Handlers that have let go of the engine lock but are still at work (get_catalog for one source builds that source's
+ * filter properties with no lock held). Shutdown's lock-and-unlock only waits for handlers inside the lock, so it
+ * waits for this count to reach zero as well (QA-A02). A condition, not a timer. */
+static pthread_mutex_t g_unlocked_calls_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_unlocked_calls_cond = PTHREAD_COND_INITIALIZER;
+static int g_unlocked_calls = 0;
+
+static void unlocked_call_begin(void)
+{
+	pthread_mutex_lock(&g_unlocked_calls_mutex);
+	g_unlocked_calls++;
+	pthread_mutex_unlock(&g_unlocked_calls_mutex);
+}
+
+static void unlocked_call_end(void)
+{
+	pthread_mutex_lock(&g_unlocked_calls_mutex);
+	if (--g_unlocked_calls == 0) {
+		pthread_cond_broadcast(&g_unlocked_calls_cond);
+	}
+	pthread_mutex_unlock(&g_unlocked_calls_mutex);
+}
+
+static void unlocked_calls_wait_for_none(void)
+{
+	pthread_mutex_lock(&g_unlocked_calls_mutex);
+	while (g_unlocked_calls > 0) {
+		pthread_cond_wait(&g_unlocked_calls_cond, &g_unlocked_calls_mutex);
+	}
+	pthread_mutex_unlock(&g_unlocked_calls_mutex);
+}
 static volatile bool g_mix_reply_registered = false;
 
 static bool parse_mix_provider_id(obs_data_t *reply, bool *out_has_provider, char *out_id, size_t out_size)
@@ -321,6 +353,43 @@ static bool request_number_or_error(obs_data_t *request_data, obs_data_t *respon
 	return ok;
 }
 
+/* The same for a true / false parameter: "afv":"no" would read as false and switch the setting off. */
+static bool request_bool_or_error(obs_data_t *request_data, obs_data_t *response_data, const char *name)
+{
+	obs_data_item_t *item = obs_data_item_byname(request_data, name);
+	const bool ok = item && obs_data_item_gettype(item) == OBS_DATA_BOOLEAN;
+	obs_data_item_release(&item);
+	if (!ok) {
+		char sentence[128];
+		snprintf(sentence, sizeof(sentence), "Parameter '%s' must be a boolean.", name);
+		set_error_comment(response_data, "invalid_parameter", sentence);
+	}
+	return ok;
+}
+
+/* Optional parameters: each one that is present must have its type (C-05). False, with the error set, otherwise. */
+static bool request_optional_types_or_error(obs_data_t *request_data, obs_data_t *response_data,
+					    const char *const *numbers, size_t number_count, const char *const *bools,
+					    size_t bool_count)
+{
+	if (!request_data) {
+		return true;
+	}
+	for (size_t i = 0U; i < number_count; ++i) {
+		if (obs_data_has_user_value(request_data, numbers[i]) &&
+		    !request_number_or_error(request_data, response_data, numbers[i])) {
+			return false;
+		}
+	}
+	for (size_t i = 0U; i < bool_count; ++i) {
+		if (obs_data_has_user_value(request_data, bools[i]) &&
+		    !request_bool_or_error(request_data, response_data, bools[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void set_error_msg(obs_data_t *response_data, const struct mfd_msg *msg)
 {
 	char sentence[256];
@@ -340,7 +409,7 @@ static bool validate_slot_movement_locked(struct mfd_engine *eng, struct mfd_fad
 {
 	if (eng->setup_session.active && eng->setup_session.slot_index == slot_index) {
 		set_error_comment(response_data, mfd_msg_slug(MFD_MSG_STRIP_PAUSED_IN_SETUP),
-				  "Strip is currently paused while Set up is open.");
+				  "This strip is paused while Set up is open.");
 		return false;
 	}
 	if (!mfd_engine_is_slot_writable(eng, slot)) {
@@ -635,7 +704,15 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		return;
 	}
 
-	float val = clamp01((float)calldata_float(cd, "value"));
+	double raw_val = 0.0;
+	if (!calldata_get_float(cd, "value", &raw_val) || !isfinite(raw_val)) {
+		/* no "value" would read as 0 and take the strip to 0 % (C-05) */
+		calldata_set_bool(cd, "ok", false);
+		calldata_set_bool(cd, "success", false);
+		set_proc_reason(cd, "missing_parameter", "Missing required 'value' parameter (0.0 to 1.0).");
+		return;
+	}
+	float val = clamp01((float)raw_val);
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
 		mfd_engine_unlock(eng);
@@ -644,86 +721,18 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		set_proc_reason(cd, "shutting_down", "Midi Fadester is shutting down.");
 		return;
 	}
-	if (eng->setup_session.active && eng->setup_session.slot_index == idx) {
-		mfd_engine_unlock(eng);
-		calldata_set_bool(cd, "ok", false);
-		calldata_set_bool(cd, "success", false);
-		set_proc_reason(cd, mfd_msg_slug(MFD_MSG_STRIP_PAUSED_IN_SETUP),
-				"Strip is currently paused while Set up is open.");
-		return;
-	}
-	struct mfd_fader_slot *slot = &eng->fader_slots[idx];
-	if (!mfd_engine_is_slot_writable(eng, slot)) {
-		bool avail = false;
+	/* One decision tree for "set a strip's value" (C-10): the engine's, which the obs-websocket request uses too.
+	 * This proc had a copy of its own that had drifted: at a rail it applied the output and sent fader_changed
+	 * again on every call. */
+	struct mfd_msg set_msg;
+	if (!mfd_engine_set_slot_value_msg(eng, idx, val, false, "api", &set_msg)) {
 		char reason[160] = {0};
-		struct mfd_msg reason_msg;
-		mfd_engine_get_slot_status_msg(eng, slot, NULL, 0U, &avail, reason, sizeof(reason), &reason_msg);
+		mfd_msg_format_english(&set_msg, reason, sizeof(reason));
 		mfd_engine_unlock(eng);
 		calldata_set_bool(cd, "ok", false);
 		calldata_set_bool(cd, "success", false);
-		set_proc_reason(cd, mfd_msg_slug(reason_msg.code), reason);
+		set_proc_reason(cd, mfd_msg_slug(set_msg.code), reason);
 		return;
-	}
-	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
-			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
-
-	slot->auto_fade_active = false;
-	slot->auto_fade_is_reset_fx = false;
-	slot->pending_clean_apply_on_avail = false;
-	slot->tbar_midi_active = false;
-	slot->tbar_from_idle_band = false;
-	slot->takeover.dial_reversed = false;
-
-	if (slot->target_type == MFD_TARGET_TBAR) {
-		if (mfd_tbar_is_in_target_rail_zone(val, false)) {
-			if (!was_parked) {
-				if (slot->tbar_state == MFD_TBAR_IDLE) {
-					mfd_engine_unlatch_tbar(eng);
-				}
-				mfd_engine_apply_slot_output_ex(eng, slot, 1.0f, true);
-				mfd_engine_notify_fader_changed(eng, idx, "api");
-				if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-					mfd_engine_notify_state_changed(eng);
-				}
-			}
-		} else if (mfd_tbar_is_in_origin_rail_zone(val, false)) {
-			if (slot->tbar_state == MFD_TBAR_THROWING) {
-				mfd_engine_apply_tbar_abort(eng, slot);
-				mfd_engine_notify_fader_changed(eng, idx, "api");
-				mfd_engine_notify_state_changed(eng);
-			} else if (was_parked) {
-				mfd_engine_unlatch_tbar(eng);
-				slot->tbar_state = MFD_TBAR_IDLE;
-				mfd_takeover_unpark_from_api(&slot->takeover, 0.0f);
-				mfd_smoother_reset(&slot->smoother, 0.0f);
-				slot->last_applied_val = 0.0f;
-				mfd_engine_notify_fader_changed(eng, idx, "api");
-				mfd_engine_notify_state_changed(eng);
-			}
-		} else {
-			if (was_parked || slot->tbar_state == MFD_TBAR_IDLE) {
-				mfd_engine_unlatch_tbar(eng);
-			}
-			slot->tbar_state = MFD_TBAR_THROWING;
-			mfd_takeover_unpark_from_api(&slot->takeover, val);
-			mfd_smoother_reset(&slot->smoother, val);
-			mfd_engine_apply_slot_output(eng, slot, val);
-			mfd_engine_notify_fader_changed(eng, idx, "api");
-			if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-				mfd_engine_notify_state_changed(eng);
-			}
-		}
-	} else {
-		mfd_takeover_unpark_from_api(&slot->takeover, val);
-		mfd_smoother_reset(&slot->smoother, val);
-		mfd_engine_apply_slot_output(eng, slot, val);
-		if (slot->takeover.two_rail_mode && (val >= 1.0f || val <= 0.0f)) {
-			mfd_takeover_notify_rail_completed(&slot->takeover, val >= 1.0f, val);
-		}
-		mfd_engine_notify_fader_changed(eng, idx, "api");
-		if (was_parked != (slot->takeover.state == MFD_TAKEOVER_PARKED)) {
-			mfd_engine_notify_state_changed(eng);
-		}
 	}
 
 	mfd_engine_mark_ui_dirty(eng, false);
@@ -1322,6 +1331,16 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 	if (idx < 0) {
 		return;
 	}
+	{
+		/* C-05: a number sent as a string or a bool would be read as 0, a bool sent as a string as false */
+		static const char *const numbers[] = {"cal_min", "cal_max", "from_val", "to_val"};
+		static const char *const bools[] = {"afv", "bypass_at_zero"}; /* "enabled" has its own check below */
+		if (!request_optional_types_or_error(request_data, response_data, numbers,
+						     sizeof(numbers) / sizeof(numbers[0]), bools,
+						     sizeof(bools) / sizeof(bools[0]))) {
+			return;
+		}
+	}
 
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
@@ -1645,6 +1664,18 @@ void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *respons
 	}
 
 	struct mfd_msg err_msg;
+	if (source && source[0] != '\0') {
+		/* One source's filters: this builds every filter's properties (the filters' own code) and reads no
+		 * engine state, so it runs with no engine lock held (F-04, A-03); the video tick does not wait.
+		 * Counted before the lock is let go, so a shutdown that begins now waits for it (QA-A02). */
+		unlocked_call_begin();
+		mfd_engine_unlock(eng);
+		if (!mfd_engine_fill_vendor_catalog_msg_locked(eng, source, response_data, &err_msg)) {
+			set_error_msg(response_data, &err_msg);
+		}
+		unlocked_call_end();
+		return;
+	}
 	if (!mfd_engine_fill_vendor_catalog_msg_locked(eng, source, response_data, &err_msg)) {
 		set_error_msg(response_data, &err_msg);
 	}
@@ -1662,6 +1693,10 @@ void mfd_vendor_handle_reset_fx(obs_data_t *request_data, obs_data_t *response_d
 	}
 	sync_scene_graph_for_request(eng, request_data);
 
+	if (request_data && obs_data_has_user_value(request_data, "ms") &&
+	    !request_number_or_error(request_data, response_data, "ms")) {
+		return; /* "ms":"2000" would read as 0 and clear every FX strip at once (C-05) */
+	}
 	long long raw_ms = (request_data && obs_data_has_user_value(request_data, "ms"))
 				   ? obs_data_get_int(request_data, "ms")
 				   : 0LL;
@@ -1785,6 +1820,7 @@ void mfd_vendor_api_shutdown(struct mfd_engine *eng)
 		mfd_engine_lock(eng);
 		mfd_engine_unlock(eng);
 	}
+	unlocked_calls_wait_for_none();
 	g_vendor = NULL;
 	g_bridge_sh = NULL;
 	g_event_sink = NULL;

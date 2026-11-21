@@ -134,11 +134,16 @@ Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's 
 
 ## 3. Live Portable OBS 33 + `loopMIDI` Self-Test (`MFD_SELF_TEST=1`)
 
-Run the live hardware-loopback and GPU pixel suite via `scripts/run-live-selftest.ps1`, which targets the machine's one test OBS, `C:\Users\jeffr\OBS-Studio-33-Portable`. That folder holds only settings: its `bin`, `core` and `data` are directory links to the installed OBS 33, and its `plugins\midi-fadester` is a link into the one plugin folder, `C:\ProgramData\obs-studio\plugins`, which the operator's OBS loads too. So the run tests the very build it deploys, and leaves the Release DLL installed:
+Run the live hardware-loopback and GPU pixel suite via `scripts/run-live-selftest.ps1`, which targets the machine's one test OBS, `C:\Users\jeffr\OBS-Studio-33-Portable`. That folder holds only settings: its `bin`, `core` and `data` are directory links to the installed OBS 33, and its `plugins\midi-fadester` is a link into the one plugin folder, `C:\ProgramData\obs-studio\plugins`, which the operator's OBS loads too. So the run copies what is in that plugin folder aside first, deploys the build under test with all of its `data` (shaders and the Tape Deck page too), and puts the folder back exactly as it was when it ends, pass or fail: the operator's OBS is left as it was found. The harness is only in a build configured with `-DMIDI_FADESTER_SELF_TEST=ON` (off by default, so no ordinary build or installer carries it); the script stops with the two commands to run if `build_x64` was configured without it:
 
 ```powershell
+cmake --preset windows-x64 -DMIDI_FADESTER_SELF_TEST=ON
+cmake --build --preset windows-x64 --config RelWithDebInfo
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-live-selftest.ps1
 ```
+
+Afterwards configure with `-DMIDI_FADESTER_SELF_TEST=OFF` again, so that the next ordinary build and installer carry
+no harness.
 
 Remove one of the folder's links with `rmdir <link>`; never delete the folder with a recursive delete, which can follow a link and empty the installed OBS or the plugin folder.
 
@@ -169,7 +174,7 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
 
 ## Translations (0.6.0, 2026-11-01)
 
-`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all eleven languages present, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). `test-ui-dialog` renders every strip-mode card in every language file and fails if any label is cut off (Segoe UI 10 px bold, the map's own `QFontMetrics` elide; boxes: Preview and Program 54 px, Left 48, Right 72, Layer 128, Filter 100). The widest of the others: Left 44 (es), Right 38 (es), Layer 76 (pt-BR), Filter 58 (ru). Preview / Program measured 2026-11-01: de 43/50, en 37/41, es "Previa" 29 (was "Vista previa" 55) / 46, fr 33 / "Prog." 25 (was "Programme" 55), ja 38/39, ko 40/40, nl 48/28, pt-BR "Prévia" 29 (was "Pré-visualização" 76; OBS 33's own pt-BR `Basic.AudioMixer.Category.Preview`) / 46, ru "Просмотр" 49 (was "Предпросмотр" 73; "Предпросм." 59 is still cut off) / 47, tr 44/41, zh-CN 20/20, zh-TW 20/20. In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`, `nl-NL`) and put the file back afterwards; the script installs every language file and keeps the updater off.
+`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all twelve languages present, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). `test-ui-dialog` renders every strip-mode card in every language file and fails if any label is cut off (Segoe UI 10 px bold, the map's own `QFontMetrics` elide; boxes: Preview and Program 54 px, Left 48, Right 72, Layer 128, Filter 100). The widest of the others: Left 44 (es), Right 38 (es), Layer 76 (pt-BR), Filter 58 (ru). Preview / Program measured 2026-11-01: de 43/50, en 37/41, es "Previa" 29 (was "Vista previa" 55) / 46, fr 33 / "Prog." 25 (was "Programme" 55), ja 38/39, ko 40/40, nl 48/28, pt-BR "Prévia" 29 (was "Pré-visualização" 76; OBS 33's own pt-BR `Basic.AudioMixer.Category.Preview`) / 46, ru "Просмотр" 49 (was "Предпросмотр" 73; "Предпросм." 59 is still cut off) / 47, tr 44/41, zh-CN 20/20, zh-TW 20/20. In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`, `nl-NL`) and put the file back afterwards; the script installs every language file and keeps the updater off.
 
 | Check | Expected | Result |
 |---|---|---|

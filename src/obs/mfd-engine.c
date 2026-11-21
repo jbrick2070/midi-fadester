@@ -383,6 +383,8 @@ static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
 static void vj_hold_epoch_sync_locked(struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
+static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng);
+static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng);
 
 void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 {
@@ -474,14 +476,21 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 		eng->pending_config_save = false;
 		do_save = true;
 	}
-	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+	if (midi_closed_unexpectedly_locked(eng)) {
 		check_health = true;
 	}
+	mfd_tbar_deferred_fn tbar_retry = eng->tbar_deferred_due ? eng->tbar_deferred : NULL;
+	eng->tbar_deferred_due = false;
 	mfd_engine_unlock(eng);
+
+	if (tbar_retry) {
+		(void)tbar_retry(true); /* UI thread, no engine lock: the driver may call back into the engine */
+	}
 
 	if (do_save && obs_initialized()) {
 		mfd_engine_save_global_config(eng);
 	}
+	refresh_filter_meta_on_ui_thread(eng);
 	if (check_health) {
 		mfd_engine_poll_midi_health_on_ui_thread(eng);
 	}
@@ -507,7 +516,31 @@ static void unlock_and_persist_global_config(struct mfd_engine *eng)
 	}
 }
 
-static void refresh_apc40_detected_locked(struct mfd_engine *eng)
+/*
+ * The MIDI In ports as the system lists them now. Listing asks the MIDI driver (WinMM, CoreMIDI), which can be slow
+ * or stall on a device that was just pulled, so it is always read with no engine lock held (A-02) and handed to the
+ * code that needs it under the lock.
+ */
+struct mfd_midi_port_list {
+	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
+	size_t count;
+	bool valid; /* false before OBS is up: nothing was read */
+};
+
+static void midi_port_list_read(struct mfd_midi_port_list *ports)
+{
+	ports->count = 0U;
+	ports->valid = obs_initialized();
+	if (ports->valid) {
+		ports->count = mfd_winmm_enumerate(ports->list, MFD_MAX_MIDI_DEVICES);
+	}
+}
+
+/* Serialises MIDI port work (open, close) between threads. Taken with no engine lock held; the engine lock is taken
+ * inside it for short state updates only, never the other way round. */
+static pthread_mutex_t g_midi_io_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void refresh_apc40_detected_locked(struct mfd_engine *eng, const struct mfd_midi_port_list *ports)
 {
 	if (!eng) {
 		return;
@@ -520,17 +553,76 @@ static void refresh_apc40_detected_locked(struct mfd_engine *eng)
 		eng->apc40_controller_detected = true;
 		return;
 	}
-	if (obs_initialized()) {
-		struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
-		size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
-		for (size_t i = 0U; i < count; ++i) {
-			if (list[i].is_apc40_mk2) {
+	if (ports && ports->valid) {
+		for (size_t i = 0U; i < ports->count; ++i) {
+			if (ports->list[i].is_apc40_mk2) {
 				eng->apc40_controller_detected = true;
 				return;
 			}
 		}
 		eng->apc40_controller_detected = false;
 	}
+}
+
+/*
+ * Takes the open handles out of the engine's device into `old`, under the engine lock, so the caller can close them
+ * with no engine lock held. The engine's device keeps is_open and opened_name until the caller stores the outcome, so
+ * the tick sees no "no controller" frame in between; with no MIDI Out handle it sends no light meanwhile.
+ */
+static void midi_detach_handles_locked(struct mfd_engine *eng, struct mfd_winmm_device *old)
+{
+	*old = eng->midi_dev;
+	old->callback_owner = NULL;
+	eng->midi_dev.handle = NULL;
+	eng->midi_dev.out_handle = NULL;
+	/* Closing a port raises device_closed_unexpectedly through its callback; the tick must not read that as an
+	 * unplug. Cleared again under the lock by midi_io_done_locked once the flag is back down. */
+	eng->midi_io_busy = true;
+}
+
+static void midi_io_done_locked(struct mfd_engine *eng)
+{
+	eng->midi_io_busy = false;
+}
+
+/* The MIDI In callback reported the port closed, and it was not this plugin closing it. Engine lock held. */
+static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng)
+{
+	return !eng->midi_io_busy && os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly);
+}
+
+/* Stores a device opened (or not) on the caller's stack into the engine's device, under the engine lock. */
+static void midi_install_device_locked(struct mfd_engine *eng, const struct mfd_winmm_device *fresh)
+{
+	struct mfd_winmm_device *dst = &eng->midi_dev;
+	dst->handle = fresh->handle;
+	dst->out_handle = fresh->out_handle;
+	dst->is_open = fresh->is_open;
+	dst->error_kind = fresh->error_kind;
+	dst->error_operation = fresh->error_operation;
+	dst->error_code = fresh->error_code;
+	memcpy(dst->error_device_name, fresh->error_device_name, sizeof(dst->error_device_name));
+	memcpy(dst->opened_name, fresh->opened_name, sizeof(dst->opened_name));
+	memcpy(dst->last_error, fresh->last_error, sizeof(dst->last_error));
+	memcpy(dst->out_name, fresh->out_name, sizeof(dst->out_name));
+}
+
+/*
+ * Closes `old` (handles taken with midi_detach_handles_locked) and opens `device_name` into `fresh`. No engine lock
+ * is held: the video tick keeps running while the MIDI driver works. The MIDI In callback of the new port is bound to
+ * the engine's own device (its queue and its closed flag).
+ */
+static bool midi_reopen_unlocked(struct mfd_engine *eng, struct mfd_winmm_device *old, const char *device_name,
+				 struct mfd_winmm_device *fresh)
+{
+	mfd_winmm_close(old);
+	/* Closing the old port may have raised the flag through its callback; no port is open now. */
+	os_atomic_store_bool(&eng->midi_dev.device_closed_unexpectedly, false);
+	mfd_winmm_init(fresh, &eng->midi_queue);
+	fresh->callback_owner = &eng->midi_dev;
+	bool ok = mfd_winmm_open_by_name(fresh, device_name);
+	fresh->callback_owner = NULL;
+	return ok;
 }
 
 static void clear_slot_filter_fields(struct mfd_fader_slot *s);
@@ -660,6 +752,15 @@ void mfd_engine_set_tbar_driver(mfd_tbar_apply_fn driver_fn)
 {
 	mfd_engine_lock(&g_engine);
 	g_engine.tbar_driver = driver_fn;
+	mfd_engine_unlock(&g_engine);
+}
+
+void mfd_engine_set_tbar_deferred_fn(mfd_tbar_deferred_fn deferred_fn)
+{
+	mfd_engine_lock(&g_engine);
+	g_engine.tbar_deferred = deferred_fn;
+	g_engine.tbar_deferred_due = false;
+	g_engine.tbar_deferred_wait_sec = 0.0f;
 	mfd_engine_unlock(&g_engine);
 }
 
@@ -799,6 +900,7 @@ static void init_slot_runtime(struct mfd_engine *eng, struct mfd_fader_slot *slo
 	slot->last_applied_val = initial_val;
 	slot->last_alpha_a = 1.0f;
 	slot->last_alpha_b = 0.0f;
+	slot->mix_start_pending = (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX);
 	slot->last_audio_mul = mfd_deflection_to_mul(initial_val);
 	slot->last_audio_db = mfd_deflection_to_db(initial_val);
 	slot->output_write_count = 0U;
@@ -931,6 +1033,7 @@ void mfd_engine_reset_slot_mode_state(struct mfd_engine *eng, struct mfd_fader_s
 	slot->last_applied_val = init_val;
 	slot->last_alpha_a = 1.0f;
 	slot->last_alpha_b = 0.0f;
+	slot->mix_start_pending = (new_target == MFD_TARGET_TWO_SOURCE_MIX);
 	slot->last_audio_mul = mfd_deflection_to_mul(init_val);
 	slot->last_audio_db = mfd_deflection_to_db(init_val);
 
@@ -1245,9 +1348,6 @@ bool mfd_engine_source_exists(const struct mfd_engine *eng, const char *source_n
 	}
 	if (eng && eng->scene_graph_ops && eng->scene_graph_ops->source_exists) {
 		return eng->scene_graph_ops->source_exists(source_name, eng->scene_graph_user_data);
-	}
-	if (eng && eng->source_exists_fn) {
-		return eng->source_exists_fn(source_name, eng->source_exists_user_data);
 	}
 	if (!obs_initialized()) {
 		return false;
@@ -1931,19 +2031,29 @@ static bool filter_live_value_is_ours(const struct mfd_fader_slot *slot, double 
 					: (fabs(live_val - cur_mapped) <= 1e-6);
 }
 
-bool mfd_engine_validate_filter_param_binding_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
-						     const char *source_a, const char *filter_name,
-						     const char *filter_prop, bool has_from_to, double *inout_from_val,
-						     double *inout_to_val, struct mfd_filter_prop_info *out_prop_info,
-						     char *out_err, size_t err_size)
-{
-	struct mfd_msg msg;
-	bool ok = mfd_engine_validate_filter_param_binding_msg_locked(eng, slot_index, enabled, source_a, filter_name,
-								      filter_prop, has_from_to, inout_from_val,
-								      inout_to_val, out_prop_info, &msg);
-	mfd_msg_format_english(&msg, out_err, err_size);
-	return ok;
-}
+enum mfd_filter_meta_result {
+	MFD_FILTER_META_NO_PROPS = 0, /* the filter gave no properties */
+	MFD_FILTER_META_NUMERIC,      /* the setting is a number: filter_meta_* hold its range */
+	MFD_FILTER_META_NOT_NUMERIC,  /* the setting exists but is not a number */
+	MFD_FILTER_META_MISSING,      /* the filter has no setting of that name */
+};
+
+struct mfd_filter_meta {
+	enum mfd_filter_meta_result result;
+	struct mfd_filter_prop_info info;
+};
+
+static void read_filter_meta(const struct mfd_engine *eng, const char *source, const char *filter, const char *prop,
+			     struct mfd_filter_meta *out);
+
+/* prefetched: the setting's description, read by the caller with no engine lock held (QA-A03), or NULL to read it
+ * here. Reading runs the filter's own properties code, so a caller that checks often (the Set up sheet, on every
+ * change of a choice) reads first and locks afterwards; the video tick then never waits for a filter. */
+static bool validate_filter_param_binding(const struct mfd_engine *eng, int slot_index, bool enabled,
+					  const char *source_a, const char *filter_name, const char *filter_prop,
+					  bool has_from_to, double *inout_from_val, double *inout_to_val,
+					  struct mfd_filter_prop_info *out_prop_info,
+					  const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg);
 
 bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
 							 const char *source_a, const char *filter_name,
@@ -1951,6 +2061,16 @@ bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine
 							 double *inout_from_val, double *inout_to_val,
 							 struct mfd_filter_prop_info *out_prop_info,
 							 struct mfd_msg *out_msg)
+{
+	return validate_filter_param_binding(eng, slot_index, enabled, source_a, filter_name, filter_prop, has_from_to,
+					     inout_from_val, inout_to_val, out_prop_info, NULL, out_msg);
+}
+
+static bool validate_filter_param_binding(const struct mfd_engine *eng, int slot_index, bool enabled,
+					  const char *source_a, const char *filter_name, const char *filter_prop,
+					  bool has_from_to, double *inout_from_val, double *inout_to_val,
+					  struct mfd_filter_prop_info *out_prop_info,
+					  const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg)
 {
 	mfd_msg_clear(out_msg);
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -1999,21 +2119,32 @@ bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine
 		return false;
 	}
 
-	obs_properties_t *props = sg_create_filter_properties(eng, source_a, filter_name);
-	if (!props) {
-		mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
-		return false;
-	}
-	obs_data_t *settings = sg_get_filter_settings(eng, source_a, filter_name);
 	bool found_non_numeric = false;
+	bool found_numeric = false;
 	struct mfd_filter_prop_info info;
 	memset(&info, 0, sizeof(info));
-	bool found_numeric =
-		find_filter_prop_in_props_depth(props, settings, filter_prop, &found_non_numeric, &info, 0);
-	if (settings) {
-		obs_data_release(settings);
+	if (prefetched) {
+		if (prefetched->result == MFD_FILTER_META_NO_PROPS) {
+			mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
+			return false;
+		}
+		info = prefetched->info;
+		found_numeric = prefetched->result == MFD_FILTER_META_NUMERIC;
+		found_non_numeric = prefetched->result == MFD_FILTER_META_NOT_NUMERIC;
+	} else {
+		obs_properties_t *props = sg_create_filter_properties(eng, source_a, filter_name);
+		if (!props) {
+			mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
+			return false;
+		}
+		obs_data_t *settings = sg_get_filter_settings(eng, source_a, filter_name);
+		found_numeric =
+			find_filter_prop_in_props_depth(props, settings, filter_prop, &found_non_numeric, &info, 0);
+		if (settings) {
+			obs_data_release(settings);
+		}
+		obs_properties_destroy(props);
 	}
-	obs_properties_destroy(props);
 
 	if (!found_numeric) {
 		mfd_msg_set(out_msg, found_non_numeric ? MFD_MSG_SETTING_NOT_NUMERIC : MFD_MSG_SETTING_NOT_FOUND,
@@ -2247,6 +2378,143 @@ void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng)
 	mfd_engine_unlock(eng);
 }
 
+/* Reads one setting's description from the filter's properties. This runs the filter's own code
+ * (obs_source_properties): never call it on the video thread. */
+static void read_filter_meta(const struct mfd_engine *eng, const char *source, const char *filter, const char *prop,
+			     struct mfd_filter_meta *out)
+{
+	memset(out, 0, sizeof(*out));
+	obs_properties_t *props = sg_create_filter_properties(eng, source, filter);
+	if (!props) {
+		out->result = MFD_FILTER_META_NO_PROPS;
+		return;
+	}
+	bool found_non_num = false;
+	bool found_num = find_filter_prop_in_props_depth(props, NULL, prop, &found_non_num, &out->info, 0);
+	obs_properties_destroy(props);
+	out->result = found_num ? MFD_FILTER_META_NUMERIC
+				: (found_non_num ? MFD_FILTER_META_NOT_NUMERIC : MFD_FILTER_META_MISSING);
+}
+
+static bool filter_meta_matches_slot(const struct mfd_fader_slot *slot)
+{
+	return slot->filter_meta_cached && strcmp(slot->filter_meta_source, slot->source_a_name) == 0 &&
+	       strcmp(slot->filter_meta_filter, slot->filter_name) == 0 &&
+	       strcmp(slot->filter_meta_prop, slot->filter_prop) == 0;
+}
+
+static void store_filter_meta_locked(struct mfd_fader_slot *slot, const char *source, const char *filter,
+				     const char *prop, const struct mfd_filter_meta *meta)
+{
+	slot->filter_meta_cached = true;
+	slot->filter_meta_stale = false;
+	slot->filter_meta_result = (uint8_t)meta->result;
+	snprintf(slot->filter_meta_source, sizeof(slot->filter_meta_source), "%s", source);
+	snprintf(slot->filter_meta_filter, sizeof(slot->filter_meta_filter), "%s", filter);
+	snprintf(slot->filter_meta_prop, sizeof(slot->filter_meta_prop), "%s", prop);
+	slot->filter_meta_is_int = meta->info.is_int;
+	slot->filter_meta_min = meta->info.min_val;
+	slot->filter_meta_max = meta->info.max_val;
+	slot->filter_meta_step = meta->info.step;
+	snprintf(slot->filter_meta_suffix, sizeof(slot->filter_meta_suffix), "%s", meta->info.suffix);
+	snprintf(slot->filter_meta_label, sizeof(slot->filter_meta_label), "%s", meta->info.label);
+}
+
+/* Whether this thread may run a filter's properties code inside a re-check. Not the video thread (A-03). */
+static bool filter_meta_may_read_here(const struct mfd_engine *eng)
+{
+	return !eng->filter_meta_defer_for_test && !obs_in_task_thread(OBS_TASK_GRAPHICS);
+}
+
+/* Engine lock held. Every Filter Setting strip reads its filter's properties again at its next re-check. */
+static void mark_filter_meta_stale_locked(struct mfd_engine *eng, const char *source, const char *filter)
+{
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		struct mfd_fader_slot *s = &eng->fader_slots[i];
+		/* a strip whose properties are being read for the first time is named by its binding */
+		const char *s_source = s->filter_meta_cached ? s->filter_meta_source : s->source_a_name;
+		const char *s_filter = s->filter_meta_cached ? s->filter_meta_filter : s->filter_name;
+		if (source && strcmp(s_source, source) != 0) {
+			continue;
+		}
+		if (filter && strcmp(s_filter, filter) != 0) {
+			continue;
+		}
+		s->filter_meta_gen++; /* a read that began before this change is out of date when it lands */
+		if (s->filter_meta_cached) {
+			s->filter_meta_stale = true;
+		}
+	}
+}
+
+/*
+ * UI thread, no engine lock held. Reads the filter properties that a re-check on the video thread could not, stores
+ * them under the lock and re-checks. The properties code of a filter (this plugin's own, or anyone's) so never runs on
+ * the video thread and never holds up the engine lock (A-03, B-09).
+ */
+static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng)
+{
+	struct {
+		int slot;
+		uint32_t gen;
+		char source[MFD_SOURCE_NAME_MAX];
+		char filter[MFD_SOURCE_NAME_MAX];
+		char prop[MFD_FILTER_PROP_NAME_MAX];
+		struct mfd_filter_meta meta;
+	} *jobs = NULL;
+	int n = 0;
+
+	mfd_engine_lock(eng);
+	if (!eng->filter_meta_refresh_pending) {
+		mfd_engine_unlock(eng);
+		return;
+	}
+	eng->filter_meta_refresh_pending = false;
+	jobs = bzalloc(sizeof(*jobs) * MFD_MAX_FADER_SLOTS);
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_fader_slot *s = &eng->fader_slots[i];
+		if (!s->enabled || s->target_type != MFD_TARGET_FILTER_PARAM || s->source_a_name[0] == '\0' ||
+		    s->filter_name[0] == '\0' || s->filter_prop[0] == '\0') {
+			continue;
+		}
+		if (filter_meta_matches_slot(s) && !s->filter_meta_stale) {
+			continue;
+		}
+		jobs[n].slot = i;
+		jobs[n].gen = s->filter_meta_gen;
+		snprintf(jobs[n].source, sizeof(jobs[n].source), "%s", s->source_a_name);
+		snprintf(jobs[n].filter, sizeof(jobs[n].filter), "%s", s->filter_name);
+		snprintf(jobs[n].prop, sizeof(jobs[n].prop), "%s", s->filter_prop);
+		++n;
+	}
+	mfd_engine_unlock(eng);
+
+	for (int k = 0; k < n; ++k) {
+		read_filter_meta(eng, jobs[k].source, jobs[k].filter, jobs[k].prop, &jobs[k].meta);
+	}
+
+	if (n > 0) {
+		mfd_engine_lock(eng);
+		for (int k = 0; k < n; ++k) {
+			struct mfd_fader_slot *s = &eng->fader_slots[jobs[k].slot];
+			/* the strip may have been set to something else meanwhile: then its own re-check reads */
+			if (strcmp(s->source_a_name, jobs[k].source) == 0 &&
+			    strcmp(s->filter_name, jobs[k].filter) == 0 && strcmp(s->filter_prop, jobs[k].prop) == 0) {
+				store_filter_meta_locked(s, jobs[k].source, jobs[k].filter, jobs[k].prop,
+							 &jobs[k].meta);
+				if (s->filter_meta_gen != jobs[k].gen) {
+					/* the filter changed while it was being read: what was stored may be the
+					 * older range, so it is read once more */
+					s->filter_meta_stale = true;
+				}
+			}
+		}
+		mfd_engine_reevaluate_slots(eng, true);
+		mfd_engine_unlock(eng);
+	}
+	bfree(jobs);
+}
+
 static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot_index, bool *out_avail,
 						struct mfd_msg *out_reason)
 {
@@ -2263,53 +2531,54 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 		mfd_msg_set(&rsn, MFD_MSG_FILTER_RESERVED, slot->filter_name, NULL, NULL, NULL, NULL);
 	} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, NULL);
+		/* a source of this name that comes back (undo, a scene copy) may carry a same-named filter of another
+		 * kind or range, and its filters load before any signal of it reaches this strip: read afresh (QA-A04) */
+		slot->filter_meta_cached = false;
 		mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL, NULL);
 	} else if (!sg_filter_exists(eng, slot->source_a_name, slot->filter_name, NULL)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, slot->filter_name);
+		slot->filter_meta_cached = false; /* a filter of this name added later is read afresh */
 		mfd_msg_set(&rsn, MFD_MSG_FILTER_REMOVED, slot->filter_name, slot->source_a_name, NULL, NULL, NULL);
 	} else {
-		obs_properties_t *props = sg_create_filter_properties(eng, slot->source_a_name, slot->filter_name);
-		if (!props) {
+		/* The filter's properties are read once per binding and kept (A-03): a re-check on a scene change costs
+		 * no properties call. They are read again when the binding changed or the filter changed, on a thread
+		 * that may run the filter's code; the video thread hands that to the UI thread and goes on with what
+		 * it last knew. */
+		bool have = filter_meta_matches_slot(slot);
+		if (!have || slot->filter_meta_stale) {
+			if (filter_meta_may_read_here(eng)) {
+				struct mfd_filter_meta meta;
+				read_filter_meta(eng, slot->source_a_name, slot->filter_name, slot->filter_prop, &meta);
+				store_filter_meta_locked(slot, slot->source_a_name, slot->filter_name,
+							 slot->filter_prop, &meta);
+				have = true;
+			} else {
+				eng->filter_meta_refresh_pending = true;
+				eng->pending_ui_notify = true; /* wakes the UI thread's flush */
+			}
+		}
+		if (!have || slot->filter_meta_result == MFD_FILTER_META_NO_PROPS ||
+		    slot->filter_meta_result == MFD_FILTER_META_MISSING) {
 			mfd_msg_set(&rsn, MFD_MSG_SETTING_UNAVAILABLE, slot->filter_prop, slot->filter_name, NULL, NULL,
 				    NULL);
+		} else if (slot->filter_meta_result == MFD_FILTER_META_NOT_NUMERIC) {
+			mfd_msg_set(&rsn, MFD_MSG_SETTING_NOT_NUMERIC, slot->filter_prop, slot->filter_name, NULL, NULL,
+				    NULL);
 		} else {
-			obs_data_t *settings = sg_get_filter_settings(eng, slot->source_a_name, slot->filter_name);
-			bool found_non_num = false;
-			struct mfd_filter_prop_info info;
-			memset(&info, 0, sizeof(info));
-			bool found_num = find_filter_prop_in_props_depth(props, settings, slot->filter_prop,
-									 &found_non_num, &info, 0);
-			if (settings) {
-				obs_data_release(settings);
-			}
-			obs_properties_destroy(props);
-
-			if (!found_num) {
-				if (found_non_num) {
-					mfd_msg_set(&rsn, MFD_MSG_SETTING_NOT_NUMERIC, slot->filter_prop,
-						    slot->filter_name, NULL, NULL, NULL);
-				} else {
-					mfd_msg_set(&rsn, MFD_MSG_SETTING_UNAVAILABLE, slot->filter_prop,
-						    slot->filter_name, NULL, NULL, NULL);
-				}
-			} else if (!mfd_filter_range_is_valid(slot->filter_from_val, slot->filter_to_val, info.min_val,
-							      info.max_val)) {
-				slot->filter_prop_is_int = info.is_int;
-				slot->filter_prop_min = info.min_val;
-				slot->filter_prop_max = info.max_val;
-				slot->filter_prop_step = info.step;
-				snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s", info.suffix);
-				snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s", info.label);
+			slot->filter_prop_is_int = slot->filter_meta_is_int;
+			slot->filter_prop_min = slot->filter_meta_min;
+			slot->filter_prop_max = slot->filter_meta_max;
+			slot->filter_prop_step = slot->filter_meta_step;
+			snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s",
+				 slot->filter_meta_suffix);
+			snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s",
+				 slot->filter_meta_label);
+			if (!mfd_filter_range_is_valid(slot->filter_from_val, slot->filter_to_val,
+						       slot->filter_meta_min, slot->filter_meta_max)) {
 				set_range_outside_msg(&rsn, slot->filter_from_val, slot->filter_to_val,
-						      slot->filter_prop, info.min_val, info.max_val);
+						      slot->filter_prop, slot->filter_meta_min, slot->filter_meta_max);
 			} else {
 				slot->filter_prop_valid = true;
-				slot->filter_prop_is_int = info.is_int;
-				slot->filter_prop_min = info.min_val;
-				slot->filter_prop_max = info.max_val;
-				slot->filter_prop_step = info.step;
-				snprintf(slot->filter_prop_suffix, sizeof(slot->filter_prop_suffix), "%s", info.suffix);
-				snprintf(slot->filter_prop_label, sizeof(slot->filter_prop_label), "%s", info.label);
 				avail = true;
 				mfd_msg_clear(&rsn);
 			}
@@ -2321,6 +2590,177 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 	}
 	if (out_reason) {
 		*out_reason = rsn;
+	}
+}
+
+/* What evaluate_slot_preconditions works out for one strip: its log label, whether it can act and why not, the
+ * scene it acts in, and which of a mix's two layers is on top. */
+struct slot_verdict {
+	char lbl[128];
+	bool avail;
+	struct mfd_msg rsn;
+	char res_scene[MFD_SOURCE_NAME_MAX];
+	bool a_above_b;
+};
+
+/* A Two-Source Mix strip: both layers named, different, and in one scene (its own, or the first that holds both). */
+static void verdict_two_source_mix(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, bool live,
+				   struct slot_verdict *v)
+{
+	if (slot->source_a_name[0] != '\0' && slot->source_b_name[0] != '\0') {
+		snprintf(v->lbl, sizeof(v->lbl), "%s -> %s", slot->source_a_name, slot->source_b_name);
+	} else {
+		snprintf(v->lbl, sizeof(v->lbl), "Crossfade A/B");
+	}
+	if (slot->source_a_name[0] == '\0' || slot->source_b_name[0] == '\0') {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
+	} else if (!live) {
+		v->avail = slot->cached_available;
+		v->rsn = slot->cached_reason_msg;
+	} else if (slot->scene_name[0] != '\0') {
+		if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL, NULL, NULL);
+		} else {
+			int idx_a = sg_scene_item_stack_index(eng, slot->scene_name, slot->source_a_name);
+			int idx_b = sg_scene_item_stack_index(eng, slot->scene_name, slot->source_b_name);
+			if (idx_a < 0) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name, slot->scene_name,
+					    NULL, NULL, NULL);
+			} else if (idx_b < 0) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_b_name, slot->scene_name,
+					    NULL, NULL, NULL);
+			} else {
+				v->avail = true;
+				mfd_msg_clear(&v->rsn);
+				v->a_above_b = (idx_a > idx_b);
+				snprintf(v->res_scene, sizeof(v->res_scene), "%s", slot->scene_name);
+			}
+		}
+	} else {
+		char found_sc[MFD_SOURCE_NAME_MAX] = {0};
+		int idx_a = -1;
+		int idx_b = -1;
+		if (sg_find_scene_with_pair(eng, slot->source_a_name, slot->source_b_name, found_sc, sizeof(found_sc),
+					    &idx_a, &idx_b)) {
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			v->a_above_b = (idx_a > idx_b);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", found_sc);
+		} else if (slot->resolved_scene_name[0] != '\0') {
+			if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->resolved_scene_name, NULL, NULL, NULL,
+					    NULL);
+			} else if (sg_scene_item_stack_index(eng, slot->resolved_scene_name, slot->source_a_name) < 0) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
+					    slot->resolved_scene_name, NULL, NULL, NULL);
+			} else {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_b_name,
+					    slot->resolved_scene_name, NULL, NULL, NULL);
+			}
+		} else {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_LAYERS_NOT_IN_SAME_SCENE, slot->source_a_name, slot->source_b_name,
+				    NULL, NULL, NULL);
+		}
+	}
+}
+
+/* A Layer strip: its source in its own scene, or else in the scene on air, or else in any scene. */
+static void verdict_single_layer(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, bool live,
+				 struct slot_verdict *v)
+{
+	if (slot->source_a_name[0] != '\0') {
+		snprintf(v->lbl, sizeof(v->lbl), "%s (Opacity)", slot->source_a_name);
+	} else {
+		snprintf(v->lbl, sizeof(v->lbl), "Layer Opacity");
+	}
+	if (slot->source_a_name[0] == '\0') {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	} else if (!live) {
+		v->avail = slot->cached_available;
+		v->rsn = slot->cached_reason_msg;
+	} else if (slot->scene_name[0] != '\0') {
+		if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL, NULL, NULL);
+		} else if (sg_scene_item_stack_index(eng, slot->scene_name, slot->source_a_name) < 0) {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name, slot->scene_name, NULL,
+				    NULL, NULL);
+		} else {
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", slot->scene_name);
+		}
+	} else {
+		char found_sc[MFD_SOURCE_NAME_MAX] = {0};
+		if (eng->cached_program_scene[0] != '\0' &&
+		    sg_scene_item_stack_index(eng, eng->cached_program_scene, slot->source_a_name) >= 0) {
+			/* A strip with no scene of its own acts on the scene on air when that scene
+			 * holds its source (B-05): a show/hide or blend pad must change what the
+			 * audience sees, not the first scene OBS happens to list. Re-checked on
+			 * every Program change. */
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", eng->cached_program_scene);
+		} else if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name, NULL, found_sc,
+								  sizeof(found_sc))) {
+			v->avail = true;
+			mfd_msg_clear(&v->rsn);
+			snprintf(v->res_scene, sizeof(v->res_scene), "%s", found_sc);
+		} else if (slot->resolved_scene_name[0] != '\0') {
+			if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_SCENE_DELETED, slot->resolved_scene_name, NULL, NULL, NULL,
+					    NULL);
+			} else {
+				v->avail = false;
+				mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
+					    slot->resolved_scene_name, NULL, NULL, NULL);
+			}
+		} else {
+			v->avail = false;
+			mfd_msg_set(&v->rsn, MFD_MSG_LAYER_NOT_IN_ANY_SCENE, slot->source_a_name, NULL, NULL, NULL,
+				    NULL);
+		}
+	}
+}
+
+/* An Audio Volume strip: its source exists and has audio. */
+static void verdict_audio_volume(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, bool live,
+				 struct slot_verdict *v)
+{
+	if (slot->source_a_name[0] != '\0') {
+		snprintf(v->lbl, sizeof(v->lbl), "%s (Audio)", slot->source_a_name);
+	} else {
+		snprintf(v->lbl, sizeof(v->lbl), "Audio Volume");
+	}
+	if (slot->source_a_name[0] == '\0') {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	} else if (!live) {
+		v->avail = slot->cached_available;
+		v->rsn = slot->cached_reason_msg;
+	} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL, NULL);
+	} else if (!mfd_engine_source_has_audio(eng, slot->source_a_name)) {
+		v->avail = false;
+		mfd_msg_set(&v->rsn, MFD_MSG_NO_AUDIO, slot->source_a_name, NULL, NULL, NULL, NULL);
+	} else {
+		v->avail = true;
+		mfd_msg_clear(&v->rsn);
 	}
 }
 
@@ -2337,219 +2777,71 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 					struct mfd_msg *out_reason, char *out_resolved_scene, size_t resolved_size,
 					bool *out_a_above_b, bool live)
 {
-	char lbl[128] = "Unassigned";
-	bool avail = false;
-	struct mfd_msg rsn;
-	mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-	char res_scene[MFD_SOURCE_NAME_MAX] = {0};
-	bool a_above_b = slot ? slot->a_is_above_b : false;
+	struct slot_verdict v;
+	memset(&v, 0, sizeof(v));
+	snprintf(v.lbl, sizeof(v.lbl), "Unassigned");
+	mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+	v.a_above_b = slot ? slot->a_is_above_b : false;
 
 	if (slot) {
 		if (slot->target_type == MFD_TARGET_TWO_SOURCE_MIX || slot->target_type == MFD_TARGET_SINGLE_LAYER) {
-			snprintf(res_scene, sizeof(res_scene), "%s", slot->resolved_scene_name);
+			snprintf(v.res_scene, sizeof(v.res_scene), "%s", slot->resolved_scene_name);
 		}
 		if (!slot->enabled) {
-			snprintf(lbl, sizeof(lbl), "Disabled");
-			avail = false;
-			mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+			snprintf(v.lbl, sizeof(v.lbl), "Disabled");
+			v.avail = false;
+			mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 		} else {
 			switch (slot->target_type) {
 			case MFD_TARGET_UNASSIGNED:
-				snprintf(lbl, sizeof(lbl), "Unassigned");
-				avail = false;
-				mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+				snprintf(v.lbl, sizeof(v.lbl), "Unassigned");
+				v.avail = false;
+				mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				break;
 
 			case MFD_TARGET_MIX_MASTER:
-				snprintf(lbl, sizeof(lbl), "Whole mix");
-				avail = true; /* Can request; the external mix provider confirms application. */
-				mfd_msg_clear(&rsn);
+				snprintf(v.lbl, sizeof(v.lbl), "Whole mix");
+				v.avail = true; /* Can request; the external mix provider confirms application. */
+				mfd_msg_clear(&v.rsn);
 				break;
 
 			case MFD_TARGET_TBAR:
-				snprintf(lbl, sizeof(lbl), "Studio Mode T-Bar");
+				snprintf(v.lbl, sizeof(v.lbl), "Studio Mode T-Bar");
 				if (!mfd_engine_is_studio_mode_active(eng)) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_STUDIO_MODE_OFF, NULL, NULL, NULL, NULL, NULL);
+					v.avail = false;
+					mfd_msg_set(&v.rsn, MFD_MSG_STUDIO_MODE_OFF, NULL, NULL, NULL, NULL, NULL);
 				} else if (eng && eng->tbar_error[0] != '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_TBAR_SLIDER_MISSING, NULL, NULL, NULL, NULL, NULL);
+					v.avail = false;
+					mfd_msg_set(&v.rsn, MFD_MSG_TBAR_SLIDER_MISSING, NULL, NULL, NULL, NULL, NULL);
 				} else {
-					avail = true;
-					mfd_msg_clear(&rsn);
+					v.avail = true;
+					mfd_msg_clear(&v.rsn);
 				}
 				break;
 
-			case MFD_TARGET_TWO_SOURCE_MIX: {
-				if (slot->source_a_name[0] != '\0' && slot->source_b_name[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s -> %s", slot->source_a_name,
-						 slot->source_b_name);
-				} else {
-					snprintf(lbl, sizeof(lbl), "Crossfade A/B");
-				}
-				if (slot->source_a_name[0] == '\0' || slot->source_b_name[0] == '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-				} else if (strcmp(slot->source_a_name, slot->source_b_name) == 0) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_SAME_LAYER, NULL, NULL, NULL, NULL, NULL);
-				} else if (!live) {
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
-				} else if (slot->scene_name[0] != '\0') {
-					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL,
-							    NULL, NULL);
-					} else {
-						int idx_a = sg_scene_item_stack_index(eng, slot->scene_name,
-										      slot->source_a_name);
-						int idx_b = sg_scene_item_stack_index(eng, slot->scene_name,
-										      slot->source_b_name);
-						if (idx_a < 0) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_a_name, slot->scene_name, NULL, NULL,
-								    NULL);
-						} else if (idx_b < 0) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_b_name, slot->scene_name, NULL, NULL,
-								    NULL);
-						} else {
-							avail = true;
-							mfd_msg_clear(&rsn);
-							a_above_b = (idx_a > idx_b);
-							snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
-						}
-					}
-				} else {
-					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
-					int idx_a = -1;
-					int idx_b = -1;
-					if (sg_find_scene_with_pair(eng, slot->source_a_name, slot->source_b_name,
-								    found_sc, sizeof(found_sc), &idx_a, &idx_b)) {
-						avail = true;
-						mfd_msg_clear(&rsn);
-						a_above_b = (idx_a > idx_b);
-						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
-					} else if (slot->resolved_scene_name[0] != '\0') {
-						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED,
-								    slot->resolved_scene_name, NULL, NULL, NULL, NULL);
-						} else if (sg_scene_item_stack_index(eng, slot->resolved_scene_name,
-										     slot->source_a_name) < 0) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_a_name, slot->resolved_scene_name,
-								    NULL, NULL, NULL);
-						} else {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_b_name, slot->resolved_scene_name,
-								    NULL, NULL, NULL);
-						}
-					} else {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_LAYERS_NOT_IN_SAME_SCENE, slot->source_a_name,
-							    slot->source_b_name, NULL, NULL, NULL);
-					}
-				}
+			case MFD_TARGET_TWO_SOURCE_MIX:
+				verdict_two_source_mix(eng, slot, live, &v);
 				break;
-			}
 
-			case MFD_TARGET_SINGLE_LAYER: {
-				if (slot->source_a_name[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s (Opacity)", slot->source_a_name);
-				} else {
-					snprintf(lbl, sizeof(lbl), "Layer Opacity");
-				}
-				if (slot->source_a_name[0] == '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-				} else if (!live) {
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
-				} else if (slot->scene_name[0] != '\0') {
-					if (!mfd_engine_scene_exists(eng, slot->scene_name)) {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED, slot->scene_name, NULL, NULL,
-							    NULL, NULL);
-					} else if (sg_scene_item_stack_index(eng, slot->scene_name,
-									     slot->source_a_name) < 0) {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE, slot->source_a_name,
-							    slot->scene_name, NULL, NULL, NULL);
-					} else {
-						avail = true;
-						mfd_msg_clear(&rsn);
-						snprintf(res_scene, sizeof(res_scene), "%s", slot->scene_name);
-					}
-				} else {
-					char found_sc[MFD_SOURCE_NAME_MAX] = {0};
-					if (mfd_engine_find_other_scene_with_layer(eng, slot->source_a_name, NULL,
-										   found_sc, sizeof(found_sc))) {
-						avail = true;
-						mfd_msg_clear(&rsn);
-						snprintf(res_scene, sizeof(res_scene), "%s", found_sc);
-					} else if (slot->resolved_scene_name[0] != '\0') {
-						if (!mfd_engine_scene_exists(eng, slot->resolved_scene_name)) {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_SCENE_DELETED,
-								    slot->resolved_scene_name, NULL, NULL, NULL, NULL);
-						} else {
-							avail = false;
-							mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_SCENE,
-								    slot->source_a_name, slot->resolved_scene_name,
-								    NULL, NULL, NULL);
-						}
-					} else {
-						avail = false;
-						mfd_msg_set(&rsn, MFD_MSG_LAYER_NOT_IN_ANY_SCENE, slot->source_a_name,
-							    NULL, NULL, NULL, NULL);
-					}
-				}
+			case MFD_TARGET_SINGLE_LAYER:
+				verdict_single_layer(eng, slot, live, &v);
 				break;
-			}
 
 			case MFD_TARGET_AUDIO_VOLUME:
-				if (slot->source_a_name[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s (Audio)", slot->source_a_name);
-				} else {
-					snprintf(lbl, sizeof(lbl), "Audio Volume");
-				}
-				if (slot->source_a_name[0] == '\0') {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
-				} else if (!live) {
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
-				} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL,
-						    NULL);
-				} else if (!mfd_engine_source_has_audio(eng, slot->source_a_name)) {
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NO_AUDIO, slot->source_a_name, NULL, NULL, NULL,
-						    NULL);
-				} else {
-					avail = true;
-					mfd_msg_clear(&rsn);
-				}
+				verdict_audio_volume(eng, slot, live, &v);
 				break;
 
 			case MFD_TARGET_FILTER_PARAM:
 				if (slot->source_a_name[0] != '\0' && slot->filter_name[0] != '\0' &&
 				    slot->filter_prop[0] != '\0') {
-					snprintf(lbl, sizeof(lbl), "%s: %s (%s)", slot->source_a_name,
+					snprintf(v.lbl, sizeof(v.lbl), "%s: %s (%s)", slot->source_a_name,
 						 slot->filter_name, slot->filter_prop);
-					avail = slot->cached_available;
-					rsn = slot->cached_reason_msg;
+					v.avail = slot->cached_available;
+					v.rsn = slot->cached_reason_msg;
 				} else {
-					snprintf(lbl, sizeof(lbl), "Filter Setting");
-					avail = false;
-					mfd_msg_set(&rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
+					snprintf(v.lbl, sizeof(v.lbl), "Filter Setting");
+					v.avail = false;
+					mfd_msg_set(&v.rsn, MFD_MSG_NOT_SET_UP, NULL, NULL, NULL, NULL, NULL);
 				}
 				break;
 			}
@@ -2557,22 +2849,69 @@ static void evaluate_slot_preconditions(const struct mfd_engine *eng, const stru
 	}
 
 	if (out_label && label_size > 0U) {
-		/* lbl holds names cut to 127 bytes: a long non-ASCII name can end in half a character */
-		snprintf(out_label, label_size, "%s", lbl);
+		/* v.lbl holds names cut to 127 bytes: a long non-ASCII name can end in half a character */
+		snprintf(out_label, label_size, "%s", v.lbl);
 		mfd_utf8_make_valid(out_label);
 	}
 	if (out_available) {
-		*out_available = avail;
+		*out_available = v.avail;
 	}
 	if (out_reason) {
-		*out_reason = rsn;
+		*out_reason = v.rsn;
 	}
 	if (out_resolved_scene && resolved_size > 0U) {
-		snprintf(out_resolved_scene, resolved_size, "%s", res_scene);
+		snprintf(out_resolved_scene, resolved_size, "%s", v.res_scene);
 	}
 	if (out_a_above_b) {
-		*out_a_above_b = a_above_b;
+		*out_a_above_b = v.a_above_b;
 	}
+}
+
+static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *out);
+
+/*
+ * Engine lock held. The strip's output is at v and its fader has to pick it up again from where it is: the takeover
+ * starts over at v, and if the fader's position is known it is kept, with the hint pointing from it to v.
+ */
+static void restart_pickup_at_locked(const struct mfd_engine *eng, struct mfd_fader_slot *s, float v)
+{
+	bool had_raw = s->takeover.has_last_fader;
+	float raw = s->last_raw_norm;
+	mfd_takeover_init(&s->takeover, v, MFD_DEFAULT_PICKUP_THRESHOLD, false);
+	configure_slot_takeover_mode(eng, s);
+	if (had_raw) {
+		s->takeover.has_last_fader = true;
+		s->takeover.last_raw_fader = raw;
+		s->takeover.last_fader = raw;
+		float diff = raw - v;
+		s->takeover.hint = fabsf(diff) <= s->takeover.pickup_threshold ? MFD_HINT_NONE
+				   : diff < 0.0f                               ? MFD_HINT_MOVE_UP
+									       : MFD_HINT_MOVE_DOWN;
+	}
+}
+
+/*
+ * B-06: a Two-Source Mix strip that was just loaded or bound has written nothing yet, and OBS has both sources at the
+ * level their layer filters hold (100 % after a restart: the filter does not save its level). So the picture shows the
+ * upper source. The strip starts at the end that shows the same picture, with pick-up from where its fader is,
+ * instead of claiming 0 % (source A) while Program shows B. Nothing is written to OBS: the picture does not move.
+ */
+static void mix_start_where_obs_is_locked(struct mfd_engine *eng, struct mfd_fader_slot *slot)
+{
+	slot->mix_start_pending = false;
+	float level_a = 1.0f;
+	float level_b = 1.0f;
+	(void)vj_live_opacity(eng, slot->source_a_name, &level_a);
+	(void)vj_live_opacity(eng, slot->source_b_name, &level_b);
+	const bool a_above = slot->a_is_above_b;
+	const bool upper_shown = (a_above ? level_a : level_b) >= 0.5f;
+	/* 0 % is source A, 100 % is source B */
+	const float t = (a_above == upper_shown) ? 0.0f : 1.0f;
+
+	mfd_smoother_reset(&slot->smoother, t);
+	restart_pickup_at_locked(eng, slot, t);
+	slot->last_applied_val = t;
+	mfd_crossfade_eval_stacked(slot->curve, t, a_above, &slot->last_alpha_a, &slot->last_alpha_b);
 }
 
 void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
@@ -2645,6 +2984,10 @@ void mfd_engine_reevaluate_slots(struct mfd_engine *eng, bool emit_if_changed)
 			mfd_engine_apply_slot_output_ex(eng, slot, 0.0f, false);
 			mfd_takeover_sync_external(&slot->takeover, 0.0f);
 			mfd_engine_notify_fader_changed(eng, i, "api");
+			any_changed = true;
+		} else if (new_avail && slot->target_type == MFD_TARGET_TWO_SOURCE_MIX && slot->mix_start_pending &&
+			   !(eng->setup_session.active && eng->setup_session.slot_index == i)) {
+			mix_start_where_obs_is_locked(eng, slot);
 			any_changed = true;
 		} else if (new_avail && slot->target_type == MFD_TARGET_TWO_SOURCE_MIX && prev_avail &&
 			   prev_a_above_b != new_a_above_b &&
@@ -2719,6 +3062,9 @@ static bool rename_source_refs_locked(struct mfd_engine *eng, const char *prev_n
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		bool slot_touched = false;
 		if (strcmp(s->source_a_name, prev_name) == 0) {
+			if (filter_meta_matches_slot(s)) { /* the same source under a new name */
+				snprintf(s->filter_meta_source, sizeof(s->filter_meta_source), "%s", new_name);
+			}
 			snprintf(s->source_a_name, sizeof(s->source_a_name), "%s", new_name);
 			slot_touched = true;
 		}
@@ -2779,6 +3125,9 @@ static bool rename_filter_refs_locked(struct mfd_engine *eng, const char *parent
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
 		if (s->target_type == MFD_TARGET_FILTER_PARAM && strcmp(s->source_a_name, parent_source_name) == 0 &&
 		    strcmp(s->filter_name, prev_name) == 0) {
+			if (filter_meta_matches_slot(s)) { /* the same filter under a new name: its properties hold */
+				snprintf(s->filter_meta_filter, sizeof(s->filter_meta_filter), "%s", new_name);
+			}
 			snprintf(s->filter_name, sizeof(s->filter_name), "%s", new_name);
 			mfd_engine_bump_slot_rev(eng, i);
 			touched = true;
@@ -2917,12 +3266,13 @@ void mfd_engine_handle_filter_settings_updated(struct mfd_engine *eng, const cha
 void mfd_engine_handle_filter_properties_updated(struct mfd_engine *eng, const char *parent_source_name,
 						 const char *filter_name)
 {
-	UNUSED_PARAMETER(parent_source_name);
-	UNUSED_PARAMETER(filter_name);
 	if (!eng) {
 		return;
 	}
+	mfd_engine_lock(eng);
+	mark_filter_meta_stale_locked(eng, parent_source_name, filter_name);
 	mfd_engine_reevaluate_slots(eng, true);
+	mfd_engine_unlock(eng);
 }
 
 void mfd_engine_get_slot_status(const struct mfd_engine *eng, const struct mfd_fader_slot *slot, char *out_label,
@@ -3335,10 +3685,10 @@ bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *so
 		return false;
 	}
 	snprintf(out->source_name, sizeof(out->source_name), "%s", source_name);
-	mfd_engine_lock(eng);
+	/* No engine lock (F-04): this builds the properties of every filter on the source, which runs the filters' own
+	 * code and can be slow, and it reads nothing of the engine's state; the video tick must not wait for it. */
 	if (!mfd_engine_source_exists(eng, source_name)) {
 		out->source_exists = false;
-		mfd_engine_unlock(eng);
 		return false;
 	}
 	out->source_exists = true;
@@ -3346,7 +3696,6 @@ bool mfd_engine_get_source_filter_catalog(struct mfd_engine *eng, const char *so
 	bool is_sc = false;
 	(void)sg_enum_source_filters(eng, source_name, &is_sc, fill_source_filter_cat_cb, &ctx);
 	out->is_scene = is_sc || mfd_engine_scene_exists(eng, source_name);
-	mfd_engine_unlock(eng);
 	return true;
 }
 
@@ -3565,15 +3914,6 @@ static bool append_live_vendor_audio_cb(void *param, obs_source_t *src)
 	return true;
 }
 
-bool mfd_engine_fill_vendor_catalog_locked(struct mfd_engine *eng, const char *source_name, obs_data_t *response_data,
-					   char *out_err, size_t err_size)
-{
-	struct mfd_msg msg;
-	bool ok = mfd_engine_fill_vendor_catalog_msg_locked(eng, source_name, response_data, &msg);
-	mfd_msg_format_english(&msg, out_err, err_size);
-	return ok;
-}
-
 bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const char *source_name,
 					       obs_data_t *response_data, struct mfd_msg *out_msg)
 {
@@ -3655,6 +3995,28 @@ bool mfd_engine_fill_vendor_catalog_msg_locked(struct mfd_engine *eng, const cha
 	obs_data_array_release(audio_arr);
 	obs_data_array_release(hosts_arr);
 	return true;
+}
+
+void mfd_engine_get_ui_revs(struct mfd_engine *eng, uint64_t *topology_rev, uint64_t *telemetry_rev,
+			    uint64_t *desk_frame_rev)
+{
+	uint64_t topo = 0U, tele = 0U, frame = 0U;
+	if (eng) {
+		mfd_engine_lock(eng);
+		topo = eng->config_topology_rev;
+		tele = eng->telemetry_rev;
+		frame = eng->desk_frame_rev;
+		mfd_engine_unlock(eng);
+	}
+	if (topology_rev) {
+		*topology_rev = topo;
+	}
+	if (telemetry_rev) {
+		*telemetry_rev = tele;
+	}
+	if (desk_frame_rev) {
+		*desk_frame_rev = frame;
+	}
 }
 
 void mfd_engine_get_ui_snapshot(struct mfd_engine *eng, struct mfd_ui_snapshot *out)
@@ -3916,6 +4278,86 @@ void mfd_engine_cancel_setup_session(struct mfd_engine *eng)
 	mfd_engine_unlock(eng);
 }
 
+static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_slot *s, float v);
+static void apply_source_opacity_and_afv(const struct mfd_engine *eng, const char *source_name, float alpha_01,
+					 bool afv);
+
+/* What a strip showed or mixed before an edit: the sources it may leave behind (B-07). */
+struct mfd_layer_binding {
+	enum mfd_target_type target;
+	bool afv;
+	char source_a[MFD_SOURCE_NAME_MAX];
+	char source_b[MFD_SOURCE_NAME_MAX];
+};
+
+static void layer_binding_read(const struct mfd_fader_slot *s, struct mfd_layer_binding *out)
+{
+	out->target = s->enabled ? s->target_type : MFD_TARGET_UNASSIGNED;
+	out->afv = s->audio_follows_video;
+	snprintf(out->source_a, sizeof(out->source_a), "%s", s->source_a_name);
+	snprintf(out->source_b, sizeof(out->source_b), "%s", s->source_b_name);
+}
+
+/* Whether the strip's job names this source as a layer it shows or mixes, switched on or not. */
+static bool slot_names_layer(const struct mfd_fader_slot *s, const char *source)
+{
+	if (s->target_type == MFD_TARGET_SINGLE_LAYER) {
+		return strcmp(s->source_a_name, source) == 0;
+	}
+	if (s->target_type == MFD_TARGET_TWO_SOURCE_MIX) {
+		return strcmp(s->source_a_name, source) == 0 || strcmp(s->source_b_name, source) == 0;
+	}
+	return false;
+}
+
+static bool slot_drives_layer(const struct mfd_fader_slot *s, const char *source)
+{
+	return s->enabled && slot_names_layer(s, source);
+}
+
+/* A source no strip drives any more goes back to 100 %: left faded out, nothing could raise it again. */
+static void release_layer_if_undriven_locked(struct mfd_engine *eng, const char *source, bool afv)
+{
+	if (!source || source[0] == '\0') {
+		return;
+	}
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		if (slot_drives_layer(&eng->fader_slots[i], source)) {
+			return;
+		}
+	}
+	if (mfd_engine_source_exists(eng, source)) {
+		apply_source_opacity_and_afv(eng, source, 1.0f, afv);
+	}
+}
+
+/*
+ * B-07: a strip was given another source (or another job). Call after the strip has been written and reset. The
+ * sources it left go back to 100 % when no strip drives them, and a Layer Opacity strip starts at the level its new
+ * source has now, with pick-up from where its fader is: the picture does not jump at the first fader move.
+ *
+ * A source the strip still names has not been left: switching a strip off (the Advanced tab's "On" box, set_slot
+ * with "enabled": false) only parks it, and the source stays at the level it has on air (QA-A01).
+ */
+static void after_layer_binding_change_locked(struct mfd_engine *eng, struct mfd_fader_slot *s,
+					      const struct mfd_layer_binding *before)
+{
+	if ((before->target == MFD_TARGET_SINGLE_LAYER || before->target == MFD_TARGET_TWO_SOURCE_MIX) &&
+	    !slot_names_layer(s, before->source_a)) {
+		release_layer_if_undriven_locked(eng, before->source_a, before->afv);
+	}
+	if (before->target == MFD_TARGET_TWO_SOURCE_MIX && !slot_names_layer(s, before->source_b)) {
+		release_layer_if_undriven_locked(eng, before->source_b, before->afv);
+	}
+	if (s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
+	    (before->target != MFD_TARGET_SINGLE_LAYER || strcmp(before->source_a, s->source_a_name) != 0)) {
+		float live = 1.0f;
+		if (vj_live_opacity(eng, s->source_a_name, &live)) {
+			vj_start_strip_at_locked(eng, s, live);
+		}
+	}
+}
+
 bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_index)
 {
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -3930,6 +4372,8 @@ bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_ind
 	}
 	mfd_engine_detach_filter_binding_locked(eng, slot_index);
 	struct mfd_fader_slot *s = &eng->fader_slots[slot_index];
+	struct mfd_layer_binding before;
+	layer_binding_read(s, &before);
 	s->enabled = true;
 	s->scene_name[0] = '\0';
 	s->resolved_scene_name[0] = '\0';
@@ -3945,6 +4389,7 @@ bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_ind
 	s->audio_follows_video = false;
 	s->auto_follow = false;
 	mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
+	after_layer_binding_change_locked(eng, s, &before); /* the source it leaves is not left faded out (B-07) */
 	mfd_engine_bump_slot_rev(eng, slot_index);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
@@ -3984,8 +4429,36 @@ bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const str
 	return ok;
 }
 
+static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+						const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg);
+
+/* Takes the engine lock (A-04, F-14): the check reads the other strips' names and the cached OBS state, which the
+ * video tick and obs-websocket threads rewrite under that lock. The lock is recursive, so a commit that validates
+ * while holding it still works.
+ *
+ * A Filter Setting candidate needs the filter's properties, and building them runs the filter's own code. The Set up
+ * sheet asks on every change of a choice, so they are read before the lock is taken (QA-A03): a slow filter then
+ * costs the sheet a moment and the video tick nothing. */
 bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					     struct mfd_msg *out_msg)
+{
+	struct mfd_filter_meta meta;
+	const struct mfd_filter_meta *prefetched = NULL;
+	if (eng && cand && cand->enabled && cand->target_type == MFD_TARGET_FILTER_PARAM &&
+	    cand->source_a_name[0] != '\0' && cand->filter_name[0] != '\0' && cand->filter_prop[0] != '\0' &&
+	    !mfd_is_internal_filter(cand->filter_name, NULL) && filter_meta_may_read_here(eng)) {
+		read_filter_meta(eng, cand->source_a_name, cand->filter_name, cand->filter_prop, &meta);
+		prefetched = &meta;
+	}
+	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
+	mfd_engine_lock(lock_eng);
+	bool ok = validate_setup_candidate_msg_locked(eng, cand, prefetched, out_msg);
+	mfd_engine_unlock(lock_eng);
+	return ok;
+}
+
+static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
+						const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg)
 {
 	mfd_msg_clear(out_msg);
 	if (!eng || !cand || cand->slot_index < 0 || cand->slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -4017,10 +4490,9 @@ bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const
 	} else if (cand->target_type == MFD_TARGET_FILTER_PARAM) {
 		double fval = cand->filter_from_val;
 		double tval = cand->filter_to_val;
-		return mfd_engine_validate_filter_param_binding_msg_locked(eng, cand->slot_index, cand->enabled,
-									   cand->source_a_name, cand->filter_name,
-									   cand->filter_prop, true, &fval, &tval, NULL,
-									   out_msg);
+		return validate_filter_param_binding(eng, cand->slot_index, cand->enabled, cand->source_a_name,
+						     cand->filter_name, cand->filter_prop, true, &fval, &tval, NULL,
+						     prefetched, out_msg);
 	}
 
 	struct mfd_fader_slot tmp;
@@ -4106,6 +4578,8 @@ bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mf
 	mfd_engine_detach_filter_binding_locked(eng, cand->slot_index);
 
 	struct mfd_fader_slot *s = &eng->fader_slots[cand->slot_index];
+	struct mfd_layer_binding before;
+	layer_binding_read(s, &before);
 	mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 	s->enabled = cand->enabled;
 	s->addr = chosen_addr;
@@ -4147,6 +4621,7 @@ bool mfd_engine_commit_setup_session_msg(struct mfd_engine *eng, const struct mf
 										       : MFD_TARGET_UNASSIGNED;
 	s->target_type = force_prev;
 	mfd_engine_reset_slot_mode_state(eng, s, cand->target_type);
+	after_layer_binding_change_locked(eng, s, &before);
 
 	memset(&eng->setup_session, 0, sizeof(eng->setup_session));
 	mfd_engine_bump_slot_rev(eng, cand->slot_index);
@@ -4441,6 +4916,8 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 	mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 	mfd_engine_detach_filter_binding_locked(eng, slot_index);
 
+	struct mfd_layer_binding before;
+	layer_binding_read(s, &before);
 	s->enabled = edit->enabled;
 	bool invert_changed = (s->invert != edit->invert);
 	s->invert = edit->invert;
@@ -4500,7 +4977,24 @@ bool mfd_engine_update_slot_config_msg(struct mfd_engine *eng, int slot_index, c
 	if (edit->target_type == MFD_TARGET_FILTER_PARAM && filter_range_changed) {
 		s->target_type = MFD_TARGET_UNASSIGNED;
 	}
+	/* A layer or mix strip given another source starts afresh, as the Set up commit does (B-07): its level and
+	 * pick-up belonged to the source it had. */
+	const bool layer_sources_changed =
+		(edit->target_type == MFD_TARGET_SINGLE_LAYER || edit->target_type == MFD_TARGET_TWO_SOURCE_MIX) &&
+		before.target == edit->target_type &&
+		(strcmp(before.source_a, s->source_a_name) != 0 ||
+		 (edit->target_type == MFD_TARGET_TWO_SOURCE_MIX && strcmp(before.source_b, s->source_b_name) != 0));
+	if (layer_sources_changed) {
+		s->target_type = MFD_TARGET_UNASSIGNED;
+	}
 	mfd_engine_reset_slot_mode_state(eng, s, edit->target_type);
+	after_layer_binding_change_locked(eng, s, &before);
+	if (invert_changed && s->enabled && s->target_type != MFD_TARGET_TBAR &&
+	    s->target_type != MFD_TARGET_UNASSIGNED && s->takeover.has_last_fader) {
+		/* Reverse direction was switched: the fader now stands for the mirrored position. Its pick-up starts
+		 * over at the value the strip has, so the output does not jump to the mirror at the next message. */
+		restart_pickup_at_locked(eng, s, s->last_applied_val);
+	}
 	mfd_engine_bump_slot_rev(eng, slot_index);
 	mfd_engine_reevaluate_slots(eng, false);
 	mfd_engine_notify_state_changed(eng);
@@ -5135,12 +5629,40 @@ static float normalize_decoded_sample(struct mfd_engine *eng, struct mfd_midi_ad
  * switched off. */
 static void sync_parser_lsb_independence_locked(struct mfd_engine *eng)
 {
+	/* The table depends only on the desk, the layout and the bound addresses: work those out (19 small compares)
+	 * and leave the table alone while they are what it was built from (B-11). 0xFFFF is "no CC here". */
+	const bool all_independent = (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) ||
+				     mfd_engine_get_active_profile(eng) != MFD_PROFILE_GENERIC;
+	uint16_t key[MFD_MAX_FADER_SLOTS + 2];
+	key[0] = all_independent ? 1U : 0U;
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_midi_addr *a = &eng->fader_slots[i].addr;
+		const bool own = a->type == MFD_MIDI_CC && !a->is_14bit && a->number >= 32U && a->number < 64U;
+		key[i + 1] = own ? (uint16_t)(((uint16_t)a->channel << 8) | a->number) : (uint16_t)0xFFFFU;
+	}
+	{
+		const struct mfd_midi_addr *c = &eng->setup_session.candidate_addr;
+		const bool own = eng->setup_session.active && c->type == MFD_MIDI_CC && !c->is_14bit &&
+				 c->number >= 32U && c->number < 64U;
+		key[MFD_MAX_FADER_SLOTS + 1] = own ? (uint16_t)(((uint16_t)c->channel << 8) | c->number)
+						   : (uint16_t)0xFFFFU;
+	}
+	if (eng->midi_parser.lsb_table_built && memcmp(key, eng->lsb_sync_key, sizeof(key)) == 0) {
+		return;
+	}
+	memcpy(eng->lsb_sync_key, key, sizeof(key));
+
 	mfd_midi_parser_clear_lsb_independent(&eng->midi_parser);
+	eng->midi_parser.lsb_table_built = true;
 	/* The APC40 mkII sends only 7-bit CCs, but its controls sit on 14-bit LSB numbers: Cue Level (CC 47) is the
 	 * crossfader's (CC 15) partner and the track knobs (CC 48..55) the Device knobs' (CC 16..23). Turning one within
-	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar. Another desk on
-	 * the default profile keeps 14-bit pairing. */
-	if (eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name)) {
+	 * the pairing window of the other must not merge them, or Cue Level would drive the live T-bar.
+	 *
+	 * The same holds for every desk this plugin has a layout for (G-02): none of them sends 14-bit CC pairs, and
+	 * on several a second control sits 32 numbers above a fader (the nanoKONTROL2's S buttons above its sliders,
+	 * the MIDImix's knob rows). Only the Generic layout, where the desk is unknown, pairs CC n with CC n+32, and
+	 * there the parser asks for a run of pairs first (MFD_MIDI_14BIT_PAIR_REPEATS). */
+	if (all_independent) {
 		for (uint8_t ch = 0; ch < 16U; ++ch) {
 			for (uint8_t cc = 32U; cc < 64U; ++cc) {
 				mfd_midi_parser_set_lsb_independent(&eng->midi_parser, ch, cc, true);
@@ -5194,7 +5716,7 @@ static void sync_volume_slots_from_live_locked(struct mfd_engine *eng)
 static bool apc40_relative_knob(const struct mfd_engine *eng, const struct mfd_midi_addr *a)
 {
 	return eng->midi_dev.is_open && mfd_is_apc40_mk2_name(eng->midi_dev.opened_name) && a->type == MFD_MIDI_CC &&
-	       a->channel == 0U && (a->number == MFD_VJ_CC_TEMPO || a->number == 47U);
+	       a->channel == 0U && (a->number == MFD_VJ_CC_TEMPO || a->number == MFD_VJ_CC_CUE_LEVEL);
 }
 
 static int vj_effective_fade_ms(const struct mfd_engine *eng)
@@ -5673,9 +6195,6 @@ static void vj_run_locked(struct mfd_engine *eng, const struct mfd_vj_action *a)
 		break;
 	case MFD_VJ_ACTION_SCENE_PROGRAM:
 		vj_scene_locked(eng, s, true);
-		break;
-	case MFD_VJ_ACTION_TAKE:
-		vj_take_locked(eng);
 		break;
 	case MFD_VJ_ACTION_SCENE_FADE:
 		vj_scene_fade_locked(eng, s);
@@ -6211,7 +6730,14 @@ void mfd_engine_set_vj_buttons(struct mfd_engine *eng, bool enabled, int fade_ms
 
 bool mfd_engine_vj_buttons_enabled(const struct mfd_engine *eng)
 {
-	return eng && !eng->vj_disabled;
+	if (!eng) {
+		return false;
+	}
+	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
+	mfd_engine_lock(lock_eng);
+	bool on = !eng->vj_disabled;
+	mfd_engine_unlock(lock_eng);
+	return on;
 }
 
 void mfd_engine_set_desk_video_controls(struct mfd_engine *eng, bool shown)
@@ -6258,7 +6784,14 @@ void mfd_engine_desk_first_show_done(struct mfd_engine *eng)
 
 int mfd_engine_vj_fade_ms(const struct mfd_engine *eng)
 {
-	return vj_effective_fade_ms(eng);
+	if (!eng) {
+		return vj_effective_fade_ms(eng);
+	}
+	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
+	mfd_engine_lock(lock_eng);
+	int ms = vj_effective_fade_ms(eng);
+	mfd_engine_unlock(lock_eng);
+	return ms;
 }
 
 /* --- Strips that fill themselves from the scene on air --- */
@@ -6341,7 +6874,20 @@ static bool vj_collect_layers(struct mfd_engine *eng, const char *scene, struct 
 /* The level Midi Fadester's own opacity filter has on a source now, if it has one. */
 static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *out)
 {
-	if (eng->scene_graph_ops || !obs_initialized()) {
+	if (!source || source[0] == '\0') {
+		return false;
+	}
+	if (eng->scene_graph_ops) {
+		float v = 0.0f;
+		if (eng->scene_graph_ops->get_opacity &&
+		    eng->scene_graph_ops->get_opacity(source, &v, eng->scene_graph_user_data) && v >= 0.0f &&
+		    v <= 1.0f) {
+			*out = v;
+			return true;
+		}
+		return false;
+	}
+	if (!obs_initialized()) {
 		return false;
 	}
 	obs_source_t *src = obs_get_source_by_name(source);
@@ -6365,22 +6911,10 @@ static bool vj_live_opacity(struct mfd_engine *eng, const char *source, float *o
 /* A strip taking a layer that is at some level already starts there, with pick-up from where its fader is. */
 static void vj_start_strip_at_locked(struct mfd_engine *eng, struct mfd_fader_slot *s, float v)
 {
-	bool had_raw = s->takeover.has_last_fader;
-	float raw = s->last_raw_norm;
 	mfd_smoother_reset(&s->smoother, v);
-	mfd_takeover_init(&s->takeover, v, MFD_DEFAULT_PICKUP_THRESHOLD, false);
-	configure_slot_takeover_mode(eng, s);
+	restart_pickup_at_locked(eng, s, v);
 	s->last_applied_val = v;
 	s->last_alpha_a = v;
-	if (had_raw) {
-		s->takeover.has_last_fader = true;
-		s->takeover.last_raw_fader = raw;
-		s->takeover.last_fader = raw;
-		float diff = raw - v;
-		s->takeover.hint = fabsf(diff) <= s->takeover.pickup_threshold ? MFD_HINT_NONE
-				   : diff < 0.0f                               ? MFD_HINT_MOVE_UP
-									       : MFD_HINT_MOVE_DOWN;
-	}
 }
 
 /* Points strip k (1..8) at a source in a scene, or at nothing, as a strip that follows the scene. What the pads held
@@ -6840,17 +7374,6 @@ void mfd_engine_set_test_scene_list(struct mfd_engine *eng, const char *const *n
 	mfd_engine_unlock(eng);
 }
 
-bool mfd_engine_slot_follows_scene(struct mfd_engine *eng, int slot_index)
-{
-	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
-		return false;
-	}
-	mfd_engine_lock(eng);
-	bool f = eng->fader_slots[slot_index].auto_follow;
-	mfd_engine_unlock(eng);
-	return f;
-}
-
 void mfd_engine_vs_result(struct mfd_engine *eng, bool from_poll, enum mfd_vj_command_kind kind, bool answered,
 			  bool panic)
 {
@@ -7013,6 +7536,7 @@ void mfd_engine_get_desk_view(struct mfd_engine *eng, bool dock_shift, struct mf
 	out->crossfader = eng->fader_slots[0].last_applied_val;
 	out->vs_panic = eng->vs_panic;
 	out->blackout = mfd_blackout_is_on();
+	out->blackout_failure = (int)mfd_blackout_last_failure();
 	out->video_controls = eng->desk_video_controls;
 	out->vs_panic_known = eng->vs_panic_known;
 	out->vs_last_failed = eng->vs_last_failed;
@@ -7161,7 +7685,7 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 
 	mfd_engine_lock(eng);
 
-	if (os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly)) {
+	if (midi_closed_unexpectedly_locked(eng)) {
 		bool first = !eng->midi_disconnect_handled;
 		abort_open_tbar_slots_on_midi_disconnect_locked(eng);
 		if (first) {
@@ -7591,13 +8115,26 @@ void mfd_engine_tick(struct mfd_engine *eng, float seconds)
 	vj_tidy_locked(eng);
 	vj_hold_epoch_sync_locked(eng);
 	vj_flush_leds_locked(eng);
+	if (eng->tbar_deferred && eng->tbar_deferred(false)) {
+		/* A T-bar command is parked behind a transition that is still ending (C-07): the tick is the clock that
+		 * asks the UI thread to try it again, about every 25 ms. No timer. */
+		eng->tbar_deferred_wait_sec += seconds;
+		if (eng->tbar_deferred_wait_sec >= MFD_TBAR_DEFERRED_RETRY_SEC) {
+			eng->tbar_deferred_wait_sec = 0.0f;
+			eng->tbar_deferred_due = true;
+			eng->pending_ui_notify = true;
+		}
+	} else {
+		eng->tbar_deferred_wait_sec = 0.0f;
+	}
 	if (eng->desk_visible) {
 		/* The dock repaints on OBS's frame clock (no timers): about 30 times a second, for its pulsing pads and
 		 * Visual Sidechain's beat. */
 		eng->desk_frame_sec += seconds;
 		if (eng->desk_frame_sec >= 1.0f / 30.0f) {
 			eng->desk_frame_sec = 0.0f;
-			mfd_engine_mark_ui_dirty(eng, false);
+			++eng->desk_frame_rev; /* the dock only: the settings window does not refresh on this (F-08) */
+			eng->pending_ui_notify = true;
 		}
 	}
 	if (eng->vj_state_dirty) {
@@ -7911,6 +8448,10 @@ static void apply_named_change_locked(struct mfd_engine *eng, const struct mfd_g
 	case MFD_GRAPH_RECHECK:
 		*recheck = true;
 		break;
+	case MFD_GRAPH_FILTER_PROPS:
+		mark_filter_meta_stale_locked(eng, NULL, NULL);
+		*recheck = true;
+		break;
 	case MFD_GRAPH_SOURCE_GONE:
 		*prune = true;
 		if (!ch->flag) {
@@ -7930,6 +8471,8 @@ static void apply_named_change_locked(struct mfd_engine *eng, const struct mfd_g
 		*prune = true;
 		if (ch->a[0] != '\0') {
 			invalidate_filter_leases_for_removed_locked(eng, ch->a, ch->b[0] != '\0' ? ch->b : NULL);
+			/* a filter of the same name may be added in the same batch: it is another filter */
+			mark_filter_meta_stale_locked(eng, ch->a, ch->b[0] != '\0' ? ch->b : NULL);
 		}
 		*recheck = true;
 		break;
@@ -8056,7 +8599,8 @@ static bool graph_kind_is_droppable(enum mfd_graph_change_kind kind)
 
 static bool graph_kind_is_foldable(enum mfd_graph_change_kind kind)
 {
-	return kind == MFD_GRAPH_SOURCE_GONE || kind == MFD_GRAPH_FILTER_SETTINGS || kind == MFD_GRAPH_FILTER_ENABLED;
+	return kind == MFD_GRAPH_SOURCE_GONE || kind == MFD_GRAPH_FILTER_SETTINGS || kind == MFD_GRAPH_FILTER_ENABLED ||
+	       kind == MFD_GRAPH_FILTER_PROPS;
 }
 
 /* A rename or removal: an update queued after it may concern a different source or filter of the same name. */
@@ -8212,6 +8756,8 @@ static void on_obs_host_filter_add(void *data, calldata_t *cd)
 	if (flt && mfd_is_internal_filter(obs_source_get_name(flt), obs_source_get_id(flt))) {
 		return;
 	}
+	/* a filter of a bound name may have come (back): its properties are read again (A-03) */
+	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
 	mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RESCAN, NULL, NULL, NULL, false);
 }
 
@@ -8252,7 +8798,7 @@ static void on_obs_filter_update_properties(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(cd);
 	struct mfd_engine *eng = engine_from_signal_data(data);
 	if (eng) {
-		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_RECHECK, NULL, NULL, NULL, false);
+		mfd_engine_report_scene_graph_change(eng, MFD_GRAPH_FILTER_PROPS, NULL, NULL, NULL, false);
 	}
 }
 
@@ -8461,6 +9007,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	if (!eng) {
 		return;
 	}
+	struct mfd_midi_port_list loaded_ports;
+	loaded_ports.count = 0U;
+	loaded_ports.valid = false;
 
 	/* Frontend events run on the UI thread with no libobs lock held: a safe place to catch up. */
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED ||
@@ -8478,11 +9027,12 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		midi_port_list_read(&loaded_ports); /* before the lock (A-02) */
 		mfd_engine_lock(eng);
 		vj_restore_loaded_punches_locked(eng);
 		eng->frontend_finished_loading = true;
 		mfd_engine_mark_ui_dirty(eng, false); /* the UI thread looks once more: the dock's first show (U1-01) */
-		refresh_apc40_detected_locked(eng);
+		refresh_apc40_detected_locked(eng, &loaded_ports);
 		connect_all_live_source_and_filter_signals(eng);
 		sync_slots_on_scene_change(eng, false);
 		mfd_engine_unlock(eng);
@@ -8559,7 +9109,7 @@ void mfd_engine_frontend_event_for_test(struct mfd_engine *eng, int event)
 }
 
 static void serialize_slots(struct mfd_engine *eng, obs_data_t *root);
-static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root);
+static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root, bool keep_user_midi);
 
 void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root)
 {
@@ -8571,7 +9121,7 @@ void mfd_engine_serialize_slots_for_test(struct mfd_engine *eng, obs_data_t *roo
 void mfd_engine_deserialize_slots_for_test(struct mfd_engine *eng, obs_data_t *root)
 {
 	mfd_engine_lock(eng);
-	deserialize_slots(eng, root);
+	deserialize_slots(eng, root, false);
 	mfd_engine_unlock(eng);
 }
 
@@ -8685,15 +9235,34 @@ static void clear_slot_filter_fields(struct mfd_fader_slot *s)
 	s->filter_prop_valid = false;
 }
 
-static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
+/*
+ * keep_user_midi (B-04): a scene collection is loading and this installation has its own settings file. Which control
+ * drives each strip, its 14-bit flag and its learned range belong to the user (README: "kept per user"), so they stay
+ * as they are; the collection gives only each strip's job. Without it (the settings file itself, Import, or a
+ * collection read before any settings file exists) the addresses in the data are taken.
+ */
+static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root, bool keep_user_midi)
 {
 	obs_data_array_t *arr = obs_data_get_array(root, "slots");
 	if (!arr) {
 		return;
 	}
 
+	struct mfd_midi_addr user_addr[MFD_MAX_FADER_SLOTS];
+	struct mfd_control_calibration user_cal[MFD_MAX_FADER_SLOTS];
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		user_addr[i] = eng->fader_slots[i].addr;
+		user_cal[i] = eng->fader_slots[i].cal;
+	}
+
 	/* Pre-seed 0..17 from active profile defaults (detaching any active filter bypass leases first) */
 	mfd_engine_load_profile_defaults(eng, mfd_engine_get_active_profile(eng));
+	if (keep_user_midi) {
+		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+			eng->fader_slots[i].addr = user_addr[i];
+			eng->fader_slots[i].cal = user_cal[i];
+		}
+	}
 
 	bool seen_slot[MFD_MAX_FADER_SLOTS];
 	memset(seen_slot, 0, sizeof(seen_slot));
@@ -8746,7 +9315,9 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			}
 		}
 
-		if (obs_data_has_user_value(item, "midi_type")) {
+		if (keep_user_midi) {
+			/* the address and range restored above stay; the data's own are not read */
+		} else if (obs_data_has_user_value(item, "midi_type")) {
 			long long raw_mtype = obs_data_get_int(item, "midi_type");
 			if (raw_mtype < (long long)MFD_MIDI_NONE || raw_mtype > (long long)MFD_MIDI_PITCH_BEND) {
 				obs_log(LOG_WARNING, "Slot '%s' had invalid midi_type %lld; resetting MIDI binding",
@@ -8759,7 +9330,9 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root)
 			s->addr.number = (uint8_t)(obs_data_get_int(item, "midi_number") & 0x7F);
 			s->addr.is_14bit = obs_data_get_bool(item, "midi_14bit");
 		}
-		if (obs_data_has_user_value(item, "cal_min") && obs_data_has_user_value(item, "cal_max")) {
+		if (keep_user_midi) {
+			/* kept */
+		} else if (obs_data_has_user_value(item, "cal_min") && obs_data_has_user_value(item, "cal_max")) {
 			mfd_calibration_set(&s->cal, slot_addr_is_14bit(&s->addr),
 					    (int)obs_data_get_int(item, "cal_min"),
 					    (int)obs_data_get_int(item, "cal_max"));
@@ -8893,11 +9466,14 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 
 	mfd_engine_lock(eng);
 	if (saving) {
+#ifdef MFD_ENABLE_SELF_TEST
+		/* only a build with the self-test harness looks at this (H-02): an ordinary build always saves */
 		const char *self_test_env = getenv("MFD_SELF_TEST");
 		if (self_test_env && strcmp(self_test_env, "1") == 0) {
 			mfd_engine_unlock(eng);
 			return;
 		}
+#endif
 		obs_data_t *obj = obs_data_create();
 		serialize_slots(eng, obj);
 		/* Sources punched by the desk right now: the scene saved with them holds the punch, so the source's own
@@ -8935,7 +9511,7 @@ static void on_save_callback(obs_data_t *save_data, bool saving, void *private_d
 		}
 		obs_data_array_release(punches);
 		if (obj) {
-			deserialize_slots(eng, obj);
+			deserialize_slots(eng, obj, eng->user_midi_layout_known);
 			if (slots_differ_from_apc40_defaults(eng)) {
 				eng->first_run_offer_dismissed = true;
 			}
@@ -9015,6 +9591,8 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		obs_data_release(data);
 		return false;
 	}
+	struct mfd_midi_port_list ports;
+	midi_port_list_read(&ports); /* before the lock (A-02) */
 	mfd_engine_lock(eng);
 	cancel_row_learn_locked(eng);
 	const char *dev = obs_data_get_string(data, "device_name");
@@ -9101,8 +9679,12 @@ static bool import_config_file_impl(struct mfd_engine *eng, const char *filepath
 		obs_data_array_release(punch);
 	}
 	deserialize_calibrations(eng, data);
-	deserialize_slots(eng, data);
-	refresh_apc40_detected_locked(eng);
+	deserialize_slots(eng, data, false);
+	if (obs_data_has_user_value(data, "slots")) {
+		eng->user_midi_layout_known =
+			true; /* from here a scene collection no longer changes addresses (B-04) */
+	}
+	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
 	obs_data_release(data);
@@ -9153,6 +9735,15 @@ bool mfd_engine_save_global_config(struct mfd_engine *eng)
 	}
 	bool ok = mfd_engine_export_config_file(eng, cfg_path);
 	bfree(cfg_path);
+	if (ok) {
+		mfd_engine_lock(eng);
+		if (eng->frontend_finished_loading) {
+			/* The settings file now holds this session's addresses. Only once OBS has loaded: an installation
+			 * with no settings file yet first reads its addresses from the scene collection (B-04). */
+			eng->user_midi_layout_known = true;
+		}
+		mfd_engine_unlock(eng);
+	}
 	return ok;
 }
 
@@ -9173,28 +9764,41 @@ static bool load_global_config_if_present(struct mfd_engine *eng)
 	return loaded;
 }
 
-void mfd_engine_load_global_config(struct mfd_engine *eng)
-{
-	(void)load_global_config_if_present(eng);
-}
-
 bool mfd_engine_reconnect_midi(struct mfd_engine *eng, const char *device_name)
 {
 	if (!eng) {
 		return false;
 	}
+	/* The port is closed and opened with no engine lock held (A-02): the video tick does not wait for the MIDI
+	 * driver. Call with no engine lock held. */
+	struct mfd_winmm_device old;
+	struct mfd_winmm_device fresh;
+	struct mfd_midi_port_list ports;
+	char name[MFD_MIDI_DEV_NAME_MAX];
+
+	pthread_mutex_lock(&g_midi_io_mutex);
 	mfd_engine_lock(eng);
 	if (device_name) {
 		snprintf(eng->configured_device_name, sizeof(eng->configured_device_name), "%s", device_name);
 	}
+	snprintf(name, sizeof(name), "%s", eng->configured_device_name);
+	midi_detach_handles_locked(eng, &old);
+	mfd_engine_unlock(eng);
+
+	bool ok = midi_reopen_unlocked(eng, &old, name, &fresh);
+	midi_port_list_read(&ports);
+
+	mfd_engine_lock(eng);
+	midi_install_device_locked(eng, &fresh);
+	midi_io_done_locked(eng);
 	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
-	bool ok = mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name);
 	if (ok) {
 		eng->midi_disconnect_handled = false;
 	}
-	refresh_apc40_detected_locked(eng);
+	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_notify_state_changed(eng);
 	mfd_engine_unlock(eng);
+	pthread_mutex_unlock(&g_midi_io_mutex);
 	return ok;
 }
 
@@ -9208,7 +9812,9 @@ void mfd_engine_set_smooth_tau_ms(struct mfd_engine *eng, float tau_ms)
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		mfd_smoother_set_tau_ms(&eng->fader_slots[i].smoother, eng->smooth_tau_ms);
 	}
-	mfd_engine_mark_ui_dirty(eng, true);
+	/* a value, not a change of what the strips are: the settings window refreshes without rebuilding its Advanced
+	 * table on every step of the Smoothing box (F-06) */
+	mfd_engine_mark_ui_dirty(eng, false);
 	mfd_engine_unlock(eng);
 }
 
@@ -9258,70 +9864,116 @@ void mfd_engine_poll_midi_health_on_ui_thread(struct mfd_engine *eng)
 		return;
 	}
 
+	/*
+	 * Everything that asks the MIDI driver (listing the ports, closing, opening) runs with no engine lock held
+	 * (A-02), so the video tick never waits for it; the engine lock is taken only to read and store state. Call
+	 * with no engine lock held.
+	 */
+	struct mfd_winmm_device work;
+	struct mfd_winmm_device fresh;
+	struct mfd_midi_port_list ports;
+	char name[MFD_MIDI_DEV_NAME_MAX];
+
+	pthread_mutex_lock(&g_midi_io_mutex);
 	mfd_engine_lock(eng);
-	if (eng->midi_dev.is_open) {
-		if (!mfd_winmm_check_health(&eng->midi_dev)) {
+	work = eng->midi_dev;
+	snprintf(name, sizeof(name), "%s", eng->configured_device_name);
+	mfd_engine_unlock(eng);
+
+	if (work.is_open) {
+		bool healthy = mfd_winmm_is_present(&work) &&
+			       !os_atomic_load_bool(&eng->midi_dev.device_closed_unexpectedly);
+		if (!healthy) {
+			midi_port_list_read(&ports);
+			mfd_engine_lock(eng);
+			midi_detach_handles_locked(eng, &work);
+			eng->midi_dev.is_open = false;
+			eng->midi_dev.out_name[0] = '\0';
+			eng->midi_dev.error_kind = MFD_WINMM_ERR_DISCONNECTED;
+			eng->midi_dev.error_operation = MFD_WINMM_OP_NONE;
+			eng->midi_dev.error_code = 0U;
+			snprintf(eng->midi_dev.error_device_name, sizeof(eng->midi_dev.error_device_name), "%s",
+				 work.opened_name);
+			snprintf(eng->midi_dev.last_error, sizeof(eng->midi_dev.last_error),
+				 "MIDI device '%s' was disconnected. Reconnect USB cable and click Reconnect.",
+				 work.opened_name);
+			obs_log(LOG_WARNING, "%s", eng->midi_dev.last_error);
 			abort_open_tbar_slots_on_midi_disconnect_locked(eng);
 			vj_release_all_locked(eng);
-			refresh_apc40_detected_locked(eng);
+			refresh_apc40_detected_locked(eng, &ports);
 			mfd_engine_notify_state_changed(eng);
+			mfd_engine_unlock(eng);
+			mfd_winmm_close(&work);
+			os_atomic_store_bool(&eng->midi_dev.device_closed_unexpectedly, false);
+			mfd_engine_lock(eng);
+			midi_io_done_locked(eng);
+			mfd_engine_unlock(eng);
 		}
-		mfd_engine_unlock(eng);
+		pthread_mutex_unlock(&g_midi_io_mutex);
 		return;
 	}
 
-	/* Event-driven hot-plug rescan on WM_DEVICECHANGE / Reconnect (R-MIDI-2) */
-	struct mfd_midi_device_info list[MFD_MAX_MIDI_DEVICES];
-	size_t count = mfd_winmm_enumerate(list, MFD_MAX_MIDI_DEVICES);
-	if (count == 0U) {
-		refresh_apc40_detected_locked(eng);
-		mfd_engine_unlock(eng);
-		return;
-	}
+	/* Event-driven hot-plug rescan on WM_DEVICECHANGE / Reconnect (R-MIDI-2). The rescan always reads the list,
+	 * also before OBS is up. */
+	ports.valid = true;
+	ports.count = mfd_winmm_enumerate(ports.list, MFD_MAX_MIDI_DEVICES);
 
 	bool candidate_present = false;
-	if (eng->configured_device_name[0] != '\0') {
-		for (size_t i = 0U; i < count; ++i) {
-			if (strcmp(list[i].name, eng->configured_device_name) == 0) {
+	if (ports.count == 0U) {
+		candidate_present = false;
+	} else if (name[0] != '\0') {
+		for (size_t i = 0U; i < ports.count; ++i) {
+			if (strcmp(ports.list[i].name, name) == 0) {
 				candidate_present = true;
 				break;
 			}
 		}
 	} else {
-		for (size_t i = 0U; i < count; ++i) {
-			if (list[i].is_apc40_mk2) {
+		for (size_t i = 0U; i < ports.count; ++i) {
+			if (ports.list[i].is_apc40_mk2) {
 				candidate_present = true;
 				break;
 			}
 		}
-		if (!candidate_present && eng->midi_dev.error_kind != MFD_WINMM_ERR_BUSY_ALLOCATED) {
+		if (!candidate_present && work.error_kind != MFD_WINMM_ERR_BUSY_ALLOCATED) {
 			candidate_present = true;
 		}
 	}
 
+	bool opened = false;
 	if (candidate_present) {
-		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
-		if (mfd_winmm_open_by_name(&eng->midi_dev, eng->configured_device_name)) {
-			eng->midi_disconnect_handled = false;
-			refresh_apc40_detected_locked(eng);
-			mfd_engine_notify_state_changed(eng);
-		}
-	} else {
-		refresh_apc40_detected_locked(eng);
+		work.handle = NULL; /* nothing was open: nothing to close */
+		work.out_handle = NULL;
+		opened = midi_reopen_unlocked(eng, &work, name, &fresh);
 	}
+
+	mfd_engine_lock(eng);
+	if (candidate_present) {
+		midi_install_device_locked(eng, &fresh); /* also a failed open: its error is what the UI shows */
+		mfd_midi_parser_reset_cc_state(&eng->midi_parser);
+	}
+	if (opened) {
+		eng->midi_disconnect_handled = false;
+		mfd_engine_notify_state_changed(eng);
+	}
+	ports.valid = obs_initialized(); /* as before: the "an APC40 is plugged in" flag is only kept once OBS is up */
+	refresh_apc40_detected_locked(eng, &ports);
 	mfd_engine_unlock(eng);
+	pthread_mutex_unlock(&g_midi_io_mutex);
 }
 
 bool mfd_engine_init(void)
 {
 	mfd_tbar_apply_fn saved_tbar_driver = g_engine.tbar_driver;
 	mfd_tbar_unlatch_fn saved_tbar_unlatch = g_engine.tbar_unlatch;
+	mfd_tbar_deferred_fn saved_tbar_deferred = g_engine.tbar_deferred;
 	memset(&g_engine, 0, sizeof(g_engine));
 	if (!mfd_engine_init_mutex(&g_engine)) {
 		return false;
 	}
 	g_engine.tbar_driver = saved_tbar_driver;
 	g_engine.tbar_unlatch = saved_tbar_unlatch;
+	g_engine.tbar_deferred = saved_tbar_deferred;
 	mfd_midi_queue_init(&g_engine.midi_queue);
 	mfd_midi_parser_init(&g_engine.midi_parser);
 	mfd_winmm_init(&g_engine.midi_dev, &g_engine.midi_queue);
@@ -9345,7 +9997,11 @@ bool mfd_engine_init(void)
 			mfd_engine_load_profile_defaults(&g_engine, detected);
 		}
 	}
-	refresh_apc40_detected_locked(&g_engine);
+	{
+		struct mfd_midi_port_list init_ports;
+		midi_port_list_read(&init_ports);
+		refresh_apc40_detected_locked(&g_engine, &init_ports);
+	}
 	refresh_frontend_cache_on_ui_thread_locked(&g_engine);
 
 	connect_obs_signals(&g_engine);

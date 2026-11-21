@@ -328,6 +328,16 @@ bool mfd_takeover_step(struct mfd_takeover *t, float raw_fader_norm, float *out_
 		bool within = (fabsf(effective - t->target_obs) <= t->pickup_threshold) ||
 			      (!t->two_rail_mode && t->target_obs <= 1e-5f &&
 			       effective <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f));
+		if (t->two_rail_mode) {
+			/* A fader that stops a step or two short of its end (CC 125 of 127, or CC 2) can neither come
+			 * within the pick-up window of a value that sits on that rail nor cross it (G-03). The fader
+			 * and the value in the same 3 % rail zone count as met: the zones the park logic uses. */
+			const bool both_at_top = effective >= (MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f) &&
+						 t->target_obs >= (MFD_TWO_RAIL_UPPER_PARK_THRESHOLD - 1e-5f);
+			const bool both_at_bottom = effective <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f) &&
+						    t->target_obs <= (MFD_TWO_RAIL_LOWER_PARK_THRESHOLD + 1e-5f);
+			within = within || both_at_top || both_at_bottom;
+		}
 		bool crossed = false;
 		if (t->has_last_fader) {
 			crossed = ((t->last_fader <= t->target_obs && effective >= t->target_obs) ||
@@ -491,104 +501,7 @@ void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val)
 	}
 }
 
-float mfd_takeover_throw_to_mix_value(const struct mfd_takeover *t, float throw_progress)
-{
-	float p = clamp01(throw_progress);
-	if (t && t->polarity_reversed) {
-		return 1.0f - p;
-	}
-	return p;
-}
-
-float mfd_takeover_mix_to_throw_progress(const struct mfd_takeover *t, float mix_value)
-{
-	float m = clamp01(mix_value);
-	if (t && t->polarity_reversed) {
-		return 1.0f - m;
-	}
-	return m;
-}
-
 int mfd_calibrated_percent(float calibrated_norm)
 {
 	return (int)lroundf(clamp01(calibrated_norm) * 100.0f);
-}
-
-int mfd_takeover_format_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type, float applied_val,
-				   float alpha_a, float alpha_b, float db_val, char *out_text, size_t text_size)
-{
-	int pct = mfd_calibrated_percent(applied_val);
-	if (!out_text || text_size == 0U) {
-		return pct;
-	}
-
-	if (t && t->state == MFD_TAKEOVER_WAITING) {
-		int tgt_pct = mfd_calibrated_percent(t->target_obs);
-		const char *arrow = (t->hint == MFD_HINT_MOVE_UP) ? "\xE2\x86\x91" : "\xE2\x86\x93";
-		snprintf(out_text, text_size, "%s %d%%", arrow, tgt_pct);
-		return tgt_pct;
-	}
-
-	if (target_type == MFD_TARGET_TWO_SOURCE_MIX) {
-		int a_pct = mfd_calibrated_percent(alpha_a);
-		int b_pct = mfd_calibrated_percent(alpha_b);
-		snprintf(out_text, text_size, "%d%% (A:%d%% B:%d%%)", pct, a_pct, b_pct);
-	} else if (target_type == MFD_TARGET_AUDIO_VOLUME) {
-		if (isfinite(db_val)) {
-			snprintf(out_text, text_size, "%.1f dB (%d%%)", (double)db_val, pct);
-		} else {
-			snprintf(out_text, text_size, "-inf dB (0%%)");
-		}
-	} else {
-		snprintf(out_text, text_size, "%d%%", pct);
-	}
-
-	return pct;
-}
-
-int mfd_takeover_format_calibrated_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type,
-					      float calibrated_norm, bool available, const char *reason, float alpha_a,
-					      float alpha_b, float db_val, char *out_text, size_t text_size)
-{
-	int pct = mfd_calibrated_percent(calibrated_norm);
-	if (!out_text || text_size == 0U) {
-		return pct;
-	}
-
-	if (target_type == MFD_TARGET_UNASSIGNED) {
-		snprintf(out_text, text_size, "%d%%", pct);
-		return pct;
-	}
-
-	if (!available) {
-		if (reason && reason[0] != '\0') {
-			snprintf(out_text, text_size, "%d%% \xE2\x80\x94 %s", pct, reason);
-		} else {
-			snprintf(out_text, text_size, "%d%%", pct);
-		}
-		return pct;
-	}
-
-	if (t && t->state == MFD_TAKEOVER_WAITING && t->hint != MFD_HINT_NONE) {
-		int tgt_pct = mfd_calibrated_percent(t->target_obs);
-		const char *arrow = (t->hint == MFD_HINT_MOVE_UP) ? "\xE2\x86\x91" : "\xE2\x86\x93";
-		snprintf(out_text, text_size, "%d%% (%s %d%%)", pct, arrow, tgt_pct);
-		return pct;
-	}
-
-	if (target_type == MFD_TARGET_TWO_SOURCE_MIX) {
-		int a_pct = mfd_calibrated_percent(alpha_a);
-		int b_pct = mfd_calibrated_percent(alpha_b);
-		snprintf(out_text, text_size, "%d%% (A:%d%% B:%d%%)", pct, a_pct, b_pct);
-	} else if (target_type == MFD_TARGET_AUDIO_VOLUME) {
-		if (isfinite(db_val)) {
-			snprintf(out_text, text_size, "%.1f dB (%d%%)", (double)db_val, pct);
-		} else {
-			snprintf(out_text, text_size, "-inf dB (%d%%)", pct);
-		}
-	} else {
-		snprintf(out_text, text_size, "%d%%", pct);
-	}
-
-	return pct;
 }

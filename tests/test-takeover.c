@@ -144,17 +144,6 @@ int main(void)
 	REQUIRE(fabsf(out - 1.0f) < 1e-5f);
 
 	/*
-	 * Case 3c: Two-source crossfade rail mapping (mfd_takeover_throw_to_mix_value):
-	 * At upper rail unpark (polarity_reversed=true, throw_progress=0.0), mix stays 1.0 (Source B, no jump)
-	 * and reaches 0.0 (Source A) at physical rail 0.0.
-	 */
-	tbar.polarity_reversed = true;
-	REQUIRE(fabsf(mfd_takeover_throw_to_mix_value(&tbar, 0.0f) - 1.0f) < 1e-6f);
-	REQUIRE(fabsf(mfd_takeover_throw_to_mix_value(&tbar, 0.5f) - 0.5f) < 1e-6f);
-	REQUIRE(fabsf(mfd_takeover_throw_to_mix_value(&tbar, 1.0f) - 0.0f) < 1e-6f);
-	REQUIRE(fabsf(mfd_takeover_mix_to_throw_progress(&tbar, 0.10f) - 0.90f) < 1e-6f);
-
-	/*
 	 * Case 3d: Directional two-rail mode (two-source crossfade, single-layer opacity, audio volume):
 	 * Output stays strictly linear to the physical end (92% -> 92%, 95% -> 95%, 97% -> 97%, 100% -> 100%;
 	 * no 90%/10% snap!). Parking engages only inside the 3% rail zones (>= 97% or <= 3%), advances linearly
@@ -236,29 +225,6 @@ int main(void)
 	REQUIRE(fabsf(out - 0.0f) < 1e-6f);
 	REQUIRE(mfd_takeover_step(&two_rail, 0.55f, &out));
 	REQUIRE(fabsf(out - 0.50f) < 1e-5f);
-
-	/* 4. Output bar formatter shows ↑/↓ arrow while waiting, then live value once engaged (Item 2) */
-	char bar_text[128] = {0};
-	struct mfd_takeover t_ui;
-	mfd_takeover_init(&t_ui, 0.80f, 0.015f, false);
-	REQUIRE(!mfd_takeover_step(&t_ui, 0.20f, &out));
-	int pct = mfd_takeover_format_output_bar(&t_ui, MFD_TARGET_SINGLE_LAYER, out, 0.80f, 0.0f, 0.0f, bar_text,
-						 sizeof(bar_text));
-	REQUIRE(pct == 80);
-	REQUIRE(strcmp(bar_text, "\xE2\x86\x91 80%") == 0);
-
-	REQUIRE(mfd_takeover_step(&t_ui, 0.85f, &out));
-	pct = mfd_takeover_format_output_bar(&t_ui, MFD_TARGET_SINGLE_LAYER, out, 0.85f, 0.0f, 0.0f, bar_text,
-					     sizeof(bar_text));
-	REQUIRE(pct == 85);
-	REQUIRE(strcmp(bar_text, "85%") == 0);
-
-	mfd_takeover_sync_external(&t_ui, 0.20f);
-	REQUIRE(!mfd_takeover_step(&t_ui, 0.60f, &out));
-	pct = mfd_takeover_format_output_bar(&t_ui, MFD_TARGET_SINGLE_LAYER, out, 0.20f, 0.0f, 0.0f, bar_text,
-					     sizeof(bar_text));
-	REQUIRE(pct == 20);
-	REQUIRE(strcmp(bar_text, "\xE2\x86\x93 20%") == 0);
 
 	/*
 	 * 5. Fast throw bumper-bounce peak preservation & 30-step 127/126/127 rail jitter (R-FADE-1 / R-FEEL-4):
@@ -344,18 +310,7 @@ int main(void)
 				  &out)); /* unparks at 0.10 -> rescales [0.10, 1.00] -> [0.0, 1.0] */
 	REQUIRE(mfd_takeover_step(&t_rescaled, cc51_norm, &out));
 	REQUIRE(fabsf(out - ((cc51_norm - 0.10f) / 0.90f)) < 1e-5f); /* effective ~ 0.3351 (33.5%) */
-	pct = mfd_takeover_format_calibrated_output_bar(&t_rescaled, MFD_TARGET_TWO_SOURCE_MIX, cc51_norm, true, "",
-							1.0f, out, 0.0f, bar_text, sizeof(bar_text));
-	REQUIRE(pct == 40);
-	REQUIRE(strncmp(bar_text, "40% ", 4) == 0);
-
-	/* While !available ("Studio Mode is off."), calibrated bar still reports 40% at CC 51 */
-	pct = mfd_takeover_format_calibrated_output_bar(&t_rescaled, MFD_TARGET_TBAR, cc51_norm, false,
-							"Studio Mode is off.", 1.0f, 0.0f, 0.0f, bar_text,
-							sizeof(bar_text));
-	REQUIRE(pct == 40);
-	REQUIRE(strstr(bar_text, "40%") != NULL);
-	REQUIRE(strstr(bar_text, "Studio Mode is off.") != NULL);
+	REQUIRE(mfd_calibrated_percent(cc51_norm) == 40);
 
 	/*
 	 * 9. A two-rail slot set to a rail from outside (Stream Deck key, dial, auto-fade) while the fader stands
@@ -422,6 +377,36 @@ int main(void)
 	REQUIRE(!mfd_takeover_step(&t_resync, 0.24f, &out)); /* away from the target: no pick-up */
 	REQUIRE(fabsf(out - 0.40f) < 1e-6f);
 	REQUIRE(mfd_takeover_step(&t_resync, 0.41f, &out)); /* real crossing picks up */
+
+	/*
+	 * 12. G-03: a fader that tops out at CC 125 (125/127 = 0.984) picks up a value that sits at 100 %, and one that
+	 *     bottoms out at CC 2 picks up a value at 0 %. Outside the 3 % rail zone nothing changes: no pick-up.
+	 */
+	struct mfd_takeover t_short;
+	mfd_takeover_init(&t_short, 1.0f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_short, true);
+	REQUIRE(!mfd_takeover_step(&t_short, 0.50f, &out));
+	REQUIRE(fabsf(out - 1.0f) < 1e-6f);
+	REQUIRE(!mfd_takeover_step(&t_short, 120.0f / 127.0f, &out)); /* 94.5 %: below the rail zone */
+	REQUIRE(t_short.state == MFD_TAKEOVER_WAITING);
+	(void)mfd_takeover_step(&t_short, 125.0f / 127.0f, &out);
+	REQUIRE(t_short.state != MFD_TAKEOVER_WAITING); /* picked up (and at the rail) */
+	REQUIRE(out >= 0.97f);
+
+	mfd_takeover_init(&t_short, 0.0f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_short, true);
+	REQUIRE(!mfd_takeover_step(&t_short, 0.50f, &out));
+	REQUIRE(!mfd_takeover_step(&t_short, 6.0f / 127.0f, &out)); /* 4.7 %: above the rail zone */
+	REQUIRE(t_short.state == MFD_TAKEOVER_WAITING);
+	(void)mfd_takeover_step(&t_short, 2.0f / 127.0f, &out);
+	REQUIRE(t_short.state != MFD_TAKEOVER_WAITING);
+	REQUIRE(out <= 0.03f);
+
+	/* A value in the rail zone is not met by a fader at the other end. */
+	mfd_takeover_init(&t_short, 0.98f, 0.015f, false);
+	mfd_takeover_set_two_rail_mode(&t_short, true);
+	REQUIRE(!mfd_takeover_step(&t_short, 0.01f, &out));
+	REQUIRE(t_short.state == MFD_TAKEOVER_WAITING);
 
 	printf("test-takeover: PASS\n");
 	return 0;

@@ -23,8 +23,9 @@ extern "C" {
  * with the first deck that registers and stops at module unload. Pages POST their reports as text/plain JSON to
  * /report; each report names its deck, and the deck's callback runs on the listener thread with the parsed report,
  * under the listener's lock: a callback must not call back into the listener. Reports for a deck nobody registered,
- * and bodies that are not reports, are dropped without a word. One request may take at most 1.5 s, so a slow client
- * cannot hold the other decks' reports or the shutdown. Every function here may be called from any thread. */
+ * and bodies that are not reports, are dropped without a word. One request may take at most 1.5 s, and a connection
+ * that sends nothing at all is closed after 0.15 s, so neither a slow client nor a row of silent ones can hold the
+ * other decks' reports or the shutdown for long. Every function here may be called from any thread. */
 
 typedef void (*tub_report_fn)(void *deck, obs_data_t *report, uint64_t now_ns);
 

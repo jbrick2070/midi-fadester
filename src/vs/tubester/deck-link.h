@@ -20,9 +20,13 @@
 extern "C" {
 #endif
 
+/* The largest position or length, in seconds, and the largest playback rate a report may carry (E-06): ten days and
+ * 16x, far beyond any tape and any speed the deck sets, small enough for every later conversion. */
+#define TUB_REPORT_MAX_SECONDS 864000.0
+#define TUB_REPORT_MAX_RATE 16.0
+
 #define TUB_TOKEN_LEN 32
 #define TUB_INCARNATION_MAX 32
-#define TUB_SRC_MAX 260
 /* Pages replaced by a reload, remembered so their late reports cannot take the link back (R-LNK-3). */
 #define TUB_RETIRED_MAX 16
 
@@ -42,7 +46,6 @@ enum tub_deck_state {
 /* What the page said, parsed from one report. Only fields the page sent are set; the rest stay zero. */
 struct tub_report {
 	char incarnation[TUB_INCARNATION_MAX];
-	char src[TUB_SRC_MAX];
 	char event[16];
 	uint64_t gen;
 	uint64_t seq;
@@ -51,7 +54,6 @@ struct tub_report {
 	double rate;
 	int ready_state;
 	int video_width;
-	int video_height;
 	int error_code;
 	bool paused;
 	bool ended;
@@ -82,9 +84,6 @@ struct tub_link {
 
 /* token: exactly TUB_TOKEN_LEN hex characters. Returns false when it is not, and the link then accepts no report. */
 bool tub_link_init(struct tub_link *l, const char *token);
-
-/* A new generation for a tape command (R-LNK-3). */
-uint64_t tub_link_next_gen(struct tub_link *l);
 
 /* Parses the body the page posted: JSON with token, inc, gen, seq, ev and the player fields. body need not be
  * NUL-terminated. The caller releases *out with obs_data_release. False on anything that is not a JSON object. */

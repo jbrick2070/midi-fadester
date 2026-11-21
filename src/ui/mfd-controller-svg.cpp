@@ -189,6 +189,47 @@ QByteArray mfd_make_mode_card_svg(enum mfd_target_type mode)
 	return svg.toUtf8();
 }
 
+/* What a strip shows, from its slot in a snapshot: the one place that fills the sentence builder's input, for the
+ * Strips tab, the Advanced table and the controller drawing alike (F-15). */
+void mfd_ui_strip_presentation_from_slot(int idx, const struct mfd_fader_slot &s, struct mfd_ui_strip_presentation *out)
+{
+	char disp_buf[64] = {0};
+	mfd_engine_format_slot_display_value_ex(&s, s.last_applied_val, true, disp_buf, sizeof(disp_buf));
+
+	struct mfd_ui_strip_input in;
+	std::memset(&in, 0, sizeof(in));
+	in.slot_index = idx;
+	in.slot_label = s.label;
+	in.is_horizontal = (idx == 0);
+	in.enabled = s.enabled;
+	in.addr_type = s.addr.type;
+	in.target_type = s.target_type;
+	in.auto_follow = s.auto_follow;
+	in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
+	in.source_a_name = s.source_a_name;
+	in.source_b_name = s.source_b_name;
+	in.filter_name = s.filter_name;
+	in.filter_prop = s.filter_prop;
+	in.filter_prop_label = s.filter_prop_label;
+	in.display_value = disp_buf;
+	in.available = s.cached_available;
+	in.reason = s.cached_reason;
+	in.reason_msg = &s.cached_reason_msg;
+	in.raw_norm = s.last_raw_norm;
+	in.applied_val = s.last_applied_val;
+	in.alpha_a = s.last_alpha_a;
+	in.alpha_b = s.last_alpha_b;
+	in.audio_db = mfd_deflection_to_db(s.last_applied_val);
+	in.auto_fade_active = s.auto_fade_active;
+	in.tbar_state = s.tbar_state;
+	in.takeover_state = s.takeover.state;
+	in.takeover_hint = s.takeover.hint;
+	in.has_last_fader = s.takeover.has_last_fader;
+	in.polarity_reversed = s.takeover.polarity_reversed;
+	in.target_obs = s.takeover.target_obs;
+	mfd_ui_format_strip_presentation(&in, out);
+}
+
 QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 {
 	const struct mfd_controller_profile_def *def = mfd_profile_get_def(snap.active_profile);
@@ -446,50 +487,13 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 		return QStringLiteral("#38bdf8");
 	};
 
-	auto build_strip_pres = [&](int idx, struct mfd_ui_strip_presentation *out) {
-		const struct mfd_fader_slot &s = snap.slots[idx];
-		char disp_buf[64] = {0};
-		mfd_engine_format_slot_display_value_ex(&s, s.last_applied_val, true, disp_buf, sizeof(disp_buf));
-		struct mfd_ui_strip_input in;
-		std::memset(&in, 0, sizeof(in));
-		in.slot_index = idx;
-		in.slot_label = s.label;
-		in.is_horizontal = (idx == 0);
-		in.enabled = s.enabled;
-		in.addr_type = s.addr.type;
-		in.target_type = s.target_type;
-		in.scene_name = (s.scene_name[0] != '\0') ? s.scene_name : s.resolved_scene_name;
-		in.source_a_name = s.source_a_name;
-		in.source_b_name = s.source_b_name;
-		in.filter_name = s.filter_name;
-		in.filter_prop = s.filter_prop;
-		in.filter_prop_label = s.filter_prop_label;
-		in.display_value = disp_buf;
-		in.available = s.cached_available;
-		in.reason = s.cached_reason;
-		in.reason_msg = &s.cached_reason_msg;
-		in.raw_norm = s.last_raw_norm;
-		in.applied_val = s.last_applied_val;
-		in.alpha_a = s.last_alpha_a;
-		in.alpha_b = s.last_alpha_b;
-		in.audio_db = mfd_deflection_to_db(s.last_applied_val);
-		in.auto_fade_active = s.auto_fade_active;
-		in.tbar_state = s.tbar_state;
-		in.takeover_state = s.takeover.state;
-		in.takeover_hint = s.takeover.hint;
-		in.has_last_fader = s.takeover.has_last_fader;
-		in.polarity_reversed = s.takeover.polarity_reversed;
-		in.target_obs = s.takeover.target_obs;
-		mfd_ui_format_strip_presentation(&in, out);
-	};
-
 	/* Vertical faders: Track 1..track_fader_count + optional Master (index 9) */
 	const int vert_count = def->track_fader_count + (def->has_master_fader ? 1 : 0);
 	for (int v = 0; v < vert_count; ++v) {
 		const int slot_idx = (v < def->track_fader_count) ? (v + 1) : 9;
 		const int cx = col_cx(v);
 		struct mfd_ui_strip_presentation sp;
-		build_strip_pres(slot_idx, &sp);
+		mfd_ui_strip_presentation_from_slot(slot_idx, snap.slots[slot_idx], &sp);
 		const QString accent = accent_for_strip(sp);
 		const QString title = elide_px(QString::fromUtf8(sp.title), 12, true, 70);
 		const QString cc_lbl = elide_px(compact_midi_addr(snap.slots[slot_idx].addr), 10, false, 72);
@@ -544,7 +548,7 @@ QByteArray mfd_make_controller_desk_svg(const struct mfd_ui_snapshot &snap)
 	if (def->has_crossfader) {
 		/* Horizontal Crossfader (index 0) at bottom right */
 		struct mfd_ui_strip_presentation sp0;
-		build_strip_pres(0, &sp0);
+		mfd_ui_strip_presentation_from_slot(0, snap.slots[0], &sp0);
 		const QString accent0 = accent_for_strip(sp0);
 		const QString title0 = mfdFill(mfdText("Map.CrossfaderTitle", "%1 (%2%)"),
 					       {elide_px(QString::fromUtf8(sp0.title), 12, true, 120),

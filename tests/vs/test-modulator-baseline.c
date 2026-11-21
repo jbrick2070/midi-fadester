@@ -224,6 +224,70 @@ static void test_removed_filter_forgets_old_baseline_before_recreation(void)
 	assert(double_near(target.intensity, 0.9, 1e-6));
 }
 
+/* D-07: a renamed target keeps its baselines, so disabling the modulator still puts the real value back. */
+static void test_renamed_target_keeps_its_baseline(void)
+{
+	struct vs_baseline_table table;
+	vs_baseline_init(&table);
+	assert(vs_baseline_record_before_write_float(&table, "Color", "opacity", 0.80, 0.20));
+	assert(vs_baseline_record_before_write_float(&table, "Color", "gamma", 0.10, 0.50));
+	assert(vs_baseline_record_before_write_float(&table, "Blur", "radius", 4.0, 9.0));
+	assert(vs_baseline_rename_filter(&table, "Color", "Colour grade") == 2);
+	assert(vs_baseline_find(&table, "Color", "opacity") == NULL);
+	const struct vs_baseline_entry *e = vs_baseline_find(&table, "Colour grade", "opacity");
+	assert(e && fabs(e->original_float - 0.80) < 1e-12 && fabs(e->last_written_float - 0.20) < 1e-12);
+	assert(vs_baseline_find(&table, "Blur", "radius") != NULL);
+	assert(vs_baseline_rename_filter(&table, "Color", "Other") == 0); /* nothing left under the old name */
+	assert(vs_baseline_rename_filter(&table, "Blur", "Blur") == 0);
+	assert(vs_baseline_rename_filter(&table, NULL, "x") == 0);
+}
+
+/* D-08, D-09: what a modulator does with the record it finds on a target. */
+static void test_target_claims(void)
+{
+	assert(vs_baseline_claim(false, false, false, false) == VS_CLAIM_FREE);
+	assert(vs_baseline_claim(false, true, true, true) == VS_CLAIM_FREE);
+	assert(vs_baseline_claim(true, true, true, true) == VS_CLAIM_MINE);
+	assert(vs_baseline_claim(true, false, true, false) == VS_CLAIM_TAKEN); /* a second modulator: refused */
+	assert(vs_baseline_claim(true, false, true, true) == VS_CLAIM_TAKEN);  /* also when it held it before a save */
+	assert(vs_baseline_claim(true, false, false, false) ==
+	       VS_CLAIM_ORPHAN); /* a copied filter: value put back first */
+	/* QA-B03: this modulator's id on a setting it holds no baseline for is a copy pasted on its own source */
+	assert(vs_baseline_claim(true, true, true, false) == VS_CLAIM_ORPHAN);
+	assert(vs_baseline_claim(true, true, false, false) == VS_CLAIM_ORPHAN);
+}
+
+/* QA-B05: a slot that is refused drops the baseline it still held, and nothing is written to the target. */
+static int g_forget_applies;
+static void count_apply(void *user_data, const char *filter_name, const char *setting_name, enum vs_prop_type prop_type,
+			double float_val, int64_t int_val)
+{
+	(void)user_data;
+	(void)filter_name;
+	(void)setting_name;
+	(void)prop_type;
+	(void)float_val;
+	(void)int_val;
+	g_forget_applies++;
+}
+
+static void test_refused_slot_forgets_its_baseline_unwritten(void)
+{
+	struct vs_baseline_table t;
+	vs_baseline_init(&t);
+	assert(vs_baseline_record_before_write_float(&t, "Color", "opacity", 1.0, 0.4));
+	assert(vs_baseline_record_before_write_float(&t, "Color", "gamma", 0.0, 0.2));
+	assert(vs_baseline_forget_entry(&t, "Color", "opacity"));
+	assert(!vs_baseline_find(&t, "Color", "opacity"));
+	assert(vs_baseline_find(&t, "Color", "gamma"));
+	assert(!vs_baseline_forget_entry(&t, "Color", "opacity"));
+	/* what the other modulator wrote there (0.9) is not read as an edit, and switching off writes only gamma */
+	assert(!vs_baseline_reconcile_float(&t, "Color", "opacity", 0.9));
+	g_forget_applies = 0;
+	assert(vs_baseline_restore_all(&t, count_apply, NULL) == 1);
+	assert(g_forget_applies == 1);
+}
+
 int main(void)
 {
 	test_baseline_capture_once_during_pulse();
@@ -232,6 +296,9 @@ int main(void)
 	test_manual_edit_during_steady_signal_survives_restore_and_save();
 	test_baseline_crash_recovery_reload();
 	test_removed_filter_forgets_old_baseline_before_recreation();
+	test_renamed_target_keeps_its_baseline();
+	test_target_claims();
+	test_refused_slot_forgets_its_baseline_unwritten();
 	printf("test-modulator-baseline: all assertions passed\n");
 	return 0;
 }
