@@ -2296,11 +2296,18 @@ int main(int argc, char **argv)
 		const int was_learning = eng.learning_slot_index;
 		eng.setup_session.active = false; /* the pads lit, as on stage */
 		eng.learning_slot_index = -1;
+		/* the picture shows three scenes on the scene buttons; the count goes back right after it */
+		const int shot_scene_count = eng.cached_scene_count;
+		std::snprintf(eng.cached_scenes[0], sizeof(eng.cached_scenes[0]), "Red");
+		std::snprintf(eng.cached_scenes[1], sizeof(eng.cached_scenes[1]), "Blue");
+		std::snprintf(eng.cached_scenes[2], sizeof(eng.cached_scenes[2]), "Green");
+		eng.cached_scene_count = 3;
 		QWidget *desk = mfd_desk_dock_create(&eng);
 		desk->resize(560, 520);
 		desk->show();
 		pump_ui();
 		capture_and_verify_png(desk, screenshot_dir, QStringLiteral("13-desk-dock.png"));
+		eng.cached_scene_count = shot_scene_count;
 		/* what it shows: the version, and a live pad on a column with a source (column 1, Show / hide) */
 		auto *desk_title = desk->findChild<QLabel *>(QStringLiteral("mfdDeskTitle"));
 		/* the dock's own title bar says Fadester Desk; this line starts with what matters and holds the version */

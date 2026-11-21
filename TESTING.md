@@ -129,7 +129,9 @@ Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's 
 
 ![State 12: Set up Filter or Effect Setting](docs/screenshots/12-setup-filter-step2.png)
 
-### State 13: Fadester Desk dock (0.8.0)
+### State 13: Fadester Desk dock
+
+The dock with an APC40 mkII connected: the title carries the version (`APC40 mkII connected · Midi Fadester 1.5.0`) beside the **?** and gear buttons; `ON AIR Red` and `PREVIEW Blue` are the largest text; under them the scene buttons (`Red`, `Blue`, `Green`), then the `Fade, beats` row with the yellow cut pad and the seven greens from 32 beats down to ½; the pad rows `Show / hide`, `Fade out`, `Flash`, `Blend` and `Reset` over the eight fader bars (fader 1 amber: it waits to pick up); and `Reset all`, `Shift`, the green `Fade` and `Blackout` at the bottom.
 
 ![State 13: Fadester Desk dock](docs/screenshots/13-desk-dock.png)
 
