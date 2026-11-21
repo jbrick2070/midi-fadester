@@ -105,6 +105,7 @@ struct mfd_fader_slot {
 	bool mix_start_pending;
 	bool filter_meta_cached;    /* filter_meta_* describe the three names below */
 	bool filter_meta_stale;     /* the filter changed since: read again when a thread that may do so comes by */
+	uint32_t filter_meta_gen;   /* counts the filter's changes, so a read that one overtook is done again */
 	uint8_t filter_meta_result; /* enum mfd_filter_meta_result */
 	char filter_meta_source[MFD_SOURCE_NAME_MAX];
 	char filter_meta_filter[MFD_SOURCE_NAME_MAX];

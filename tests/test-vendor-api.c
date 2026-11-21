@@ -3864,6 +3864,25 @@ static int test_pass2_layer_bindings(void)
 	REQUIRE(fabsf(eng->fader_slots[2].last_applied_val - (100.0f / 127.0f)) < 1e-4f);
 	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - (100.0f / 127.0f)) < 1e-4f);
 
+	/* QA-A01: switching the strip off parks it. Its source stays at the level it has on air (it was put back to
+	 * 100 % as if the strip had left it), and switching it on again changes nothing either: the strip waits for
+	 * its fader at that level. */
+	const int x_writes = fake_sg_find_source(&sg, "X")->opacity_writes;
+	e.enabled = false;
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(!eng->fader_slots[2].enabled);
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(fake_sg_find_source(&sg, "X")->opacity_writes == x_writes);
+	e.enabled = true;
+	REQUIRE(mfd_engine_update_slot_config(eng, 2, &e));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(fabsf(eng->fader_slots[2].last_applied_val - (100.0f / 127.0f)) < 1e-4f);
+	REQUIRE(eng->fader_slots[2].takeover.state == MFD_TAKEOVER_WAITING);
+	/* a strip that is off and is then given another source did leave the first one... but it was not driving it,
+	 * so nothing is put back; "Not used" on a strip that is on still puts its source back */
+	REQUIRE(mfd_engine_unassign_slot_preserve_addr(eng, 2));
+	REQUIRE(fabsf(fake_sg_find_source(&sg, "X")->last_opacity - 1.0f) < 1e-6f);
+
 	graph_test_engine_free(eng, sh);
 	return 0;
 }
@@ -7481,6 +7500,87 @@ int main(void)
 			REQUIRE(eng.fader_slots[10].cached_available);
 			eng.filter_meta_defer_for_test = false;
 			eng.initialized = was_initialized;
+		}
+
+		/* QA-A03: the Set up sheet's check of a Filter Setting candidate reads the filter's properties once, before
+		 * it takes the engine lock, and judges the range from what it read. */
+		{
+			struct mfd_setup_candidate fc;
+			memset(&fc, 0, sizeof(fc));
+			fc.slot_index = 11; /* fx_2, which holds this setting: no other strip does */
+			fc.enabled = true;
+			fc.target_type = MFD_TARGET_FILTER_PARAM;
+			snprintf(fc.source_a_name, sizeof(fc.source_a_name), "%s", "Color");
+			snprintf(fc.filter_name, sizeof(fc.filter_name), "%s", "Blur");
+			snprintf(fc.filter_prop, sizeof(fc.filter_prop), "%s", "passes");
+			fc.filter_from_val = 1.0;
+			fc.filter_to_val = 3.0;
+			struct mfd_msg fmsg;
+			int calls = g_fake_props_calls;
+			REQUIRE(mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(g_fake_props_calls == calls + 1);
+			fc.filter_to_val = 900.0;
+			REQUIRE(!mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(strcmp(mfd_msg_slug(fmsg.code), "range_outside_limits") == 0);
+			snprintf(fc.filter_prop, sizeof(fc.filter_prop), "%s", "no_such_setting");
+			REQUIRE(!mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(strcmp(mfd_msg_slug(fmsg.code), "setting_not_found") == 0);
+			snprintf(fc.filter_name, sizeof(fc.filter_name), "%s", "No Such Filter");
+			calls = g_fake_props_calls;
+			REQUIRE(!mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			REQUIRE(strcmp(mfd_msg_slug(fmsg.code), "filter_not_found") == 0);
+			/* a thread that may not run a filter's code reads nothing ahead; the check still answers */
+			eng.filter_meta_defer_for_test = true;
+			snprintf(fc.filter_name, sizeof(fc.filter_name), "%s", "Blur");
+			snprintf(fc.filter_prop, sizeof(fc.filter_prop), "%s", "passes");
+			fc.filter_to_val = 3.0;
+			REQUIRE(mfd_engine_validate_setup_candidate_msg(&eng, &fc, &fmsg));
+			eng.filter_meta_defer_for_test = false;
+		}
+
+		/* QA-A04: the source a Filter Setting strip uses is deleted, and a source of the same name comes back with
+		 * a same-named filter of a smaller range. No filter signal reaches the strip for it, so the strip must not
+		 * go on with the range it read from the first one. */
+		{
+			const struct mfd_fader_slot saved = eng.fader_slots[17];
+			fake_sg_add_source(&fake_sg, "Comes Back", false);
+			struct fake_sg_filter *first = fake_sg_add_filter(
+				&fake_sg, "Comes Back", "Blur", "blur_filter_v2", true, FAKE_SCHEMA_BLUR_GROUPED);
+			REQUIRE(first != NULL);
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "fx_8");
+			obs_data_set_string(req, "target_mode", "filter_param");
+			obs_data_set_string(req, "source_a", "Comes Back");
+			obs_data_set_string(req, "filter_name", "Blur");
+			obs_data_set_string(req, "filter_prop", "radius");
+			obs_data_set_double(req, "from_val", 0.0);
+			obs_data_set_double(req, "to_val", 50.0);
+			obs_data_set_bool(req, "enabled", true);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(!obs_data_has_user_value(res, "error"));
+			obs_data_release(req);
+			obs_data_release(res);
+			REQUIRE(eng.fader_slots[17].cached_available);
+
+			fake_sg_remove_source(&fake_sg, "Comes Back");
+			mfd_engine_reevaluate_slots(&eng, true);
+			REQUIRE(!eng.fader_slots[17].cached_available);
+			REQUIRE(strstr(eng.fader_slots[17].cached_reason, "was deleted") != NULL);
+
+			fake_sg_add_source(&fake_sg, "Comes Back", false);
+			struct fake_sg_filter *second = fake_sg_add_filter(
+				&fake_sg, "Comes Back", "Blur", "blur_filter_v2", true, FAKE_SCHEMA_BLUR_GROUPED);
+			REQUIRE(second != NULL);
+			second->float_max_override = 20.0; /* the strip's 0..50 no longer fits */
+			mfd_engine_reevaluate_slots(&eng, true);
+			REQUIRE(!eng.fader_slots[17].cached_available);
+			REQUIRE(strstr(eng.fader_slots[17].cached_reason, "outside") != NULL);
+
+			REQUIRE(mfd_engine_unassign_slot_preserve_addr(&eng, 17));
+			fake_sg_remove_source(&fake_sg, "Comes Back");
+			eng.fader_slots[17] = saved;
+			mfd_engine_reevaluate_slots(&eng, true);
 		}
 
 		/* 8. Profile switch apc40mk2 -> apcminimk2 -> apc40mk2 preserves fx_1..fx_8 enabled & bindings */

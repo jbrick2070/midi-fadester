@@ -66,10 +66,6 @@ void mfd_takeover_notify_rail_completed(struct mfd_takeover *t, bool upper_rail,
 void mfd_takeover_unpark_from_api(struct mfd_takeover *t, float api_val);
 
 int mfd_calibrated_percent(float calibrated_norm);
-int mfd_takeover_format_calibrated_output_bar(const struct mfd_takeover *t, enum mfd_target_type target_type,
-					      float calibrated_norm, bool available, const char *reason, float alpha_a,
-					      float alpha_b, float db_val, char *out_text, size_t text_size);
-
 #ifdef __cplusplus
 }
 #endif

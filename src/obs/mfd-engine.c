@@ -2031,12 +2031,46 @@ static bool filter_live_value_is_ours(const struct mfd_fader_slot *slot, double 
 					: (fabs(live_val - cur_mapped) <= 1e-6);
 }
 
+enum mfd_filter_meta_result {
+	MFD_FILTER_META_NO_PROPS = 0, /* the filter gave no properties */
+	MFD_FILTER_META_NUMERIC,      /* the setting is a number: filter_meta_* hold its range */
+	MFD_FILTER_META_NOT_NUMERIC,  /* the setting exists but is not a number */
+	MFD_FILTER_META_MISSING,      /* the filter has no setting of that name */
+};
+
+struct mfd_filter_meta {
+	enum mfd_filter_meta_result result;
+	struct mfd_filter_prop_info info;
+};
+
+static void read_filter_meta(const struct mfd_engine *eng, const char *source, const char *filter, const char *prop,
+			     struct mfd_filter_meta *out);
+
+/* prefetched: the setting's description, read by the caller with no engine lock held (QA-A03), or NULL to read it
+ * here. Reading runs the filter's own properties code, so a caller that checks often (the Set up sheet, on every
+ * change of a choice) reads first and locks afterwards; the video tick then never waits for a filter. */
+static bool validate_filter_param_binding(const struct mfd_engine *eng, int slot_index, bool enabled,
+					  const char *source_a, const char *filter_name, const char *filter_prop,
+					  bool has_from_to, double *inout_from_val, double *inout_to_val,
+					  struct mfd_filter_prop_info *out_prop_info,
+					  const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg);
+
 bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine *eng, int slot_index, bool enabled,
 							 const char *source_a, const char *filter_name,
 							 const char *filter_prop, bool has_from_to,
 							 double *inout_from_val, double *inout_to_val,
 							 struct mfd_filter_prop_info *out_prop_info,
 							 struct mfd_msg *out_msg)
+{
+	return validate_filter_param_binding(eng, slot_index, enabled, source_a, filter_name, filter_prop, has_from_to,
+					     inout_from_val, inout_to_val, out_prop_info, NULL, out_msg);
+}
+
+static bool validate_filter_param_binding(const struct mfd_engine *eng, int slot_index, bool enabled,
+					  const char *source_a, const char *filter_name, const char *filter_prop,
+					  bool has_from_to, double *inout_from_val, double *inout_to_val,
+					  struct mfd_filter_prop_info *out_prop_info,
+					  const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg)
 {
 	mfd_msg_clear(out_msg);
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -2085,21 +2119,32 @@ bool mfd_engine_validate_filter_param_binding_msg_locked(const struct mfd_engine
 		return false;
 	}
 
-	obs_properties_t *props = sg_create_filter_properties(eng, source_a, filter_name);
-	if (!props) {
-		mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
-		return false;
-	}
-	obs_data_t *settings = sg_get_filter_settings(eng, source_a, filter_name);
 	bool found_non_numeric = false;
+	bool found_numeric = false;
 	struct mfd_filter_prop_info info;
 	memset(&info, 0, sizeof(info));
-	bool found_numeric =
-		find_filter_prop_in_props_depth(props, settings, filter_prop, &found_non_numeric, &info, 0);
-	if (settings) {
-		obs_data_release(settings);
+	if (prefetched) {
+		if (prefetched->result == MFD_FILTER_META_NO_PROPS) {
+			mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
+			return false;
+		}
+		info = prefetched->info;
+		found_numeric = prefetched->result == MFD_FILTER_META_NUMERIC;
+		found_non_numeric = prefetched->result == MFD_FILTER_META_NOT_NUMERIC;
+	} else {
+		obs_properties_t *props = sg_create_filter_properties(eng, source_a, filter_name);
+		if (!props) {
+			mfd_msg_set(out_msg, MFD_MSG_FILTER_NO_PROPERTIES, filter_name, source_a, NULL, NULL, NULL);
+			return false;
+		}
+		obs_data_t *settings = sg_get_filter_settings(eng, source_a, filter_name);
+		found_numeric =
+			find_filter_prop_in_props_depth(props, settings, filter_prop, &found_non_numeric, &info, 0);
+		if (settings) {
+			obs_data_release(settings);
+		}
+		obs_properties_destroy(props);
 	}
-	obs_properties_destroy(props);
 
 	if (!found_numeric) {
 		mfd_msg_set(out_msg, found_non_numeric ? MFD_MSG_SETTING_NOT_NUMERIC : MFD_MSG_SETTING_NOT_FOUND,
@@ -2333,18 +2378,6 @@ void mfd_engine_restore_all_bypass_leases(struct mfd_engine *eng)
 	mfd_engine_unlock(eng);
 }
 
-enum mfd_filter_meta_result {
-	MFD_FILTER_META_NO_PROPS = 0, /* the filter gave no properties */
-	MFD_FILTER_META_NUMERIC,      /* the setting is a number: filter_meta_* hold its range */
-	MFD_FILTER_META_NOT_NUMERIC,  /* the setting exists but is not a number */
-	MFD_FILTER_META_MISSING,      /* the filter has no setting of that name */
-};
-
-struct mfd_filter_meta {
-	enum mfd_filter_meta_result result;
-	struct mfd_filter_prop_info info;
-};
-
 /* Reads one setting's description from the filter's properties. This runs the filter's own code
  * (obs_source_properties): never call it on the video thread. */
 static void read_filter_meta(const struct mfd_engine *eng, const char *source, const char *filter, const char *prop,
@@ -2398,16 +2431,19 @@ static void mark_filter_meta_stale_locked(struct mfd_engine *eng, const char *so
 {
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 		struct mfd_fader_slot *s = &eng->fader_slots[i];
-		if (!s->filter_meta_cached) {
+		/* a strip whose properties are being read for the first time is named by its binding */
+		const char *s_source = s->filter_meta_cached ? s->filter_meta_source : s->source_a_name;
+		const char *s_filter = s->filter_meta_cached ? s->filter_meta_filter : s->filter_name;
+		if (source && strcmp(s_source, source) != 0) {
 			continue;
 		}
-		if (source && strcmp(s->filter_meta_source, source) != 0) {
+		if (filter && strcmp(s_filter, filter) != 0) {
 			continue;
 		}
-		if (filter && strcmp(s->filter_meta_filter, filter) != 0) {
-			continue;
+		s->filter_meta_gen++; /* a read that began before this change is out of date when it lands */
+		if (s->filter_meta_cached) {
+			s->filter_meta_stale = true;
 		}
-		s->filter_meta_stale = true;
 	}
 }
 
@@ -2420,6 +2456,7 @@ static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng)
 {
 	struct {
 		int slot;
+		uint32_t gen;
 		char source[MFD_SOURCE_NAME_MAX];
 		char filter[MFD_SOURCE_NAME_MAX];
 		char prop[MFD_FILTER_PROP_NAME_MAX];
@@ -2444,6 +2481,7 @@ static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng)
 			continue;
 		}
 		jobs[n].slot = i;
+		jobs[n].gen = s->filter_meta_gen;
 		snprintf(jobs[n].source, sizeof(jobs[n].source), "%s", s->source_a_name);
 		snprintf(jobs[n].filter, sizeof(jobs[n].filter), "%s", s->filter_name);
 		snprintf(jobs[n].prop, sizeof(jobs[n].prop), "%s", s->filter_prop);
@@ -2464,6 +2502,11 @@ static void refresh_filter_meta_on_ui_thread(struct mfd_engine *eng)
 			    strcmp(s->filter_name, jobs[k].filter) == 0 && strcmp(s->filter_prop, jobs[k].prop) == 0) {
 				store_filter_meta_locked(s, jobs[k].source, jobs[k].filter, jobs[k].prop,
 							 &jobs[k].meta);
+				if (s->filter_meta_gen != jobs[k].gen) {
+					/* the filter changed while it was being read: what was stored may be the
+					 * older range, so it is read once more */
+					s->filter_meta_stale = true;
+				}
 			}
 		}
 		mfd_engine_reevaluate_slots(eng, true);
@@ -2488,6 +2531,9 @@ static void refresh_filter_slot_metadata_locked(struct mfd_engine *eng, int slot
 		mfd_msg_set(&rsn, MFD_MSG_FILTER_RESERVED, slot->filter_name, NULL, NULL, NULL, NULL);
 	} else if (!mfd_engine_source_exists(eng, slot->source_a_name)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, NULL);
+		/* a source of this name that comes back (undo, a scene copy) may carry a same-named filter of another
+		 * kind or range, and its filters load before any signal of it reaches this strip: read afresh (QA-A04) */
+		slot->filter_meta_cached = false;
 		mfd_msg_set(&rsn, MFD_MSG_SOURCE_DELETED, slot->source_a_name, NULL, NULL, NULL, NULL);
 	} else if (!sg_filter_exists(eng, slot->source_a_name, slot->filter_name, NULL)) {
 		invalidate_filter_leases_for_removed_locked(eng, slot->source_a_name, slot->filter_name);
@@ -4252,11 +4298,9 @@ static void layer_binding_read(const struct mfd_fader_slot *s, struct mfd_layer_
 	snprintf(out->source_b, sizeof(out->source_b), "%s", s->source_b_name);
 }
 
-static bool slot_drives_layer(const struct mfd_fader_slot *s, const char *source)
+/* Whether the strip's job names this source as a layer it shows or mixes, switched on or not. */
+static bool slot_names_layer(const struct mfd_fader_slot *s, const char *source)
 {
-	if (!s->enabled) {
-		return false;
-	}
 	if (s->target_type == MFD_TARGET_SINGLE_LAYER) {
 		return strcmp(s->source_a_name, source) == 0;
 	}
@@ -4264,6 +4308,11 @@ static bool slot_drives_layer(const struct mfd_fader_slot *s, const char *source
 		return strcmp(s->source_a_name, source) == 0 || strcmp(s->source_b_name, source) == 0;
 	}
 	return false;
+}
+
+static bool slot_drives_layer(const struct mfd_fader_slot *s, const char *source)
+{
+	return s->enabled && slot_names_layer(s, source);
 }
 
 /* A source no strip drives any more goes back to 100 %: left faded out, nothing could raise it again. */
@@ -4286,14 +4335,18 @@ static void release_layer_if_undriven_locked(struct mfd_engine *eng, const char 
  * B-07: a strip was given another source (or another job). Call after the strip has been written and reset. The
  * sources it left go back to 100 % when no strip drives them, and a Layer Opacity strip starts at the level its new
  * source has now, with pick-up from where its fader is: the picture does not jump at the first fader move.
+ *
+ * A source the strip still names has not been left: switching a strip off (the Advanced tab's "On" box, set_slot
+ * with "enabled": false) only parks it, and the source stays at the level it has on air (QA-A01).
  */
 static void after_layer_binding_change_locked(struct mfd_engine *eng, struct mfd_fader_slot *s,
 					      const struct mfd_layer_binding *before)
 {
-	if (before->target == MFD_TARGET_SINGLE_LAYER || before->target == MFD_TARGET_TWO_SOURCE_MIX) {
+	if ((before->target == MFD_TARGET_SINGLE_LAYER || before->target == MFD_TARGET_TWO_SOURCE_MIX) &&
+	    !slot_names_layer(s, before->source_a)) {
 		release_layer_if_undriven_locked(eng, before->source_a, before->afv);
 	}
-	if (before->target == MFD_TARGET_TWO_SOURCE_MIX) {
+	if (before->target == MFD_TARGET_TWO_SOURCE_MIX && !slot_names_layer(s, before->source_b)) {
 		release_layer_if_undriven_locked(eng, before->source_b, before->afv);
 	}
 	if (s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
@@ -4377,23 +4430,35 @@ bool mfd_engine_validate_setup_candidate(const struct mfd_engine *eng, const str
 }
 
 static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
-						struct mfd_msg *out_msg);
+						const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg);
 
 /* Takes the engine lock (A-04, F-14): the check reads the other strips' names and the cached OBS state, which the
  * video tick and obs-websocket threads rewrite under that lock. The lock is recursive, so a commit that validates
- * while holding it still works. */
+ * while holding it still works.
+ *
+ * A Filter Setting candidate needs the filter's properties, and building them runs the filter's own code. The Set up
+ * sheet asks on every change of a choice, so they are read before the lock is taken (QA-A03): a slow filter then
+ * costs the sheet a moment and the video tick nothing. */
 bool mfd_engine_validate_setup_candidate_msg(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
 					     struct mfd_msg *out_msg)
 {
+	struct mfd_filter_meta meta;
+	const struct mfd_filter_meta *prefetched = NULL;
+	if (eng && cand && cand->enabled && cand->target_type == MFD_TARGET_FILTER_PARAM &&
+	    cand->source_a_name[0] != '\0' && cand->filter_name[0] != '\0' && cand->filter_prop[0] != '\0' &&
+	    !mfd_is_internal_filter(cand->filter_name, NULL) && filter_meta_may_read_here(eng)) {
+		read_filter_meta(eng, cand->source_a_name, cand->filter_name, cand->filter_prop, &meta);
+		prefetched = &meta;
+	}
 	struct mfd_engine *lock_eng = (struct mfd_engine *)(uintptr_t)eng;
 	mfd_engine_lock(lock_eng);
-	bool ok = validate_setup_candidate_msg_locked(eng, cand, out_msg);
+	bool ok = validate_setup_candidate_msg_locked(eng, cand, prefetched, out_msg);
 	mfd_engine_unlock(lock_eng);
 	return ok;
 }
 
 static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, const struct mfd_setup_candidate *cand,
-						struct mfd_msg *out_msg)
+						const struct mfd_filter_meta *prefetched, struct mfd_msg *out_msg)
 {
 	mfd_msg_clear(out_msg);
 	if (!eng || !cand || cand->slot_index < 0 || cand->slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -4425,10 +4490,9 @@ static bool validate_setup_candidate_msg_locked(const struct mfd_engine *eng, co
 	} else if (cand->target_type == MFD_TARGET_FILTER_PARAM) {
 		double fval = cand->filter_from_val;
 		double tval = cand->filter_to_val;
-		return mfd_engine_validate_filter_param_binding_msg_locked(eng, cand->slot_index, cand->enabled,
-									   cand->source_a_name, cand->filter_name,
-									   cand->filter_prop, true, &fval, &tval, NULL,
-									   out_msg);
+		return validate_filter_param_binding(eng, cand->slot_index, cand->enabled, cand->source_a_name,
+						     cand->filter_name, cand->filter_prop, true, &fval, &tval, NULL,
+						     prefetched, out_msg);
 	}
 
 	struct mfd_fader_slot tmp;
@@ -9902,12 +9966,14 @@ bool mfd_engine_init(void)
 {
 	mfd_tbar_apply_fn saved_tbar_driver = g_engine.tbar_driver;
 	mfd_tbar_unlatch_fn saved_tbar_unlatch = g_engine.tbar_unlatch;
+	mfd_tbar_deferred_fn saved_tbar_deferred = g_engine.tbar_deferred;
 	memset(&g_engine, 0, sizeof(g_engine));
 	if (!mfd_engine_init_mutex(&g_engine)) {
 		return false;
 	}
 	g_engine.tbar_driver = saved_tbar_driver;
 	g_engine.tbar_unlatch = saved_tbar_unlatch;
+	g_engine.tbar_deferred = saved_tbar_deferred;
 	mfd_midi_queue_init(&g_engine.midi_queue);
 	mfd_midi_parser_init(&g_engine.midi_parser);
 	mfd_winmm_init(&g_engine.midi_dev, &g_engine.midi_queue);

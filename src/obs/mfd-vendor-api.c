@@ -26,6 +26,38 @@ static signal_handler_t *g_bridge_sh = NULL;
 static mfd_vendor_event_sink_fn g_event_sink = NULL;
 static void *g_event_sink_user_data = NULL;
 static volatile bool g_vendor_shutting_down = false;
+
+/* Handlers that have let go of the engine lock but are still at work (get_catalog for one source builds that source's
+ * filter properties with no lock held). Shutdown's lock-and-unlock only waits for handlers inside the lock, so it
+ * waits for this count to reach zero as well (QA-A02). A condition, not a timer. */
+static pthread_mutex_t g_unlocked_calls_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_unlocked_calls_cond = PTHREAD_COND_INITIALIZER;
+static int g_unlocked_calls = 0;
+
+static void unlocked_call_begin(void)
+{
+	pthread_mutex_lock(&g_unlocked_calls_mutex);
+	g_unlocked_calls++;
+	pthread_mutex_unlock(&g_unlocked_calls_mutex);
+}
+
+static void unlocked_call_end(void)
+{
+	pthread_mutex_lock(&g_unlocked_calls_mutex);
+	if (--g_unlocked_calls == 0) {
+		pthread_cond_broadcast(&g_unlocked_calls_cond);
+	}
+	pthread_mutex_unlock(&g_unlocked_calls_mutex);
+}
+
+static void unlocked_calls_wait_for_none(void)
+{
+	pthread_mutex_lock(&g_unlocked_calls_mutex);
+	while (g_unlocked_calls > 0) {
+		pthread_cond_wait(&g_unlocked_calls_cond, &g_unlocked_calls_mutex);
+	}
+	pthread_mutex_unlock(&g_unlocked_calls_mutex);
+}
 static volatile bool g_mix_reply_registered = false;
 
 static bool parse_mix_provider_id(obs_data_t *reply, bool *out_has_provider, char *out_id, size_t out_size)
@@ -1634,11 +1666,14 @@ void mfd_vendor_handle_get_catalog(obs_data_t *request_data, obs_data_t *respons
 	struct mfd_msg err_msg;
 	if (source && source[0] != '\0') {
 		/* One source's filters: this builds every filter's properties (the filters' own code) and reads no
-		 * engine state, so it runs with no engine lock held (F-04, A-03); the video tick does not wait. */
+		 * engine state, so it runs with no engine lock held (F-04, A-03); the video tick does not wait.
+		 * Counted before the lock is let go, so a shutdown that begins now waits for it (QA-A02). */
+		unlocked_call_begin();
 		mfd_engine_unlock(eng);
 		if (!mfd_engine_fill_vendor_catalog_msg_locked(eng, source, response_data, &err_msg)) {
 			set_error_msg(response_data, &err_msg);
 		}
+		unlocked_call_end();
 		return;
 	}
 	if (!mfd_engine_fill_vendor_catalog_msg_locked(eng, source, response_data, &err_msg)) {
@@ -1785,6 +1820,7 @@ void mfd_vendor_api_shutdown(struct mfd_engine *eng)
 		mfd_engine_lock(eng);
 		mfd_engine_unlock(eng);
 	}
+	unlocked_calls_wait_for_none();
 	g_vendor = NULL;
 	g_bridge_sh = NULL;
 	g_event_sink = NULL;
