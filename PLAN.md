@@ -252,6 +252,10 @@ Goal: Midi Fadester follows the language OBS runs in, in the ten languages obs-p
 Dutch where the English is word for word OBS's, Claude's draft, a Gemini 4 Argon review); REQUIRED_LOCALES, R-I18N-4
 and the README list include it.
 
+*Added 2026-11-20 (operator):* Italian (it-IT) as a twelfth language, 13 with English (OBS 33's own Italian where the
+English is word for word OBS's, Claude's draft; not yet reviewed by a second model or a native speaker);
+REQUIRED_LOCALES, R-I18N-4 and the README list include it.
+
 Today `en-US.ini` has 5 keys; about 480 distinct visible strings are hardcoded (inventory 2026-10-31: settings dialog
 ~111, ui-sentences.c ~104, setup sheet ~79, engine reasons and errors ~75, controller drawing ~38, APC40 and MIDI
 device texts). Each step ends with the full ctest green and its own commit; the push comes once, after step 6.

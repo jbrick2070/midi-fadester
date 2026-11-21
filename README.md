@@ -53,7 +53,7 @@ There are 18 slots: a crossfader, eight channel faders, a master, and eight FX k
 
 ## You need
 
-- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 0.9.0 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
+- **OBS Studio 33.0.0 or newer** on 64-bit Windows or macOS 13.0 or newer. The 1.5.0 release has Windows x64 files and a universal macOS build (Apple Silicon and Intel); see [Install](#install). The plugin uses the OBS 33 plugin layout and does not load in older versions.
 - **A USB MIDI controller** with faders or knobs. The Akai APC40 mkII is set up out of the box and has been tested with a real desk on Windows (last recorded 2026-11-08). Four more desks have ready-made layouts, and any other controller works through Learn (see [Controllers](#controllers)).
 - **Studio Mode** turned on, for scene switching only. The other jobs work with it off.
 - **The obs-websocket server** turned on (it ships with OBS), only if you also use Fadester for OBS or scripts.
@@ -62,7 +62,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 0.9.0, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 1.5.0, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -93,7 +93,7 @@ On Windows you end up with `plugins\midi-fadester\midi-fadester.dll` and `plugin
 4. **Throw the crossfader** all the way to the other end. Program fades to what was in Preview. When the throw finishes, OBS moves the old Program scene into Preview (its default *Swap Preview/Program Scenes After Transitioning* setting), ready for the next throw, and the strip reads *At end.* Pick another scene in Preview and throw the crossfader back the other way.
 5. **Give a fader a job.** Click **Set up** under a strip. Three steps: pick the job, pick the scene and layer or source, then move the fader, check that the bar in the sheet follows it, and click **Done**. OBS does not change until you click **Done**.
 
-   ![Set up, step 1 of 3: what should this control do?](docs/screenshots/05-setup-step1-cards.png)
+   ![Set up, step 1 of 3: what should this strip do?](docs/screenshots/05-setup-step1-cards.png)
 
 6. **Another controller?** Click **Change controller** and pick its port; a known desk gets its layout by itself, any other desk gets the Generic layout. When a desk has no ready layout but another desk's layout is in use, a blue bar at the top says so. If a fader does not respond, open **Which hardware control?** in step 3 of Set up, press **Learn** and move the fader. The **Advanced** tab is a map of all 18 strips: each row shows the strip's MIDI control with **Learn** and **×**, what the strip does, its output, and an **Edit...** button that opens Set up on that strip. **On** and **Reverse** in a row, like the other switches on that tab, apply at once and are saved.
 
@@ -178,7 +178,7 @@ The bank bar on the Strips screen switches between **Faders** and **FX & Knobs (
 
 ## How it feels
 
-- **Smoothing.** Every move gets a short glide (30 ms by default, *Smoothing (ms)* on the Advanced tab; 0 turns it off), so the 128 steps of a MIDI fader do not show as steps on screen.
+- **Smoothing.** Every move gets a short glide (30 ms by default, **Smoothing** on the Advanced tab; 0 turns it off), so the 128 steps of a MIDI fader do not show as steps on screen.
 - **Pick-up.** If a value moved without the fader (someone dragged it in OBS, a Stream Deck dial turned it, a scene collection loaded), the fader does not make it jump. The strip shows an amber bar, a marker at the target and *Move the fader up to 40% to start.* Once the fader crosses that point it acts again, without a step. On the Fadester Desk dock the same fader's bar is amber, with the same marker.
 - **Rails.** The top and bottom 3 % of the travel are the rails. A control resting there is parked (*At end.*), so hand jitter against the end stop never flickers a layer or re-triggers a transition. Moving 8 % back unparks it, and the rest of the travel is rescaled so there is no jump.
 - **Calibration.** Each control starts with the full MIDI range and widens it whenever it sends a value beyond anything seen before, saved per layout and control. A fader that stops at 125 instead of 127 still reaches 100 %, because the top 3 % of the travel counts as the end.
@@ -244,8 +244,8 @@ The full contract, with every field and the rules both sides follow, is [API-CON
 
 ## Where settings live
 
-- **Per Windows user:** the MIDI port, layout, smoothing, T-bar direction, each control's learned range and your first-run and Stream Deck card choices are saved in `%APPDATA%\obs-studio\plugin_config\midi-fadester\global.json` (for a portable OBS: `config\obs-studio\plugin_config\midi-fadester\global.json` inside the OBS folder). That file also keeps a copy of the 18 jobs, which stay active when a scene collection has no saved set of its own.
-- **Per scene collection:** the 18 jobs are saved inside the collection, because they name scenes and sources.
+- **Per Windows user:** the MIDI port, layout, which MIDI control drives each strip (what **Learn** set) with its learned range, smoothing, T-bar direction and your first-run and Stream Deck card choices are saved in `%APPDATA%\obs-studio\plugin_config\midi-fadester\global.json` (for a portable OBS: `config\obs-studio\plugin_config\midi-fadester\global.json` inside the OBS folder). That file also keeps a copy of the 18 jobs, which stay active when a scene collection has no saved set of its own.
+- **Per scene collection:** the 18 jobs are saved inside the collection, because they name scenes and sources. Loading a collection changes the jobs, not which MIDI control drives a strip: once the settings file has a strip list, the MIDI addresses kept in a scene collection are no longer read.
 - **Import...** and **Export...** on the Advanced tab read and write that whole file: port, layout, smoothing, T-bar direction, learned ranges, card choices and jobs.
 
 ## If something is wrong
@@ -383,7 +383,9 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-**0.9.0** (November 2026) is the current release. **Visual Sidechain is now part of Midi Fadester**: one plugin, one install, one version. The installer removes the old separate Visual Sidechain plugin (on Windows its own uninstaller runs; the Mac package deletes the old `visual-sidechain.plugin`). Filter names, hotkeys, saved scenes and the `visual-sidechain` obs-websocket vendor are unchanged, so Fadester for OBS and the Companion keep working. If the old plugin is still found, Visual Sidechain stays off and the Fadester Desk dock shows which file to remove. See [Visual Sidechain is built in](#visual-sidechain-is-built-in).
+**1.5.0** (November 2026) is the current release. It is the suite-wide step to 1.5: every product of the Fadester suite moves to 1.5 together, so Midi Fadester goes from 0.9.0 straight to 1.5.0, and Visual Sidechain, being part of it, is 1.5.0 too. Since 0.9.0: **on the APC40 mkII**, Session is now **Blackout** (Program fades to black and back, and nothing is added to your scenes), the top pad row cuts (pad 1, yellow) or fades Preview on air over 32 down to ½ beats at Visual Sidechain's tempo, pinning a column moved to Shift + Clip Stop, and a Scene Launch press on the scene already on air does nothing (see [APC40 mkII pads](#apc40-mkii-pads)). **A simpler screen**: every window shows the version in its title bar; the Fadester Desk dock has ON AIR and PREVIEW as its largest text, buttons named for what they do (**Reset**, **Reset all**, **Fade out**, **Cut out**, **Dark (hold)**; each tooltip names the APC40's own button), a **?** that explains the pads, a gear that opens the settings, an amber bar on a fader that waits to pick up, and scene buttons, **Fade** and **Blackout** that work without an APC40; on a new installation the APC40's usual layout is applied without a question and the dock opens once, while an installation that already has settings is left as it is; the Advanced tab is a map of the 18 strips with one **Edit...** per row; resetting all strips, **Not used** and **Import...** ask first; Set up starts Learn by itself on a strip with no control; Visual Sidechain's filter windows open on the controls most people need, with the rest behind **More settings**, and its effect names lost the "FFT" prefix. **Fixes from a code review of the whole repository**: an audio fader no longer drops out of pick-up when a scene change lands mid-move; Paste Filters can no longer freeze OBS with a Shader Filter or an Audio Modulator; a compiled shader no longer stays in memory until OBS exits; Flash Guard also guards filters it does not know; a long non-English source name can no longer crash OBS through obs-websocket; the Tape Deck no longer refuses every tape on macOS; HDR and 16-bit sources are no longer clipped below 100 % on a layer fader; an unplugged saved MIDI port shows as *name (missing)*; the settings window fits a 1080p laptop at 150 %; an Audio Modulator keeps a setting's own value when the filter it moves is renamed. **Languages**: Italian is new, which makes 13 languages; the Italian file is a model draft, not yet reviewed by a second model or a native speaker (see [Languages](#languages)). The Mac installer is titled Midi Fadester and ends with the three next steps in all 13. **If you update from an older version**: which MIDI control drives a strip is the user's, so per-user MIDI addresses that were kept per scene collection are no longer read once the settings file has a strip list (see [Where settings live](#where-settings-live)). **For scripts**: the vendor API's requests and error codes are unchanged; some error sentences are reworded in plain words, and a request field of the wrong type is now refused.
+
+**0.9.0** (November 2026). **Visual Sidechain is now part of Midi Fadester**: one plugin, one install, one version. The installer removes the old separate Visual Sidechain plugin (on Windows its own uninstaller runs; the Mac package deletes the old `visual-sidechain.plugin`). Filter names, hotkeys, saved scenes and the `visual-sidechain` obs-websocket vendor are unchanged, so Fadester for OBS and the Companion keep working. If the old plugin is still found, Visual Sidechain stays off and the Fadester Desk dock shows which file to remove. See [Visual Sidechain is built in](#visual-sidechain-is-built-in).
 
 **0.8.0** (November 2026). It adds the **Fadester Desk** dock (Docks → Fadester Desk): the APC40 mkII on screen, with the scene buttons, the pad grid in the desk's own colours, Clip Stop, the faders and Visual Sidechain's tempo, beat, lock and panic, and buttons that act like the desk's (see [APC40 mkII pads](#apc40-mkii-pads)). Designed with reviews by Codex and Antigravity. Visual Sidechain moves to 0.8.0 with it (no changes there).
 
@@ -417,7 +419,7 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 
 The built plugin lands in `build_x64\rundir\RelWithDebInfo\midi-fadester\`; copy that folder into your OBS `plugins` folder.
 
-- **Tests.** Thirty-three `ctest` targets run in a few seconds without OBS or hardware: the MIDI parser and queue, the smoother, pick-up, the crossfade curves, the T-bar state machine, the filter math, every UI sentence, the vendor API with a fake websocket, a real Qt6 dialog and the Fadester Desk dock that render the thirteen screenshots in `docs/screenshots/`, and repository hygiene (UTF-8 without BOM, no timers, every locale key present).
+- **Tests.** Seventy-eight `ctest` tests (36 for Midi Fadester, 42 for Visual Sidechain) run in about 25 seconds without OBS or hardware: the MIDI parser and queue, the smoother, pick-up, the crossfade curves, the T-bar state machine, the filter math, every UI sentence, the vendor API with a fake websocket, a real Qt6 dialog and the Fadester Desk dock that render the thirteen screenshots in `docs/screenshots/`, Visual Sidechain's audio analysis, modulator, shader parser and Tape Deck, and repository hygiene (UTF-8 without BOM, no timers, every locale key present, every translation in step with the English file).
 - **Live self-test.** `scripts\run-live-selftest.ps1` boots a dedicated portable OBS 33 with a loopMIDI port, throws the T-bar eight ways, checks GPU pixels through `GetSourceScreenshot`, and exits with zero leaks. [TESTING.md](TESTING.md) explains the setup.
 - **Formatting.** CI checks C and C++ with clang-format 17 and CMake with gersemi, using the repository's `.clang-format` and `.gersemirc`.
 - **Design.** The MIDI input thread is lock-free and never calls OBS; the engine has no timers and runs on MIDI and OBS events. [PLAN.md](PLAN.md) has the thread contract.

@@ -1,13 +1,13 @@
-# Midi Fadester — Verification & UI State Gallery (`0.9.0`)
+# Midi Fadester — Verification & UI State Gallery (`1.5.0`)
 
 Midi Fadester verifies every engine invariant, T-bar state transition, Soft Takeover rail/pickup rule, filter parameter modulation & shared-filter `bypass_at_zero` lease contract, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 
-1. **Automated `ctest` Suite (75 headless tests, about 20 s: 33 for Midi Fadester and 42 for Visual Sidechain, which is part of Midi Fadester since 0.9.0)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
+1. **Automated `ctest` Suite (78 headless tests, about 25 s: 36 for Midi Fadester and 42 for Visual Sidechain, which is part of Midi Fadester since 0.9.0)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
 2. **Live Portable OBS 33 + `loopMIDI` Hardware-Loopback Suite (`MFD_SELF_TEST=1`)** — boots real `obs64.exe` in Studio Mode, renders HLSL `mfd_layer_mixer.effect` composites and live `color_filter_v2` `filter_param` sweeps on the GPU, checks `GetSourceScreenshot` pixel samples, verifies live scene-item reorder stack-order inversion, live filter/host rename + remove/re-add + external OBS `"update"` Soft Takeover + `reset_fx`, drives 8 physical-timing `loopMIDI` cases through WinMM `midiInOpen`, and asserts `Number of memory leaks: 0` on clean exit.
 
 ---
 
-## 1. Automated `ctest` Suite (`75/75` tests)
+## 1. Automated `ctest` Suite (`78/78` tests)
 
 Run locally from a configured preset:
 
@@ -28,20 +28,20 @@ ctest --preset windows-x64 -C RelWithDebInfo --output-on-failure
 | 7 | `test-tbar-logic` | Pure-C T-bar state machine (`R-TBAR-SM`): `6%` start deadband (`x > 0.06` starts throw with `t` rescaled `[0.06, 1.0] -> [0.0, 1.0]`), linear tracking to `100%`, `3%` target rail completion (`x >= 0.97` normal / `x <= 0.03` reversed), `3%` origin rail abort (`Throwing -> Idle` with `pos = 0`, single `release`, zero polarity flip), and bidirectional park/unpark. |
 | 8 | `test-filter-mod` | Pure-C filter parameter math (`src/core/filter-math.c`, `R-FADE-4`): `[from_val, to_val]` forward/inverted sub-range mapping, `OBS_PROPERTY_INT` nearest-int rounding, step quantization (`1e-12` midpoint tie handling), endpoint snap, quantized write gating (`mfd_filter_should_write_mapped`), `bypass_at_zero` deadzone (`u <= 0.005` off / `u >= 0.010` on), inverse normalized position for external OBS `"update"` sync, and `display_value` unit formatting (`px`, `%`, `dB`, `°`, raw float/int). |
 | 9 | `test-ui-sentences` | Pure-C table-driven test of every plain-English UI sentence in `src/core/ui-sentences.c`: controller status bar (`Connected`, unplugged, WinMM busy/error, generic/none), strip & FX bank assignment/state/action precedence (`Not used`, `Studio Mode is off`, missing scene/layer/audio/filter/property recovery sentences, `Throwing N%` + `Finish now`, `At end.`, Soft Takeover pickup arrows/sentences, live `%` / `dB` / `display_value` readouts), 3-step `Set up` sheet copy & multi-scene warning, Zone 3 live status line, and `Advanced` tab Output cell text. |
-| 10 | `test-vendor-api` | Full 18-slot engine & nine `obs-websocket` vendor requests (`get_state`, `get_catalog`, `set_slot`, `set_fader_value`, `nudge_fader`, `auto_fade`, `reset_fx`, `load_profile`, `mix_reply`), Fadester mix master requests (one coalesced `mix.set` per tick and no direct OBS volume writes; only the reply matching the pending request UUID is accepted, once; a decline never counts as a write), nested `OBS_PROPERTY_GROUP` recursion, universal single-writer `(source, filter, prop)` uniqueness across enabled & disabled slots, shared-filter `bypass_at_zero` lease aggregation + crash-recovery `pre_mfd_enabled` restoration, enabled/disabled lifecycle and live-value resync, filter-only Clean FX, external OBS `"update"` Soft Takeover sync (`origin: "obs"`), weak-ref signal lifecycle, and 4-thread concurrent stress (`tick` + `snapshot` + `setup_session` + `shutdown`). |
-| 11 | `test-ui-dialog` | Real Qt6 `qwindows` (`Qt::WA_DontShowOnScreen`) end-to-end dialog test instantiating `mfd_ui_create_settings_dialog`: drives First-Run banner, Studio Mode amber banner & one-click recovery, live MIDI CC throws/fades, Soft Takeover pickup arrows, red precondition recovery flows, `[Faders]` / `[FX & Knobs (8)]` bank pills + `[Clean / All FX Off]`, 3-step `Set up` modal sheet including `Filter or effect setting` & single-writer conflict guard, `[Show controller]` live SVG desk view across all 6 controller profiles, 18-row `Advanced` tab (`<= 1380 px`), and non-blank `QDialog::grab()` PNG verification of all 12 states below. |
+| 10 | `test-vendor-api` | Full 18-slot engine & ten `obs-websocket` vendor requests (`get_state`, `get_catalog`, `set_slot`, `set_fader_value`, `nudge_fader`, `auto_fade`, `reset_fx`, `load_profile`, `mix_reply`, `fill_from_scene`), Fadester mix master requests (one coalesced `mix.set` per tick and no direct OBS volume writes; only the reply matching the pending request UUID is accepted, once; a decline never counts as a write), nested `OBS_PROPERTY_GROUP` recursion, universal single-writer `(source, filter, prop)` uniqueness across enabled & disabled slots, shared-filter `bypass_at_zero` lease aggregation + crash-recovery `pre_mfd_enabled` restoration, enabled/disabled lifecycle and live-value resync, filter-only Clean FX, external OBS `"update"` Soft Takeover sync (`origin: "obs"`), weak-ref signal lifecycle, and 4-thread concurrent stress (`tick` + `snapshot` + `setup_session` + `shutdown`). |
+| 11 | `test-ui-dialog` | Real Qt6 `qwindows` (`Qt::WA_DontShowOnScreen`) end-to-end dialog test instantiating `mfd_ui_create_settings_dialog`: drives First-Run notice, Studio Mode amber banner & one-click recovery, live MIDI CC throws/fades, Soft Takeover pickup arrows, red precondition recovery flows, `[Faders]` / `[FX & Knobs (8)]` bank pills + `[Clean / All FX Off]`, 3-step `Set up` modal sheet including `Filter or effect setting` & single-writer conflict guard, `[Show controller]` live SVG desk view across all 6 controller profiles, 18-row `Advanced` tab (`<= 1380 px`), and non-blank `QDialog::grab()` PNG verification of all 13 states below. |
 | 12 | `test-midi-send` | CLI argument validation and WinMM loopback message framing for `midi-send.exe`. |
-| 13 | `test-shader-syntax` | HLSL `data/effects/mfd_layer_mixer.effect` uniform/pass validation, repository-wide UTF-8 no-BOM guard across 35 source/config files, and zero-timer / zero-sleep static source audit (`QTimer`, `startTimer`, `SetTimer`, `QThread::msleep`, `os_sleep_ms`). |
+| 13 | `test-shader-syntax` | HLSL `data/effects/mfd_layer_mixer.effect` uniform/pass validation, UTF-8 no-BOM guard over every source file under `src/` (found by pattern, 111 files, so a new file is covered without being listed), and zero-timer / zero-sleep static audit of the same files (`QTimer`, `QBasicTimer`, `startTimer`, `SetTimer`, `sleep_for`, `Sleep(`, `150 ms`); the live self-test block (`#ifdef MFD_ENABLE_SELF_TEST`) is the one exception. Three more tests prove the guard on fixtures: `test-shader-syntax-guard-inside` (a timer inside the self-test block passes), `test-shader-syntax-guard-timer-outside` (one outside it fails) and `test-shader-syntax-guard-comment-trap` (the directive's words in a comment open no block). |
 | 14 | `check-locale-keys` | Verifies every `obs_module_text(...)` key in `src/` exists in `data/locale/en-US.ini` with non-empty text and no `"OBS"` prefix violation. |
 | 15 | `check-locale-keys-fails-on-missing-key` | Negative mutation check proving `check-locale-keys` fails immediately when a locale key is missing. |
 
-The table lists Midi Fadester's core targets; the rest of its 33 tests are the locale-file checks and their negative cases. **Visual Sidechain's 42 tests** (`tests/vs`, all named `vs-*`) came with it in 0.9.0 unchanged: audio analysis (FFT, onsets, spectrum, envelope, tempo), the modulator and its baseline protection, the fader bridge, the shader parser and the photosensitivity flash limit, the Tape Deck (core, HTTP, listener, link), its vendor API, its own locale and product-naming checks and, on macOS, `vs-test-shader-gpu`, which compiles every built-in shader with OBS's GLSL and Metal translators. Their history is in [Visual Sidechain's TESTING.md](https://github.com/jbrick2070/visual-sidechain/blob/main/TESTING.md).
+The table lists Midi Fadester's core targets; the rest of its 36 tests are `test-mfd-text`, `test-vj-pads`, the three `test-shader-syntax-guard-*` fixture tests of row 13, four more cases of `check-locale-keys` (a call wrapped over lines, changed English twice, a key built at run time) and `check-locale-files` with its eleven fixture cases. **Visual Sidechain's 42 tests** (`tests/vs`, all named `vs-*`) came with it in 0.9.0, and several have gained cases since: audio analysis (FFT, onsets, spectrum, envelope, tempo), the modulator and its baseline protection, the fader bridge, the shader parser and the photosensitivity flash limit, the Tape Deck (core, HTTP, listener, link), its vendor API, its own locale and product-naming checks and, on macOS only, a 43rd, `vs-test-shader-gpu`, which compiles every built-in shader with OBS's GLSL and Metal translators. Their history is in [Visual Sidechain's TESTING.md](https://github.com/jbrick2070/visual-sidechain/blob/main/TESTING.md).
 
 ---
 
-## 2. Dialog State Screenshot Gallery (`0.4.0` UI)
+## 2. Dialog State Screenshot Gallery
 
-All 13 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). To regenerate them into `docs/screenshots/`:
+All 13 screenshots below are rendered deterministically by `test-ui-dialog` on the real Windows `qwindows` Qt6 platform plugin (`1380x660` main dialog, `Qt::WA_DontShowOnScreen`). The descriptions follow the 1.5.0 code. The PNG files in `docs/screenshots/` were last regenerated for 0.9.0 or earlier, so they show older wording in places (and an older version number on the dock and the Advanced tab). To regenerate them into `docs/screenshots/`:
 
 ```powershell
 ctest --preset windows-x64 -C RelWithDebInfo -R test-ui-dialog --output-on-failure
@@ -71,16 +71,19 @@ Moving physical Crossfader past the `6%` bottom-rail deadband transitions into `
 Each strip reports the highest-priority actionable sentence without abbreviations:
 - **Crossfader:** Completed throw parked at target rail (`"At end."`, emerald bar).
 - **Fader 1:** Soft Takeover waiting for physical fader (`48%`) to move down to OBS's target (`12%`) — amber bar, hollow target marker, downward arrow glyph, and `"Move the fader down to 12% to start."`.
-- **Strip 4:** Missing layer in scene (`"Color 2 is not in Red"` + `[Fix]`).
-- **Strip 5:** Deleted scene (`"Scene OldScene was removed"` + `[Fix]`).
-- **Strip 6:** Video-only source assigned to Volume (`"Color has no audio"` + `[Fix]`).
-- **Zone 1 (Controller Bar):** Red dot + `"APC40 mkII is busy in another app. Close Ableton or MIDI-OX, then click Reconnect."` + `[Reconnect]`.
+- **Strip 4:** Missing layer in scene (`"Color 2 is no longer in scene Red."`).
+- **Strip 5:** Deleted scene (`"Scene OldScene was deleted."`).
+- **Strip 6:** Deleted audio source (`"Guest Mic was deleted. Click Set up to choose another."`).
+- **Strip 7:** Video-only source assigned to Volume (`"Title Card has no audio."`).
+- **Zone 1 (Controller Bar):** Red dot + `"Another program has the APC40 mkII open. Close it, then press Reconnect."` + `[Reconnect]`.
+
+A strip in red keeps its `[Set up]` button, which is where it is put right.
 
 ![State 4: Pickup Pending and Precondition Errors](docs/screenshots/04-pickup-pending-and-errors.png)
 
-### State 5 — 3-Step `Set up` Sheet: Step 1 of 3 (`What should Fader 1 do?`)
+### State 5 — 3-Step `Set up` Sheet: Step 1 of 3 (`What should this strip do?`)
 
-Clicking `[Set up]` (or `[Fix]`) opens a non-destructive transactional sheet over `Strips`. Step 1 presents the four plain-English role cards (`Switch scenes`, `Mix two layers`, `Show or hide a layer`, `Volume`) plus `Not used` on any strip, so controllers without a physical horizontal crossfader can assign any vertical fader to `Switch scenes`. Clicking `Cancel` or `Esc` at any step rolls back without touching live bindings.
+Clicking `[Set up]` opens a non-destructive transactional sheet over `Strips`. Step 1 presents the six plain-English role cards (`Switch scenes`, `Mix two layers`, `Show or hide a layer`, `Volume`, `Filter or effect setting`, `Whole mix`) plus `Not used` on any strip, so controllers without a physical horizontal crossfader can assign any vertical fader to `Switch scenes`. Clicking `Cancel` or `Esc` at any step rolls back without touching live bindings.
 
 ![State 5: Set up Step 1 Role Cards](docs/screenshots/05-setup-step1-cards.png)
 
@@ -92,7 +95,7 @@ Step 2 filters pickers to valid OBS scenes/sources for the chosen role, explains
 
 ### State 7 — 3-Step `Set up` Sheet: Step 3 of 3 (`Move the control` Hardware Test)
 
-Step 3 asks the operator to move the physical control (`"Move the control. This strip does not change OBS until you click Done."`) and shows the live `Hardware test` bar and the plain-English confirmation (`"1 mixes Color and Color 2 in scene Red"`) before `[Done]`. The strip leaves OBS alone until `[Done]`. `[Which hardware control? ▾]` shows the strip's MIDI control with a `[Learn]` button, and warns when that control is already assigned to another strip.
+Step 3 asks the operator to move the physical control (`"Move the fader to try it. Nothing changes in OBS until you click Done."`; straight after a Learn it names the control first, which is the state the test renders: `"Got it: Channel 2, CC 7. Move it to try it. Nothing changes in OBS until you click Done."`) and shows the live `Hardware test` bar and the plain-English confirmation (`"1 mixes Color and Color 2 in scene Red"`) before `[Done]`. The strip leaves OBS alone until `[Done]`. `[Which hardware control? ▾]` shows the strip's MIDI control with a `[Learn]` button, and warns when that control is already assigned to another strip.
 
 ![State 7: Set up Step 3, Move the Control](docs/screenshots/07-setup-step3-try-it.png)
 
@@ -116,13 +119,13 @@ Selecting one of the four **Beta** profiles (`Akai APC mini mk2`, `Akai MIDImix`
 
 ### State 11 — `FX & Knobs (8)` Bank (`fx_1..fx_8` Dedicated Filter Strips & `[Clean / All FX Off]`)
 
-Switching the segmented bank bar on `Strips` to **`FX & Knobs (8)`** displays the 8 dedicated FX/knob cards (`FX 1..FX 8`, pre-mapped to `Ch 1 CC 16–23` on APC40 mkII and nanoKONTROL2, Row-3 knobs on MIDImix and Launch Control XL, and always active for Stream Deck + / `obs-websocket` even on knobless controllers), cyan-to-amber filter intensity bars, formatted `display_value` readouts (`14.0 px`, `62.0 %`), and the one-click **`[Clean / All FX Off]`** reset button (for Midi Fadester's own FX slots; Visual Sidechain's Panic is separate).
+Switching the segmented bank bar on `Strips` to **`FX & Knobs (8)`** displays the 8 dedicated FX/knob cards (`FX 1..FX 8`, pre-mapped to `Ch 1 CC 16–23` on APC40 mkII and nanoKONTROL2, Row-3 knobs on MIDImix and Launch Control XL, and always active for Stream Deck + / `obs-websocket` even on knobless controllers), cyan-to-amber filter intensity bars, formatted `display_value` readouts (`20.2 px`, `25%`), and the one-click **`[Clean / All FX Off]`** reset button (for Midi Fadester's own FX slots; Visual Sidechain's Panic is separate).
 
 ![State 11: FX & Knobs Bank](docs/screenshots/11-fx-bank-strips.png)
 
 ### State 12 — 3-Step `Set up` Sheet: `Filter or effect setting` (`Step 2 of 3` Range & Bypass Pickers)
 
-Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's source/scene, filter, and numeric setting pickers (including nested `OBS_PROPERTY_GROUP` settings such as Visual Sidechain reactivity), editable `At 0% (From)` / `At 100% (To)` sub-ranges with `[Use current]` capture buttons, `[x] Turn filter off at 0% (saves GPU)` shared-lease bypass, and immediate single-writer conflict refusal if another slot already drives the same `(source, filter, setting)`.
+Choosing **`Filter or effect setting`** on any fader or FX strip opens Step 2's source/scene, filter, and numeric setting pickers (including nested `OBS_PROPERTY_GROUP` settings such as Visual Sidechain reactivity), editable `At 0% (Clean):` / `At 100% (Max):` sub-ranges with `[Use current]` capture buttons, `[x] Turn filter off at 0% (saves GPU)` shared-lease bypass, and immediate single-writer conflict refusal if another slot already drives the same `(source, filter, setting)`.
 
 ![State 12: Set up Filter or Effect Setting](docs/screenshots/12-setup-filter-step2.png)
 
@@ -174,7 +177,7 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
 
 ## Translations (0.6.0, 2026-11-01)
 
-`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all twelve languages present, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). `test-ui-dialog` renders every strip-mode card in every language file and fails if any label is cut off (Segoe UI 10 px bold, the map's own `QFontMetrics` elide; boxes: Preview and Program 54 px, Left 48, Right 72, Layer 128, Filter 100). The widest of the others: Left 44 (es), Right 38 (es), Layer 76 (pt-BR), Filter 58 (ru). Preview / Program measured 2026-11-01: de 43/50, en 37/41, es "Previa" 29 (was "Vista previa" 55) / 46, fr 33 / "Prog." 25 (was "Programme" 55), ja 38/39, ko 40/40, nl 48/28, pt-BR "Prévia" 29 (was "Pré-visualização" 76; OBS 33's own pt-BR `Basic.AudioMixer.Category.Preview`) / 46, ru "Просмотр" 49 (was "Предпросмотр" 73; "Предпросм." 59 is still cut off) / 47, tr 44/41, zh-CN 20/20, zh-TW 20/20. In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`, `nl-NL`) and put the file back afterwards; the script installs every language file and keeps the updater off.
+`ctest` checks every language file against `en-US.ini` (`check-locale-files`: same keys and `%1`..`%9`, no printf conversion, Qt mnemonics, UTF-8 without BOM, all twelve translations present, which with English makes 13 languages, with negative tests) and holds each `mfd_text` / `mfdText` English literal equal to `en-US.ini` (`check-locale-keys`). `test-ui-dialog` renders every strip-mode card in every language file and fails if any label is cut off (Segoe UI 10 px bold, the map's own `QFontMetrics` elide; boxes: Preview and Program 54 px, Left 48, Right 72, Layer 128, Filter 100). The widest of the others: Left 44 (es), Right 38 (es), Layer 76 (pt-BR), Filter 58 (ru). Preview / Program measured 2026-11-01: de 43/50, en 37/41, es "Previa" 29 (was "Vista previa" 55) / 46, fr 33 / "Prog." 25 (was "Programme" 55), ja 38/39, ko 40/40, nl 48/28, pt-BR "Prévia" 29 (was "Pré-visualização" 76; OBS 33's own pt-BR `Basic.AudioMixer.Category.Preview`) / 46, ru "Просмотр" 49 (was "Предпросмотр" 73; "Предпросм." 59 is still cut off) / 47, tr 44/41, zh-CN 20/20, zh-TW 20/20. In OBS, run `scripts/run-live-selftest.ps1` with the test copy's `config\obs-studio\user.ini` set to `[General] Language=de-DE` (or `ja-JP`, `ru-RU`, `nl-NL`) and put the file back afterwards; the script installs every language file and keeps the updater off.
 
 | Check | Expected | Result |
 |---|---|---|
@@ -183,3 +186,4 @@ When `obs64.exe` launches with `MFD_SELF_TEST=1` and a `loopMIDI Port` loopback 
 | T.3 | The same in Russian | Pass (2026-11-01, OBS 33.0.1) |
 | T.4 | By eye, OBS in German, Japanese, Russian and Dutch: the settings dialog, the setup sheet, the controller drawing and the strip labels; nothing cut off that is whole in English | Pending (English already cuts the nanoKONTROL2 STOP/PLAY and some strip labels) |
 | T.5 | Live self-test with OBS in Dutch (nl-NL, added 2026-11-01): the Dutch file loads, every case passes, zero leaks, clean exit; the controller map's Dutch texts fit | Pass (2026-11-01, OBS 33.0.1, rerun after the QA changes to `nl-NL.ini`, started with `--portable --disable-updater --multi --disable-shutdown-check`; the log names no Midi Fadester text failure in nl-NL, `SELF-TEST RESULT` all 1, memory leaks 0; user.ini restored, hash checked. The map's fixed-width texts measured with the same Qt 6 `QFontMetrics` call the map uses: the beta-profile card (title, no-crossfader line, Learn line) and the four legend entries fit, the legend keeps the English positions; `Map.ModeProgram` "Programma" was 55 px in a 54 px box, so it is "Progr.". A by-eye look is part of T.4) |
+| T.6 | By eye, OBS in Italian (it-IT, added 2026-11-20, a single-model draft): the Fadester Desk dock on Windows and on a Mac, the settings dialog and the setup sheet; nothing cut off that is whole in English | Pending |
