@@ -1337,11 +1337,12 @@ void MfdDeskDock::refresh()
 										std::max(28, col_names_[i]->width())));
 		setCss(col_names_[i], src.isEmpty() ? QStringLiteral("color: #6b7280;") : QString()); /* not a layer */
 		setTip(col_names_[i],
-		       !src.isEmpty() ? src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
-							  : mfdText("Desk.Pinned", " (pinned)"))
-		       : !label.isEmpty()
-			       ? mfdFill(mfdText("Desk.Tip.NotLayer", "Not a layer: its fader drives %1."), {label})
-			       : mfdText("Desk.Tip.Empty", "No source on this column."));
+		       !src.isEmpty()     ? src + (st.follows ? mfdText("Desk.Follows", " (follows the scene on air)")
+							      : mfdText("Desk.Pinned", " (pinned)"))
+		       : !label.isEmpty() ? mfdFill(mfdText("Desk.Tip.NotLayer",
+							    "Its fader drives %1, not a source in the scene."),
+						    {label})
+					  : mfdText("Desk.Tip.Empty", "No source on this column."));
 		for (int r = 0; r < kRows; ++r) {
 			int cell = kRowCell[r];
 			const struct mfd_vj_led &led = view_.leds[i * MFD_DESK_CELLS + cell];

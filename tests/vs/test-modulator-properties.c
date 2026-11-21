@@ -348,8 +348,9 @@ static void test_flash_guard_defaults_and_live_color_filter_cap(void)
 		static const char *const first[] = {"slot_1_target_filter", "slot_1_target_setting", "slot_1_signal",
 						    "slot_1_amount_pct",    "slot_1_min_value",      "slot_1_max_value",
 						    "slot_1_flash_guard"};
-		static const char *const later[] = {"slot_1_depth_fader", "slot_1_depth_reset", "slot_1_invert",
-						    "slot_1_rate_divider"};
+		static const char *const later[] = {"slot_1_depth_fader", "slot_1_invert", "slot_1_rate_divider"};
+		/* no Clear button: choosing (None) in the Depth Fader list does it (U1-16) */
+		assert(!obs_properties_get(props, "slot_1_depth_reset"));
 		obs_property_t *more = obs_properties_get(props, "mod_show_more");
 		assert(more && obs_property_get_type(more) == OBS_PROPERTY_BOOL && obs_property_visible(more));
 		for (size_t i = 0; i < sizeof(first) / sizeof(first[0]); i++)

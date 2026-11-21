@@ -167,7 +167,10 @@ static void mfd_layer_filter_render(void *data, gs_effect_t *unused_effect)
 static struct obs_source_info mfd_layer_filter_info = {
 	.id = MFD_LAYER_FILTER_ID,
 	.type = OBS_SOURCE_TYPE_FILTER,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB,
+	/* Not offered in OBS's add-filter menu (U1-25): the engine adds it to a source it fades, and one added by hand does
+	 * nothing useful. OBS reads OBS_SOURCE_CAP_DISABLED only when it fills its add menus; a filter saved in a scene
+	 * still loads, and obs_source_create still makes one. */
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB | OBS_SOURCE_CAP_DISABLED,
 	.get_name = mfd_layer_filter_get_name,
 	.create = mfd_layer_filter_create,
 	.destroy = mfd_layer_filter_destroy,

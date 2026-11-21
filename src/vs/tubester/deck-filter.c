@@ -82,7 +82,6 @@
 #define TUB_OWNERS_MAX TUB_DECKS_MAX
 #define TUB_DECKS_EVENT_INTERVAL_NS 33333333ULL
 #define S_SPEED_FADER_STATUS "tubester_speed_fader_status"
-#define S_SPEED_FADER_CLEAR "tubester_speed_fader_clear"
 
 /* The hotkeys on the deck's Browser source (R-CTL-3). Their names are the keys of the saved bindings, so they never
  * change. */
@@ -1689,11 +1688,10 @@ static void refresh_speed_fader_status(obs_properties_t *props, obs_data_t *sett
 	if (!status || !settings)
 		return;
 	long long slot = obs_data_get_int(settings, TUB_SETTING_SPEED_FADER);
-	/* the two fader speeds and Clear mean nothing until a fader is chosen (U1-16) */
+	/* the two fader speeds mean nothing until a fader is chosen (U1-16) */
 	const bool chosen = slot >= 0 && slot < VS_FADER_SLOT_COUNT;
 	obs_property_set_visible(obs_properties_get(props, TUB_SETTING_SPEED_FADER_MIN), chosen);
 	obs_property_set_visible(obs_properties_get(props, TUB_SETTING_SPEED_FADER_MAX), chosen);
-	obs_property_set_visible(obs_properties_get(props, S_SPEED_FADER_CLEAR), chosen);
 	if (!chosen) {
 		vs_property_info_set_text(status, obs_module_text("Tubester.SpeedFader.StatusFixed"));
 		return;
@@ -1719,23 +1717,6 @@ static bool speed_fader_modified(void *priv, obs_properties_t *props, obs_proper
 	UNUSED_PARAMETER(priv);
 	UNUSED_PARAMETER(property);
 	refresh_speed_fader_status(props, settings);
-	return true;
-}
-
-static bool clear_speed_fader_clicked(obs_properties_t *props, obs_property_t *property, void *data)
-{
-	UNUSED_PARAMETER(property);
-	struct tub_deck_filter *f = data;
-	if (!f || !f->context)
-		return false;
-	obs_data_t *patch = obs_data_create();
-	obs_data_set_int(patch, TUB_SETTING_SPEED_FADER, VS_FADER_SLOT_NONE);
-	obs_source_update(f->context, patch);
-	obs_data_release(patch);
-	obs_data_t *settings = obs_source_get_settings(f->context);
-	refresh_speed_fader_status(props, settings);
-	obs_data_release(settings);
-	/* redraws the properties already built: the list shows None, the status line its new text */
 	return true;
 }
 
@@ -1774,8 +1755,6 @@ static void add_speed_fader_group(obs_properties_t *props, struct tub_deck_filte
 	obs_property_int_set_suffix(p_max, "%");
 
 	vs_properties_add_info(grp, S_SPEED_FADER_STATUS, "");
-	obs_properties_add_button2(grp, S_SPEED_FADER_CLEAR, obs_module_text("Tubester.SpeedFader.Clear"),
-				   clear_speed_fader_clicked, f);
 	obs_properties_add_group(props, "tubester_speed_fader_group", obs_module_text("Tubester.SpeedFaderGroup"),
 				 OBS_GROUP_NORMAL, grp);
 
@@ -1788,7 +1767,6 @@ static void add_speed_fader_group(obs_properties_t *props, struct tub_deck_filte
 		/* no filter yet (OBS asking for the type's properties): no fader is chosen */
 		obs_property_set_visible(p_min, false);
 		obs_property_set_visible(p_max, false);
-		obs_property_set_visible(obs_properties_get(props, S_SPEED_FADER_CLEAR), false);
 	}
 }
 

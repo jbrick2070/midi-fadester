@@ -1209,8 +1209,8 @@ int main(int argc, char **argv)
 	set_opened_desk("USB MIDI Keys");
 	REQUIRE(!nl_banner->isHidden());
 	REQUIRE(nl_text->text() ==
-		QStringLiteral("There is no ready layout for USB MIDI Keys. Click Set up under a strip. In "
-			       "step 3, open Which hardware control?, press Learn and move the fader."));
+		QStringLiteral("No ready layout for USB MIDI Keys. Click Set up under a strip and move the control "
+			       "you want."));
 	nl_ok->click();
 	pump_ui();
 	REQUIRE(nl_banner->isHidden());

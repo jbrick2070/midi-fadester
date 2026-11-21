@@ -150,7 +150,7 @@ MfdSetupSheetDialog::MfdSetupSheetDialog(struct mfd_engine *eng, QWidget *parent
 	mfdPlainLabels(this); /* names from OBS are shown as plain text (F-10) */
 }
 
-/* Page 0, step 1: "What should this control do?" */
+/* Page 0, step 1: "What should this strip do?" */
 void MfdSetupSheetDialog::build_step1_page()
 {
 	auto *page1 = new QWidget(stack_);
@@ -158,7 +158,7 @@ void MfdSetupSheetDialog::build_step1_page()
 	p1_lay->setContentsMargins(0, 0, 0, 0);
 	p1_lay->setSpacing(10);
 
-	auto *p1_prompt = new QLabel(mfdText("Setup.Step1.Prompt", "What should this control do?"), page1);
+	auto *p1_prompt = new QLabel(mfdText("Setup.Step1.Prompt", "What should this strip do?"), page1);
 	p1_prompt->setStyleSheet(QStringLiteral("color: #93c5fd; font-size: 14px; font-weight: bold;"));
 	p1_lay->addWidget(p1_prompt);
 

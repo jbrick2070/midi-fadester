@@ -50,8 +50,6 @@
 #define S_REACTIVITY_FADER_SLOT "reactivity_fader_slot"
 #define S_MIX_FADER_STATUS "vs_mix_fader_status"
 #define S_REACTIVITY_FADER_STATUS "vs_reactivity_fader_status"
-#define S_MIX_FADER_RESET "vs_mix_fader_reset"
-#define S_REACTIVITY_FADER_RESET "vs_reactivity_fader_reset"
 #define S_EFFECT_MIX "vs_effect_mix_pct"
 #define S_AUDIO_REACTIVITY "vs_audio_reactivity_pct"
 #define S_FADER_NOT_LOADED "vs_shader_fader_not_loaded"
@@ -1682,7 +1680,6 @@ static void refresh_shader_fader_props_visibility(obs_properties_t *props, obs_d
 	const char *slot_keys[] = {S_MIX_FADER_SLOT, S_REACTIVITY_FADER_SLOT};
 	const char *slider_keys[] = {S_EFFECT_MIX, S_AUDIO_REACTIVITY};
 	const char *status_keys[] = {S_MIX_FADER_STATUS, S_REACTIVITY_FADER_STATUS};
-	const char *reset_keys[] = {S_MIX_FADER_RESET, S_REACTIVITY_FADER_RESET};
 	/* key and English pairs spelled out, so check-locale-keys sees each one */
 	const char *fixed_text[] = {
 		vs_text_format("Shader.MixFader.StatusFixed", "Effect mix follows the Effect Mix slider (%.0f%%)."),
@@ -1717,9 +1714,6 @@ static void refresh_shader_fader_props_visibility(obs_properties_t *props, obs_d
 		vs_property_info_set_text(status, summary);
 		obs_property_set_visible(list, show_mix_react && !collapsed);
 		obs_property_set_visible(status, show_mix_react && !collapsed);
-		obs_property_t *reset = obs_properties_get(props, reset_keys[i]);
-		obs_property_set_visible(reset, show_mix_react && !collapsed);
-		obs_property_set_enabled(reset, slot != VS_FADER_SLOT_NONE);
 	}
 
 	bool earlier_selected = false;
@@ -1926,32 +1920,27 @@ static bool on_shader_fader_reset_clicked(obs_properties_t *props, obs_property_
 	obs_data_t *settings = obs_source_get_settings(sf->context);
 	if (!settings)
 		return false;
+	/* Only a parameter fader has a Clear button: it also forgets the parameter and its range. The Effect Mix and
+	 * Audio Reactivity faders are cleared by choosing (None) in their lists, which did the same as their buttons
+	 * (U1-15). */
 	bool reset = false;
-	if (strcmp(name, S_MIX_FADER_RESET) == 0) {
-		obs_data_set_int(settings, S_MIX_FADER_SLOT, VS_FADER_SLOT_NONE);
+	for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
+		char key[64];
+		param_fader_key(key, sizeof(key), k, "reset");
+		if (strcmp(name, key) != 0)
+			continue;
+		param_fader_key(key, sizeof(key), k, "target");
+		obs_data_set_string(settings, key, "");
+		param_fader_key(key, sizeof(key), k, "slot");
+		obs_data_set_int(settings, key, VS_FADER_SLOT_NONE);
+		param_fader_key(key, sizeof(key), k, "min");
+		obs_data_unset_user_value(settings, key);
+		param_fader_key(key, sizeof(key), k, "max");
+		obs_data_unset_user_value(settings, key);
+		param_fader_key(key, sizeof(key), k, "seeded");
+		obs_data_set_string(settings, key, "");
 		reset = true;
-	} else if (strcmp(name, S_REACTIVITY_FADER_RESET) == 0) {
-		obs_data_set_int(settings, S_REACTIVITY_FADER_SLOT, VS_FADER_SLOT_NONE);
-		reset = true;
-	} else {
-		for (int k = 0; k < VS_SHADER_PARAM_FADER_SLOTS; k++) {
-			char key[64];
-			param_fader_key(key, sizeof(key), k, "reset");
-			if (strcmp(name, key) != 0)
-				continue;
-			param_fader_key(key, sizeof(key), k, "target");
-			obs_data_set_string(settings, key, "");
-			param_fader_key(key, sizeof(key), k, "slot");
-			obs_data_set_int(settings, key, VS_FADER_SLOT_NONE);
-			param_fader_key(key, sizeof(key), k, "min");
-			obs_data_unset_user_value(settings, key);
-			param_fader_key(key, sizeof(key), k, "max");
-			obs_data_unset_user_value(settings, key);
-			param_fader_key(key, sizeof(key), k, "seeded");
-			obs_data_set_string(settings, key, "");
-			reset = true;
-			break;
-		}
+		break;
 	}
 	if (reset) {
 		obs_source_update(sf->context, settings);
@@ -2238,8 +2227,6 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	obs_property_set_visible(p_mix, !override_effect);
 	obs_property_set_modified_callback2(p_mix, on_shader_param_fader_changed, sf);
 	vs_properties_add_info(f_grp, S_MIX_FADER_STATUS, "");
-	obs_properties_add_button2(f_grp, S_MIX_FADER_RESET, obs_module_text("Shader.MixFader.Reset"),
-				   on_shader_fader_reset_clicked, sf);
 
 	obs_property_t *p_react = obs_properties_add_list(f_grp, S_REACTIVITY_FADER_SLOT,
 							  obs_module_text("Shader.ReactivityFader"),
@@ -2249,8 +2236,6 @@ static obs_properties_t *shader_filter_get_properties(void *data)
 	obs_property_set_visible(p_react, !override_effect);
 	obs_property_set_modified_callback2(p_react, on_shader_param_fader_changed, sf);
 	vs_properties_add_info(f_grp, S_REACTIVITY_FADER_STATUS, "");
-	obs_properties_add_button2(f_grp, S_REACTIVITY_FADER_RESET, obs_module_text("Shader.ReactivityFader.Reset"),
-				   on_shader_fader_reset_clicked, sf);
 	vs_properties_add_info(f_grp, "vs_shader_fader_ownership", obs_module_text("Shader.ParamFader.Ownership"));
 
 	bool has_bindable_params = false;

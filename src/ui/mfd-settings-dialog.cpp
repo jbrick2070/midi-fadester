@@ -1502,9 +1502,8 @@ private:
 		if (show) {
 			const QString text =
 				mfdFill(mfdText("Dialog.NoLayout.Text",
-						"There is no ready layout for %1. Click Set up under a strip. "
-						"In step 3, open Which hardware control?, press Learn and move "
-						"the fader."),
+						"No ready layout for %1. Click Set up under a strip and move the "
+						"control you want."),
 					{opened});
 			if (no_layout_text_->text() != text) {
 				no_layout_text_->setText(text);

@@ -102,9 +102,9 @@ Clicking `[Show controller]` opens a vector (`Qt6::Svg`) hardware map of the Aka
 
 ![State 8: Live APC40 mkII SVG Desk View](docs/screenshots/08-show-controller-svg.png)
 
-### State 9 — `Advanced` Tab (Multi-Controller Profile Picker, 10-Row Power-User Table & High-Contrast Help Callout)
+### State 9 — `Advanced` Tab (Multi-Controller Profile Picker, 18-Row Strip Map)
 
-Switching to `Advanced` provides the multi-controller `Layout:` picker (Verified & Beta controller layouts), `Reset all strips to the <layout> layout` (`Clear all strips` on the Generic layout), the line saying that changes on the page take effect at once and are saved, the full 10-row power-user matrix (`On`, `Strip`, `MIDI Control` + `Learn` / clear, `Reverse direction`, `What it does`, `Left`, `Right`, `Feel`, `Also fade audio`, stretched `Output` readout bar), `Smoothing (ms)`, `T-bar works in both directions`, `Import...` / `Export...`, `Back to Strips`, and a full-width `13px` two-line callout comparing **Switch scenes (T-bar)** vs. **Mix two layers**. Edits in `Advanced` and `Strips` share the exact same `mfd_engine` snapshot and round-trip instantaneously.
+Switching to `Advanced` provides the multi-controller `Layout:` picker (Verified & Beta controller layouts), `Reset all strips to the <layout> layout` (`Clear all strips` on the Generic layout), the line saying that changes on the page apply at once and are saved, the 18-row map of the strips (`On`, `Strip`, `MIDI Control` + `Learn` / clear, `Reverse`, `What it does` as the strip's own sentence, the `Output` readout bar, and `Edit...`, which opens Set up on that strip), `Smoothing:`, `T-bar works in both directions`, `Import...` / `Export...` and `Back to Strips`. `On` and `Reverse` are the only switches in the table; a strip's job, source, range and feel change in Set up only. `Advanced` and `Strips` share the exact same `mfd_engine` snapshot.
 
 ![State 9: Advanced Tab](docs/screenshots/09-advanced-tab.png)
 

@@ -99,13 +99,11 @@ static const char *template_for(enum mfd_msg_code code, bool translate)
 		return mfd_text_or_english(translate, "Msg.InvalidStrip", "Invalid strip index.");
 	case MFD_MSG_MISSING_SOURCE_A:
 		return mfd_text_or_english(translate, "Msg.MissingSourceA",
-					   "Missing required 'source_a' for filter_param.");
+					   "Choose the source or scene that has the filter.");
 	case MFD_MSG_MISSING_FILTER_NAME:
-		return mfd_text_or_english(translate, "Msg.MissingFilterName",
-					   "Missing required 'filter_name' for filter_param.");
+		return mfd_text_or_english(translate, "Msg.MissingFilterName", "Choose a filter.");
 	case MFD_MSG_MISSING_FILTER_PROP:
-		return mfd_text_or_english(translate, "Msg.MissingFilterProp",
-					   "Missing required 'filter_prop' for filter_param.");
+		return mfd_text_or_english(translate, "Msg.MissingFilterProp", "Choose a setting of the filter.");
 	case MFD_MSG_SETTING_ALREADY_CONTROLLED:
 		return mfd_text_or_english(translate, "Msg.SettingAlreadyControlled",
 					   "Setting '%1' on '%2' is already controlled by %3.");
