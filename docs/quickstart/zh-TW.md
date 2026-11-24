@@ -4,7 +4,7 @@
 
 ## Midi Fadester
 
-Midi Fadester 把 MIDI 控制器上的推桿與旋鈕變成 OBS Studio 的即時控制：用真正的交叉推桿在場景之間淡變、混合兩個圖層、讓攝影機淡入淡出、調整音量、推動任何濾鏡設定。它專為 Akai APC40 mkII 打造，也能透過 MIDI Learn 搭配其他控制器使用。
+Midi Fadester 把 MIDI 控制器上的推桿與旋鈕變成 OBS Studio 的即時控制：用真正的交叉推桿在場景之間淡變、混合兩個圖層、讓攝影機淡入淡出、調整音量、控制任何濾鏡設定。它專為 Akai APC40 mkII 打造，也能透過 MIDI Learn 搭配其他控制器使用。
 
 ### 快速入門
 

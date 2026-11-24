@@ -4,7 +4,7 @@
 
 ## Midi Fadester
 
-Midi Fadester convierte los faders y potenciómetros de un controlador MIDI en controles en directo para OBS Studio: fundir entre escenas con un crossfader de verdad, mezclar dos capas, fundir una cámara, llevar un volumen, recorrer cualquier ajuste de un filtro. Está hecho para el Akai APC40 mkII y funciona con otros controladores mediante MIDI Learn.
+Midi Fadester convierte los faders y potenciómetros de un controlador MIDI en controles en directo para OBS Studio: fundir entre escenas con un crossfader de verdad, mezclar dos capas, fundir una cámara, regular un volumen, recorrer cualquier ajuste de un filtro. Está hecho para el Akai APC40 mkII y funciona con otros controladores mediante MIDI Learn.
 
 ### Inicio rápido
 
