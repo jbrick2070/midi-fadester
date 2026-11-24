@@ -11,10 +11,10 @@ Midi Fadester maakt van de faders en knoppen op een MIDI-controller live bedieni
 <img src="../../docs/quick-start.svg" alt="Midi Fadester in drie stappen: 1, voer het installatieprogramma uit de nieuwste release uit en start OBS; 2, sluit de controller aan (een APC40 mkII stelt zichzelf in); 3, zet Studiomodus aan en schuif de crossfader: Programma fadet naar Voorvertoning." width="900">
 
 1. **Installeer het.** Voer uit de [nieuwste release](https://github.com/jbrick2070/midi-fadester/releases/latest) `midi-fadester-<version>-windows-x64-Installer.exe` (Windows) of `midi-fadester-<version>-macos-universal.pkg` (Mac) uit en start dan OBS Studio 33 of nieuwer. Andere bestanden en waarschuwingen: [Install](../../README.md#install) (Engels).
-2. **Sluit de controller aan.** Een APC40 mkII stelt zichzelf in en het dock **Fadester Desk** gaat open. Een andere controller: open **Hulpmiddelen → Midi Fadester** (menubalk van OBS, boven) en klik op het tabblad **Strips** op **Controller wijzigen**.
+2. **Sluit de controller aan.** Een APC40 mkII stelt zichzelf in en het dock **Fadester Desk** gaat open. Een andere controller: open **Tools → Midi Fadester** (menubalk van OBS, boven) en klik op het tabblad **Strips** op **Controller wijzigen**.
 3. **Schuif de crossfader.** Klik in OBS op de knop **Studiomodus** (rechtsonder) en schuif de crossfader helemaal naar het andere eind: Programma fadet naar wat in Voorvertoning stond.
 
-Klaar. Om een fader een andere taak te geven, klik je in **Hulpmiddelen → Midi Fadester** op **Instellen** onder zijn strip.
+Klaar. Om een fader een andere taak te geven, klik je in **Tools → Midi Fadester** op **Instellen** onder zijn strip.
 
 **[Volledige handleiding (Engels)](../../README.md)**
 

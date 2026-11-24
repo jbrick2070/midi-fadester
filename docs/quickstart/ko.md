@@ -27,8 +27,8 @@ Visual Sidechain은 Windows와 macOS의 OBS Studio 33에서 영상이 음악에 
 <img src="../../docs/visual-sidechain-steps.svg" alt="Visual Sidechain 3단계: 1, Midi Fadester 설치 (Visual Sidechain 포함); 2, 소스의 필터에서 +를 눌러 Visual Sidechain: 셰이더 필터 추가; 3, 음악을 재생하면 화면이 소리에 맞춰 움직임." width="900">
 
 1. **Midi Fadester를 설치**하고([Install](../../README.md#install), 영어) OBS Studio 33을 시작하세요.
-2. **필터를 추가하세요.** 소스나 장면을 마우스 오른쪽 버튼으로 클릭하고 **필터**를 선택한 뒤, 효과 필터 아래의 **`+`**를 눌러 **`Visual Sidechain: 셰이더 필터`**를 추가하세요.
-3. **음악을 재생하세요.** 화면이 **트랙 1 (메인 믹스)**의 소리에 맞춰 움직입니다.
+2. **필터를 추가하세요.** 소스나 장면을 마우스 오른쪽 버튼으로 클릭하고 **필터**를 선택한 뒤, 효과 필터 아래의 **`+`** 버튼을 눌러 **`Visual Sidechain: 셰이더 필터`** 항목을 추가하세요.
+3. **음악을 재생하세요.** 화면이 **트랙 1 (메인 믹스)** 소리에 맞춰 움직입니다.
 
 끝입니다. 필터 창의 **효과**에서 다른 모습을 고를 수 있습니다.
 
