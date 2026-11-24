@@ -1,4 +1,4 @@
-> Bu sayfa İngilizce hızlı başlangıçların bir çevirisidir; bir yapay zekâ modeliyle hazırlandı ve ikinci bir yapay zekâ modeli tarafından denetlendi. Henüz anadili Türkçe olan biri tarafından gözden geçirilmedi.
+> Bu sayfa İngilizce hızlı başlangıçların bir çevirisidir; bir yapay zekâ modeliyle hazırlandı ve ikinci bir yapay zekâ modeli tarafından denetlendi. Henüz ana dili Türkçe olan biri tarafından gözden geçirilmedi.
 
 # Hızlı başlangıç: Midi Fadester ve Visual Sidechain
 

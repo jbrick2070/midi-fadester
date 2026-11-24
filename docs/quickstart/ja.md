@@ -24,7 +24,7 @@ Visual Sidechain は、Windows と macOS の OBS Studio 33 で映像を音楽に
 
 ### クイックスタート
 
-<img src="../../docs/visual-sidechain-steps.svg" alt="Visual Sidechain の 3 ステップ: 1、Midi Fadester をインストール (Visual Sidechain も含まれます); 2、ソースのフィルタで + を押して Visual Sidechain: シェーダーフィルタ を追加; 3、音楽を再生すると映像が音に合わせて動く。" width="900">
+<img src="../../docs/visual-sidechain-steps.svg" alt="Visual Sidechain の 3 ステップ: 1、Midi Fadester をインストール (Visual Sidechain も含まれる); 2、ソースのフィルタで + を押して Visual Sidechain: シェーダーフィルタ を追加; 3、音楽を再生すると映像が音に合わせて動く。" width="900">
 
 1. **Midi Fadester をインストール** し ([Install](../../README.md#install)、英語)、OBS Studio 33 を起動します。
 2. **フィルタを追加する。** ソースまたはシーンを右クリックして **フィルタ** を選び、エフェクトフィルタの下の **`+`** を押して **`Visual Sidechain: シェーダーフィルタ`** を追加します。
