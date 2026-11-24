@@ -14,6 +14,8 @@
 
 That's it. Choose another look under **`Effect`** in the filter's window.
 
+Quick start in other languages: [Deutsch](quickstart/de.md#visual-sidechain) · [Español](quickstart/es.md#visual-sidechain) · [Français](quickstart/fr.md#visual-sidechain) · [Italiano](quickstart/it.md#visual-sidechain) · [日本語](quickstart/ja.md#visual-sidechain) · [한국어](quickstart/ko.md#visual-sidechain) · [Nederlands](quickstart/nl.md#visual-sidechain) · [Português (Brasil)](quickstart/pt-BR.md#visual-sidechain) · [Русский](quickstart/ru.md#visual-sidechain) · [Türkçe](quickstart/tr.md#visual-sidechain) · [简体中文](quickstart/zh-CN.md#visual-sidechain) · [繁體中文](quickstart/zh-TW.md#visual-sidechain)
+
 > **Before you go live, set a Panic key:** **Settings → Hotkeys → `Visual Sidechain: Panic (all effects off)`**. One press turns off every Visual Sidechain effect in every scene. See [Photosensitivity safety](#photosensitivity-safety-panic-restore-visuals-and-the-flash-limit).
 
 ![Visual Sidechain in OBS Studio 33: the Program scene "Visual Sidechain" shows the Hex Pulse Lattice shader reacting to the soundtrack, with Studio Mode previewing a layer mix. A frame of a real OBS window capture.](screenshots/visual-sidechain-hero.png)

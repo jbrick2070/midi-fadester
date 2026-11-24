@@ -24,6 +24,8 @@ Midi Fadester turns the faders and knobs on a MIDI controller into live controls
 
 That's it. To give a fader another job, click **Set up** under its strip in **Tools → Midi Fadester**.
 
+Quick start in other languages: [Deutsch](docs/quickstart/de.md#midi-fadester) · [Español](docs/quickstart/es.md#midi-fadester) · [Français](docs/quickstart/fr.md#midi-fadester) · [Italiano](docs/quickstart/it.md#midi-fadester) · [日本語](docs/quickstart/ja.md#midi-fadester) · [한국어](docs/quickstart/ko.md#midi-fadester) · [Nederlands](docs/quickstart/nl.md#midi-fadester) · [Português (Brasil)](docs/quickstart/pt-BR.md#midi-fadester) · [Русский](docs/quickstart/ru.md#midi-fadester) · [Türkçe](docs/quickstart/tr.md#midi-fadester) · [简体中文](docs/quickstart/zh-CN.md#midi-fadester) · [繁體中文](docs/quickstart/zh-TW.md#midi-fadester)
+
 ![The Strips screen: a throw in progress on the crossfader, a two-layer mix, a layer fade, a volume and the master](docs/screenshots/03-strips-throwing-and-active.png)
 
 ## Contents
