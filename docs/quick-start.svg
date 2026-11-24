@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" role="img" aria-labelledby="t d">
+  <title id="t">Midi Fadester in three steps</title>
+  <desc id="d">1: install Midi Fadester from the latest release and start OBS. 2: plug in the MIDI controller; an APC40 mkII sets itself up. 3: turn on Studio Mode and throw the crossfader: Program fades to what is in Preview.</desc>
+  <style>
+    .card { fill: #ffffff; stroke: #cfe0d5; stroke-width: 2; }
+    .num { fill: #236044; }
+    .numt { fill: #ffffff; font: 700 22px system-ui, "Segoe UI", sans-serif; }
+    .h { fill: #162922; font: 700 21px system-ui, "Segoe UI", sans-serif; }
+    .s { fill: #3d5a4c; font: 15px system-ui, "Segoe UI", sans-serif; }
+    .ink { stroke: #236044; stroke-width: 3; fill: none; }
+    .pale { fill: #eef4ef; stroke: #236044; stroke-width: 3; }
+    .amber { fill: #e9a84a; }
+    .key { fill: #1b382d; }
+    .lbl { fill: #236044; font: 700 11px system-ui, "Segoe UI", sans-serif; }
+    .arrow { fill: #9bb8a8; }
+  </style>
+  <defs><marker id="tip" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#236044"/></marker></defs>
+  <rect x="0" y="0" width="900" height="300" rx="18" fill="#eef4ef"/>
+
+  <!-- 1: install -->
+  <rect class="card" x="20" y="20" width="260" height="260" rx="16"/>
+  <circle class="num" cx="52" cy="52" r="18"/><text class="numt" x="52" y="60" text-anchor="middle">1</text>
+  <rect class="pale" x="92" y="120" width="116" height="66" rx="10"/>
+  <line class="ink" x1="92" y1="140" x2="208" y2="140"/>
+  <rect x="112" y="152" width="76" height="10" rx="5" fill="#cfe0d5"/><rect x="112" y="152" width="50" height="10" rx="5" fill="#236044"/>
+  <rect x="112" y="168" width="40" height="10" rx="5" class="amber"/>
+  <line x1="150" y1="72" x2="150" y2="108" stroke="#236044" stroke-width="5" stroke-linecap="round"/>
+  <path d="M134 98 l16 18 16 -18 z" fill="#236044"/>
+  <text class="h" x="150" y="222" text-anchor="middle">Install it</text>
+  <text class="s" x="150" y="246" text-anchor="middle">Run the installer from</text>
+  <text class="s" x="150" y="266" text-anchor="middle">the release, start OBS</text>
+
+  <path class="arrow" d="M288 142 l14 8 -14 8 z"/>
+
+  <!-- 2: plug in -->
+  <rect class="card" x="320" y="20" width="260" height="260" rx="16"/>
+  <circle class="num" cx="352" cy="52" r="18"/><text class="numt" x="352" y="60" text-anchor="middle">2</text>
+  <rect class="pale" x="362" y="84" width="176" height="104" rx="12"/>
+  <!-- pads -->
+  <rect class="key" x="376" y="96" width="18" height="14" rx="3"/><rect class="key" x="398" y="96" width="18" height="14" rx="3"/><rect class="key" x="420" y="96" width="18" height="14" rx="3"/><rect class="key" x="442" y="96" width="18" height="14" rx="3"/>
+  <rect class="amber" x="376" y="114" width="18" height="14" rx="3"/><rect class="key" x="398" y="114" width="18" height="14" rx="3"/><rect class="key" x="420" y="114" width="18" height="14" rx="3"/><rect class="key" x="442" y="114" width="18" height="14" rx="3"/>
+  <!-- faders -->
+  <line x1="385" y1="140" x2="385" y2="178" stroke="#236044" stroke-width="3"/><rect x="377" y="150" width="16" height="8" rx="2" fill="#236044"/>
+  <line x1="407" y1="140" x2="407" y2="178" stroke="#236044" stroke-width="3"/><rect x="399" y="162" width="16" height="8" rx="2" fill="#236044"/>
+  <line x1="429" y1="140" x2="429" y2="178" stroke="#236044" stroke-width="3"/><rect x="421" y="144" width="16" height="8" rx="2" fill="#236044"/>
+  <line x1="451" y1="140" x2="451" y2="178" stroke="#236044" stroke-width="3"/><rect x="443" y="168" width="16" height="8" rx="2" fill="#236044"/>
+  <!-- knobs -->
+  <circle cx="490" cy="104" r="9" fill="#ffffff" stroke="#236044" stroke-width="2.5"/><circle cx="516" cy="104" r="9" fill="#ffffff" stroke="#236044" stroke-width="2.5"/>
+  <circle cx="490" cy="130" r="9" fill="#ffffff" stroke="#236044" stroke-width="2.5"/><circle cx="516" cy="130" r="9" fill="#ffffff" stroke="#236044" stroke-width="2.5"/>
+  <!-- crossfader -->
+  <line x1="476" y1="168" x2="528" y2="168" stroke="#236044" stroke-width="3"/><rect x="496" y="160" width="10" height="16" rx="2" class="amber" stroke="#236044" stroke-width="1.5"/>
+  <!-- cable -->
+  <path class="ink" d="M538 120 c18 0 18 -40 30 -40"/>
+  <text class="h" x="450" y="222" text-anchor="middle">Plug it in</text>
+  <text class="s" x="450" y="246" text-anchor="middle">An APC40 mkII sets itself up;</text>
+  <text class="s" x="450" y="266" text-anchor="middle">other desks: Change controller</text>
+
+  <path class="arrow" d="M588 142 l14 8 -14 8 z"/>
+
+  <!-- 3: throw -->
+  <rect class="card" x="620" y="20" width="260" height="260" rx="16"/>
+  <circle class="num" cx="652" cy="52" r="18"/><text class="numt" x="652" y="60" text-anchor="middle">3</text>
+  <rect class="pale" x="660" y="78" width="80" height="52" rx="6"/><text class="lbl" x="700" y="144" text-anchor="middle">PREVIEW</text>
+  <rect x="760" y="78" width="80" height="52" rx="6" fill="#236044" stroke="#236044" stroke-width="3"/><rect x="772" y="90" width="56" height="28" rx="4" class="amber" opacity="0.85"/><text class="lbl" x="800" y="144" text-anchor="middle">PROGRAM</text>
+  <path class="ink" d="M742 104 h14" marker-end="url(#tip)"/>
+  <line x1="680" y1="174" x2="820" y2="174" stroke="#236044" stroke-width="4" stroke-linecap="round"/>
+  <rect x="790" y="162" width="16" height="24" rx="3" class="amber" stroke="#236044" stroke-width="2"/>
+  <path class="ink" d="M700 192 h80" marker-end="url(#tip)"/>
+  <text class="h" x="750" y="222" text-anchor="middle">Throw the crossfader</text>
+  <text class="s" x="750" y="246" text-anchor="middle">With Studio Mode on,</text>
+  <text class="s" x="750" y="266" text-anchor="middle">Program fades to Preview</text>
+</svg>
