@@ -72,6 +72,10 @@ struct vs_mod_eval_result {
 };
 
 void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg);
+/* Copies an integer list's `count` values into dst for snapping and returns how many are kept: all of them, or 0 for a
+ * list longer than VS_MOD_INT_LIST_MAX (values is then not read past VS_MOD_INT_LIST_MAX), which leaves the slot on its
+ * continuous min..max range instead of snapping to only the first items. */
+size_t vs_mod_int_list_store(int64_t dst[VS_MOD_INT_LIST_MAX], const int64_t *values, size_t count);
 void vs_mod_slot_reset_state(struct vs_mod_slot_state *state);
 /* Earlier enabled slots own a target setting so one instance never fights itself. */
 bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, size_t earlier_count,

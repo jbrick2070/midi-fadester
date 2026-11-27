@@ -111,6 +111,24 @@ static void test_modulation_math_and_epsilon(void)
 	vs_mod_slot_reset_state(&state);
 	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
 	assert(res.int_val == 5);
+	/* a list longer than VS_MOD_INT_LIST_MAX is not kept: the slot uses the whole continuous range, so its last items
+	 * stay reachable instead of everything snapping to item 63 */
+	{
+		int64_t long_list[100];
+		for (int k = 0; k < 100; k++)
+			long_list[k] = k;
+		assert(vs_mod_int_list_store(cfg.int_list, long_list, 100) == 0);
+		assert(vs_mod_int_list_store(cfg.int_list, long_list, VS_MOD_INT_LIST_MAX) == VS_MOD_INT_LIST_MAX);
+		assert(cfg.int_list[VS_MOD_INT_LIST_MAX - 1] == VS_MOD_INT_LIST_MAX - 1);
+		cfg.int_list_count = vs_mod_int_list_store(cfg.int_list, long_list, 100);
+		cfg.min_value = 0.0;
+		cfg.max_value = 99.0;
+		vs_mod_slot_reset_state(&state);
+		vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+		assert(res.int_val == 99);
+		vs_mod_slot_eval(&cfg, &state, 0.8f, &res);
+		assert(res.int_val == 79);
+	}
 	cfg.int_list_count = 0;
 	cfg.int_step = 5;
 	cfg.min_value = 0.0;

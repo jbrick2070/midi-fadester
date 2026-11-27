@@ -44,6 +44,14 @@ static int64_t saturating_round_i64(double value)
 	return (int64_t)llround(value);
 }
 
+size_t vs_mod_int_list_store(int64_t dst[VS_MOD_INT_LIST_MAX], const int64_t *values, size_t count)
+{
+	if (!dst || !values || count == 0 || count > VS_MOD_INT_LIST_MAX)
+		return 0;
+	memcpy(dst, values, count * sizeof(values[0]));
+	return count;
+}
+
 void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg)
 {
 	if (!cfg)

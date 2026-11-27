@@ -586,16 +586,19 @@ static void inspect_properties_for_setting(obs_properties_t *props, struct prop_
 				if (count > 0) {
 					long long lo = obs_property_list_item_int(p, 0);
 					long long hi = lo;
+					int64_t values[VS_MOD_INT_LIST_MAX];
 					for (size_t i = 0; i < count; i++) {
 						const long long v = obs_property_list_item_int(p, i);
 						if (v < lo)
 							lo = v;
 						if (v > hi)
 							hi = v;
-						/* the list's own values: a write between two of them would not be an item */
-						if (q->int_list_count < VS_MOD_INT_LIST_MAX)
-							q->int_list[q->int_list_count++] = (int64_t)v;
+						if (i < VS_MOD_INT_LIST_MAX)
+							values[i] = (int64_t)v;
 					}
+					/* the list's own values, so a write between two of them never happens; a longer list is not
+					 * kept and the slot uses the continuous range */
+					q->int_list_count = vs_mod_int_list_store(q->int_list, values, count);
 					q->min_val = (double)lo;
 					q->max_val = (double)hi;
 				} else {
