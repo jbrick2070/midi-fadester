@@ -4,6 +4,14 @@ Every release, newest first. [Back to the README](../README.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
+## Unreleased
+
+Fixes from the full code review of 27 November 2026:
+
+- Resetting or clearing the strips, choosing another layout, the first-run choice, obs-websocket `load_profile` and **Import...** no longer leave a layer a strip had faded out invisible: as when one strip is edited, a layer no strip drives any more goes back to 100 % (and to full volume when its audio followed the fader).
+- A fader that follows the scene on air and moves to another source no longer leaves its old source faded out when no other fader takes it.
+- **Import...** in a running session starts a layer fader at the level its layer has now, so the picture does not jump when the fader is first moved.
+
 ## 1.5.0 (November 2026), the current release
 
 Every product of the Fadester suite moves to 1.5 together, so Midi Fadester goes from 0.9.0 straight to 1.5.0, and Visual Sidechain, being part of it, is 1.5.0 too. Since 0.9.0:

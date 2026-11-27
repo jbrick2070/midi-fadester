@@ -3990,6 +3990,129 @@ static int test_pass2_layer_bindings(void)
 	return 0;
 }
 
+/* Strip `slot` shows `source` as a Layer Opacity strip and is pulled to `level`. */
+static int b07_fade(struct mfd_engine *eng, struct fake_scene_graph *sg, int slot, const char *source, float level)
+{
+	struct mfd_slot_config_edit e;
+	memset(&e, 0, sizeof(e));
+	e.enabled = true;
+	e.target_type = MFD_TARGET_SINGLE_LAYER;
+	e.preserve_scene = true;
+	snprintf(e.source_a_name, sizeof(e.source_a_name), "%s", source);
+	char err[160] = {0};
+	REQUIRE(mfd_engine_update_slot_config(eng, slot, &e));
+	REQUIRE(mfd_engine_set_slot_value(eng, slot, level, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(fabsf(fake_sg_find_source(sg, source)->last_opacity - level) < 1e-6f);
+	return 0;
+}
+
+static bool b07_at(struct fake_scene_graph *sg, const char *source, float level)
+{
+	return fabsf(fake_sg_find_source(sg, source)->last_opacity - level) < 1e-6f;
+}
+
+/* B-07 on every path that wipes or moves strips in bulk: Reset, another layout, load_profile, Import and the strips
+ * that follow Program. A layer a strip faded and no strip drives any more goes back to 100 %. */
+static int test_b07_bulk_paths_release_layers(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "X", false);
+	fake_sg_add_source(&sg, "Y", false);
+	fake_sg_add_source(&sg, "Z", false);
+	fake_sg_add_scene(&sg, "First");
+	fake_sg_scene_add_item(&sg, "First", "X");
+	fake_sg_scene_add_item(&sg, "First", "Y");
+	fake_sg_add_scene(&sg, "Second");
+	fake_sg_scene_add_item(&sg, "Second", "Y");
+	fake_sg_scene_add_item(&sg, "Second", "Z");
+
+	struct mfd_scene_graph_ops ops = g_fake_sg_ops;
+	ops.get_opacity = pass2_get_opacity;
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	mfd_midi_parser_init(&eng->midi_parser);
+	mfd_midi_queue_init(&eng->midi_queue);
+	eng->learning_slot_index = -1;
+	mfd_engine_load_apc40_defaults(eng);
+	mfd_engine_set_smooth_tau_ms(eng, 0.0f);
+
+	/* Reset / Clear / first run: the usual layout is loaded over a strip that holds X at 0 %. */
+	REQUIRE(b07_fade(eng, &sg, 2, "X", 0.0f) == 0);
+	mfd_engine_load_apc40_defaults(eng);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+
+	/* obs-websocket load_profile does the same. */
+	REQUIRE(b07_fade(eng, &sg, 3, "Y", 0.25f) == 0);
+	obs_data_t *req = obs_data_create();
+	obs_data_t *resp = obs_data_create();
+	obs_data_set_string(req, "name", "apc40mk2");
+	mfd_vendor_handle_load_profile(req, resp, eng);
+	REQUIRE(!obs_data_has_user_value(resp, "error"));
+	REQUIRE(b07_at(&sg, "Y", 1.0f));
+	obs_data_release(req);
+	obs_data_release(resp);
+
+	/* Another layout that lacks the strip (the APC mini has no crossfader) clears it and puts its layer back; a
+	 * strip the new layout keeps still holds its own. */
+	REQUIRE(b07_fade(eng, &sg, 0, "X", 0.0f) == 0);
+	REQUIRE(b07_fade(eng, &sg, 2, "Z", 0.5f) == 0);
+	REQUIRE(mfd_engine_select_profile(eng, MFD_PROFILE_APC_MINI_MK2, false));
+	REQUIRE(eng->fader_slots[0].source_a_name[0] == '\0');
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(b07_at(&sg, "Z", 0.5f));
+	REQUIRE(mfd_engine_select_profile(eng, MFD_PROFILE_APC40_MK2, true));
+	REQUIRE(b07_at(&sg, "Z", 1.0f));
+
+	/* Import: X is faded by strip 2, the file binds strip 3 to Y only. X goes back to 100 %; strip 3 starts at
+	 * the 30 % Y stands at now, waiting for its fader, not at 100 % (finding 9). */
+	REQUIRE(b07_fade(eng, &sg, 2, "X", 0.0f) == 0);
+	fake_sg_find_source(&sg, "Y")->last_opacity = 0.30f;
+	obs_data_t *root = obs_data_create();
+	obs_data_array_t *arr = obs_data_array_create();
+	obs_data_t *item = obs_data_create();
+	obs_data_set_string(item, "id", "fader_3");
+	obs_data_set_bool(item, "enabled", true);
+	obs_data_set_int(item, "target_type", MFD_TARGET_SINGLE_LAYER);
+	obs_data_set_string(item, "source_a", "Y");
+	obs_data_array_push_back(arr, item);
+	obs_data_release(item);
+	obs_data_set_array(root, "slots", arr);
+	obs_data_array_release(arr);
+	mfd_engine_deserialize_slots_for_test(eng, root);
+	obs_data_release(root);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(strcmp(eng->fader_slots[3].source_a_name, "Y") == 0);
+	REQUIRE(fabsf(eng->fader_slots[3].last_applied_val - 0.30f) < 1e-6f);
+	REQUIRE(eng->fader_slots[3].takeover.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(b07_at(&sg, "Y", 0.30f)); /* Y itself is not moved */
+
+	/* Strips that follow Program (finding 8): First puts X on strip 1 and Y on strip 2. X is pulled to 0 % and Y to
+	 * 60 %. Second has Y and Z: X is left by every strip and goes back to 100 %; Y moves to strip 1 and keeps its
+	 * 60 %, the strip starting there. */
+	mfd_engine_load_apc40_defaults(eng);
+	enum mfd_fill_status st = MFD_FILL_NO_SCENE;
+	REQUIRE(mfd_engine_fill_strips_from_scene(eng, "First", true, true, &st, NULL, 0U) == 2);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "X") == 0);
+	REQUIRE(strcmp(eng->fader_slots[2].source_a_name, "Y") == 0);
+	char err[160] = {0};
+	REQUIRE(mfd_engine_set_slot_value(eng, 1, 0.0f, false, "api", err, sizeof(err)));
+	REQUIRE(mfd_engine_set_slot_value(eng, 2, 0.6f, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(b07_at(&sg, "X", 0.0f) && b07_at(&sg, "Y", 0.6f));
+	REQUIRE(mfd_engine_fill_strips_from_scene(eng, "Second", true, true, &st, NULL, 0U) == 2);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "Y") == 0);
+	REQUIRE(strcmp(eng->fader_slots[2].source_a_name, "Z") == 0);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(b07_at(&sg, "Y", 0.6f));
+	REQUIRE(fabsf(eng->fader_slots[1].last_applied_val - 0.6f) < 1e-6f);
+
+	graph_test_engine_free(eng, sh);
+	return 0;
+}
+
 int main(void)
 {
 	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
@@ -4018,6 +4141,7 @@ int main(void)
 	REQUIRE(test_enable_toggle_survives_overflow() == 0);
 	REQUIRE(test_vj_pads_drive_layers() == 0);
 	REQUIRE(test_pass2_layer_bindings() == 0);
+	REQUIRE(test_b07_bulk_paths_release_layers() == 0);
 	REQUIRE(test_blackout_logic() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
