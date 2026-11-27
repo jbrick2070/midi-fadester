@@ -423,7 +423,8 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	eng->vj_autofill_pending = false;
 	bool vs_poll = eng->vj_vs_poll_pending && !eng->scene_graph_ops;
 	eng->vj_vs_poll_pending = false;
-	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng) && !fading) {
+	/* follow_asked: a follow asked for after the read above waits for the next flush, which asks OBS first */
+	if (follow_asked && eng->vj_follow_pending && !vj_tbar_busy_locked(eng) && !fading) {
 		eng->vj_follow_pending = false;
 		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
 	}
