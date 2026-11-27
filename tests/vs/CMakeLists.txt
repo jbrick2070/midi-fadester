@@ -139,6 +139,28 @@ visual_sidechain_add_test(
 if(OS_WINDOWS)
   target_link_libraries(vs-test-tubester-listener PRIVATE ws2_32)
 endif()
+# The Tape Deck filter itself on a headless libobs (no OBS executable): attaching after Paste Filters Undo / Redo, and a
+# deck_command in the gap between a deck's release and its destroy.
+visual_sidechain_add_test(
+  test-tubester-deck
+  test-tubester-deck.c
+  "${_tubester}/deck-filter.c"
+  "${_tubester}/command.c"
+  "${_tubester}/deck-link.c"
+  "${_tubester}/http-parse.c"
+  "${_tubester}/listener.c"
+  "${_tubester}/random.c"
+  "${_tubester}/speed.c"
+  "${_tubester}/tape-url.c"
+  "${_core}/fader-bridge.c"
+  "${_core}/tempo.c"
+  "${_core}/text-format.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/text.c"
+)
+target_link_libraries(vs-test-tubester-deck PRIVATE plugin-support)
+if(OS_WINDOWS)
+  target_link_libraries(vs-test-tubester-deck PRIVATE ws2_32 bcrypt)
+endif()
 
 # Every built-in shader built by OBS's own renderers (R-PLAT-9): on macOS, libobs-opengl (HLSL to GLSL) and
 # libobs-metal (HLSL to Metal), built from the same OBS sources by cmake/common/buildspec_common.cmake. The test exits

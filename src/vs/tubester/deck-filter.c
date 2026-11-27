@@ -110,6 +110,11 @@ enum deck_role {
 
 struct tub_deck_filter {
 	obs_source_t *context;
+	/* this filter's own weak reference, taken at create and released last in destroy. libobs frees a source's weak
+	 * control as soon as its last strong reference goes, before destroy runs; holding one here keeps the control
+	 * alive for the lister of g_decks (deck_command) in that gap, where obs_source_get_weak_source(context) would
+	 * read freed memory. */
+	obs_weak_source_t *self_weak;
 	pthread_mutex_t attach_mutex;
 	pthread_mutex_t mutex;
 
@@ -209,6 +214,7 @@ struct tub_deck_filter {
 };
 
 static void release_parent(struct tub_deck_filter *f, obs_source_t *parent_or_null);
+static void deck_filter_add(void *data, obs_source_t *parent);
 
 /* ---- the owner registry: one deck drives a Browser source ---- */
 
@@ -1236,12 +1242,24 @@ static void deck_video_tick(void *data, float seconds)
 	obs_source_t *parent = NULL;
 
 	pthread_mutex_lock(&f->attach_mutex);
-	if (f->parent_key && obs_filter_get_parent(f->context) != f->parent_key) {
+	obs_source_t *listed_parent = obs_filter_get_parent(f->context);
+	if (f->parent_key && listed_parent != f->parent_key) {
 		/* a remove raced the add (libobs calls them outside its filter lock) and left this attachment behind; the
-		 * parent no longer lists this filter, so let it go */
+		 * parent no longer lists this filter, so let it go. If a source lists it again (an undo putting the filter
+		 * list back), a later tick attaches it there. */
 		pthread_mutex_unlock(&f->attach_mutex);
 		obs_log(LOG_WARNING, "tape deck %s: released an attachment its source had already dropped", f->deck_id);
 		release_parent(f, NULL);
+		return;
+	}
+	if (!f->parent_key && listed_parent) {
+		/* Paste Filters' Undo and Redo rebuild a filter list with obs_source_restore_filters, which gives each
+		 * filter its parent without filter_add: attach here, as filter_add would have */
+		pthread_mutex_unlock(&f->attach_mutex);
+		obs_source_t *ref = obs_source_get_ref(listed_parent);
+		if (ref && obs_filter_get_parent(f->context) == ref)
+			deck_filter_add(f, ref);
+		obs_source_release(ref);
 		return;
 	}
 	if (f->parent && f->parent_is_browser && f->page_url)
@@ -1442,16 +1460,19 @@ static void *deck_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct tub_deck_filter *f = bzalloc(sizeof(*f));
 	f->context = source;
+	f->self_weak = obs_source_get_weak_source(source);
 	for (size_t i = 0; i < TUB_HOTKEY_COUNT; i++)
 		f->hotkeys[i] = OBS_INVALID_HOTKEY_ID;
 	f->fader_slot = VS_FADER_SLOT_NONE;
 	tub_coalesce_init(&f->coalesce);
 	if (pthread_mutex_init_recursive(&f->attach_mutex) != 0) {
+		obs_weak_source_release(f->self_weak);
 		bfree(f);
 		return NULL;
 	}
 	if (pthread_mutex_init_recursive(&f->mutex) != 0) {
 		pthread_mutex_destroy(&f->attach_mutex);
+		obs_weak_source_release(f->self_weak);
 		bfree(f);
 		return NULL;
 	}
@@ -1517,6 +1538,8 @@ static void deck_destroy(void *data)
 	bfree(f->page_url);
 	pthread_mutex_destroy(&f->mutex);
 	pthread_mutex_destroy(&f->attach_mutex);
+	/* last: the deck left g_decks above, so no lister can still be copying this reference */
+	obs_weak_source_release(f->self_weak);
 	bfree(f);
 }
 
@@ -1982,7 +2005,10 @@ enum tub_deck_cmd_status tub_deck_command_apply(const char *deck_target, enum tu
 	pthread_mutex_lock(&g_decks_mutex);
 	for (size_t i = 0; i < g_deck_count && count < TUB_OWNERS_MAX; i++) {
 		struct tub_deck_filter *f = g_decks[i];
-		obs_weak_source_t *filter = f->context ? obs_source_get_weak_source(f->context) : NULL;
+		/* not obs_source_get_weak_source(f->context): the filter may already be released, its destroy queued */
+		obs_weak_source_t *filter = f->self_weak;
+		if (filter)
+			obs_weak_source_addref(filter);
 		pthread_mutex_lock(&f->mutex);
 		obs_weak_source_t *parent = f->parent;
 		if (parent)

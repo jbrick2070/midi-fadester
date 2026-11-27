@@ -11,6 +11,8 @@ Fixes from the full code review of 27 November 2026:
 - Resetting or clearing the strips, choosing another layout, the first-run choice, obs-websocket `load_profile` and **Import...** no longer leave a layer a strip had faded out invisible: as when one strip is edited, a layer no strip drives any more goes back to 100 % (and to full volume when its audio followed the fader).
 - A fader that follows the scene on air and moves to another source no longer leaves its old source faded out when no other fader takes it.
 - **Import...** in a running session starts a layer fader at the level its layer has now, so the picture does not jump when the fader is first moved.
+- A Tape Deck command from a Stream Deck or a script that arrives while the deck's Browser source is being deleted can no longer crash OBS.
+- A Tape Deck brought back by **Edit > Undo** or **Redo** after Paste Filters attaches to its Browser source again (before, it stayed silent until OBS restarted).
 
 ## 1.5.0 (November 2026), the current release
 
