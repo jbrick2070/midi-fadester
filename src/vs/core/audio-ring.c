@@ -48,6 +48,8 @@ void vs_audio_ring_reset(struct vs_audio_ring *ring)
 	ring->write_pos = 0;
 	ring->total_written = 0;
 	ring->last_timestamp_ns = 0;
+	ring->use_rear = false;
+	ring->front_silent_blocks = 0;
 	pthread_mutex_unlock(&ring->mutex);
 }
 
@@ -69,16 +71,26 @@ void vs_audio_ring_push_mono(struct vs_audio_ring *ring, const float *samples, s
 	pthread_mutex_unlock(&ring->mutex);
 }
 
-/* Whether every sample of these planes over the block is (near) silent: below about -120 dBFS, or not finite. */
-static bool planes_silent(const float *const *planes, size_t count, size_t frames)
+/* The block's peak on one plane, non-finite samples read as 0. */
+static float plane_peak(const float *plane, size_t frames)
 {
-	for (size_t ch = 0; ch < count; ch++) {
-		for (size_t i = 0; i < frames; i++) {
-			if (fabsf(sanitize_sample(planes[ch][i])) >= 1e-6f)
-				return false;
-		}
+	float peak = 0.0f;
+	for (size_t i = 0; i < frames; i++) {
+		const float a = fabsf(sanitize_sample(plane[i]));
+		if (a > peak)
+			peak = a;
 	}
-	return true;
+	return peak;
+}
+
+/* The LFE plane of OBS's speaker layout for this channel count (2.1: 2; 4.1, 5.1, 7.1: 3), or -1 (4.0 has none). */
+static int lfe_plane(size_t channels)
+{
+	if (channels == 3)
+		return 2;
+	if (channels == 5 || channels == 6 || channels == 8)
+		return 3;
+	return -1;
 }
 
 void vs_audio_ring_push_planar(struct vs_audio_ring *ring, const float *const *planes, size_t channels, size_t frames,
@@ -87,40 +99,61 @@ void vs_audio_ring_push_planar(struct vs_audio_ring *ring, const float *const *p
 	if (!ring || !ring->mutex_initialized || frames == 0)
 		return;
 
+	pthread_mutex_lock(&ring->mutex);
 	size_t active_ch = 0;
 	const float *valid_planes[VS_AUDIO_MAX_CHANNELS];
 	if (planes && (!muted || react_when_muted)) {
 		/* With OBS set to 2.1, 4.0, 4.1, 5.1 or 7.1, the first two planes are front left and right. A stereo source
 		 * fills only those (the rest are silent), and OBS spreads a mono source over all of them, so averaging every
 		 * plane would put stereo music 9.5 dB (5.1) to 12 dB (7.1) under the fixed onset thresholds. Front left and
-		 * right alone give every layout the stereo layout's level. A block whose front planes are silent while
-		 * another plane is not (dialogue only in the centre, surround-only ambience) averages those other planes
-		 * instead, so it is not read as silence. */
+		 * right alone give every layout the stereo layout's level. While the front stays silent and the centre or
+		 * rear carry sound (dialogue only in the centre, surround-only ambience), those planes are averaged instead,
+		 * only the ones with sound and never the LFE, so the passage arrives near the level stereo would; the switch
+		 * holds (VS_AUDIO_RING_FALLBACK_HOLD), so the choice does not flip from block to block. */
 		const size_t limit = channels < VS_AUDIO_MAX_CHANNELS ? channels : VS_AUDIO_MAX_CHANNELS;
 		const size_t front = limit > 2 ? 2 : limit;
+		float front_peak = 0.0f;
 		for (size_t ch = 0; ch < front; ch++) {
 			if (planes[ch] != NULL) {
 				valid_planes[active_ch++] = planes[ch];
+				const float p = plane_peak(planes[ch], frames);
+				if (p > front_peak)
+					front_peak = p;
 			}
 		}
-		if (limit > 2 && planes_silent(valid_planes, active_ch, frames)) {
+		if (limit > 2) {
+			const int lfe = lfe_plane(limit);
 			size_t rear_ch = 0;
 			const float *rear[VS_AUDIO_MAX_CHANNELS];
 			for (size_t ch = 2; ch < limit; ch++) {
-				if (planes[ch] != NULL) {
+				if (planes[ch] != NULL && (int)ch != lfe &&
+				    plane_peak(planes[ch], frames) >= VS_AUDIO_RING_SILENT_PEAK) {
 					rear[rear_ch++] = planes[ch];
 				}
 			}
-			if (rear_ch > 0 && !planes_silent(rear, rear_ch, frames)) {
+			if (front_peak >= VS_AUDIO_RING_FRONT_BACK_PEAK) {
+				ring->use_rear = false;
+				ring->front_silent_blocks = 0;
+			} else if (front_peak < VS_AUDIO_RING_SILENT_PEAK) {
+				if (ring->front_silent_blocks < VS_AUDIO_RING_FALLBACK_HOLD)
+					ring->front_silent_blocks++;
+				if (ring->front_silent_blocks >= VS_AUDIO_RING_FALLBACK_HOLD && rear_ch > 0)
+					ring->use_rear = true;
+			} else {
+				ring->front_silent_blocks = 0; /* quiet but not silent: the choice stays as it is */
+			}
+			if (ring->use_rear && rear_ch > 0) {
 				for (size_t ch = 0; ch < rear_ch; ch++) {
 					valid_planes[ch] = rear[ch];
 				}
 				active_ch = rear_ch;
 			}
+		} else {
+			ring->use_rear = false;
+			ring->front_silent_blocks = 0;
 		}
 	}
 
-	pthread_mutex_lock(&ring->mutex);
 	uint32_t wp = ring->write_pos;
 	if (active_ch == 0) {
 		for (size_t i = 0; i < frames; i++) {

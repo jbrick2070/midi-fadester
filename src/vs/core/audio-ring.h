@@ -29,7 +29,18 @@ struct vs_audio_ring {
 	uint32_t write_pos;
 	uint64_t total_written;
 	uint64_t last_timestamp_ns;
+	/* surround layouts (push_planar): the downmix reads the centre and rear planes instead of front left and right */
+	bool use_rear;
+	uint32_t front_silent_blocks; /* consecutive blocks with front left and right below the silence level */
 };
+
+/* Surround downmix (vs_audio_ring_push_planar): front left and right below VS_AUDIO_RING_SILENT_PEAK (-70 dBFS, so dither
+ * and noise count as silence) for VS_AUDIO_RING_FALLBACK_HOLD blocks in a row switch to the centre and rear planes that
+ * carry sound (LFE excluded); front left or right above VS_AUDIO_RING_FRONT_BACK_PEAK (-50 dBFS) switches back at once.
+ * In between, the choice stays as it is, so it cannot flip from block to block. */
+#define VS_AUDIO_RING_SILENT_PEAK 3.1623e-4f
+#define VS_AUDIO_RING_FRONT_BACK_PEAK 3.1623e-3f
+#define VS_AUDIO_RING_FALLBACK_HOLD 4u
 
 bool vs_audio_ring_init(struct vs_audio_ring *ring);
 void vs_audio_ring_free(struct vs_audio_ring *ring);
