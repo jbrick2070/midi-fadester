@@ -51,6 +51,12 @@ void tub_register_deck_filter(void);
  * an earlier tape. Any thread. */
 void tub_decks_describe(obs_data_t *out);
 
+#ifdef TUB_DECK_TEST_HOOKS
+/* Tests only: whether the deck listed under deck_id holds its own weak reference to its source, which keeps the weak
+ * control valid from the source's release until the deck's destroy; out_expired says whether the source is released. */
+bool tub_deck_test_own_weak(const char *deck_id, bool *out_expired);
+#endif
+
 enum tub_deck_op {
 	TUB_DECK_OP_PLAY_PAUSE = 0,
 	TUB_DECK_OP_CUE_TO_START,

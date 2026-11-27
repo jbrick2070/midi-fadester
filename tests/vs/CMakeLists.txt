@@ -158,18 +158,22 @@ visual_sidechain_add_test(
   "${CMAKE_SOURCE_DIR}/src/vs/obs/text.c"
 )
 target_link_libraries(vs-test-tubester-deck PRIVATE plugin-support)
+target_compile_definitions(vs-test-tubester-deck PRIVATE TUB_DECK_TEST_HOOKS)
 if(OS_WINDOWS)
   target_link_libraries(vs-test-tubester-deck PRIVATE ws2_32 bcrypt)
 endif()
 
 # The deck page (data/deck.html) in Node, with a stand-in video element: it reports only to a whole-number port on
-# 127.0.0.1. Skipped where Node is not installed.
+# 127.0.0.1. Skipped where Node is not installed, except on CI, where configure fails without it.
 find_program(VS_NODE_EXECUTABLE node)
+set(_deck_page_script "${CMAKE_CURRENT_SOURCE_DIR}/test-deck-page.js")
 if(VS_NODE_EXECUTABLE)
   add_test(
     NAME vs-test-deck-page
-    COMMAND "${VS_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test-deck-page.js" "${CMAKE_SOURCE_DIR}/data/deck.html"
+    COMMAND "${VS_NODE_EXECUTABLE}" "${_deck_page_script}" "${CMAKE_SOURCE_DIR}/data/deck.html"
   )
+elseif(DEFINED ENV{CI})
+  message(FATAL_ERROR "Visual Sidechain tests: Node.js not found; vs-test-deck-page needs it on CI")
 else()
   message(STATUS "Visual Sidechain tests: Node.js not found; vs-test-deck-page is not added")
 endif()

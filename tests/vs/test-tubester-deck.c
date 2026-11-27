@@ -138,16 +138,20 @@ static void test_restored_deck_attaches_on_tick(void)
 	assert(strcmp(role, "pending") == 0);
 	assert(strcmp(source, "Deck Browser") == 0);
 
-	/* a tick that finds the parent gone for a moment (the undo's first loop clears it) lets go; the next tick, with
-	 * the parent back, attaches again */
-	obs_data_array_t *again = obs_source_backup_filters(browser);
-	obs_source_restore_filters(browser, again);
-	obs_data_array_release(again);
+	/* Undo of that paste: obs_source_restore_filters puts back a list without the deck. It clears the deck's parent
+	 * and drops it without filter_remove, so the deck, still alive while anything holds it (here the test's
+	 * reference), must let its Browser source go at the next tick and not attach anywhere again. */
+	obs_data_array_t *empty = obs_data_array_create();
+	obs_source_restore_filters(browser, empty);
+	obs_data_array_release(empty);
+	assert(obs_filter_get_parent(restored) == NULL);
 	tick_filter(restored);
 	assert(first_deck(role, source, deck_id));
-	assert(strcmp(role, "pending") == 0 && strcmp(source, "Deck Browser") == 0);
+	assert(strcmp(role, "detached") == 0 && strcmp(source, "") == 0);
+	tick_filter(restored);
+	assert(first_deck(role, source, deck_id));
+	assert(strcmp(role, "detached") == 0);
 
-	obs_source_filter_remove(browser, restored);
 	obs_source_release(restored);
 	obs_source_release(browser);
 	drain_destroy_queue();
@@ -173,7 +177,13 @@ static void test_command_between_release_and_destroy(void)
 
 	assert(os_event_init(&g_destroy_gate, OS_EVENT_TYPE_MANUAL) == 0);
 	obs_queue_task(OBS_TASK_DESTROY, hold_destroy_queue, NULL, false);
+	bool expired = false;
+	assert(tub_deck_test_own_weak(deck_id, &expired) && !expired);
 	obs_source_release(deck); /* the destroy is queued behind the gate; the deck is still listed */
+	/* libobs has dropped its own hold on the source's weak control at the release; the deck's own reference keeps
+	 * that control valid until the deck's destroy, so the command path below reads live memory. Checked directly,
+	 * since reading freed memory need not crash a plain build. */
+	assert(tub_deck_test_own_weak(deck_id, &expired) && expired);
 	for (int i = 0; i < 4; i++) {
 		struct tub_deck_command_result r;
 		memset(&r, 0, sizeof(r));

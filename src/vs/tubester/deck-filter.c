@@ -1878,6 +1878,24 @@ void tub_register_deck_filter(void)
 	obs_register_source(&tub_deck_filter_info);
 }
 
+#ifdef TUB_DECK_TEST_HOOKS
+bool tub_deck_test_own_weak(const char *deck_id, bool *out_expired)
+{
+	bool held = false;
+	pthread_mutex_lock(&g_decks_mutex);
+	for (size_t i = 0; i < g_deck_count; i++) {
+		struct tub_deck_filter *f = g_decks[i];
+		if (deck_id && strcmp(f->deck_id, deck_id) == 0 && f->self_weak) {
+			held = true;
+			if (out_expired)
+				*out_expired = obs_weak_source_expired(f->self_weak);
+		}
+	}
+	pthread_mutex_unlock(&g_decks_mutex);
+	return held;
+}
+#endif
+
 static const char *role_name(enum deck_role role)
 {
 	switch (role) {
