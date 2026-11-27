@@ -78,7 +78,13 @@ void vs_audio_ring_push_planar(struct vs_audio_ring *ring, const float *const *p
 	size_t active_ch = 0;
 	const float *valid_planes[VS_AUDIO_MAX_CHANNELS];
 	if (planes && (!muted || react_when_muted)) {
-		size_t limit = channels < VS_AUDIO_MAX_CHANNELS ? channels : VS_AUDIO_MAX_CHANNELS;
+		/* With OBS set to 2.1, 4.0, 4.1, 5.1 or 7.1, the first two planes are front left and right. A stereo source
+		 * fills only those (the rest are silent), and OBS spreads a mono source over all of them, so averaging every
+		 * plane would put stereo music 9.5 dB (5.1) to 12 dB (7.1) under the fixed onset thresholds. Front left and
+		 * right alone give every layout the stereo layout's level. */
+		size_t limit = channels > 2 ? 2 : channels;
+		if (limit > VS_AUDIO_MAX_CHANNELS)
+			limit = VS_AUDIO_MAX_CHANNELS;
 		for (size_t ch = 0; ch < limit; ch++) {
 			if (planes[ch] != NULL) {
 				valid_planes[active_ch++] = planes[ch];

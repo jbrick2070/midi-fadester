@@ -144,6 +144,37 @@ static void test_ring_nan_inf_sanitization(void)
 	vs_audio_ring_free(&ring);
 }
 
+/* OBS set to 5.1 or 7.1: a stereo source fills front left and right only, and OBS spreads a mono source over every
+ * plane (LFE excepted on 7.1). Both reach the analyser at the level a stereo layout gives them. */
+static void test_ring_surround_layouts_keep_stereo_level(void)
+{
+	struct vs_audio_ring ring;
+	assert(vs_audio_ring_init(&ring));
+
+	float front_l[4] = {0.5f, 0.5f, -0.5f, 0.25f};
+	float front_r[4] = {0.5f, 0.3f, -0.5f, 0.25f};
+	float silent[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	float mono[4] = {0.5f, 0.4f, -0.5f, 0.25f};
+	const float expect[4] = {0.5f, 0.4f, -0.5f, 0.25f};
+	float out[4];
+
+	for (size_t channels = 6; channels <= 8; channels += 2) {
+		const float *stereo_planes[8] = {front_l, front_r, silent, silent, silent, silent, silent, silent};
+		vs_audio_ring_push_planar(&ring, stereo_planes, channels, 4, false, false, 100ULL);
+		assert(vs_audio_ring_read_window(&ring, 4, 0, out, NULL, NULL));
+		for (size_t i = 0; i < 4; i++)
+			assert(float_near(out[i], expect[i], 1e-6f));
+
+		const float *mono_planes[8] = {mono, mono, mono, channels == 8 ? silent : mono, mono, mono, mono, mono};
+		vs_audio_ring_push_planar(&ring, mono_planes, channels, 4, false, false, 200ULL);
+		assert(vs_audio_ring_read_window(&ring, 4, 0, out, NULL, NULL));
+		for (size_t i = 0; i < 4; i++)
+			assert(float_near(out[i], expect[i], 1e-6f));
+	}
+
+	vs_audio_ring_free(&ring);
+}
+
 static void test_ring_underrun_zero_pad(void)
 {
 	struct vs_audio_ring ring;
@@ -178,6 +209,7 @@ int main(void)
 	test_ring_wrap_around();
 	test_ring_sync_offset_delay();
 	test_ring_nan_inf_sanitization();
+	test_ring_surround_layouts_keep_stereo_level();
 	test_ring_underrun_zero_pad();
 
 	printf("test-audio-ring: all 4 tests passed\n");

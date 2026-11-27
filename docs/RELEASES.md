@@ -14,6 +14,7 @@ Fixes from the full code review of 27 November 2026:
 - A Tape Deck command from a Stream Deck or a script that arrives while the deck's Browser source is being deleted can no longer crash OBS.
 - A Tape Deck brought back by **Edit > Undo** or **Redo** after Paste Filters attaches to its Browser source again (before, it stayed silent until OBS restarted).
 - Flash Guard now also holds an Audio Modulator slot aimed at a custom shader's own brightness, opacity, exposure or alpha setting to 3 flashes per second, as it does for any other filter.
+- With OBS's audio set to 5.1 or 7.1 channels, stereo music no longer reaches Visual Sidechain 9.5 to 12 dB too quiet, so kicks, snares and the tempo are found as in stereo.
 
 ## 1.5.0 (November 2026), the current release
 
