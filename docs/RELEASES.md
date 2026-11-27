@@ -19,6 +19,7 @@ Fixes from the full code review of 27 November 2026:
 - For scripts: a fader value, nudge or fade target far beyond the range (such as `1e39`) now counts as full up or full down instead of 0 %.
 - For scripts: `set_slot` refuses a text field (`scene`, `source_a`, `source_b`, `filter_name`, `filter_prop`, `target_mode`, `curve`) sent as another type, instead of clearing the strip's source; `release` in `set_fader_value` and `all` in `fill_from_scene` must be true or false. A calibration range past what the control reads (0 to 127, or 0 to 16383 for a 14-bit control) is refused with `invalid_parameter` instead of being reset while the request reported success.
 - For scripts: `fill_from_scene` errors now carry `error_code` as every other request does (`error` is unchanged).
+- The Tape Deck page sends its reports only to a whole-number port on 127.0.0.1; a deck message with any other port is ignored.
 
 ## 1.5.0 (November 2026), the current release
 
