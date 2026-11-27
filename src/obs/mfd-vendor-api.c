@@ -1262,8 +1262,10 @@ void mfd_vendor_handle_fill_from_scene(obs_data_t *request_data, obs_data_t *res
 		bool is_string = it && obs_data_item_gettype(it) == OBS_DATA_STRING;
 		obs_data_item_release(&it);
 		if (!is_string) {
+			/* "error" holds the code for this request, as it always has; error_code is set as everywhere else */
 			obs_data_set_string(response_data, "error", "invalid_parameter");
 			obs_data_set_string(response_data, "comment", "Field 'scene' must be a scene name.");
+			obs_data_set_string(response_data, "error_code", "invalid_parameter");
 			return;
 		}
 		scene = obs_data_get_string(request_data, "scene");
@@ -1282,6 +1284,7 @@ void mfd_vendor_handle_fill_from_scene(obs_data_t *request_data, obs_data_t *res
 		obs_data_set_string(response_data, "error", "scene_not_found");
 		obs_data_set_string(response_data, "comment",
 				    used[0] != '\0' ? "That scene is not in OBS." : "No scene is on air.");
+		obs_data_set_string(response_data, "error_code", "scene_not_found");
 		return;
 	}
 	static const char *const k_status[] = {"ok", "no_scene", "no_empty_strips", "no_video_layers"};

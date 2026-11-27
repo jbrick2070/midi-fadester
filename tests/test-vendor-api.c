@@ -2819,6 +2819,15 @@ static int test_vj_fill_follow_and_desk(void)
 	obs_data_set_string(req, "scene", "Nowhere");
 	mfd_vendor_handle_fill_from_scene(req, resp, eng);
 	REQUIRE(strcmp(obs_data_get_string(resp, "error"), "scene_not_found") == 0);
+	REQUIRE(strcmp(obs_data_get_string(resp, "error_code"), "scene_not_found") == 0);
+	obs_data_release(req);
+	obs_data_release(resp);
+	req = obs_data_create();
+	resp = obs_data_create();
+	obs_data_set_int(req, "scene", 3);
+	mfd_vendor_handle_fill_from_scene(req, resp, eng);
+	REQUIRE(strcmp(obs_data_get_string(resp, "error"), "invalid_parameter") == 0);
+	REQUIRE(strcmp(obs_data_get_string(resp, "error_code"), "invalid_parameter") == 0);
 	obs_data_release(req);
 	obs_data_release(resp);
 	req = obs_data_create();
