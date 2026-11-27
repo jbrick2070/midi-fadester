@@ -5323,6 +5323,62 @@ int main(void)
 	obs_data_release(req);
 	obs_data_release(res);
 
+	/* A range past what a 7-bit control reads is refused, not cut or reset while the request reports success; a
+	 * huge number does not wrap into range. */
+	{
+		const long long bad[][2] = {{200, 300}, {120, 1000}, {0, 4294967296LL + 100LL}};
+		for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "crossfader");
+			obs_data_set_int(req, "cal_min", bad[k][0]);
+			obs_data_set_int(req, "cal_max", bad[k][1]);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+			REQUIRE(eng.fader_slots[0].cal.cal_min == 0 && eng.fader_slots[0].cal.cal_max == 125);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+	}
+
+	/* A text field of another type is refused; it does not read as "" and clear the strip's source. The same for
+	 * set_fader_value's "release" and fill_from_scene's "all" sent as text. */
+	{
+		const char *const fields[] = {"scene",       "source_a",    "source_b", "filter_name",
+					      "filter_prop", "target_mode", "curve"};
+		eng.fader_slots[2].enabled = true;
+		eng.fader_slots[2].target_type = MFD_TARGET_SINGLE_LAYER;
+		snprintf(eng.fader_slots[2].source_a_name, sizeof(eng.fader_slots[2].source_a_name), "%s", "Cam 1");
+		for (size_t k = 0; k < sizeof(fields) / sizeof(fields[0]); ++k) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "fader_2");
+			obs_data_set_int(req, fields[k], 5);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+			REQUIRE(strcmp(eng.fader_slots[2].source_a_name, "Cam 1") == 0);
+			REQUIRE(eng.fader_slots[2].target_type == MFD_TARGET_SINGLE_LAYER);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_2");
+		obs_data_set_double(req, "value", 0.5);
+		obs_data_set_string(req, "release", "true");
+		mfd_vendor_handle_set_fader_value(req, res, &eng);
+		REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "all", "true");
+		mfd_vendor_handle_fill_from_scene(req, res, &eng);
+		REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+	}
+
 	/* Reloading profile preserves persisted [0, 125] calibration for (apc40mk2, Ch 1 CC 15) */
 	mfd_engine_load_apc40_defaults(&eng);
 	REQUIRE(eng.fader_slots[0].cal.cal_min == 0);

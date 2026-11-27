@@ -407,6 +407,30 @@ static bool request_optional_types_or_error(obs_data_t *request_data, obs_data_t
 	return true;
 }
 
+/* The same for a text parameter: "source_a":5 would read as "" and clear the strip's source. */
+static bool request_optional_strings_or_error(obs_data_t *request_data, obs_data_t *response_data,
+					      const char *const *names, size_t count)
+{
+	if (!request_data) {
+		return true;
+	}
+	for (size_t i = 0U; i < count; ++i) {
+		if (!obs_data_has_user_value(request_data, names[i])) {
+			continue;
+		}
+		obs_data_item_t *item = obs_data_item_byname(request_data, names[i]);
+		const bool ok = item && obs_data_item_gettype(item) == OBS_DATA_STRING;
+		obs_data_item_release(&item);
+		if (!ok) {
+			char sentence[128];
+			snprintf(sentence, sizeof(sentence), "Parameter '%s' must be a string.", names[i]);
+			set_error_comment(response_data, "invalid_parameter", sentence);
+			return false;
+		}
+	}
+	return true;
+}
+
 static void set_error_msg(obs_data_t *response_data, const struct mfd_msg *msg)
 {
 	char sentence[256];
@@ -924,6 +948,12 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 	if (!request_number_or_error(request_data, response_data, "value")) {
 		return;
 	}
+	{
+		static const char *const bools[] = {"release"}; /* "release":"true" would read as false */
+		if (!request_optional_types_or_error(request_data, response_data, NULL, 0U, bools, 1U)) {
+			return;
+		}
+	}
 
 	float val = clamp_request_double(obs_data_get_double(request_data, "value"), 0.0, 1.0);
 	bool release = obs_data_get_bool(request_data, "release");
@@ -1238,6 +1268,12 @@ void mfd_vendor_handle_fill_from_scene(obs_data_t *request_data, obs_data_t *res
 		}
 		scene = obs_data_get_string(request_data, "scene");
 	}
+	{
+		static const char *const bools[] = {"all"}; /* "all":"true" would read as false */
+		if (!request_optional_types_or_error(request_data, response_data, NULL, 0U, bools, 1U)) {
+			return;
+		}
+	}
 	bool all = request_data && obs_data_get_bool(request_data, "all");
 	enum mfd_fill_status st = MFD_FILL_NO_SCENE;
 	char used[MFD_SOURCE_NAME_MAX] = {0};
@@ -1352,9 +1388,13 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		/* C-05: a number sent as a string or a bool would be read as 0, a bool sent as a string as false */
 		static const char *const numbers[] = {"cal_min", "cal_max", "from_val", "to_val"};
 		static const char *const bools[] = {"afv", "bypass_at_zero"}; /* "enabled" has its own check below */
+		static const char *const strings[] = {"scene",       "source_a",    "source_b", "filter_name",
+						      "filter_prop", "target_mode", "curve"};
 		if (!request_optional_types_or_error(request_data, response_data, numbers,
 						     sizeof(numbers) / sizeof(numbers[0]), bools,
-						     sizeof(bools) / sizeof(bools[0]))) {
+						     sizeof(bools) / sizeof(bools[0])) ||
+		    !request_optional_strings_or_error(request_data, response_data, strings,
+						       sizeof(strings) / sizeof(strings[0]))) {
 			return;
 		}
 	}
@@ -1392,8 +1432,13 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		(has_scene && strcmp(obs_data_get_string(request_data, "scene"), s->scene_name) != 0) ||
 		(has_sa && strcmp(obs_data_get_string(request_data, "source_a"), s->source_a_name) != 0) ||
 		(has_sb && strcmp(obs_data_get_string(request_data, "source_b"), s->source_b_name) != 0);
-	int new_cal_min = has_cal_min ? (int)obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
-	int new_cal_max = has_cal_max ? (int)obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
+	/* read as long long and checked before the cast, so a huge number cannot wrap into range */
+	const long long raw_cal_min = has_cal_min ? obs_data_get_int(request_data, "cal_min") : s->cal.cal_min;
+	const long long raw_cal_max = has_cal_max ? obs_data_get_int(request_data, "cal_max") : s->cal.cal_max;
+	/* a 7-bit control reads 0..127, a 14-bit one (or pitch bend) 0..16383: a range past that would be cut or reset to
+	 * the default by mfd_calibration_set, while the request said it succeeded */
+	const int cal_limit = (s->addr.is_14bit || s->addr.type == MFD_MIDI_PITCH_BEND) ? MFD_CAL_DEFAULT_MAX_14BIT
+											: MFD_CAL_DEFAULT_MAX_7BIT;
 
 	if (has_enabled) {
 		obs_data_item_t *item = obs_data_item_byname(request_data, "enabled");
@@ -1406,12 +1451,23 @@ void mfd_vendor_handle_set_slot(obs_data_t *request_data, obs_data_t *response_d
 		}
 	}
 
-	if ((has_cal_min || has_cal_max) && (new_cal_min < 0 || new_cal_max <= new_cal_min)) {
+	if ((has_cal_min || has_cal_max) && (raw_cal_min < 0 || raw_cal_max <= raw_cal_min)) {
 		set_error_comment(response_data, "invalid_parameter",
 				  "Invalid calibration range: 'cal_max' must be greater than 'cal_min' (>= 0).");
 		mfd_engine_unlock(eng);
 		return;
 	}
+	if ((has_cal_min || has_cal_max) && raw_cal_max > cal_limit) {
+		char msg[160];
+		snprintf(msg, sizeof(msg),
+			 "Invalid calibration range: this control reads 0 to %d, so 'cal_max' must be %d or less.",
+			 cal_limit, cal_limit);
+		set_error_comment(response_data, "invalid_parameter", msg);
+		mfd_engine_unlock(eng);
+		return;
+	}
+	const int new_cal_min = (int)raw_cal_min;
+	const int new_cal_max = (int)raw_cal_max;
 
 	if (has_target) {
 		const char *tm = obs_data_get_string(request_data, "target_mode");
