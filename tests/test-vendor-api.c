@@ -4528,6 +4528,48 @@ int main(void)
 	REQUIRE(!eng.fader_slots[1].auto_fade_active);
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.00f) < 1e-5f);
 
+	/* 6b. A number beyond float's range is clamped before it becomes a float: 1e39 is full up, not +inf read as
+	 * 0 %; -1e39 is full down. */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.5) < 1e-5);
+	obs_data_set_double(req, "value", 1e39);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 1.0) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "delta", -1e39);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.0) < 1e-5);
+	obs_data_set_double(req, "delta", 1e39);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 1.0) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(res);
+	res = obs_data_create();
+	obs_data_erase(req, "value");
+	obs_data_set_double(req, "to", 1e39);
+	obs_data_set_int(req, "ms", 100);
+	mfd_vendor_handle_auto_fade(req, res, &eng);
+	REQUIRE(eng.fader_slots[1].auto_fade_active && fabsf(eng.fader_slots[1].auto_fade_to - 1.0f) < 1e-6f);
+	obs_data_release(req);
+	obs_data_release(res);
+	mfd_engine_tick(&eng, 0.1f);
+	REQUIRE(!eng.fader_slots[1].auto_fade_active);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.00f) < 1e-5f);
+
 	/* 7. set_fader_value on crossfader (T-Bar) with release: true finishes transition */
 	req = obs_data_create();
 	res = obs_data_create();
@@ -4640,6 +4682,15 @@ int main(void)
 	REQUIRE(fabs(calldata_float(&cd, "value") - 0.625) < 1e-5);
 	REQUIRE(strcmp(calldata_string(&cd, "reason"), "") == 0);
 	calldata_free(&cd);
+
+	/* 9d. A finite value beyond float's range is full up over the proc too, not 0 % */
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_1");
+	calldata_set_float(&cd, "value", 1e39);
+	REQUIRE(proc_handler_call(fake_ph, "midi_fadester_set_fader_value", &cd));
+	REQUIRE(calldata_bool(&cd, "ok"));
+	calldata_free(&cd);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-5f);
 
 	signal_handler_disconnect(fake_sh, "midi_fadester_fader_changed", on_fake_signal, &sig_log);
 	mfd_bridge_register_with_handlers(NULL, NULL, NULL);

@@ -16,6 +16,7 @@ Fixes from the full code review of 27 November 2026:
 - Flash Guard now also holds an Audio Modulator slot aimed at a custom shader's own brightness, opacity, exposure or alpha setting to 3 flashes per second, as it does for any other filter.
 - With OBS's audio set to 5.1 or 7.1 channels, stereo music no longer reaches Visual Sidechain 9.5 to 12 dB too quiet, so kicks, snares and the tempo are found as in stereo.
 - An Audio Modulator slot aimed at a list setting with gaps between its values (a shader's choice list, a filter's mode) now writes only the list's own values, never a number between them.
+- For scripts: a fader value, nudge or fade target far beyond the range (such as `1e39`) now counts as full up or full down instead of 0 %.
 
 ## 1.5.0 (November 2026), the current release
 

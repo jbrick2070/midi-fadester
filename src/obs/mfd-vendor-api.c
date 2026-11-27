@@ -256,6 +256,23 @@ static float clamp01(float v)
 	return v;
 }
 
+/* A request number taken into [lo, hi] while it is still a double. A double beyond float's range becomes +inf or -inf
+ * at the cast, and clamp01 reads every non-finite value as 0: a "value" of 1e39 would cut a layer to 0 % instead of
+ * taking it full up. */
+static float clamp_request_double(double v, double lo, double hi)
+{
+	if (isnan(v)) {
+		return (float)(lo > 0.0 ? lo : (hi < 0.0 ? hi : 0.0));
+	}
+	if (v <= lo) {
+		return (float)lo;
+	}
+	if (v >= hi) {
+		return (float)hi;
+	}
+	return (float)v;
+}
+
 /* Every error carries a stable error_code beside its English text, so clients can word it themselves (R-I18N-1). */
 static void set_error_comment(obs_data_t *response_data, const char *error_code, const char *sentence)
 {
@@ -712,7 +729,7 @@ static void proc_set_fader_value(void *data, calldata_t *cd)
 		set_proc_reason(cd, "missing_parameter", "Missing required 'value' parameter (0.0 to 1.0).");
 		return;
 	}
-	float val = clamp01((float)raw_val);
+	float val = clamp_request_double(raw_val, 0.0, 1.0);
 	mfd_engine_lock(eng);
 	if (os_atomic_load_bool(&g_vendor_shutting_down)) {
 		mfd_engine_unlock(eng);
@@ -908,7 +925,7 @@ void mfd_vendor_handle_set_fader_value(obs_data_t *request_data, obs_data_t *res
 		return;
 	}
 
-	float val = clamp01((float)obs_data_get_double(request_data, "value"));
+	float val = clamp_request_double(obs_data_get_double(request_data, "value"), 0.0, 1.0);
 	bool release = obs_data_get_bool(request_data, "release");
 
 	mfd_engine_lock(eng);
@@ -1035,7 +1052,7 @@ void mfd_vendor_handle_nudge_fader(obs_data_t *request_data, obs_data_t *respons
 		mfd_engine_unlock(eng);
 		return;
 	}
-	float delta = (float)obs_data_get_double(request_data, "delta");
+	float delta = clamp_request_double(obs_data_get_double(request_data, "delta"), -1.0, 1.0);
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
@@ -1150,7 +1167,7 @@ void mfd_vendor_handle_auto_fade(obs_data_t *request_data, obs_data_t *response_
 		mfd_engine_unlock(eng);
 		return;
 	}
-	float to_val = clamp01((float)obs_data_get_double(request_data, "to"));
+	float to_val = clamp_request_double(obs_data_get_double(request_data, "to"), 0.0, 1.0);
 	bool was_parked = (slot->takeover.state == MFD_TAKEOVER_PARKED) ||
 			  (slot->target_type == MFD_TARGET_TBAR && slot->tbar_state == MFD_TBAR_PARKED);
 
