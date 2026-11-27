@@ -581,6 +581,8 @@ struct mfd_engine {
 	void *scene_graph_user_data;
 	bool studio_mode_override_set;
 	bool studio_mode_override;
+	/* with scene_graph_ops: whether a Program transition counts as still drawing (program_transition_running) */
+	bool test_transition_running;
 
 	/* APC40 mkII VJ buttons (core/vj-pads.h): blend punch and pick, flash, fades, Clean FX. On unless turned off. */
 	bool vj_disabled;

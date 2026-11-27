@@ -381,6 +381,7 @@ void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, vo
 static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *cmd);
 static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
+static bool program_transition_running(const struct mfd_engine *eng);
 static void vj_hold_epoch_sync_locked(struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
 static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng);
@@ -397,6 +398,7 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	int ncmd = 0;
 	bool autofill = false;
 	bool follow = false;
+	const bool fading = program_transition_running(eng); /* asked before the engine lock: it takes libobs's */
 	mfd_engine_lock(eng);
 	if (eng->vj_cue_ms != 0) {
 		/* First: a take pressed right after turning Cue Level uses the new length. */
@@ -415,7 +417,7 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	eng->vj_autofill_pending = false;
 	bool vs_poll = eng->vj_vs_poll_pending && !eng->scene_graph_ops;
 	eng->vj_vs_poll_pending = false;
-	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
+	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng) && !fading) {
 		eng->vj_follow_pending = false;
 		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
 	}
@@ -1091,6 +1093,12 @@ static bool load_profile_defaults_locked(struct mfd_engine *eng, enum mfd_contro
 		mfd_engine_abort_tbar_for_config_change_locked(eng, &eng->fader_slots[k]);
 		mfd_engine_detach_filter_binding_locked(eng, k);
 	}
+	/* Every strip is written afresh, so a held flash or blackout pad lets go, as when one strip leaves its source
+	 * (mfd_engine_vj_let_go_locked): its lamp goes out, and its layer is put back with the others by the caller. */
+	eng->vj.flashing = 0U;
+	eng->vj.blackout = 0U;
+	vj_hold_epoch_sync_locked(eng);
+	eng->vj_state_dirty = true;
 	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
 	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	if (!eng->has_last_midi) {
@@ -1198,6 +1206,14 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 				} else {
 					mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 					mfd_engine_detach_filter_binding_locked(eng, i);
+					if (i >= 1 && i <= (int)MFD_VJ_STRIPS) {
+						/* a held pad on a strip this desk lacks lets go with it */
+						const uint8_t b = (uint8_t)(1U << (unsigned)(i - 1));
+						eng->vj.flashing &= (uint8_t)~b;
+						eng->vj.blackout &= (uint8_t)~b;
+						s->vj_flash_held = false;
+						eng->vj_state_dirty = true;
+					}
 					s->enabled = false;
 					s->addr.type = MFD_MIDI_NONE;
 					s->scene_name[0] = '\0';
@@ -1213,6 +1229,7 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 					mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 				}
 			}
+			vj_hold_epoch_sync_locked(eng);
 			/* the layers the strips this desk lacks faded are not left out (B-07) */
 			layer_bindings_release_left_locked(eng, before);
 		}
@@ -6031,6 +6048,32 @@ static bool vj_queue_cmd_locked(struct mfd_engine *eng, enum mfd_vj_command_kind
 }
 
 /* A crossfader (T-bar) throw is under way. A T-bar at rest after a throw is parked at its end and does not count. */
+/*
+ * Whether OBS is still drawing a Program transition: a fade between scenes, or a T-bar held part way. Strips that
+ * follow Program wait for its end, so a source they leave is not put back to 100 % (B-07) while the scene it is in
+ * still shows. OBS 33 sends SCENE_CHANGED for an animated transition only when its picture has finished
+ * (OBSBasic::TransitionStopped, on transition_video_stop), but a follow asked for another reason (a layer added to the
+ * scene on air, the pads turned on) can come during the fade. Active, and OBS's own stillTransitioning test. Not with
+ * the engine lock held: it takes libobs's channel lock.
+ */
+static bool program_transition_running(const struct mfd_engine *eng)
+{
+	if (eng->scene_graph_ops) {
+		return eng->test_transition_running;
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *tr = obs_get_output_source(0);
+	bool running = false;
+	if (tr && obs_source_get_type(tr) == OBS_SOURCE_TYPE_TRANSITION && obs_transition_is_active(tr)) {
+		const float t = obs_transition_get_time(tr);
+		running = t > 0.0f && t < 1.0f;
+	}
+	obs_source_release(tr);
+	return running;
+}
+
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng)
 {
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -7252,12 +7295,13 @@ static void vj_try_autofill(struct mfd_engine *eng)
 /* Program changed: strips that follow the scene move to its sources, after any crossfader throw. */
 static void vj_follow_program(struct mfd_engine *eng)
 {
+	const bool fading = program_transition_running(eng); /* asked before the engine lock: it takes libobs's */
 	mfd_engine_lock(eng);
 	bool any = false;
 	for (int k = 1; k <= (int)MFD_VJ_STRIPS && vj_active(eng); ++k) {
 		any = any || eng->fader_slots[k].auto_follow;
 	}
-	bool later = any && vj_tbar_busy_locked(eng);
+	bool later = any && (vj_tbar_busy_locked(eng) || fading);
 	if (later) {
 		eng->vj_follow_pending = true;
 	}

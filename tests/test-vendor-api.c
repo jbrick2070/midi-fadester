@@ -4050,8 +4050,12 @@ static int test_b07_bulk_paths_release_layers(void)
 
 	/* Reset / Clear / first run: the usual layout is loaded over a strip that holds X at 0 %. */
 	REQUIRE(b07_fade(eng, &sg, 2, "X", 0.0f) == 0);
+	eng->fader_slots[2].vj_flash_held = true; /* as if a Dark (hold) pad were held on strip 2 */
+	eng->vj.blackout = 0x02U;
+	eng->vj.flashing = 0x01U;
 	mfd_engine_load_apc40_defaults(eng);
 	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(eng->vj.blackout == 0U && eng->vj.flashing == 0U); /* the held pads let go: no lamp left lit */
 
 	/* obs-websocket load_profile does the same. */
 	REQUIRE(b07_fade(eng, &sg, 3, "Y", 0.25f) == 0);
@@ -4117,6 +4121,24 @@ static int test_b07_bulk_paths_release_layers(void)
 	REQUIRE(b07_at(&sg, "X", 1.0f));
 	REQUIRE(b07_at(&sg, "Y", 0.6f));
 	REQUIRE(fabsf(eng->fader_slots[1].last_applied_val - 0.6f) < 1e-6f);
+
+	/* While OBS still draws a Program transition, strips that follow Program wait: the source they leave stays
+	 * where it is until the fade has ended, then goes back to 100 %. */
+	eng->midi_dev.is_open = true;
+	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "APC40 mkII");
+	REQUIRE(mfd_engine_fill_strips_from_scene(eng, "First", true, true, &st, NULL, 0U) == 2);
+	REQUIRE(mfd_engine_set_slot_value(eng, 1, 0.0f, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(b07_at(&sg, "X", 0.0f) && eng->fader_slots[1].auto_follow);
+	eng->test_transition_running = true;
+	vj_program(eng, "First", "Second");
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "X") == 0);
+	REQUIRE(b07_at(&sg, "X", 0.0f));
+	eng->test_transition_running = false;
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "Y") == 0);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
 
 	graph_test_engine_free(eng, sh);
 	return 0;
