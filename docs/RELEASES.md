@@ -8,14 +8,14 @@ Releases are built by GitHub Actions from a version tag as a draft, then publish
 
 Fixes from the full code review of 27 November 2026:
 
-- Resetting or clearing the strips, choosing another layout, the first-run choice, obs-websocket `load_profile` and **Import...** no longer leave a layer a strip had faded out invisible: as when one strip is edited, a layer no strip drives any more goes back to 100 % (and to full volume when its audio followed the fader).
-- A fader that follows the scene on air and moves to another source no longer leaves its old source faded out when no other fader takes it.
+- Resetting or clearing the strips, choosing another layout, the first-run choice, obs-websocket `load_profile` and **Import...** no longer leave a layer a strip had faded out invisible: as when one strip is edited, a layer no strip drives any more goes back to 100 % (and to full volume when its audio followed the fader). A held Flash or Dark (hold) pad lets go first, so its layer returns to its fader's level.
+- A fader that follows the scene on air and moves to another source no longer leaves its old source faded out when no other fader takes it. Faders that follow the scene on air wait until a running transition has finished before they move.
 - **Import...** in a running session starts a layer fader at the level its layer has now, so the picture does not jump when the fader is first moved.
 - A Tape Deck command from a Stream Deck or a script that arrives while the deck's Browser source is being deleted can no longer read freed memory.
 - A Tape Deck brought back by **Edit > Undo** or **Redo** after Paste Filters attaches to its Browser source again (before, it stayed silent until OBS restarted).
 - Flash Guard now also holds an Audio Modulator slot aimed at a custom shader's own brightness, opacity, exposure or alpha setting to 3 flashes per second, as it does for any other filter.
-- With OBS's audio set to 5.1 or 7.1 channels, stereo music no longer reaches Visual Sidechain 9.5 to 12 dB too quiet, so kicks, snares and the tempo are found as in stereo; a passage with sound only in the centre or rear channels is still heard.
-- An Audio Modulator slot aimed at a list setting with gaps between its values (a shader's choice list, a filter's mode) now writes only the list's own values, never a number between them.
+- With OBS's audio set to 5.1 or 7.1 channels, stereo music no longer reaches Visual Sidechain 9.5 to 12 dB too quiet, so kicks, snares and the tempo are found as in stereo; a passage with sound only in the centre or rear channels (the LFE aside) is read from those channels at about stereo level once the front has been silent for a moment.
+- An Audio Modulator slot aimed at a list setting with gaps between its values (a shader's choice list, a filter's mode) now writes only the list's own values, never a number between them (a list of more than 64 items keeps the earlier behaviour: the whole range from its lowest to its highest value).
 - For scripts: a fader value, nudge or fade target far beyond the range (such as `1e39`) now counts as full up or full down instead of 0 %.
 - For scripts: `set_slot` refuses a text field (`scene`, `source_a`, `source_b`, `filter_name`, `filter_prop`, `target_mode`, `curve`) sent as another type, instead of clearing the strip's source; `release` in `set_fader_value` and `all` in `fill_from_scene` must be true or false. A calibration range past what the control reads (0 to 127, or 0 to 16383 for a 14-bit control) is refused with `invalid_parameter` instead of being reset while the request reported success.
 - For scripts: `fill_from_scene` errors now carry `error_code` as every other request does (`error` is unchanged).

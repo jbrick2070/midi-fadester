@@ -23,7 +23,8 @@ extern "C" {
 
 #define VS_MOD_MAX_SLOTS 8u
 #define VS_MOD_FLOAT_EPSILON 1e-4
-/* the most items of an integer list target kept for snapping (VS_PROP_INT with int_list_count > 0) */
+/* the most items of an integer list target kept for snapping (VS_PROP_INT with int_list_count > 0); a longer list is
+ * not kept and keeps the old behaviour, the continuous min..max range, which can write numbers between its items */
 #define VS_MOD_INT_LIST_MAX 64
 
 enum vs_prop_type {

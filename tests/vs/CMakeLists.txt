@@ -164,7 +164,7 @@ if(OS_WINDOWS)
 endif()
 
 # The deck page (data/deck.html) in Node, with a stand-in video element: it reports only to a whole-number port on
-# 127.0.0.1. Skipped where Node is not installed, except on CI, where configure fails without it.
+# 127.0.0.1. Skipped where Node is not installed (on CI with a warning).
 find_program(VS_NODE_EXECUTABLE node)
 set(_deck_page_script "${CMAKE_CURRENT_SOURCE_DIR}/test-deck-page.js")
 if(VS_NODE_EXECUTABLE)
@@ -173,7 +173,8 @@ if(VS_NODE_EXECUTABLE)
     COMMAND "${VS_NODE_EXECUTABLE}" "${_deck_page_script}" "${CMAKE_SOURCE_DIR}/data/deck.html"
   )
 elseif(DEFINED ENV{CI})
-  message(FATAL_ERROR "Visual Sidechain tests: Node.js not found; vs-test-deck-page needs it on CI")
+  # the workflow installs no Node of its own and relies on the runner image, so a missing Node is loud, not fatal
+  message(WARNING "Visual Sidechain tests: Node.js not found on CI; vs-test-deck-page (data/deck.html) is NOT run")
 else()
   message(STATUS "Visual Sidechain tests: Node.js not found; vs-test-deck-page is not added")
 endif()

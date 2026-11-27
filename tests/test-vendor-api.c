@@ -4102,6 +4102,30 @@ static int test_b07_bulk_paths_release_layers(void)
 	REQUIRE(eng->fader_slots[3].takeover.state == MFD_TAKEOVER_WAITING);
 	REQUIRE(b07_at(&sg, "Y", 0.30f)); /* Y itself is not moved */
 
+	/* A Dark (hold) pad holds strip 3's Y at 0 % over its fader's 30 %, and an Import keeps strip 3 on Y: the hold
+	 * lets go and Y goes back to the strip's 30 %, where the imported strip then starts; it is not left dark. */
+	eng->fader_slots[3].vj_flash_held = true;
+	eng->vj.blackout = 0x04U;
+	fake_sg_find_source(&sg, "Y")->last_opacity = 0.0f; /* what the hold applied */
+	{
+		obs_data_t *again = obs_data_create();
+		obs_data_array_t *slots = obs_data_array_create();
+		obs_data_t *it = obs_data_create();
+		obs_data_set_string(it, "id", "fader_3");
+		obs_data_set_bool(it, "enabled", true);
+		obs_data_set_int(it, "target_type", MFD_TARGET_SINGLE_LAYER);
+		obs_data_set_string(it, "source_a", "Y");
+		obs_data_array_push_back(slots, it);
+		obs_data_release(it);
+		obs_data_set_array(again, "slots", slots);
+		obs_data_array_release(slots);
+		mfd_engine_deserialize_slots_for_test(eng, again);
+		obs_data_release(again);
+	}
+	REQUIRE(b07_at(&sg, "Y", 0.30f));
+	REQUIRE(fabsf(eng->fader_slots[3].last_applied_val - 0.30f) < 1e-6f);
+	REQUIRE(eng->vj.blackout == 0U && !eng->fader_slots[3].vj_flash_held);
+
 	/* Strips that follow Program (finding 8): First puts X on strip 1 and Y on strip 2. X is pulled to 0 % and Y to
 	 * 60 %. Second has Y and Z: X is left by every strip and goes back to 100 %; Y moves to strip 1 and keeps its
 	 * 60 %, the strip starting there. */

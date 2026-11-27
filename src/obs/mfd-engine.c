@@ -382,6 +382,8 @@ static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *
 static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
 static bool program_transition_running(const struct mfd_engine *eng);
+static void apply_source_opacity_and_afv(const struct mfd_engine *eng, const char *source_name, float alpha_01,
+					 bool afv);
 static void vj_hold_epoch_sync_locked(struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
 static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng);
@@ -398,7 +400,11 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	int ncmd = 0;
 	bool autofill = false;
 	bool follow = false;
-	const bool fading = program_transition_running(eng); /* asked before the engine lock: it takes libobs's */
+	mfd_engine_lock(eng);
+	const bool follow_asked = eng->vj_follow_pending;
+	mfd_engine_unlock(eng);
+	/* asked only when a follow waits, and outside the engine lock: it takes libobs's */
+	const bool fading = follow_asked && program_transition_running(eng);
 	mfd_engine_lock(eng);
 	if (eng->vj_cue_ms != 0) {
 		/* First: a take pressed right after turning Cue Level uses the new length. */
@@ -1094,7 +1100,17 @@ static bool load_profile_defaults_locked(struct mfd_engine *eng, enum mfd_contro
 		mfd_engine_detach_filter_binding_locked(eng, k);
 	}
 	/* Every strip is written afresh, so a held flash or blackout pad lets go, as when one strip leaves its source
-	 * (mfd_engine_vj_let_go_locked): its lamp goes out, and its layer is put back with the others by the caller. */
+	 * (mfd_engine_vj_let_go_locked): its layer goes back to the strip's own level first (a new strip on the same
+	 * source starts from that level, and one that no strip drives is then put back to 100 % by the caller), and its
+	 * lamp goes out. */
+	for (int k = 0; k < MFD_MAX_FADER_SLOTS; ++k) {
+		struct mfd_fader_slot *held = &eng->fader_slots[k];
+		if (held->vj_flash_held) {
+			held->vj_flash_held = false;
+			apply_source_opacity_and_afv(eng, held->source_a_name, held->last_applied_val,
+						     held->audio_follows_video);
+		}
+	}
 	eng->vj.flashing = 0U;
 	eng->vj.blackout = 0U;
 	vj_hold_epoch_sync_locked(eng);
@@ -1211,7 +1227,12 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 						const uint8_t b = (uint8_t)(1U << (unsigned)(i - 1));
 						eng->vj.flashing &= (uint8_t)~b;
 						eng->vj.blackout &= (uint8_t)~b;
-						s->vj_flash_held = false;
+						if (s->vj_flash_held) {
+							s->vj_flash_held = false;
+							apply_source_opacity_and_afv(eng, s->source_a_name,
+										     s->last_applied_val,
+										     s->audio_follows_video);
+						}
 						eng->vj_state_dirty = true;
 					}
 					s->enabled = false;
@@ -7295,12 +7316,15 @@ static void vj_try_autofill(struct mfd_engine *eng)
 /* Program changed: strips that follow the scene move to its sources, after any crossfader throw. */
 static void vj_follow_program(struct mfd_engine *eng)
 {
-	const bool fading = program_transition_running(eng); /* asked before the engine lock: it takes libobs's */
 	mfd_engine_lock(eng);
 	bool any = false;
 	for (int k = 1; k <= (int)MFD_VJ_STRIPS && vj_active(eng); ++k) {
 		any = any || eng->fader_slots[k].auto_follow;
 	}
+	mfd_engine_unlock(eng);
+	/* asked only when a strip follows, and outside the engine lock: it takes libobs's */
+	const bool fading = any && program_transition_running(eng);
+	mfd_engine_lock(eng);
 	bool later = any && (vj_tbar_busy_locked(eng) || fading);
 	if (later) {
 		eng->vj_follow_pending = true;
