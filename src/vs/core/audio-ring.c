@@ -69,6 +69,18 @@ void vs_audio_ring_push_mono(struct vs_audio_ring *ring, const float *samples, s
 	pthread_mutex_unlock(&ring->mutex);
 }
 
+/* Whether every sample of these planes over the block is (near) silent: below about -120 dBFS, or not finite. */
+static bool planes_silent(const float *const *planes, size_t count, size_t frames)
+{
+	for (size_t ch = 0; ch < count; ch++) {
+		for (size_t i = 0; i < frames; i++) {
+			if (fabsf(sanitize_sample(planes[ch][i])) >= 1e-6f)
+				return false;
+		}
+	}
+	return true;
+}
+
 void vs_audio_ring_push_planar(struct vs_audio_ring *ring, const float *const *planes, size_t channels, size_t frames,
 			       bool muted, bool react_when_muted, uint64_t timestamp_ns)
 {
@@ -81,13 +93,29 @@ void vs_audio_ring_push_planar(struct vs_audio_ring *ring, const float *const *p
 		/* With OBS set to 2.1, 4.0, 4.1, 5.1 or 7.1, the first two planes are front left and right. A stereo source
 		 * fills only those (the rest are silent), and OBS spreads a mono source over all of them, so averaging every
 		 * plane would put stereo music 9.5 dB (5.1) to 12 dB (7.1) under the fixed onset thresholds. Front left and
-		 * right alone give every layout the stereo layout's level. */
-		size_t limit = channels > 2 ? 2 : channels;
-		if (limit > VS_AUDIO_MAX_CHANNELS)
-			limit = VS_AUDIO_MAX_CHANNELS;
-		for (size_t ch = 0; ch < limit; ch++) {
+		 * right alone give every layout the stereo layout's level. A block whose front planes are silent while
+		 * another plane is not (dialogue only in the centre, surround-only ambience) averages those other planes
+		 * instead, so it is not read as silence. */
+		const size_t limit = channels < VS_AUDIO_MAX_CHANNELS ? channels : VS_AUDIO_MAX_CHANNELS;
+		const size_t front = limit > 2 ? 2 : limit;
+		for (size_t ch = 0; ch < front; ch++) {
 			if (planes[ch] != NULL) {
 				valid_planes[active_ch++] = planes[ch];
+			}
+		}
+		if (limit > 2 && planes_silent(valid_planes, active_ch, frames)) {
+			size_t rear_ch = 0;
+			const float *rear[VS_AUDIO_MAX_CHANNELS];
+			for (size_t ch = 2; ch < limit; ch++) {
+				if (planes[ch] != NULL) {
+					rear[rear_ch++] = planes[ch];
+				}
+			}
+			if (rear_ch > 0 && !planes_silent(rear, rear_ch, frames)) {
+				for (size_t ch = 0; ch < rear_ch; ch++) {
+					valid_planes[ch] = rear[ch];
+				}
+				active_ch = rear_ch;
 			}
 		}
 	}

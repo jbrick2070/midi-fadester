@@ -170,6 +170,21 @@ static void test_ring_surround_layouts_keep_stereo_level(void)
 		assert(vs_audio_ring_read_window(&ring, 4, 0, out, NULL, NULL));
 		for (size_t i = 0; i < 4; i++)
 			assert(float_near(out[i], expect[i], 1e-6f));
+
+		/* front left and right silent in this block, sound only in the centre: the other planes are averaged, so
+		 * the block is not read as silence */
+		const float *centre_planes[8] = {silent, silent, mono, silent, silent, silent, silent, silent};
+		vs_audio_ring_push_planar(&ring, centre_planes, channels, 4, false, false, 300ULL);
+		assert(vs_audio_ring_read_window(&ring, 4, 0, out, NULL, NULL));
+		for (size_t i = 0; i < 4; i++)
+			assert(float_near(out[i], expect[i] / (float)(channels - 2), 1e-6f));
+
+		/* every plane silent: silence */
+		const float *quiet_planes[8] = {silent, silent, silent, silent, silent, silent, silent, silent};
+		vs_audio_ring_push_planar(&ring, quiet_planes, channels, 4, false, false, 400ULL);
+		assert(vs_audio_ring_read_window(&ring, 4, 0, out, NULL, NULL));
+		for (size_t i = 0; i < 4; i++)
+			assert(float_near(out[i], 0.0f, 1e-9f));
 	}
 
 	vs_audio_ring_free(&ring);
@@ -212,6 +227,6 @@ int main(void)
 	test_ring_surround_layouts_keep_stereo_level();
 	test_ring_underrun_zero_pad();
 
-	printf("test-audio-ring: all 4 tests passed\n");
+	printf("test-audio-ring: all 5 tests passed\n");
 	return 0;
 }
