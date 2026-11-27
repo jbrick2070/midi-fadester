@@ -44,6 +44,14 @@ static int64_t saturating_round_i64(double value)
 	return (int64_t)llround(value);
 }
 
+size_t vs_mod_int_list_store(int64_t dst[VS_MOD_INT_LIST_MAX], const int64_t *values, size_t count)
+{
+	if (!dst || !values || count == 0 || count > VS_MOD_INT_LIST_MAX)
+		return 0;
+	memcpy(dst, values, count * sizeof(values[0]));
+	return count;
+}
+
 void vs_mod_slot_default_config(struct vs_mod_slot_config *cfg)
 {
 	if (!cfg)
@@ -158,7 +166,8 @@ bool vs_mod_is_luminance_target(const char *filter_id, const char *setting_name)
 			if (strcmp(setting_name, k_shader_luma_params[i]) == 0)
 				return true;
 		}
-		return false;
+		/* a custom shader's own uniform (brightness, opacity, exposure, alpha...) is judged by its name below, as
+		 * any other filter's setting is */
 	}
 
 	/* Any other filter: judge by the setting's name, so a kick on Image Mask/Blend's opacity (or a third-party
@@ -221,6 +230,33 @@ bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, siz
 	return false;
 }
 
+/* An integer list target takes only its own values: the item nearest the mapped value, among those inside the slot's
+ * range when any is, else among all of them. */
+static int64_t snap_to_int_list(const struct vs_mod_slot_config *cfg, double mapped, int64_t i_lo, int64_t i_hi)
+{
+	size_t count = cfg->int_list_count < VS_MOD_INT_LIST_MAX ? cfg->int_list_count : VS_MOD_INT_LIST_MAX;
+	bool any_in_range = false;
+	for (size_t i = 0; i < count; i++) {
+		if (cfg->int_list[i] >= i_lo && cfg->int_list[i] <= i_hi) {
+			any_in_range = true;
+			break;
+		}
+	}
+	int64_t best = cfg->int_list[0];
+	double best_dist = -1.0;
+	for (size_t i = 0; i < count; i++) {
+		const int64_t v = cfg->int_list[i];
+		if (any_in_range && (v < i_lo || v > i_hi))
+			continue;
+		const double dist = fabs((double)v - mapped);
+		if (best_dist < 0.0 || dist < best_dist) {
+			best = v;
+			best_dist = dist;
+		}
+	}
+	return best;
+}
+
 void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state, float signal_01,
 		      struct vs_mod_eval_result *out_res)
 {
@@ -272,6 +308,8 @@ void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_s
 			quantized = i_lo;
 		if (quantized > i_hi)
 			quantized = i_hi;
+		if (cfg->int_list_count > 0)
+			quantized = snap_to_int_list(cfg, mapped, i_lo, i_hi);
 
 		out_res->int_val = quantized;
 		out_res->float_val = (double)quantized;

@@ -105,11 +105,19 @@
     wdSame = 0;
   }
 
+  /* The report port, as the filter sends it: a whole number from 1 to 65535, else 0. Anything else is not put into the
+     address, where a "port" such as "80@host" would make the report go to another host than the loopback. */
+  function reportPort(p) {
+    return typeof p === 'number' && Number.isInteger(p) && p >= 1 && p <= 65535 ? p : 0;
+  }
+
   window.addEventListener('tubester', function (e) {
     var d = e.detail || {};
     if (d.hello) {
+      var port = reportPort(d.port);
+      if (!port) return; /* not from the filter: the link stays as it was */
       var fresh = !link || link.token !== d.token || link.deck !== d.deck;
-      link = { deck: d.deck, token: d.token, url: 'http://127.0.0.1:' + d.port + '/report' };
+      link = { deck: d.deck, token: d.token, url: 'http://127.0.0.1:' + port + '/report' };
       if (fresh) post('hello');
       return;
     }

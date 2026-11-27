@@ -33,6 +33,8 @@ struct prop_query_ctx {
 	double min_val;
 	double max_val;
 	int64_t int_step;
+	int64_t int_list[VS_MOD_INT_LIST_MAX]; /* an integer list's values (int_list_count of them), for snapping */
+	size_t int_list_count;
 };
 
 /* One slot's target as discover_targets last found it (D-17). */
@@ -580,16 +582,23 @@ static void inspect_properties_for_setting(obs_properties_t *props, struct prop_
 				const size_t count = obs_property_list_item_count(p);
 				q->found = true;
 				q->prop_type = VS_PROP_INT;
+				q->int_list_count = 0;
 				if (count > 0) {
 					long long lo = obs_property_list_item_int(p, 0);
 					long long hi = lo;
-					for (size_t i = 1; i < count; i++) {
+					int64_t values[VS_MOD_INT_LIST_MAX];
+					for (size_t i = 0; i < count; i++) {
 						const long long v = obs_property_list_item_int(p, i);
 						if (v < lo)
 							lo = v;
 						if (v > hi)
 							hi = v;
+						if (i < VS_MOD_INT_LIST_MAX)
+							values[i] = (int64_t)v;
 					}
+					/* the list's own values, so a write between two of them never happens; a longer list is not
+					 * kept and the slot uses the continuous range */
+					q->int_list_count = vs_mod_int_list_store(q->int_list, values, count);
 					q->min_val = (double)lo;
 					q->max_val = (double)hi;
 				} else {
@@ -856,6 +865,8 @@ static void apply_settings(struct vs_modulator_filter *f, obs_data_t *settings, 
 		snprintf(next.target_filter_id, sizeof(next.target_filter_id), "%s", target_info.filter_id);
 		next.prop_type = target_found ? target_info.prop_type : VS_PROP_FLOAT;
 		next.int_step = target_info.int_step;
+		next.int_list_count = target_found ? target_info.int_list_count : 0;
+		memcpy(next.int_list, target_info.int_list, sizeof(next.int_list));
 		char seed_key[64];
 		slot_key(seed_key, sizeof(seed_key), i, "seeded_target");
 		if (target_found) {

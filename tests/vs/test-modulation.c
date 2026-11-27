@@ -83,6 +83,57 @@ static void test_modulation_math_and_epsilon(void)
 	vs_mod_slot_eval(&cfg, &state, 0.14f, &res); /* 14.0 -> still 15 -> gated */
 	assert(!res.should_write);
 
+	/* 3b. An integer list {0, 5, 10} (a shader select, a filter's mode): only its own values are written, the one
+	 * nearest the mapped value, never the integers between them. */
+	cfg.min_value = 0.0;
+	cfg.max_value = 10.0;
+	cfg.int_step = 1;
+	cfg.int_list[0] = 10;
+	cfg.int_list[1] = 0;
+	cfg.int_list[2] = 5;
+	cfg.int_list_count = 3;
+	for (int k = 0; k <= 10; k++) {
+		vs_mod_slot_reset_state(&state);
+		vs_mod_slot_eval(&cfg, &state, (float)k / 10.0f, &res);
+		assert(res.should_write);
+		assert(res.int_val == 0 || res.int_val == 5 || res.int_val == 10);
+	}
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 0.3f, &res); /* 3.0 -> 5 */
+	assert(res.int_val == 5 && double_near(res.float_val, 5.0, 1e-9));
+	vs_mod_slot_eval(&cfg, &state, 0.2f, &res); /* 2.0 -> 0 */
+	assert(res.int_val == 0);
+	vs_mod_slot_eval(&cfg, &state, 0.9f, &res); /* 9.0 -> 10 */
+	assert(res.int_val == 10);
+	/* a slot range narrower than the list keeps to the items inside it */
+	cfg.min_value = 4.0;
+	cfg.max_value = 6.0;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.int_val == 5);
+	/* a list longer than VS_MOD_INT_LIST_MAX is not kept: the slot uses the whole continuous range, so its last items
+	 * stay reachable instead of everything snapping to item 63 */
+	{
+		int64_t long_list[100];
+		for (int k = 0; k < 100; k++)
+			long_list[k] = k;
+		assert(vs_mod_int_list_store(cfg.int_list, long_list, 100) == 0);
+		assert(vs_mod_int_list_store(cfg.int_list, long_list, VS_MOD_INT_LIST_MAX) == VS_MOD_INT_LIST_MAX);
+		assert(cfg.int_list[VS_MOD_INT_LIST_MAX - 1] == VS_MOD_INT_LIST_MAX - 1);
+		cfg.int_list_count = vs_mod_int_list_store(cfg.int_list, long_list, 100);
+		cfg.min_value = 0.0;
+		cfg.max_value = 99.0;
+		vs_mod_slot_reset_state(&state);
+		vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+		assert(res.int_val == 99);
+		vs_mod_slot_eval(&cfg, &state, 0.8f, &res);
+		assert(res.int_val == 79);
+	}
+	cfg.int_list_count = 0;
+	cfg.int_step = 5;
+	cfg.min_value = 0.0;
+	cfg.max_value = 100.0;
+
 	/* 4. Rate divider (div = 4): only ticks 0, 4, 8 write. */
 	cfg.prop_type = VS_PROP_FLOAT;
 	cfg.min_value = 0.0;
@@ -384,6 +435,12 @@ static void test_modulation_flash_guard_caps_luminance_direction_changes(void)
 	assert(!vs_mod_is_luminance_target("nvidia_blur_filter", "intensity"));
 	assert(!vs_mod_is_luminance_target("color_filter", "hue_shift"));
 	assert(!vs_mod_is_luminance_target("visual_sidechain_shader_filter", "tunnel_speed"));
+	/* a custom shader's uniform outside the built-in list is judged by its name, as any other filter's setting */
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "brightness"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "opacity"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "exposure"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "glow_alpha"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "flash_intensity"));
 }
 
 /* D-05: the flash budget is one for all filters. A filter that is not being drawn must not take a flash from it: of

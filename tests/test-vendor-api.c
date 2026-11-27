@@ -2819,6 +2819,15 @@ static int test_vj_fill_follow_and_desk(void)
 	obs_data_set_string(req, "scene", "Nowhere");
 	mfd_vendor_handle_fill_from_scene(req, resp, eng);
 	REQUIRE(strcmp(obs_data_get_string(resp, "error"), "scene_not_found") == 0);
+	REQUIRE(strcmp(obs_data_get_string(resp, "error_code"), "scene_not_found") == 0);
+	obs_data_release(req);
+	obs_data_release(resp);
+	req = obs_data_create();
+	resp = obs_data_create();
+	obs_data_set_int(req, "scene", 3);
+	mfd_vendor_handle_fill_from_scene(req, resp, eng);
+	REQUIRE(strcmp(obs_data_get_string(resp, "error"), "invalid_parameter") == 0);
+	REQUIRE(strcmp(obs_data_get_string(resp, "error_code"), "invalid_parameter") == 0);
 	obs_data_release(req);
 	obs_data_release(resp);
 	req = obs_data_create();
@@ -3990,6 +3999,175 @@ static int test_pass2_layer_bindings(void)
 	return 0;
 }
 
+/* Strip `slot` shows `source` as a Layer Opacity strip and is pulled to `level`. */
+static int b07_fade(struct mfd_engine *eng, struct fake_scene_graph *sg, int slot, const char *source, float level)
+{
+	struct mfd_slot_config_edit e;
+	memset(&e, 0, sizeof(e));
+	e.enabled = true;
+	e.target_type = MFD_TARGET_SINGLE_LAYER;
+	e.preserve_scene = true;
+	snprintf(e.source_a_name, sizeof(e.source_a_name), "%s", source);
+	char err[160] = {0};
+	REQUIRE(mfd_engine_update_slot_config(eng, slot, &e));
+	REQUIRE(mfd_engine_set_slot_value(eng, slot, level, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(fabsf(fake_sg_find_source(sg, source)->last_opacity - level) < 1e-6f);
+	return 0;
+}
+
+static bool b07_at(struct fake_scene_graph *sg, const char *source, float level)
+{
+	return fabsf(fake_sg_find_source(sg, source)->last_opacity - level) < 1e-6f;
+}
+
+/* B-07 on every path that wipes or moves strips in bulk: Reset, another layout, load_profile, Import and the strips
+ * that follow Program. A layer a strip faded and no strip drives any more goes back to 100 %. */
+static int test_b07_bulk_paths_release_layers(void)
+{
+	struct fake_scene_graph sg;
+	memset(&sg, 0, sizeof(sg));
+	fake_sg_add_source(&sg, "X", false);
+	fake_sg_add_source(&sg, "Y", false);
+	fake_sg_add_source(&sg, "Z", false);
+	fake_sg_add_scene(&sg, "First");
+	fake_sg_scene_add_item(&sg, "First", "X");
+	fake_sg_scene_add_item(&sg, "First", "Y");
+	fake_sg_add_scene(&sg, "Second");
+	fake_sg_scene_add_item(&sg, "Second", "Y");
+	fake_sg_scene_add_item(&sg, "Second", "Z");
+
+	struct mfd_scene_graph_ops ops = g_fake_sg_ops;
+	ops.get_opacity = pass2_get_opacity;
+	signal_handler_t *sh = NULL;
+	struct mfd_engine *eng = graph_test_engine(&sg, &ops, &sg, &sh);
+	REQUIRE(eng != NULL && sh != NULL);
+	mfd_midi_parser_init(&eng->midi_parser);
+	mfd_midi_queue_init(&eng->midi_queue);
+	eng->learning_slot_index = -1;
+	mfd_engine_load_apc40_defaults(eng);
+	mfd_engine_set_smooth_tau_ms(eng, 0.0f);
+
+	/* Reset / Clear / first run: the usual layout is loaded over a strip that holds X at 0 %. */
+	REQUIRE(b07_fade(eng, &sg, 2, "X", 0.0f) == 0);
+	eng->fader_slots[2].vj_flash_held = true; /* as if a Dark (hold) pad were held on strip 2 */
+	eng->vj.blackout = 0x02U;
+	eng->vj.flashing = 0x01U;
+	mfd_engine_load_apc40_defaults(eng);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(eng->vj.blackout == 0U && eng->vj.flashing == 0U); /* the held pads let go: no lamp left lit */
+
+	/* obs-websocket load_profile does the same. */
+	REQUIRE(b07_fade(eng, &sg, 3, "Y", 0.25f) == 0);
+	obs_data_t *req = obs_data_create();
+	obs_data_t *resp = obs_data_create();
+	obs_data_set_string(req, "name", "apc40mk2");
+	mfd_vendor_handle_load_profile(req, resp, eng);
+	REQUIRE(!obs_data_has_user_value(resp, "error"));
+	REQUIRE(b07_at(&sg, "Y", 1.0f));
+	obs_data_release(req);
+	obs_data_release(resp);
+
+	/* Another layout that lacks the strip (the APC mini has no crossfader) clears it and puts its layer back; a
+	 * strip the new layout keeps still holds its own. */
+	REQUIRE(b07_fade(eng, &sg, 0, "X", 0.0f) == 0);
+	REQUIRE(b07_fade(eng, &sg, 2, "Z", 0.5f) == 0);
+	REQUIRE(mfd_engine_select_profile(eng, MFD_PROFILE_APC_MINI_MK2, false));
+	REQUIRE(eng->fader_slots[0].source_a_name[0] == '\0');
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(b07_at(&sg, "Z", 0.5f));
+	REQUIRE(mfd_engine_select_profile(eng, MFD_PROFILE_APC40_MK2, true));
+	REQUIRE(b07_at(&sg, "Z", 1.0f));
+
+	/* Import: X is faded by strip 2, the file binds strip 3 to Y only. X goes back to 100 %; strip 3 starts at
+	 * the 30 % Y stands at now, waiting for its fader, not at 100 % (finding 9). */
+	REQUIRE(b07_fade(eng, &sg, 2, "X", 0.0f) == 0);
+	fake_sg_find_source(&sg, "Y")->last_opacity = 0.30f;
+	obs_data_t *root = obs_data_create();
+	obs_data_array_t *arr = obs_data_array_create();
+	obs_data_t *item = obs_data_create();
+	obs_data_set_string(item, "id", "fader_3");
+	obs_data_set_bool(item, "enabled", true);
+	obs_data_set_int(item, "target_type", MFD_TARGET_SINGLE_LAYER);
+	obs_data_set_string(item, "source_a", "Y");
+	obs_data_array_push_back(arr, item);
+	obs_data_release(item);
+	obs_data_set_array(root, "slots", arr);
+	obs_data_array_release(arr);
+	mfd_engine_deserialize_slots_for_test(eng, root);
+	obs_data_release(root);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(strcmp(eng->fader_slots[3].source_a_name, "Y") == 0);
+	REQUIRE(fabsf(eng->fader_slots[3].last_applied_val - 0.30f) < 1e-6f);
+	REQUIRE(eng->fader_slots[3].takeover.state == MFD_TAKEOVER_WAITING);
+	REQUIRE(b07_at(&sg, "Y", 0.30f)); /* Y itself is not moved */
+
+	/* A Dark (hold) pad holds strip 3's Y at 0 % over its fader's 30 %, and an Import keeps strip 3 on Y: the hold
+	 * lets go and Y goes back to the strip's 30 %, where the imported strip then starts; it is not left dark. */
+	eng->fader_slots[3].vj_flash_held = true;
+	eng->vj.blackout = 0x04U;
+	fake_sg_find_source(&sg, "Y")->last_opacity = 0.0f; /* what the hold applied */
+	{
+		obs_data_t *again = obs_data_create();
+		obs_data_array_t *slots = obs_data_array_create();
+		obs_data_t *it = obs_data_create();
+		obs_data_set_string(it, "id", "fader_3");
+		obs_data_set_bool(it, "enabled", true);
+		obs_data_set_int(it, "target_type", MFD_TARGET_SINGLE_LAYER);
+		obs_data_set_string(it, "source_a", "Y");
+		obs_data_array_push_back(slots, it);
+		obs_data_release(it);
+		obs_data_set_array(again, "slots", slots);
+		obs_data_array_release(slots);
+		mfd_engine_deserialize_slots_for_test(eng, again);
+		obs_data_release(again);
+	}
+	REQUIRE(b07_at(&sg, "Y", 0.30f));
+	REQUIRE(fabsf(eng->fader_slots[3].last_applied_val - 0.30f) < 1e-6f);
+	REQUIRE(eng->vj.blackout == 0U && !eng->fader_slots[3].vj_flash_held);
+
+	/* Strips that follow Program (finding 8): First puts X on strip 1 and Y on strip 2. X is pulled to 0 % and Y to
+	 * 60 %. Second has Y and Z: X is left by every strip and goes back to 100 %; Y moves to strip 1 and keeps its
+	 * 60 %, the strip starting there. */
+	mfd_engine_load_apc40_defaults(eng);
+	enum mfd_fill_status st = MFD_FILL_NO_SCENE;
+	REQUIRE(mfd_engine_fill_strips_from_scene(eng, "First", true, true, &st, NULL, 0U) == 2);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "X") == 0);
+	REQUIRE(strcmp(eng->fader_slots[2].source_a_name, "Y") == 0);
+	char err[160] = {0};
+	REQUIRE(mfd_engine_set_slot_value(eng, 1, 0.0f, false, "api", err, sizeof(err)));
+	REQUIRE(mfd_engine_set_slot_value(eng, 2, 0.6f, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(b07_at(&sg, "X", 0.0f) && b07_at(&sg, "Y", 0.6f));
+	REQUIRE(mfd_engine_fill_strips_from_scene(eng, "Second", true, true, &st, NULL, 0U) == 2);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "Y") == 0);
+	REQUIRE(strcmp(eng->fader_slots[2].source_a_name, "Z") == 0);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+	REQUIRE(b07_at(&sg, "Y", 0.6f));
+	REQUIRE(fabsf(eng->fader_slots[1].last_applied_val - 0.6f) < 1e-6f);
+
+	/* While OBS still draws a Program transition, strips that follow Program wait: the source they leave stays
+	 * where it is until the fade has ended, then goes back to 100 %. */
+	eng->midi_dev.is_open = true;
+	snprintf(eng->midi_dev.opened_name, sizeof(eng->midi_dev.opened_name), "%s", "APC40 mkII");
+	REQUIRE(mfd_engine_fill_strips_from_scene(eng, "First", true, true, &st, NULL, 0U) == 2);
+	REQUIRE(mfd_engine_set_slot_value(eng, 1, 0.0f, false, "api", err, sizeof(err)));
+	mfd_engine_tick(eng, 0.016f);
+	REQUIRE(b07_at(&sg, "X", 0.0f) && eng->fader_slots[1].auto_follow);
+	eng->test_transition_running = true;
+	vj_program(eng, "First", "Second");
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "X") == 0);
+	REQUIRE(b07_at(&sg, "X", 0.0f));
+	eng->test_transition_running = false;
+	mfd_engine_flush_pending_ui_work(eng);
+	REQUIRE(strcmp(eng->fader_slots[1].source_a_name, "Y") == 0);
+	REQUIRE(b07_at(&sg, "X", 1.0f));
+
+	graph_test_engine_free(eng, sh);
+	return 0;
+}
+
 int main(void)
 {
 	obs_module_lookup = text_lookup_create(MFD_TEST_LOCALE_FILE);
@@ -4018,6 +4196,7 @@ int main(void)
 	REQUIRE(test_enable_toggle_survives_overflow() == 0);
 	REQUIRE(test_vj_pads_drive_layers() == 0);
 	REQUIRE(test_pass2_layer_bindings() == 0);
+	REQUIRE(test_b07_bulk_paths_release_layers() == 0);
 	REQUIRE(test_blackout_logic() == 0);
 	struct fake_scene_graph fake_sg;
 	memset(&fake_sg, 0, sizeof(fake_sg));
@@ -4404,6 +4583,48 @@ int main(void)
 	REQUIRE(!eng.fader_slots[1].auto_fade_active);
 	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.00f) < 1e-5f);
 
+	/* 6b. A number beyond float's range is clamped before it becomes a float: 1e39 is full up, not +inf read as
+	 * 0 %; -1e39 is full down. */
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.5) < 1e-5);
+	obs_data_set_double(req, "value", 1e39);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 1.0) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "delta", -1e39);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 0.0) < 1e-5);
+	obs_data_set_double(req, "delta", 1e39);
+	mfd_vendor_handle_nudge_fader(req, res, &eng);
+	REQUIRE(fabs(obs_data_get_double(res, "value") - 1.0) < 1e-5);
+	obs_data_release(req);
+	obs_data_release(res);
+	req = obs_data_create();
+	res = obs_data_create();
+	obs_data_set_string(req, "slot", "fader_1");
+	obs_data_set_double(req, "value", 0.5);
+	mfd_vendor_handle_set_fader_value(req, res, &eng);
+	obs_data_release(res);
+	res = obs_data_create();
+	obs_data_erase(req, "value");
+	obs_data_set_double(req, "to", 1e39);
+	obs_data_set_int(req, "ms", 100);
+	mfd_vendor_handle_auto_fade(req, res, &eng);
+	REQUIRE(eng.fader_slots[1].auto_fade_active && fabsf(eng.fader_slots[1].auto_fade_to - 1.0f) < 1e-6f);
+	obs_data_release(req);
+	obs_data_release(res);
+	mfd_engine_tick(&eng, 0.1f);
+	REQUIRE(!eng.fader_slots[1].auto_fade_active);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.00f) < 1e-5f);
+
 	/* 7. set_fader_value on crossfader (T-Bar) with release: true finishes transition */
 	req = obs_data_create();
 	res = obs_data_create();
@@ -4516,6 +4737,15 @@ int main(void)
 	REQUIRE(fabs(calldata_float(&cd, "value") - 0.625) < 1e-5);
 	REQUIRE(strcmp(calldata_string(&cd, "reason"), "") == 0);
 	calldata_free(&cd);
+
+	/* 9d. A finite value beyond float's range is full up over the proc too, not 0 % */
+	calldata_init(&cd);
+	calldata_set_string(&cd, "slot", "fader_1");
+	calldata_set_float(&cd, "value", 1e39);
+	REQUIRE(proc_handler_call(fake_ph, "midi_fadester_set_fader_value", &cd));
+	REQUIRE(calldata_bool(&cd, "ok"));
+	calldata_free(&cd);
+	REQUIRE(fabsf(eng.fader_slots[1].last_applied_val - 1.0f) < 1e-5f);
 
 	signal_handler_disconnect(fake_sh, "midi_fadester_fader_changed", on_fake_signal, &sig_log);
 	mfd_bridge_register_with_handlers(NULL, NULL, NULL);
@@ -5147,6 +5377,62 @@ int main(void)
 	REQUIRE(obs_data_get_int(res, "cal_max") == 125);
 	obs_data_release(req);
 	obs_data_release(res);
+
+	/* A range past what a 7-bit control reads is refused, not cut or reset while the request reports success; a
+	 * huge number does not wrap into range. */
+	{
+		const long long bad[][2] = {{200, 300}, {120, 1000}, {0, 4294967296LL + 100LL}};
+		for (size_t k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "crossfader");
+			obs_data_set_int(req, "cal_min", bad[k][0]);
+			obs_data_set_int(req, "cal_max", bad[k][1]);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+			REQUIRE(eng.fader_slots[0].cal.cal_min == 0 && eng.fader_slots[0].cal.cal_max == 125);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+	}
+
+	/* A text field of another type is refused; it does not read as "" and clear the strip's source. The same for
+	 * set_fader_value's "release" and fill_from_scene's "all" sent as text. */
+	{
+		const char *const fields[] = {"scene",       "source_a",    "source_b", "filter_name",
+					      "filter_prop", "target_mode", "curve"};
+		eng.fader_slots[2].enabled = true;
+		eng.fader_slots[2].target_type = MFD_TARGET_SINGLE_LAYER;
+		snprintf(eng.fader_slots[2].source_a_name, sizeof(eng.fader_slots[2].source_a_name), "%s", "Cam 1");
+		for (size_t k = 0; k < sizeof(fields) / sizeof(fields[0]); ++k) {
+			req = obs_data_create();
+			res = obs_data_create();
+			obs_data_set_string(req, "slot", "fader_2");
+			obs_data_set_int(req, fields[k], 5);
+			mfd_vendor_handle_set_slot(req, res, &eng);
+			REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+			REQUIRE(strcmp(eng.fader_slots[2].source_a_name, "Cam 1") == 0);
+			REQUIRE(eng.fader_slots[2].target_type == MFD_TARGET_SINGLE_LAYER);
+			obs_data_release(req);
+			obs_data_release(res);
+		}
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "slot", "fader_2");
+		obs_data_set_double(req, "value", 0.5);
+		obs_data_set_string(req, "release", "true");
+		mfd_vendor_handle_set_fader_value(req, res, &eng);
+		REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+		req = obs_data_create();
+		res = obs_data_create();
+		obs_data_set_string(req, "all", "true");
+		mfd_vendor_handle_fill_from_scene(req, res, &eng);
+		REQUIRE(strcmp(obs_data_get_string(res, "error_code"), "invalid_parameter") == 0);
+		obs_data_release(req);
+		obs_data_release(res);
+	}
 
 	/* Reloading profile preserves persisted [0, 125] calibration for (apc40mk2, Ch 1 CC 15) */
 	mfd_engine_load_apc40_defaults(&eng);

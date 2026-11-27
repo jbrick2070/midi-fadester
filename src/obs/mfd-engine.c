@@ -381,6 +381,9 @@ void mfd_engine_set_ui_notify_fn(struct mfd_engine *eng, mfd_ui_notify_fn fn, vo
 static void vj_run_command(struct mfd_engine *eng, const struct mfd_vj_command *cmd);
 static void vj_try_autofill(struct mfd_engine *eng);
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng);
+static bool program_transition_running(const struct mfd_engine *eng);
+static void apply_source_opacity_and_afv(const struct mfd_engine *eng, const char *source_name, float alpha_01,
+					 bool afv);
 static void vj_hold_epoch_sync_locked(struct mfd_engine *eng);
 static bool vj_active(const struct mfd_engine *eng);
 static bool midi_closed_unexpectedly_locked(struct mfd_engine *eng);
@@ -397,6 +400,11 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	int ncmd = 0;
 	bool autofill = false;
 	bool follow = false;
+	mfd_engine_lock(eng);
+	const bool follow_asked = eng->vj_follow_pending;
+	mfd_engine_unlock(eng);
+	/* asked only when a follow waits, and outside the engine lock: it takes libobs's */
+	const bool fading = follow_asked && program_transition_running(eng);
 	mfd_engine_lock(eng);
 	if (eng->vj_cue_ms != 0) {
 		/* First: a take pressed right after turning Cue Level uses the new length. */
@@ -415,7 +423,8 @@ void mfd_engine_flush_pending_ui_work(struct mfd_engine *eng)
 	eng->vj_autofill_pending = false;
 	bool vs_poll = eng->vj_vs_poll_pending && !eng->scene_graph_ops;
 	eng->vj_vs_poll_pending = false;
-	if (eng->vj_follow_pending && !vj_tbar_busy_locked(eng)) {
+	/* follow_asked: a follow asked for after the read above waits for the next flush, which asks OBS first */
+	if (follow_asked && eng->vj_follow_pending && !vj_tbar_busy_locked(eng) && !fading) {
 		eng->vj_follow_pending = false;
 		follow = vj_active(eng); /* the pads may have gone off since it was asked for */
 	}
@@ -1073,11 +1082,14 @@ enum mfd_controller_profile mfd_engine_get_active_profile(const struct mfd_engin
 	return MFD_PROFILE_APC40_MK2;
 }
 
-bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controller_profile prof)
+struct mfd_layer_binding;
+static struct mfd_layer_binding *layer_bindings_snapshot_locked(const struct mfd_engine *eng);
+static void layer_bindings_release_left_locked(struct mfd_engine *eng, struct mfd_layer_binding *snap);
+
+/* Writes every strip afresh from the layout. The layers the old strips faded are not put back here: callers do that
+ * once the new strips are in place (layer_bindings_release_left_locked). */
+static bool load_profile_defaults_locked(struct mfd_engine *eng, enum mfd_controller_profile prof)
 {
-	if (!eng) {
-		return false;
-	}
 	const struct mfd_controller_profile_def *def = mfd_profile_get_def(prof);
 	if (!def) {
 		return false;
@@ -1088,6 +1100,22 @@ bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controlle
 		mfd_engine_abort_tbar_for_config_change_locked(eng, &eng->fader_slots[k]);
 		mfd_engine_detach_filter_binding_locked(eng, k);
 	}
+	/* Every strip is written afresh, so a held flash or blackout pad lets go, as when one strip leaves its source
+	 * (mfd_engine_vj_let_go_locked): its layer goes back to the strip's own level first (a new strip on the same
+	 * source starts from that level, and one that no strip drives is then put back to 100 % by the caller), and its
+	 * lamp goes out. */
+	for (int k = 0; k < MFD_MAX_FADER_SLOTS; ++k) {
+		struct mfd_fader_slot *held = &eng->fader_slots[k];
+		if (held->vj_flash_held) {
+			held->vj_flash_held = false;
+			apply_source_opacity_and_afv(eng, held->source_a_name, held->last_applied_val,
+						     held->audio_follows_video);
+		}
+	}
+	eng->vj.flashing = 0U;
+	eng->vj.blackout = 0U;
+	vj_hold_epoch_sync_locked(eng);
+	eng->vj_state_dirty = true;
 	snprintf(eng->active_profile_name, sizeof(eng->active_profile_name), "%s", def->slug);
 	mfd_midi_parser_reset_cc_state(&eng->midi_parser);
 	if (!eng->has_last_midi) {
@@ -1132,6 +1160,19 @@ bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controlle
 	return true;
 }
 
+bool mfd_engine_load_profile_defaults(struct mfd_engine *eng, enum mfd_controller_profile prof)
+{
+	if (!eng || !mfd_profile_get_def(prof)) {
+		return false;
+	}
+	mfd_engine_lock(eng);
+	struct mfd_layer_binding *before = layer_bindings_snapshot_locked(eng);
+	bool ok = load_profile_defaults_locked(eng, prof);
+	layer_bindings_release_left_locked(eng, before); /* the layers the wiped strips faded are not left out (B-07) */
+	mfd_engine_unlock(eng);
+	return ok;
+}
+
 bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profile prof, bool reset_targets)
 {
 	if (!eng) {
@@ -1159,6 +1200,7 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 				}
 			}
 		} else {
+			struct mfd_layer_binding *before = layer_bindings_snapshot_locked(eng);
 			for (int i = 0; i < MFD_MAX_FADER_SLOTS && (size_t)i < MFD_APC40_DEFAULT_SLOT_COUNT; ++i) {
 				struct mfd_fader_slot *s = &eng->fader_slots[i];
 				if (mfd_slot_is_fx_bank(i)) {
@@ -1181,6 +1223,19 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 				} else {
 					mfd_engine_abort_tbar_for_config_change_locked(eng, s);
 					mfd_engine_detach_filter_binding_locked(eng, i);
+					if (i >= 1 && i <= (int)MFD_VJ_STRIPS) {
+						/* a held pad on a strip this desk lacks lets go with it */
+						const uint8_t b = (uint8_t)(1U << (unsigned)(i - 1));
+						eng->vj.flashing &= (uint8_t)~b;
+						eng->vj.blackout &= (uint8_t)~b;
+						if (s->vj_flash_held) {
+							s->vj_flash_held = false;
+							apply_source_opacity_and_afv(eng, s->source_a_name,
+										     s->last_applied_val,
+										     s->audio_follows_video);
+						}
+						eng->vj_state_dirty = true;
+					}
 					s->enabled = false;
 					s->addr.type = MFD_MIDI_NONE;
 					s->scene_name[0] = '\0';
@@ -1196,6 +1251,9 @@ bool mfd_engine_select_profile(struct mfd_engine *eng, enum mfd_controller_profi
 					mfd_engine_reset_slot_mode_state(eng, s, MFD_TARGET_UNASSIGNED);
 				}
 			}
+			vj_hold_epoch_sync_locked(eng);
+			/* the layers the strips this desk lacks faded are not left out (B-07) */
+			layer_bindings_release_left_locked(eng, before);
 		}
 		mfd_engine_bump_slot_rev(eng, -1);
 		mfd_engine_reevaluate_slots(eng, false);
@@ -4358,6 +4416,45 @@ static void after_layer_binding_change_locked(struct mfd_engine *eng, struct mfd
 	}
 }
 
+/* B-07 for a wipe of every strip (Reset, Clear, another layout, first run, load_profile, Import): what each strip
+ * showed or mixed before it. Freed by layer_bindings_release_left_locked. */
+static struct mfd_layer_binding *layer_bindings_snapshot_locked(const struct mfd_engine *eng)
+{
+	struct mfd_layer_binding *snap = bzalloc(sizeof(*snap) * MFD_MAX_FADER_SLOTS);
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		layer_binding_read(&eng->fader_slots[i], &snap[i]);
+	}
+	return snap;
+}
+
+static void release_wiped_layer_locked(struct mfd_engine *eng, const char *source, bool afv)
+{
+	float live = 1.0f;
+	if (!vj_live_opacity(eng, source, &live)) {
+		return; /* no opacity filter of ours on it: no strip ever faded it, nothing to put back */
+	}
+	release_layer_if_undriven_locked(eng, source, afv);
+}
+
+/* After the wipe, with the new strips written: each source a strip showed and no strip drives now goes back to 100 %
+ * (and to full volume when its audio followed), as a single strip's edit does. Frees snap. */
+static void layer_bindings_release_left_locked(struct mfd_engine *eng, struct mfd_layer_binding *snap)
+{
+	if (!snap) {
+		return;
+	}
+	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
+		const struct mfd_layer_binding *b = &snap[i];
+		if (b->target == MFD_TARGET_SINGLE_LAYER || b->target == MFD_TARGET_TWO_SOURCE_MIX) {
+			release_wiped_layer_locked(eng, b->source_a, b->afv);
+		}
+		if (b->target == MFD_TARGET_TWO_SOURCE_MIX) {
+			release_wiped_layer_locked(eng, b->source_b, b->afv);
+		}
+	}
+	bfree(snap);
+}
+
 bool mfd_engine_unassign_slot_preserve_addr(struct mfd_engine *eng, int slot_index)
 {
 	if (!eng || slot_index < 0 || slot_index >= MFD_MAX_FADER_SLOTS) {
@@ -5973,6 +6070,32 @@ static bool vj_queue_cmd_locked(struct mfd_engine *eng, enum mfd_vj_command_kind
 }
 
 /* A crossfader (T-bar) throw is under way. A T-bar at rest after a throw is parked at its end and does not count. */
+/*
+ * Whether OBS is still drawing a Program transition: a fade between scenes, or a T-bar held part way. Strips that
+ * follow Program wait for its end, so a source they leave is not put back to 100 % (B-07) while the scene it is in
+ * still shows. OBS 33 sends SCENE_CHANGED for an animated transition only when its picture has finished
+ * (OBSBasic::TransitionStopped, on transition_video_stop), but a follow asked for another reason (a layer added to the
+ * scene on air, the pads turned on) can come during the fade. Active, and OBS's own stillTransitioning test. Not with
+ * the engine lock held: it takes libobs's channel lock.
+ */
+static bool program_transition_running(const struct mfd_engine *eng)
+{
+	if (eng->scene_graph_ops) {
+		return eng->test_transition_running;
+	}
+	if (!obs_initialized()) {
+		return false;
+	}
+	obs_source_t *tr = obs_get_output_source(0);
+	bool running = false;
+	if (tr && obs_source_get_type(tr) == OBS_SOURCE_TYPE_TRANSITION && obs_transition_is_active(tr)) {
+		const float t = obs_transition_get_time(tr);
+		running = t > 0.0f && t < 1.0f;
+	}
+	obs_source_release(tr);
+	return running;
+}
+
 static bool vj_tbar_busy_locked(const struct mfd_engine *eng)
 {
 	for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
@@ -7089,6 +7212,7 @@ static int vj_fill_locked(struct mfd_engine *eng, const char *scene_arg, bool in
 		return 0;
 	}
 	int next = 0, placed = 0;
+	struct mfd_layer_binding *before = layer_bindings_snapshot_locked(eng);
 	for (int k = 1; k <= (int)MFD_VJ_STRIPS; ++k) {
 		if (!following[k]) {
 			continue;
@@ -7104,6 +7228,9 @@ static int vj_fill_locked(struct mfd_engine *eng, const char *scene_arg, bool in
 			++placed;
 		}
 	}
+	/* A source a strip moved off, and that no strip took, goes back to 100 % (B-07). Done after every strip has moved,
+	 * so a source one strip leaves and another takes keeps its level. */
+	layer_bindings_release_left_locked(eng, before);
 	free(layers);
 	*status = placed > 0 ? MFD_FILL_OK : MFD_FILL_NO_VIDEO_LAYERS;
 	return placed;
@@ -7195,7 +7322,11 @@ static void vj_follow_program(struct mfd_engine *eng)
 	for (int k = 1; k <= (int)MFD_VJ_STRIPS && vj_active(eng); ++k) {
 		any = any || eng->fader_slots[k].auto_follow;
 	}
-	bool later = any && vj_tbar_busy_locked(eng);
+	mfd_engine_unlock(eng);
+	/* asked only when a strip follows, and outside the engine lock: it takes libobs's */
+	const bool fading = any && program_transition_running(eng);
+	mfd_engine_lock(eng);
+	bool later = any && (vj_tbar_busy_locked(eng) || fading);
 	if (later) {
 		eng->vj_follow_pending = true;
 	}
@@ -9290,8 +9421,10 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root, bool kee
 		user_cal[i] = eng->fader_slots[i].cal;
 	}
 
-	/* Pre-seed 0..17 from active profile defaults (detaching any active filter bypass leases first) */
-	mfd_engine_load_profile_defaults(eng, mfd_engine_get_active_profile(eng));
+	/* Pre-seed 0..17 from active profile defaults (detaching any active filter bypass leases first). The layers the
+	 * old strips faded are put back at the end, once the strips read here are in place (B-07). */
+	struct mfd_layer_binding *before = layer_bindings_snapshot_locked(eng);
+	load_profile_defaults_locked(eng, mfd_engine_get_active_profile(eng));
 	if (keep_user_midi) {
 		for (int i = 0; i < MFD_MAX_FADER_SLOTS; ++i) {
 			eng->fader_slots[i].addr = user_addr[i];
@@ -9486,10 +9619,18 @@ static void deserialize_slots(struct mfd_engine *eng, obs_data_t *root, bool kee
 			init_val = query_live_filter_unmapped_deflection_locked(eng, s);
 		}
 		init_slot_runtime(eng, s, init_val);
+		/* A Layer Opacity strip starts at the level its layer has now (an Import mid-session), with pick-up from
+		 * where its fader is, as an edit of the strip does; a layer with no filter of ours yet is at 100 %. */
+		float live = 1.0f;
+		if (s->enabled && s->target_type == MFD_TARGET_SINGLE_LAYER &&
+		    vj_live_opacity(eng, s->source_a_name, &live)) {
+			vj_start_strip_at_locked(eng, s, live);
+		}
 	}
 
 	mfd_engine_bump_slot_rev(eng, -1);
 	mfd_engine_reevaluate_slots(eng, false);
+	layer_bindings_release_left_locked(eng, before);
 }
 
 static void on_save_callback(obs_data_t *save_data, bool saving, void *private_data)

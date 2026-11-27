@@ -139,6 +139,45 @@ visual_sidechain_add_test(
 if(OS_WINDOWS)
   target_link_libraries(vs-test-tubester-listener PRIVATE ws2_32)
 endif()
+# The Tape Deck filter itself on a headless libobs (no OBS executable): attaching after Paste Filters Undo / Redo, and a
+# deck_command in the gap between a deck's release and its destroy.
+visual_sidechain_add_test(
+  test-tubester-deck
+  test-tubester-deck.c
+  "${_tubester}/deck-filter.c"
+  "${_tubester}/command.c"
+  "${_tubester}/deck-link.c"
+  "${_tubester}/http-parse.c"
+  "${_tubester}/listener.c"
+  "${_tubester}/random.c"
+  "${_tubester}/speed.c"
+  "${_tubester}/tape-url.c"
+  "${_core}/fader-bridge.c"
+  "${_core}/tempo.c"
+  "${_core}/text-format.c"
+  "${CMAKE_SOURCE_DIR}/src/vs/obs/text.c"
+)
+target_link_libraries(vs-test-tubester-deck PRIVATE plugin-support)
+target_compile_definitions(vs-test-tubester-deck PRIVATE TUB_DECK_TEST_HOOKS)
+if(OS_WINDOWS)
+  target_link_libraries(vs-test-tubester-deck PRIVATE ws2_32 bcrypt)
+endif()
+
+# The deck page (data/deck.html) in Node, with a stand-in video element: it reports only to a whole-number port on
+# 127.0.0.1. Skipped where Node is not installed (on CI with a warning).
+find_program(VS_NODE_EXECUTABLE node)
+set(_deck_page_script "${CMAKE_CURRENT_SOURCE_DIR}/test-deck-page.js")
+if(VS_NODE_EXECUTABLE)
+  add_test(
+    NAME vs-test-deck-page
+    COMMAND "${VS_NODE_EXECUTABLE}" "${_deck_page_script}" "${CMAKE_SOURCE_DIR}/data/deck.html"
+  )
+elseif(DEFINED ENV{CI})
+  # the workflow installs no Node of its own and relies on the runner image, so a missing Node is loud, not fatal
+  message(WARNING "Visual Sidechain tests: Node.js not found on CI; vs-test-deck-page (data/deck.html) is NOT run")
+else()
+  message(STATUS "Visual Sidechain tests: Node.js not found; vs-test-deck-page is not added")
+endif()
 
 # Every built-in shader built by OBS's own renderers (R-PLAT-9): on macOS, libobs-opengl (HLSL to GLSL) and
 # libobs-metal (HLSL to Metal), built from the same OBS sources by cmake/common/buildspec_common.cmake. The test exits
