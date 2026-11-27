@@ -384,6 +384,12 @@ static void test_modulation_flash_guard_caps_luminance_direction_changes(void)
 	assert(!vs_mod_is_luminance_target("nvidia_blur_filter", "intensity"));
 	assert(!vs_mod_is_luminance_target("color_filter", "hue_shift"));
 	assert(!vs_mod_is_luminance_target("visual_sidechain_shader_filter", "tunnel_speed"));
+	/* a custom shader's uniform outside the built-in list is judged by its name, as any other filter's setting */
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "brightness"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "opacity"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "exposure"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "glow_alpha"));
+	assert(vs_mod_is_luminance_target("visual_sidechain_shader_filter", "flash_intensity"));
 }
 
 /* D-05: the flash budget is one for all filters. A filter that is not being drawn must not take a flash from it: of

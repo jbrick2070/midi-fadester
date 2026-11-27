@@ -158,7 +158,8 @@ bool vs_mod_is_luminance_target(const char *filter_id, const char *setting_name)
 			if (strcmp(setting_name, k_shader_luma_params[i]) == 0)
 				return true;
 		}
-		return false;
+		/* a custom shader's own uniform (brightness, opacity, exposure, alpha...) is judged by its name below, as
+		 * any other filter's setting is */
 	}
 
 	/* Any other filter: judge by the setting's name, so a kick on Image Mask/Blend's opacity (or a third-party

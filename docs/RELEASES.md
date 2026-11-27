@@ -13,6 +13,7 @@ Fixes from the full code review of 27 November 2026:
 - **Import...** in a running session starts a layer fader at the level its layer has now, so the picture does not jump when the fader is first moved.
 - A Tape Deck command from a Stream Deck or a script that arrives while the deck's Browser source is being deleted can no longer crash OBS.
 - A Tape Deck brought back by **Edit > Undo** or **Redo** after Paste Filters attaches to its Browser source again (before, it stayed silent until OBS restarted).
+- Flash Guard now also holds an Audio Modulator slot aimed at a custom shader's own brightness, opacity, exposure or alpha setting to 3 flashes per second, as it does for any other filter.
 
 ## 1.5.0 (November 2026), the current release
 
