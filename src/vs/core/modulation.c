@@ -222,6 +222,33 @@ bool vs_mod_slot_has_duplicate_target(const struct vs_mod_slot_config *cfgs, siz
 	return false;
 }
 
+/* An integer list target takes only its own values: the item nearest the mapped value, among those inside the slot's
+ * range when any is, else among all of them. */
+static int64_t snap_to_int_list(const struct vs_mod_slot_config *cfg, double mapped, int64_t i_lo, int64_t i_hi)
+{
+	size_t count = cfg->int_list_count < VS_MOD_INT_LIST_MAX ? cfg->int_list_count : VS_MOD_INT_LIST_MAX;
+	bool any_in_range = false;
+	for (size_t i = 0; i < count; i++) {
+		if (cfg->int_list[i] >= i_lo && cfg->int_list[i] <= i_hi) {
+			any_in_range = true;
+			break;
+		}
+	}
+	int64_t best = cfg->int_list[0];
+	double best_dist = -1.0;
+	for (size_t i = 0; i < count; i++) {
+		const int64_t v = cfg->int_list[i];
+		if (any_in_range && (v < i_lo || v > i_hi))
+			continue;
+		const double dist = fabs((double)v - mapped);
+		if (best_dist < 0.0 || dist < best_dist) {
+			best = v;
+			best_dist = dist;
+		}
+	}
+	return best;
+}
+
 void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_state *state, float signal_01,
 		      struct vs_mod_eval_result *out_res)
 {
@@ -273,6 +300,8 @@ void vs_mod_slot_eval(const struct vs_mod_slot_config *cfg, struct vs_mod_slot_s
 			quantized = i_lo;
 		if (quantized > i_hi)
 			quantized = i_hi;
+		if (cfg->int_list_count > 0)
+			quantized = snap_to_int_list(cfg, mapped, i_lo, i_hi);
 
 		out_res->int_val = quantized;
 		out_res->float_val = (double)quantized;

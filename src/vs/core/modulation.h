@@ -23,6 +23,8 @@ extern "C" {
 
 #define VS_MOD_MAX_SLOTS 8u
 #define VS_MOD_FLOAT_EPSILON 1e-4
+/* the most items of an integer list target kept for snapping (VS_PROP_INT with int_list_count > 0) */
+#define VS_MOD_INT_LIST_MAX 64
 
 enum vs_prop_type {
 	VS_PROP_NONE = 0,
@@ -46,6 +48,9 @@ struct vs_mod_slot_config {
 	double min_value;     /* lower bound of target range */
 	double max_value;     /* upper bound of target range */
 	int64_t int_step;     /* step size for VS_PROP_INT (>= 1) */
+	/* an integer list target's own values: when int_list_count > 0, every write is one of them (the nearest) */
+	int64_t int_list[VS_MOD_INT_LIST_MAX];
+	size_t int_list_count;
 	bool invert;
 	bool flash_guard;      /* default true: caps transient -> luminance-class bindings via shared flash clock */
 	uint32_t rate_divider; /* 1, 2, or 4 video frames */

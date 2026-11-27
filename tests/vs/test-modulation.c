@@ -83,6 +83,39 @@ static void test_modulation_math_and_epsilon(void)
 	vs_mod_slot_eval(&cfg, &state, 0.14f, &res); /* 14.0 -> still 15 -> gated */
 	assert(!res.should_write);
 
+	/* 3b. An integer list {0, 5, 10} (a shader select, a filter's mode): only its own values are written, the one
+	 * nearest the mapped value, never the integers between them. */
+	cfg.min_value = 0.0;
+	cfg.max_value = 10.0;
+	cfg.int_step = 1;
+	cfg.int_list[0] = 10;
+	cfg.int_list[1] = 0;
+	cfg.int_list[2] = 5;
+	cfg.int_list_count = 3;
+	for (int k = 0; k <= 10; k++) {
+		vs_mod_slot_reset_state(&state);
+		vs_mod_slot_eval(&cfg, &state, (float)k / 10.0f, &res);
+		assert(res.should_write);
+		assert(res.int_val == 0 || res.int_val == 5 || res.int_val == 10);
+	}
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 0.3f, &res); /* 3.0 -> 5 */
+	assert(res.int_val == 5 && double_near(res.float_val, 5.0, 1e-9));
+	vs_mod_slot_eval(&cfg, &state, 0.2f, &res); /* 2.0 -> 0 */
+	assert(res.int_val == 0);
+	vs_mod_slot_eval(&cfg, &state, 0.9f, &res); /* 9.0 -> 10 */
+	assert(res.int_val == 10);
+	/* a slot range narrower than the list keeps to the items inside it */
+	cfg.min_value = 4.0;
+	cfg.max_value = 6.0;
+	vs_mod_slot_reset_state(&state);
+	vs_mod_slot_eval(&cfg, &state, 1.0f, &res);
+	assert(res.int_val == 5);
+	cfg.int_list_count = 0;
+	cfg.int_step = 5;
+	cfg.min_value = 0.0;
+	cfg.max_value = 100.0;
+
 	/* 4. Rate divider (div = 4): only ticks 0, 4, 8 write. */
 	cfg.prop_type = VS_PROP_FLOAT;
 	cfg.min_value = 0.0;
