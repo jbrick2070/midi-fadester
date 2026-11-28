@@ -206,7 +206,7 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 **1.5.1** (November 2026) is the current release, a fix release. None of it has been through the hand tests on real hardware or in a live OBS yet.
 
-- **Fixes** from a full code review: resetting or clearing the strips, choosing another layout or **Import...** no longer leaves a faded-out layer invisible; a fader that follows the scene on air no longer leaves its old source faded out; Visual Sidechain hears stereo music at the right level when OBS's audio is set to 5.1 or 7.1; Flash Guard also limits an Audio Modulator aimed at a custom shader's brightness; two Tape Deck fixes, and stricter checks for scripts.
+- **Fixes** from a full code review: resetting or clearing the strips, choosing another layout or **Import...** no longer leaves a faded-out layer invisible; a fader that follows the scene on air no longer leaves its old source faded out; Visual Sidechain hears stereo music at the right level when OBS's audio is set to 5.1 or 7.1; Flash Guard also limits an Audio Modulator aimed at a custom shader's brightness; three Tape Deck fixes, and stricter checks for scripts.
 - **Documentation:** a shorter README that opens with a three-step quick start, also in 12 more languages.
 
 **1.5.0** (November 2026): every Fadester product moved to 1.5 together, so Midi Fadester (and Visual Sidechain inside it) went from 0.9.0 to 1.5.0.
