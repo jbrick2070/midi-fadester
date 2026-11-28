@@ -4,7 +4,9 @@ Every release, newest first. [Back to the README](../README.md).
 
 Releases are built by GitHub Actions from a version tag as a draft, then published on the [Releases](https://github.com/jbrick2070/midi-fadester/releases) page with checksums.
 
-## Unreleased
+## 1.5.1 (November 2026), the current release
+
+A fix release: fixes from the full code review of 27 November 2026, and simpler documentation. None of it has been through the hand tests on real hardware or in a live OBS yet.
 
 Fixes from the full code review of 27 November 2026:
 
@@ -21,7 +23,12 @@ Fixes from the full code review of 27 November 2026:
 - For scripts: `fill_from_scene` errors now carry `error_code` as every other request does (`error` is unchanged).
 - The Tape Deck page sends its reports only to a whole-number port on 127.0.0.1; a deck message with any other port is ignored.
 
-## 1.5.0 (November 2026), the current release
+Also since 1.5.0:
+
+- **Documentation:** the README is much shorter and opens with a three-step quick start; the reference material moved to its own pages under `docs/` (every old link still works). The quick start is also in 12 more languages (see [Quick start in other languages](quickstart/README.md)), and the [Visual Sidechain guide](VISUAL-SIDECHAIN.md) opens with its own steps.
+- **Dutch:** the Fadester Desk dock's tips and the last page of the Mac installer call OBS's menu **Tools**, as OBS itself does (OBS has no Dutch name for it).
+
+## 1.5.0 (November 2026)
 
 Every product of the Fadester suite moves to 1.5 together, so Midi Fadester goes from 0.9.0 straight to 1.5.0, and Visual Sidechain, being part of it, is 1.5.0 too. Since 0.9.0:
 

@@ -1,4 +1,4 @@
-# Midi Fadester — Verification & UI State Gallery (`1.5.0`)
+# Midi Fadester — Verification & UI State Gallery (`1.5.1`)
 
 Midi Fadester verifies every engine invariant, T-bar state transition, pick-up rail rule, filter parameter modulation & shared-filter `bypass_at_zero` lease contract, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 

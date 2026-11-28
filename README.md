@@ -60,7 +60,7 @@ No internet connection, account or other software is needed.
 
 ## Install
 
-> **Which version is this page about?** Version 1.5.0, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
+> **Which version is this page about?** Version 1.5.1, the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest). See [Releases](#releases).
 
 Download one file from the [latest release](https://github.com/jbrick2070/midi-fadester/releases/latest):
 
@@ -204,7 +204,12 @@ These are planned phases 2 to 5 in [PLAN.md](PLAN.md).
 
 ## Releases
 
-**1.5.0** (November 2026) is the current release. Every Fadester product moved to 1.5 together, so Midi Fadester (and Visual Sidechain inside it) went from 0.9.0 to 1.5.0.
+**1.5.1** (November 2026) is the current release, a fix release. None of it has been through the hand tests on real hardware or in a live OBS yet.
+
+- **Fixes** from a full code review: resetting or clearing the strips, choosing another layout or **Import...** no longer leaves a faded-out layer invisible; a fader that follows the scene on air no longer leaves its old source faded out; Visual Sidechain hears stereo music at the right level when OBS's audio is set to 5.1 or 7.1; Flash Guard also limits an Audio Modulator aimed at a custom shader's brightness; two Tape Deck fixes, and stricter checks for scripts.
+- **Documentation:** a shorter README that opens with a three-step quick start, also in 12 more languages.
+
+**1.5.0** (November 2026): every Fadester product moved to 1.5 together, so Midi Fadester (and Visual Sidechain inside it) went from 0.9.0 to 1.5.0.
 
 - **APC40 mkII:** Session is now **Blackout**; the top pad row cuts or fades Preview on air in beats; pinning moved to Shift + Clip Stop.
 - **A simpler screen:** the version in every title bar, a clearer Fadester Desk dock that works without an APC40, an Advanced tab that maps the 18 strips, and confirmations before resets.
