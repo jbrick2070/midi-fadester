@@ -1,13 +1,13 @@
-# Midi Fadester — Verification & UI State Gallery (`1.5.0`)
+# Midi Fadester — Verification & UI State Gallery (`1.5.1`)
 
 Midi Fadester verifies every engine invariant, T-bar state transition, pick-up rail rule, filter parameter modulation & shared-filter `bypass_at_zero` lease contract, concurrency contract, plain-English UI sentence, and rendered Qt6 dialog state across two complementary suites:
 
-1. **Automated `ctest` Suite (78 headless tests, about 25 s: 36 for Midi Fadester and 42 for Visual Sidechain, which is part of Midi Fadester since 0.9.0)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
+1. **Automated `ctest` Suite (80 headless tests, about 25 s: 36 for Midi Fadester and 44 for Visual Sidechain, which is part of Midi Fadester since 0.9.0)** — runs on every local build and every GitHub Actions `windows-2022` CI push without requiring OBS Studio or physical MIDI hardware.
 2. **Live Portable OBS 33 + `loopMIDI` Hardware-Loopback Suite (`MFD_SELF_TEST=1`)** — boots real `obs64.exe` in Studio Mode, renders HLSL `mfd_layer_mixer.effect` composites and live `color_filter_v2` `filter_param` sweeps on the GPU, checks `GetSourceScreenshot` pixel samples, verifies live scene-item reorder stack-order inversion, live filter/host rename + remove/re-add + external OBS `"update"` Pick-up + `reset_fx`, drives 8 physical-timing `loopMIDI` cases through WinMM `midiInOpen`, and asserts `Number of memory leaks: 0` on clean exit.
 
 ---
 
-## 1. Automated `ctest` Suite (`78/78` tests)
+## 1. Automated `ctest` Suite (`80/80` tests)
 
 Run locally from a configured preset:
 
