@@ -221,7 +221,7 @@ Full notes and every earlier release: **[docs/RELEASES.md](docs/RELEASES.md)**. 
 
 ## Building from source
 
-Visual Studio 2022 Build Tools and CMake 3.28 or newer; then `cmake --preset windows-x64`, build, and run `ctest` (78 tests, no OBS or hardware needed). Steps, tests and the live self-test: [docs/BUILDING.md](docs/BUILDING.md).
+Visual Studio 2022 Build Tools and CMake 3.28 or newer; then `cmake --preset windows-x64`, build, and run `ctest` (80 tests, no OBS or hardware needed). Steps, tests and the live self-test: [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Documents
 
